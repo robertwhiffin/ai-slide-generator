@@ -7,12 +7,18 @@
 //
 // stdin payload (UTF-8 JSON, no schema validation here — wrapper enforces):
 //   { title?: string, slides: [{ html: string, notes?: string }],
-//     bypassValidation?: boolean, engine?: 'legacy' | 'snapshot' }
+//     bypassValidation?: boolean, engine?: 'legacy' | 'snapshot',
+//     target?: 'pptx' | 'gslides' }
 //
 // engine selects the per-slide converter: 'legacy' (the default) is
 // html2pptx.js after the DOM-mutating PREPROCESS_SOURCE; 'snapshot' is
 // render_slide.cjs, which runs only the layout-neutral BG_TRANSFER_SOURCE and
 // then reads the page as rendered. Notes and failure handling are the same.
+//
+// target is the renderer the deck is written for: 'pptx' (the default) for
+// PowerPoint, 'gslides' for the Google Slides conversion. The snapshot engine
+// writes the few constructs the two apps place apart for it (a script run's
+// size); the legacy converter writes one deck for both.
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
@@ -72,6 +78,10 @@ async function main() {
   if (payload.engine !== undefined && payload.engine !== 'snapshot' && payload.engine !== 'legacy') {
     console.error(`[huashu] unknown engine ${JSON.stringify(payload.engine)}; using legacy`);
   }
+  const target = payload.target === 'gslides' ? 'gslides' : 'pptx';
+  if (payload.target !== undefined && payload.target !== 'gslides' && payload.target !== 'pptx') {
+    console.error(`[huashu] unknown target ${JSON.stringify(payload.target)}; writing for pptx`);
+  }
 
   // Lazily resolve the converter (CommonJS, sibling file). If playwright/
   // chromium isn't installed yet, the require itself succeeds but the
@@ -96,6 +106,7 @@ async function main() {
     ? (htmlFile) => converter.renderSlide(htmlFile, pres, {
       preProcessSource: BG_TRANSFER_SOURCE,
       bypassValidation,
+      target,
     })
     : (htmlFile) => converter(htmlFile, pres, {
       preProcessSource: PREPROCESS_SOURCE,

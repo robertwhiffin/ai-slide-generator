@@ -76,6 +76,11 @@ const SINGLE_SPACING_PCT = 100;
 const FIRST_LINE_A = 0.8241;
 const FIRST_LINE_B = 1.4338;
 const FIRST_LINE_C = -1.5;
+// How far Google Slides lowers a line per px its largest written run is
+// larger than the line's other runs, measured with DM Sans in Drive's PDF of
+// the conversion: 5.57 px for 5.8 px at 20 px, 11.13 px for 11.6 px at 40 px
+// (task-11 ruling R11g).
+const GOOGLE_LINE_GROWTH_PER_PX = 0.96;
 
 function inches(px) {
   return px / PX_PER_IN;
@@ -112,10 +117,27 @@ function lineCount(paragraphs) {
 }
 
 // A run's options in this item: its style and the item's direction.
-function itemRunOptions(run, item, fonts) {
-  const options = runOptions(run, fonts);
+// `sizing` is runOptions': the renderer target and the line's size.
+function itemRunOptions(run, item, fonts, sizing) {
+  const options = runOptions(run, fonts, sizing);
   if (item.rtl) options.rtlMode = true;
   return options;
+}
+
+// The size (px) a renderer that sizes a line by every run on it (Google
+// Slides) should size `line` by, so it sets the line where the browser did:
+// the largest size of its runs that no baseline shift moves, plus what grows
+// the line in the browser (its growthPx: a raised script run's line box), in
+// the size that grows a renderer's line as much (GOOGLE_LINE_GROWTH_PER_PX).
+// A script run is written no larger (emit_typography.cjs fontSizePt). 0 for a
+// line of script runs alone, which nothing caps.
+function scriptCapPx(line) {
+  let largest = 0;
+  for (const run of line.runs || []) {
+    if (!run.baseline) largest = Math.max(largest, Number(run.sizePx) || 0);
+  }
+  if (!(largest > 0)) return 0;
+  return largest + (Number(line.growthPx) || 0) / GOOGLE_LINE_GROWTH_PER_PX;
 }
 
 // A blank line's NBSP run: the previous run's face and size without its glyph
@@ -127,8 +149,10 @@ function blankLineOptions(run, item, fonts) {
 }
 
 // The item's written paragraphs, in order: {objects, pct, beforePx}, one per
-// paragraph of the model, or one per line of a loosely spaced one.
-function writtenParagraphs(item, fonts) {
+// paragraph of the model, or one per line of a loosely spaced one. `renderer`
+// is {target}: the renderer the deck is written for (emitText).
+function writtenParagraphs(item, fonts, renderer) {
+  const target = renderer && renderer.target;
   const paragraphs = item.paragraphs || [];
   const multiLine = lineCount(paragraphs) > 1;
   const written = [];
@@ -156,8 +180,9 @@ function writtenParagraphs(item, fonts) {
         current.objects.push({ text: NBSP, options });
         continue;
       }
+      const sizing = { target, capPx: scriptCapPx(lines[lineIndex]) };
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
-        const options = itemRunOptions(runs[runIndex], item, fonts);
+        const options = itemRunOptions(runs[runIndex], item, fonts, sizing);
         if (runIndex === 0 && !opensParagraph) options.softBreakBefore = true;
         current.objects.push({ text: xmlText(runs[runIndex].text), options });
         previousRun = runs[runIndex];
@@ -168,13 +193,13 @@ function writtenParagraphs(item, fonts) {
   return written;
 }
 
-// textObjects(item, fonts) -> the pptxgenjs text array of `item`'s paragraphs
-// ({paragraphs, rtl}: a text item, or a native table cell, emit_table.cjs):
-// every run carries its paragraph's spacing, and the last run of every
-// paragraph but the final one ends it.
-function textObjects(item, fonts) {
+// textObjects(item, fonts, renderer) -> the pptxgenjs text array of `item`'s
+// paragraphs ({paragraphs, rtl}: a text item, or a native table cell,
+// emit_table.cjs): every run carries its paragraph's spacing, and the last run
+// of every paragraph but the final one ends it. `renderer` is emitText's.
+function textObjects(item, fonts, renderer) {
   const objects = [];
-  const written = writtenParagraphs(item, fonts);
+  const written = writtenParagraphs(item, fonts, renderer);
   for (let index = 0; index < written.length; index++) {
     const paragraph = written[index];
     for (const object of paragraph.objects) {
@@ -221,10 +246,13 @@ function placementOf(item) {
   };
 }
 
-// emitText(slide, item, fonts): one text item as one text box.
-//   fonts  model.fonts, the webfont weights the page loaded per family.
-function emitText(slide, item, fonts) {
-  const objects = textObjects(item, fonts);
+// emitText(slide, item, fonts, renderer): one text item as one text box.
+//   fonts     model.fonts, the webfont weights the page loaded per family;
+//   renderer  {target: 'pptx' | 'gslides'}: the renderer the deck is written
+//             for (emit_deck.mjs payload.target), 'pptx' when absent. Only a
+//             script run's written size depends on it (emit_typography.cjs).
+function emitText(slide, item, fonts, renderer) {
+  const objects = textObjects(item, fonts, renderer);
   if (!objects.length) return;
   const placement = placementOf(item);
   const options = {

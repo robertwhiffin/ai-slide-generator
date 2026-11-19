@@ -196,13 +196,17 @@ def _export_documents(
     title: str,
     engine: str,
     monkeypatch: pytest.MonkeyPatch,
+    target: str | None = None,
 ) -> tuple[bytes, list[dict]]:
+    """``build_pptx_huashu`` over ``documents``; ``target`` is passed only when given."""
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
     monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
+    targets = {} if target is None else {"target": target}
     return pptx_from_html_huashu.build_pptx_huashu(
         title,
         [{"html": document} for document in documents],
         bypass_validation=True,
+        **targets,
     )
 
 
@@ -214,13 +218,15 @@ def export_slides(
     external_scripts: tuple[str, ...] = (),
     engine: str = "snapshot",
     monkeypatch: pytest.MonkeyPatch,
+    target: str | None = None,
 ) -> tuple[bytes, list[dict]]:
     """Export slide bodies through the production wrapper with the chosen engine.
 
     Each body becomes ``slide_document(body, ..., slide_id=f"snapshot-{n}")``
     (1-based ``n``), so ``slide_document(bodies[i], ..., slide_id=f"snapshot-{i + 1}")``
     reproduces the exported page exactly. Returns ``(pptx_bytes, failures)``
-    from ``build_pptx_huashu(..., bypass_validation=True)``.
+    from ``build_pptx_huashu(..., bypass_validation=True)``, with ``target``
+    (the renderer the deck is written for) when one is given.
     """
     documents = [
         slide_document(
@@ -233,7 +239,7 @@ def export_slides(
         for position, body in enumerate(bodies, start=1)
     ]
     return _export_documents(
-        documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch
+        documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch, target=target
     )
 
 

@@ -154,9 +154,11 @@ function inRange(item) {
   return withinInchLimit(item.x, item.y, item.w, item.h);
 }
 
-// emitSlide(pres, model, captures) -> slide
+// emitSlide(pres, model, captures, renderer) -> slide
 //   captures: Map<captureId, 'data:image/png;base64,…'>
-function emitSlide(pres, model, captures) {
+//   renderer: {target: 'pptx' | 'gslides'}, the renderer the deck is written
+//             for (emit_text.cjs emitText); 'pptx' when absent.
+function emitSlide(pres, model, captures, renderer) {
   const slide = pres.addSlide();
   applyBackground(slide, model.background);
   let skippedPictures = 0;
@@ -175,9 +177,9 @@ function emitSlide(pres, model, captures) {
       if (data) emitImage(slide, item, data);
       else skippedPictures += 1;
     } else if (item.kind === 'text') {
-      emitText(slide, item, model.fonts);
+      emitText(slide, item, model.fonts, renderer);
     } else if (item.kind === 'table') {
-      emitTable(slide, item, model.fonts);
+      emitTable(slide, item, model.fonts, renderer);
     } else {
       throw new Error(`[html2pptx] the slide model holds an item kind the emitter does not know: ${item.kind}`);
     }

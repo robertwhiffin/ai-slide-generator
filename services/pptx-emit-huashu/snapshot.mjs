@@ -49,7 +49,7 @@
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
 //  *  {kind:'text', x,y,w,h, rotate:number|null, wrap:boolean, align:'left'|'center'|'right',
 //  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
-//  *   lines:[{runs:Run[]}]}], inset?:{left, top, right, bottom}}
+//  *   lines:[{runs:Run[], growthPx?}]}], inset?:{left, top, right, bottom}}
 //  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the
 //  *   geometry. A turned block, the text of a turn root (TurnedText), carries
 //  *   rotate and inset: its box is the root's layout box, its text inside it;

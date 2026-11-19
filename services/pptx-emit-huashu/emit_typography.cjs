@@ -31,7 +31,13 @@
 // baseline shift at a fraction of its size, on top of the size the browser
 // already reduced it to (font-size: smaller). So the run is written at the
 // browser's size over that fraction, and the renderer's shrink brings it back
-// to the size the browser drew.
+// to the size the browser drew. That is the deck for PowerPoint (target
+// 'pptx'), which places the run's line by its other runs. Google Slides
+// (target 'gslides') sizes the LINE by the run's written size, so a larger
+// written size pushes the whole line down (about 0.28 em): written for it, a
+// script run is capped at the size its line should be sized by (sizing.capPx,
+// emit_text.cjs), which keeps the line where the browser has it, the script
+// glyph up to some 20% small (task-11 ruling R11g, measured in both apps).
 
 const PT_PER_PX = 0.75;
 // The fraction of a superscript or subscript run's size the renderers draw it at,
@@ -137,24 +143,32 @@ function xmlAttribute(value) {
 }
 
 // The size a run is written at, in pt: the browser's, over the renderers'
-// shrink for a superscript or subscript run.
-function fontSizePt(run) {
+// shrink for a superscript or subscript run; for Google Slides, no larger
+// than its line's cap (sizing.capPx).
+function fontSizePt(run, sizing) {
   const size = (Number(run.sizePx) || 0) * PT_PER_PX;
-  return run.baseline === 'super' || run.baseline === 'sub' ? size / SUPERSCRIPT_SIZE_FACTOR : size;
+  if (!(run.baseline === 'super' || run.baseline === 'sub')) return size;
+  const written = size / SUPERSCRIPT_SIZE_FACTOR;
+  const capPx = sizing && sizing.target === 'gslides' ? Number(sizing.capPx) : 0;
+  return capPx > 0 ? Math.min(written, capPx * PT_PER_PX) : written;
 }
 
-// runOptions(run, fonts) -> the pptxgenjs options of one run.
-//   fonts  model.fonts: family -> the webfont weights the page loaded.
+// runOptions(run, fonts, sizing) -> the pptxgenjs options of one run.
+//   fonts   model.fonts: family -> the webfont weights the page loaded;
+//   sizing  {target: 'pptx' | 'gslides', capPx}, or none for 'pptx': the
+//           renderer the deck is written for, and the size (px) the run's
+//           line should be sized by, which a Google Slides script run is
+//           capped at (emit_text.cjs scriptCapPx).
 // The colour is the run's own: the snapshot wrote it pre-blended and solid,
 // because Drive drops text alpha.
-function runOptions(run, fonts) {
+function runOptions(run, fonts, sizing) {
   const face = typefaceFor(run.family, run.weight, loadedWeightsOf(fonts, run.family));
   const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(run.opticalTrackingPx) || 0);
   return {
     fontFace: xmlAttribute(face.fontFace),
     bold: face.bold,
     italic: Boolean(run.italic),
-    fontSize: fontSizePt(run),
+    fontSize: fontSizePt(run, sizing),
     color: run.color,
     charSpacing: trackingPx * PT_PER_PX,
     underline: run.underline ? { style: 'sng' } : undefined,

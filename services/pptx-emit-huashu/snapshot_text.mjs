@@ -123,11 +123,14 @@
 //  *              fragment and the clip its boxes are cut to.
 //  * TextBlock = {x,y,w,h, rotate:number|null, wrap, align:'left'|'center'|'right', rtl,
 //  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
-//  *                           lines:[{runs:Run[]}]}],
+//  *                           lines:[{runs:Run[], growthPx?}]}],
 //  *              inset?: {left, top, right, bottom}}
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
 //  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx}
 //  *
+//  * growthPx how much further down than its paragraph's line height the browser
+//  *          set a line after the first (a raised inline grew its line box;
+//  *          markLineGrowth); absent when it is where the spacing puts it.
 //  * A line after the first in its paragraph is a soft break; a line with no runs
 //  * is a blank line (two <br>s, an empty pre line). Sizes are CSS px on the slide.
 //  * y        the top of the first line's glyphs (its text's rects); the emitter
@@ -298,6 +301,13 @@ function createTextLayout(env) {
     270: { left: 'Bottom', top: 'Left', right: 'Top', bottom: 'Right' },
   };
   const LOCAL_SIDES = ['left', 'top', 'right', 'bottom'];
+  // A line the browser set at least this much further down than its line
+  // height grew (markLineGrowth); less is layout rounding.
+  const LINE_GROWTH_MIN_PX = 0.5;
+  // A relatively positioned inline moved off its line by at least this many
+  // of its own ems is a superscript or subscript (Preflight moves its sub by
+  // 0.25em, its sup by 0.5em); a smaller move is a nudge of its text.
+  const SCRIPT_MOVE_EM = 0.1;
   // A face's content area (ascent plus descent) as a multiple of its size,
   // taken where its probe could not be read: the faces decks use run 1.1 to 1.3.
   const FALLBACK_CONTENT_EM = 1.2;
@@ -655,8 +665,22 @@ function createTextLayout(env) {
     return inlineRole(name, s) === 'inline';
   }
 
+  // The baseline shift an inline element's text takes: 'super' or 'sub' from
+  // its vertical-align, or from a relative position that moves it off its
+  // line, as Tailwind's Preflight sets its sub and sup (vertical-align
+  // baseline, then top: -0.5em or bottom: -0.25em). Its resolved top is the
+  // offset the browser used (the negative of its bottom when only that is
+  // set); where it does not resolve, its bottom is read. A move under
+  // SCRIPT_MOVE_EM of its size is a nudge, not a script; null for neither.
   function baselineShiftOf(s) {
-    return s.verticalAlign === 'super' ? 'super' : s.verticalAlign === 'sub' ? 'sub' : null;
+    if (s.verticalAlign === 'super') return 'super';
+    if (s.verticalAlign === 'sub') return 'sub';
+    if (s.position !== 'relative') return null;
+    const top = parseFloat(s.top);
+    const bottom = parseFloat(s.bottom);
+    const raise = Number.isFinite(top) ? -top : Number.isFinite(bottom) ? bottom : 0;
+    if (raise === 0 || Math.abs(raise) < SCRIPT_MOVE_EM * (parseFloat(s.fontSize) || 0)) return null;
+    return raise > 0 ? 'super' : 'sub';
   }
 
   function runStyle(context, scale) {
@@ -1355,7 +1379,7 @@ function createTextLayout(env) {
       wrap: false,
       align: parts.rtl ? 'left' : 'right',
       rtl: parts.rtl,
-      paragraphs: paragraphsOf([line]),
+      paragraphs: paragraphsOf([line], true),
     };
   }
 
@@ -1735,12 +1759,21 @@ function createTextLayout(env) {
       break;
     }
     const style = runStyle(ellipsis.context, scale);
+    // The "…" stands on the line's own baseline, in the block's style: across,
+    // it spans the line's body, the text no super- or subscript moves
+    // (assembleLine body), the whole line where all of it is moved.
+    let body = null;
+    for (let index = 0; index < tokens.length; index++) {
+      if (tokens[index].kind === 'text' && !tokens[index].style.baseline) body = unionBounds(body, tokens[index].rect);
+    }
+    const top = body ? body.top : line.top;
+    const bottom = body ? body.bottom : line.bottom;
     kept.push({
       kind: 'text',
       text: ELLIPSIS,
       rect: rtl
-        ? { left: at - advance, top: line.top, right: at, bottom: line.bottom }
-        : { left: at, top: line.top, right: at + advance, bottom: line.bottom },
+        ? { left: at - advance, top, right: at, bottom }
+        : { left: at, top, right: at + advance, bottom },
       style,
       face: probeFaceOf(ellipsis.context.style, style.family, scale),
       collapsible: false,
@@ -1867,9 +1900,14 @@ function createTextLayout(env) {
     return largest < 0 ? null : line.extents[largest].face;
   }
 
-  function paragraphsOf(lines) {
+  // `upright` says the lines' rects are upright on the slide (not turned), so
+  // where each line's own text starts (its body's top) is queued with its
+  // paragraph, for applyMetrics to read how far past its line height the
+  // browser set it (growthPx).
+  function paragraphsOf(lines, upright) {
     const paragraphs = [];
     let paragraph = null;
+    let pending = null;
     let key = null;
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
@@ -1881,11 +1919,14 @@ function createTextLayout(env) {
         if (!paragraph || lineKey !== key) {
           paragraph = { sizePx: largest, lineHeightPx: null, ascentPx: null, lines: [] };
           paragraphs.push(paragraph);
-          pendingParagraphs.push({ paragraph, face, lineHeight: line.lineHeight });
+          pending = { paragraph, face, lineHeight: line.lineHeight, tops: [] };
+          pendingParagraphs.push(pending);
           key = lineKey;
         }
       }
       paragraph.lines.push({ runs: line.runs });
+      const body = upright && line.runs.length ? line.body || line.rect : null;
+      pending.tops.push(body ? body.top : null);
     }
     return paragraphs;
   }
@@ -1987,7 +2028,7 @@ function createTextLayout(env) {
       wrap: lines.length > 1,
       align: written,
       rtl: layout.rtl,
-      paragraphs: paragraphsOf(lines),
+      paragraphs: paragraphsOf(lines, !frame.angle),
     };
   }
 
@@ -2185,6 +2226,7 @@ function createTextLayout(env) {
       const lineHeight = /px$/.test(pending.lineHeight) ? parseFloat(pending.lineHeight) : line.h;
       if (lineHeight > 0) pending.paragraph.lineHeightPx = lineHeight * pending.face.scale;
       if (line.ascent > 0) pending.paragraph.ascentPx = line.ascent * pending.face.scale;
+      markLineGrowth(pending);
     }
 
     for (let index = 0; index < pendingRuns.length; index++) {
@@ -2196,6 +2238,30 @@ function createTextLayout(env) {
       if (Math.abs(exportCut - drawn) / drawn <= OPTICAL_SIZE_THRESHOLD) continue;
       const characters = characterCount(pending.run.text);
       if (characters > 0) pending.run.opticalTrackingPx = (drawn - exportCut) / characters;
+    }
+  }
+
+  // Marks each line of a pending paragraph that the browser set further down
+  // than its line height puts it, with that much more, growthPx: a raised
+  // inline (a vertical-align: super run with a line height of its own) grows
+  // its line's box, so the line's own text starts lower than the paragraph's
+  // spacing alone would put it. Read from where each line's body starts
+  // (paragraphsOf), against the last line before it that holds text; the
+  // first line of a paragraph is placed by its block's own geometry. A growth
+  // under LINE_GROWTH_MIN_PX is layout rounding. The emitter reads it where a
+  // renderer grows a line by what the line holds (emit_text.cjs).
+  function markLineGrowth(pending) {
+    const pitch = pending.paragraph.lineHeightPx;
+    if (!(pitch > 0)) return;
+    let previous = -1;
+    for (let index = 0; index < pending.tops.length; index++) {
+      const top = pending.tops[index];
+      if (top === null) continue;
+      if (previous >= 0) {
+        const growth = top - pending.tops[previous] - (index - previous) * pitch;
+        if (growth >= LINE_GROWTH_MIN_PX) pending.paragraph.lines[index].growthPx = growth;
+      }
+      previous = index;
     }
   }
 
@@ -2588,7 +2654,7 @@ function createTextLayout(env) {
       wrap: false,
       align: written,
       rtl: place.rtl,
-      paragraphs: paragraphsOf(lines),
+      paragraphs: paragraphsOf(lines, false),
       inset: { left: inset.left, top: first ? first.top + place.h / 2 : inset.top, right: inset.right, bottom: 0 },
     };
   }
@@ -2613,7 +2679,7 @@ function createTextLayout(env) {
       wrap: false,
       align: written,
       rtl: place.rtl,
-      paragraphs: paragraphsOf(lines),
+      paragraphs: paragraphsOf(lines, false),
     };
   }
 
@@ -2805,7 +2871,7 @@ function createTextLayout(env) {
       paragraphs: () => {
         if (!layout) return [];
         queueRuns(layout.lines, align, !walk.frame.angle);
-        return paragraphsOf(layout.lines);
+        return paragraphsOf(layout.lines, !walk.frame.angle);
       },
       groups: () => {
         const groups = [];

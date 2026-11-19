@@ -16,9 +16,12 @@
 //                        capture target the model names, from the same page;
 //   7. emit              emit_model.cjs writes the model to a pptxgenjs slide.
 //
-// renderSlide(htmlFile, pres, { bypassValidation, preProcessSource })
+// renderSlide(htmlFile, pres, { bypassValidation, preProcessSource, target })
 //   -> { slide, summary }
 // preProcessSource defaults to BG_TRANSFER_SOURCE; null runs no preprocess.
+// target is the renderer the deck is written for, 'pptx' (the default) or
+// 'gslides': emit_model.cjs writes the few constructs the two place apart
+// for it (emit_typography.cjs fontSizePt).
 // The `slide` matches what html2pptx.js returns, so emit_deck.mjs attaches
 // speaker notes to it the same way for both engines.
 
@@ -372,6 +375,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
   const {
     tmpDir = process.env.TMPDIR || '/tmp',
     bypassValidation = false,
+    target = 'pptx',
   } = options;
 
   try {
@@ -416,7 +420,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
       ...validateTextBoxPosition(model, bodyDimensions),
     ], bypassValidation);
 
-    const slide = emitSlide(pres, model, captures);
+    const slide = emitSlide(pres, model, captures, { target });
     return { slide, summary: summarise(model, captures, preprocessResult, animations, pseudoData) };
   } catch (error) {
     if (!error.message.startsWith(htmlFile)) {

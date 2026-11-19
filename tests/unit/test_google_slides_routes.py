@@ -484,3 +484,54 @@ class TestExportEndpoint:
         )
         assert resp.status_code == 401
         assert "OAuth" in resp.json()["detail"]
+
+
+class TestFromHuashuEndpoint:
+    """The Google Slides route writes its deck for Google Slides (task-11 ruling R11g)."""
+
+    def test_the_deck_is_written_for_google_slides(self, test_client, monkeypatch):
+        """``/from-huashu`` calls ``build_pptx_huashu(..., target="gslides")``.
+
+        Google Slides sizes a line holding a superscript or subscript by the
+        run's written size, so the huashu deck it converts is written for it;
+        every other collaborator of the route is stubbed, and the stubbed
+        pipeline returns no deck, so the route stops there.
+        """
+        calls = []
+
+        def fake_build(**kwargs):
+            calls.append(kwargs)
+            return b"", [{"slide_index": 0, "error": "stubbed pipeline"}]
+
+        fake_auth = MagicMock()
+        fake_auth.is_authorized.return_value = True
+        fake_chat = MagicMock()
+        fake_chat.get_slides.return_value = {"title": "Deck", "slides": [{"html": "<p>x</p>"}]}
+        monkeypatch.setattr(
+            "src.api.routes.google_slides._check_deck_permission_for_session",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr("src.api.routes.google_slides._get_auth", lambda db: fake_auth)
+        monkeypatch.setattr("src.api.routes.google_slides.get_chat_service", lambda: fake_chat)
+        monkeypatch.setattr(
+            "src.api.routes.google_slides._build_slide_html", lambda slide, deck: "<html></html>"
+        )
+        monkeypatch.setattr(
+            "src.api.services.chat_service.resolve_active_design_system_id", lambda session_id: None
+        )
+        monkeypatch.setattr(
+            "src.utils.image_utils.substitute_deck_dict_images", lambda deck, db: None
+        )
+        monkeypatch.setattr(
+            "src.utils.ds_asset_utils.substitute_deck_dict_ds_assets",
+            lambda deck, db, design_system_id=None: None,
+        )
+        monkeypatch.setattr("src.services.pptx_from_html_huashu.build_pptx_huashu", fake_build)
+
+        resp = test_client.post(
+            "/api/export/google-slides/from-huashu", json={"session_id": "s-gslides"}
+        )
+
+        assert resp.status_code == 500, resp.text
+        assert len(calls) == 1, f"build_pptx_huashu was called {len(calls)} times"
+        assert calls[0]["target"] == "gslides" and calls[0]["bypass_validation"] is True, calls[0]

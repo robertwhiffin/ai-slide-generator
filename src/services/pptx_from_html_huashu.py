@@ -9,6 +9,17 @@ Why local-only: huashu's pipeline needs Chromium via Playwright. Databricks
 Apps containers run as non-root with limited memory and ship without Chromium.
 Adopting this on FEVM would require a deeper infra change than this round
 covers. ``is_available()`` returns False outside the local-dev gate.
+
+Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
+is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
+``"gslides"`` for the Google Slides conversion. The two place a few constructs
+apart, and only those are written differently: today a superscript or
+subscript run's size. PowerPoint shrinks a script run and places its line by
+its other runs, so the run is written enlarged and PowerPoint draws it at the
+browser's size; Google Slides sizes the whole line by that enlarged size and
+draws it low, so for it the run is capped at its line's size (task-11 ruling
+R11g, measured in both apps). A deck for ``"pptx"`` is byte-identical to one
+exported before targets existed.
 """
 
 from __future__ import annotations
@@ -21,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -156,11 +167,16 @@ def is_available() -> bool:
     return True
 
 
+RenderTarget = Literal["pptx", "gslides"]
+RENDER_TARGETS: tuple[RenderTarget, ...] = ("pptx", "gslides")
+
+
 def build_pptx_huashu(
     title: str,
     slides_html: list[dict[str, Any]],
     *,
     bypass_validation: bool = False,
+    target: RenderTarget = "pptx",
 ) -> tuple[bytes, list[dict[str, Any]]]:
     """Run huashu's pipeline over each slide's HTML, return (pptx_bytes, failures).
 
@@ -176,12 +192,18 @@ def build_pptx_huashu(
     output PPTX. Used by the Google Slides Drive route to guarantee every
     slide ships, with the trade-off that some slides may render imperfectly.
 
+    ``target``: the app the deck is written for, ``"pptx"`` (PowerPoint, the
+    default) or ``"gslides"`` (the Google Slides conversion); see the module
+    docstring. Any other value raises ``ValueError``.
+
     Returns a 2-tuple:
       * pptx_bytes — the .pptx as bytes, even if some slides failed
         (empty if ALL slides failed; the caller should handle that).
       * failures  — list of ``{ slide_index, error }`` with one entry per
         slide huashu rejected. Empty list = clean run.
     """
+    if target not in RENDER_TARGETS:
+        raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
     if not is_available():
         raise HuashuExportError(
             "huashu pipeline not available (local dev only; needs node, "
@@ -197,6 +219,8 @@ def build_pptx_huashu(
         # "snapshot" (render_slide.cjs). Read here and sent in the payload, so the
         # sidecar env allowlist stays as it is.
         "engine": os.environ.get("TELLR_EXPORT_ENGINE", "legacy"),
+        # The app the deck is written for (module docstring, Renderer target).
+        "target": target,
     }).encode("utf-8")
 
     with tempfile.TemporaryDirectory() as td:

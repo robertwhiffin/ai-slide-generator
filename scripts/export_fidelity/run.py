@@ -6,10 +6,13 @@ For a fixture deck (``deck.css`` + ``deck.json`` + ``slides/*.html``) this:
    ``build_slide_html`` (so the harness exercises exactly what the export
    routes feed the sidecar);
 2. renders the ground truth: a 1280x720 Chromium screenshot of that document;
-3. runs the production huashu export (``build_pptx_huashu``) to a .pptx;
-4. renders the .pptx with LibreOffice (``--lo``) and/or converts it to
-   Google Slides through Drive and downloads the slide thumbnails
-   (``--gslides``), which is the same conversion the Google Slides export uses;
+3. runs the production huashu export (``build_pptx_huashu``) to a .pptx,
+   written for PowerPoint (``target="pptx"``);
+4. renders the .pptx with LibreOffice (``--lo``) and/or PowerPoint
+   (``--powerpoint``), and/or converts a deck written for Google Slides
+   (``target="gslides"``, ``export-gslides.pptx``) through Drive and downloads
+   the slide thumbnails (``--gslides``): the deck and the conversion the
+   Google Slides export uses;
 5. writes one side-by-side comparison PNG per slide plus a ``scores.json``
    holding a per-slide visual difference score (lower is closer).
 
@@ -81,16 +84,22 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
     )
 
 
-def export_pptx(deck: dict, documents: list[Path], out_dir: Path, engine: str = "legacy") -> Path:
+def export_pptx(
+    deck: dict, documents: list[Path], out_dir: Path, engine: str = "legacy", target: str = "pptx"
+) -> Path:
+    """The production export of ``documents``, written for ``target``: export.pptx for
+    PowerPoint, export-gslides.pptx for Google Slides (with failures.json or
+    failures-gslides.json beside it)."""
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
     # build_pptx_huashu reads the engine from the environment and sends it to the sidecar.
     os.environ["TELLR_EXPORT_ENGINE"] = engine
     slides_payload = [{"html": path.read_text(encoding="utf-8"), "notes": path.stem} for path in documents]
     pptx_bytes, failures = pptx_from_html_huashu.build_pptx_huashu(
-        deck.get("title", "slides"), slides_payload, bypass_validation=True
+        deck.get("title", "slides"), slides_payload, bypass_validation=True, target=target
     )
-    (out_dir / "failures.json").write_text(json.dumps(failures, indent=2), encoding="utf-8")
-    pptx_path = out_dir / "export.pptx"
+    suffix = "" if target == "pptx" else f"-{target}"
+    (out_dir / f"failures{suffix}.json").write_text(json.dumps(failures, indent=2), encoding="utf-8")
+    pptx_path = out_dir / f"export{suffix}.pptx"
     pptx_path.write_bytes(pptx_bytes)
     return pptx_path
 
@@ -378,7 +387,9 @@ def main() -> int:
     if args.lo:
         render_with_libreoffice(pptx_path, names, args.out)
     if args.gslides:
-        print("Google Slides:", render_with_google_slides(pptx_path, names, args.out))
+        # The Google Slides export writes its deck for Google (R11g), so the conversion here does too.
+        gslides_path = export_pptx(deck, documents, args.out, engine=args.engine, target="gslides")
+        print("Google Slides:", render_with_google_slides(gslides_path, names, args.out))
     scores = compare(names, args.out)
     print(json.dumps(scores, indent=2))
     return 0

@@ -674,6 +674,8 @@ async def export_google_slides_from_huashu(
             title=title,
             slides_html=slides_html,
             bypass_validation=True,
+            # Written for Google Slides' own placement (R11g: script runs).
+            target="gslides",
         )
     except HuashuExportError as exc:
         logger.error("Huashu pipeline error for Google Slides export", exc_info=True)

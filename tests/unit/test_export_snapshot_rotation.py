@@ -65,9 +65,12 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import math
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -75,6 +78,7 @@ from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     ANGLE_UNITS_PER_DEGREE,
     DECK_CSS,
+    DRIVE_FILES_URL,
     EMU_PER_PX,
     NAMESPACES,
     BrowserEllipsis,
@@ -90,9 +94,16 @@ from tests.fixtures.export_snapshot_support import (
     browser_tables,
     browser_text,
     corpus_document,
+    delete_drive_file,
+    drive_file_exists,
+    emit_text_constant,
     export_corpus,
     export_documents,
     export_slides,
+    fidelity_harness,
+    google_slides_presentation,
+    node_json,
+    requires_google_slides,
     requires_huashu_sidecar,
     single_line_box_top,
     slide_document,
@@ -105,7 +116,7 @@ from tests.unit.test_export_collection_iteration_hostile_realm import (
     HOSTILE_EXPORT_TIMEOUT_SECONDS,
 )
 from tests.unit.test_export_slide_root_background import FIXTURE_DIR
-from tests.unit.test_export_snapshot_line_spacing import _assert_script_run_size
+from tests.unit.test_export_snapshot_line_spacing import _assert_script_run_size, _script_factor
 from tests.unit.test_export_svg_raster import structural_manifest
 
 ENGINE = "snapshot"
@@ -210,6 +221,11 @@ ROTATION_CSS = """
 .grid td { padding: 8px 12px; border-bottom: 1px solid #DCE0E2; }
 .grid td.cut { overflow: hidden; white-space: nowrap; }
 .grid td.cut.ellipsis { text-overflow: ellipsis; }
+/* Tailwind's Preflight sub and sup, as Tellr's prompts offer it, scoped to .preflight. */
+.preflight sub, .preflight sup { font-size: 75%; line-height: 0; position: relative;
+                                 vertical-align: baseline; }
+.preflight sup { top: -0.5em; }
+.preflight sub { bottom: -0.25em; }
 """
 
 CELL_WORDS = (
@@ -246,6 +262,34 @@ TWIN_LIST_ITEMS = "<li>First step</li><li>Second step</li>"
 TWIN_LIST_MARKERS = ("1.", "2.")
 SUPERSCRIPT_LINE = '<span id="{prefix}lead">Revenue</span><sup>1</sup> grew'
 SUPERSCRIPT_SIZE_PX = 20.0
+ELLIPSIS_SUPERSCRIPT_LINE = (
+    '<span id="lead">Revenue</span><sup>1</sup> grew in every region this quarter'
+)
+# Preflight's script lines, and of each its lead word, its script run's text and baseline shift.
+PREFLIGHT_LINES = {
+    "sup": '<span id="lead">Revenue</span><sup>1</sup> grew',
+    "sub": '<span id="lead">CO</span><sub>2</sub> output fell',
+}
+PREFLIGHT_SCRIPTS = {"sup": ("Revenue", "1", "super"), "sub": ("CO", "2", "sub")}
+# A script run on a paragraph's second line (20 px, line-height 29 px): the
+# browser's own superscript grows that line's box, Preflight's and a subscript
+# do not move its baseline. Each: its class and its second line.
+LATER_SCRIPT_LINES = {
+    "sup": ("", "margin<sup>1</sup> held"),
+    "preflight": ("preflight", "margin<sup>1</sup> held"),
+    "sub": ("", "CO<sub>2</sub> fell"),
+}
+LATER_LINE_HEIGHT_PX = 29.0
+# A line the browser set this much past its line height grew (snapshot_text.mjs).
+LINE_GROWTH_MIN_PX = 0.5
+# A script run's written size, in pt, within this of the rule's.
+SCRIPT_SIZE_TOLERANCE_PT = 0.05
+# a:rPr baseline is in 1000ths of a percent of the run's size.
+BASELINE_UNITS = 100000
+TYPOGRAPHY_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.cjs"
+SLIDE_WIDTH_PX = 1280
+# R11g: a script line's baseline in Google Slides is the browser's within this.
+GOOGLE_BASELINE_TOLERANCE_PX = 1.5
 
 
 def _twin_pair(
@@ -430,6 +474,29 @@ SLIDES: dict[str, str] = {
     "superscript-turned": _twin_pair(
         "-90deg", SUPERSCRIPT_LINE, font_size=20, tag="p", extra="margin:0;"
     ),
+    # Fix round 3. A superscript line cut by an ellipsis, and Preflight's sub and sup.
+    "ellipsis-superscript": (
+        '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
+        "width:300px; margin:0; font-size:20px; white-space:nowrap; overflow:hidden; "
+        f'text-overflow:ellipsis;">{ELLIPSIS_SUPERSCRIPT_LINE}</p></div>'
+    ),
+    **{
+        f"later-{name}": (
+            f'<div class="slide"><p id="target" class="{css_class}" style="position:absolute; '
+            "left:100px; top:150px; margin:0; font-size:20px; line-height:29px; "
+            f'white-space:nowrap;"><span id="first">Alpha</span> revenue grew<br>'
+            f'<span id="second">Gamma</span> {line}</p></div>'
+        )
+        for name, (css_class, line) in LATER_SCRIPT_LINES.items()
+    },
+    **{
+        f"preflight-{script}": (
+            '<div class="slide"><p id="target" class="preflight" style="position:absolute; '
+            'left:100px; top:150px; margin:0; font-size:20px; white-space:nowrap;">'
+            f"{line}</p></div>"
+        )
+        for script, line in PREFLIGHT_LINES.items()
+    },
 }
 
 # R11a: each single-line vertical label, its text and the angle it is turned by.
@@ -1659,6 +1726,356 @@ class TestSuperscriptLines:
         assert abs(top - expected) <= GEOMETRY_TOLERANCE_PX, (
             f"the turned paragraph's text starts {top:.2f} px across its frame, its twin's at "
             f"{expected:.2f} (off by {top - expected:.2f}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+        )
+
+
+def _written_script_size_pt(run: dict, sizing: dict | None) -> float:
+    """``runOptions(run, {}, sizing).fontSize`` of emit_typography.cjs, in Node.
+
+    ``sizing`` None calls it with two arguments, as every caller did before R11g.
+    """
+    arguments = json.dumps(run) + ", {}" + ("" if sizing is None else ", " + json.dumps(sizing))
+    script = (
+        f"const typography = require({json.dumps(str(TYPOGRAPHY_MODULE))});"
+        f"process.stdout.write(JSON.stringify(typography.runOptions({arguments}).fontSize));"
+    )
+    return float(node_json(script))
+
+
+def _script_run(item: Shape, text: str) -> Run:
+    """The one run of ``item`` reading ``text``."""
+    runs = [run for paragraph in item.paras for run in paragraph.runs if run.text == text]
+    assert len(runs) == 1, f"expected one run reading {text!r}: {item.paras}"
+    return runs[0]
+
+
+def _shift_px(run: Run) -> float:
+    """The baseline shift a run is written with, in px: its a:rPr baseline percent of its size."""
+    return run.baseline_offset / BASELINE_UNITS * (run.size_pt or 0.0) / PT_PER_PX
+
+
+def _assert_placed_from_its_text(item: Shape, document: str, what: str) -> None:
+    """``item``, a one-line unturned box, is placed from #lead's 20 px glyph top, within 1 px."""
+    lead = _layout(document, "#lead")
+    style = browser_style(document, "#target")
+    family = style["fontFamily"].split(",")[0].strip().strip("\"'")
+    ascent = browser_ascent(document, family, int(style["fontWeight"]), SUPERSCRIPT_SIZE_PX)
+    expected = single_line_box_top(lead["y"], SUPERSCRIPT_SIZE_PX, ascent)
+    assert abs(item.y - expected) <= GEOMETRY_TOLERANCE_PX, (
+        f"{what}: its box top is {item.y:.2f}; placed from its own 20 px text it is "
+        f"{expected:.2f} (off by {item.y - expected:.2f}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestScriptRunsPerRenderer:
+    """R11g: a script run's written size, per the renderer the deck is written for.
+
+    PowerPoint shrinks a superscript or subscript run to about 0.646 of its
+    written size and places its line by its other runs, so the run is written
+    at the browser's size over that factor (calibration A2), and PowerPoint
+    draws it at the browser's size on the browser's baseline. Google Slides
+    shrinks it alike but sizes the LINE by the written size, which pushes a
+    line holding one down by about 0.28 em: so for Google (``target
+    'gslides'``) the written size is capped at the line's largest size of the
+    other runs, which keeps the baseline (option A, measured: within 1.5 px in
+    both apps, but the script glyph 20% small, so only Google takes it).
+    """
+
+    @pytest.mark.parametrize("baseline", ["super", "sub"])
+    def test_the_written_script_size_rule_per_target(self, baseline: str) -> None:
+        """The pure rule (emit_typography.cjs runOptions), for a 16.67 px script in a 20 px line.
+
+        * pptx, and no target at all: the browser's size over the factor;
+        * gslides: capped at its line's cap (``capPx``): 20 px, 15 pt; a line
+          the browser grew has a larger cap (24.5 px); a script run already
+          under the cap (8 px) keeps the factor's size;
+        * a run with no baseline shift is its size in every target.
+        """
+        _, factor = _script_factor(baseline)
+        script = {
+            "text": "1",
+            "family": "DM Sans",
+            "weight": 400,
+            "italic": False,
+            "sizePx": 50 / 3,
+            "color": "1B3139",
+            "letterSpacingPx": 0,
+            "baseline": baseline,
+        }
+        calibrated = 50 / 3 * PT_PER_PX / factor
+        cases = [
+            (None, calibrated),
+            ({"target": "pptx", "capPx": 20}, calibrated),
+            ({"target": "gslides", "capPx": 20}, 20 * PT_PER_PX),
+            ({"target": "gslides", "capPx": 24.5}, 24.5 * PT_PER_PX),
+            ({"target": "gslides", "capPx": 20}, 8 * PT_PER_PX / factor, {"sizePx": 8}),
+            ({"target": "gslides", "capPx": 20}, 20 * PT_PER_PX, {"sizePx": 20, "baseline": None}),
+        ]
+        for case in cases:
+            sizing, expected = case[0], case[1]
+            run = {**script, **(case[2] if len(case) > 2 else {})}
+            written = _written_script_size_pt(run, sizing)
+            assert abs(written - expected) <= 0.01, (
+                f"a {run['sizePx']:.2f} px {run['baseline']} run under {sizing} is written at "
+                f"{written:.3f} pt, expected {expected:.3f}"
+            )
+
+    def test_a_deck_for_google_slides_caps_its_script_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_pptx_huashu(target='gslides')``: a 20 px and a 40 px line's superscript.
+
+        Each "1" stays a superscript and is written at its line's size (15 pt,
+        30 pt); for PowerPoint (``target='pptx'``) at the browser's size over
+        the factor, as before.
+        """
+        bodies = [SLIDES["superscript"], SLIDES["superscript"].replace("20px", "40px")]
+        _, factor = _script_factor("super")
+        for target in ("gslides", "pptx"):
+            pptx, failures = export_slides(
+                bodies, css=DECK_CSS + ROTATION_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [], failures
+            for index, line_px in enumerate((20.0, 40.0)):
+                document = slide_document(
+                    bodies[index], css=DECK_CSS + ROTATION_CSS, slide_id=f"snapshot-{index + 1}"
+                )
+                script_px = _px(browser_style(document, "#target sup")["fontSize"])
+                _, item = _text_item(
+                    slide_shapes(pptx, index), "Revenue", f"the {line_px:g} px line"
+                )
+                run = _script_run(item, "1")
+                expected = (
+                    line_px * PT_PER_PX if target == "gslides" else script_px * PT_PER_PX / factor
+                )
+                assert run.baseline == "super" and abs((run.size_pt or 0.0) - expected) <= 0.01, (
+                    f"{target}: the {line_px:g} px line's superscript is {_describe_run(run)}, "
+                    f"expected a superscript at {expected:.2f} pt"
+                )
+
+    @pytest.mark.parametrize("name", list(LATER_SCRIPT_LINES))
+    def test_a_later_lines_script_cap_is_its_lines_size_and_growth(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """R11g, lines after the first: Google grows a script line as the browser did.
+
+        "Alpha revenue grew<br>Gamma ..." in 20 px, line-height 29 px, a script
+        run on the second line. The browser's own superscript grows that line's
+        box, so "Gamma" starts lower than the line height puts it (its growth);
+        Preflight's sup (line-height 0) and a subscript grow nothing there.
+        Written for Google, the script run is capped at the line's 20 px plus
+        that growth over Google's growth per px (``GOOGLE_LINE_GROWTH_PER_PX``),
+        and no larger than PowerPoint's size: so Google grows the line as the
+        browser did. Capped at 20 px alone, the superscript's line would be
+        drawn some 6 px high.
+        """
+        body = SLIDES[f"later-{name}"]
+        css = DECK_CSS + ROTATION_CSS
+        document = slide_document(body, css=css, slide_id="snapshot-1")
+        first, second = _layout(document, "#first"), _layout(document, "#second")
+        growth = second["y"] - first["y"] - LATER_LINE_HEIGHT_PX
+        tag, script, baseline = ("sub", "2", "sub") if name == "sub" else ("sup", "1", "super")
+        script_px = _px(browser_style(document, f"#target {tag}")["fontSize"])
+        _, factor = _script_factor(baseline)
+        per_px = emit_text_constant("GOOGLE_LINE_GROWTH_PER_PX")
+        cap = SUPERSCRIPT_SIZE_PX + (growth if growth >= LINE_GROWTH_MIN_PX else 0.0) / per_px
+        expected = min(script_px / factor, cap) * PT_PER_PX
+        pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch, target="gslides")
+        assert failures == [], failures
+        _, item = _text_item(slide_shapes(pptx, 0), "Alpha", "the paragraph")
+        run = _script_run(item, script)
+
+        assert abs((run.size_pt or 0.0) - expected) <= SCRIPT_SIZE_TOLERANCE_PT, (
+            f"{name}: the second line grew {growth:.2f} px in the browser, so its script run is "
+            f"written at {expected:.2f} pt for Google; it is {_describe_run(run)}"
+        )
+
+    def test_the_pptx_target_writes_what_the_default_does(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``target='pptx'`` is the default, byte for byte; 'gslides' changes script sizes alone.
+
+        For a deck with no script run and one with them, the export with no
+        target and with ``target='pptx'`` are the same artifact (every part
+        identical, ``docProps/core.xml`` canonicalised: ``structural_manifest``).
+        Written for Google, the deck with no script run is the same artifact
+        too, and the one with them differs only in its script runs' sizes.
+        """
+        css = DECK_CSS + ROTATION_CSS
+        decks = {
+            "no scripts": [SLIDES["tag"], SLIDES["br-lines"]],
+            "scripts": [SLIDES["superscript"], SLIDES["preflight-sub"]],
+        }
+        for deck, bodies in decks.items():
+            exports = {}
+            for target in (None, "pptx", "gslides"):
+                exports[target], failures = export_slides(
+                    bodies, css=css, monkeypatch=monkeypatch, target=target
+                )
+                assert failures == [], failures
+            assert structural_manifest(exports[None]) == structural_manifest(exports["pptx"]), (
+                f"{deck}: target='pptx' does not export what the default does"
+            )
+            if deck == "no scripts":
+                assert structural_manifest(exports["gslides"]) == structural_manifest(
+                    exports["pptx"]
+                ), "with no script run, the Google deck must equal the PowerPoint deck"
+                continue
+            for index in range(len(bodies)):
+                pptx_shapes = slide_shapes(exports["pptx"], index)
+                google_shapes = slide_shapes(exports["gslides"], index)
+                assert _without_script_sizes(google_shapes) == _without_script_sizes(pptx_shapes), (
+                    f"{deck}, slide {index}: the Google deck differs beyond its script runs' sizes"
+                )
+                assert google_shapes != pptx_shapes, (
+                    f"{deck}, slide {index}: no script run was resized"
+                )
+
+
+def _without_script_sizes(shapes: list[Shape]) -> list[Shape]:
+    """``shapes`` with every script run's size taken out, the one thing the targets differ in."""
+    return [
+        dataclasses.replace(
+            shape,
+            paras=[
+                dataclasses.replace(
+                    paragraph,
+                    runs=[
+                        dataclasses.replace(run, size_pt=None) if run.baseline else run
+                        for run in paragraph.runs
+                    ],
+                )
+                for paragraph in shape.paras
+            ],
+        )
+        for shape in shapes
+    ]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+@requires_google_slides
+class TestScriptRunsInGoogleSlides:
+    def test_a_script_line_sits_on_the_browsers_baseline_in_google_slides(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R11g, opt-in (``TELLR_GOOGLE_TESTS=1``, run with ``uv run --with pymupdf``).
+
+        Written for Google (``target='gslides'``) and converted through Drive,
+        in Drive's PDF of the presentation each line's baseline is the
+        browser's (its glyph top plus its ascent), within 1.5 px:
+        * "Revenue" of a 20 px and a 40 px "Revenue<sup>1</sup> grew".
+          Written at the browser's size over the factor, Google draws it 6 px
+          low at 20 px and 12 px low at 40 px;
+        * "Gamma", the second line of a paragraph holding a script run there:
+          the browser's superscript, Preflight's, and a subscript. Capped at
+          the line's size alone, the browser's superscript line is drawn 6 px
+          high; written for PowerPoint, Preflight's 3.6 px and the subscript's
+          6 px low.
+        The presentation is deleted afterwards.
+        """
+        fitz = pytest.importorskip("fitz", reason="reads Drive's PDF: run with --with pymupdf")
+        later = [f"later-{name}" for name in LATER_SCRIPT_LINES]
+        bodies = [SLIDES["superscript"], SLIDES["superscript"].replace("20px", "40px")]
+        bodies += [SLIDES[name] for name in later]
+        # Each slide: the word whose baseline is read, its selector and its line's size.
+        words = [("Revenue", "#lead", 20.0), ("Revenue", "#lead", 40.0)]
+        words += [("Gamma", "#second", 20.0)] * len(later)
+        css = DECK_CSS + ROTATION_CSS
+        pptx, failures = export_slides(bodies, css=css, monkeypatch=monkeypatch, target="gslides")
+        assert failures == [], failures
+        conversion = google_slides_presentation(pptx, ["sup-20", "sup-40", *later])
+        try:
+            harness = fidelity_harness()
+            pdf_bytes = harness._google_request(
+                f"{DRIVE_FILES_URL}/{conversion.presentation_id}/export?mimeType=application/pdf",
+                harness._google_token(),
+            )
+            pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for index, (word, selector, line_px) in enumerate(words):
+                document = slide_document(bodies[index], css=css, slide_id=f"snapshot-{index + 1}")
+                style = browser_style(document, "#target")
+                family = style["fontFamily"].split(",")[0].strip().strip("\"'")
+                expected = _layout(document, selector)["y"] + browser_ascent(
+                    document, family, int(style["fontWeight"]), line_px
+                )
+                page = pdf[index]
+                scale = SLIDE_WIDTH_PX / page.rect.width
+                origins = [
+                    span["origin"][1] * scale
+                    for block in page.get_text("rawdict")["blocks"]
+                    for line in block.get("lines", [])
+                    for span in line["spans"]
+                    if "".join(char["c"] for char in span["chars"]).lstrip().startswith(word)
+                ]
+                assert len(origins) == 1, f"slide {index}'s PDF holds {len(origins)} {word!r}"
+                assert abs(origins[0] - expected) <= GOOGLE_BASELINE_TOLERANCE_PX, (
+                    f"slide {index}: Google draws {word!r}'s baseline at {origins[0]:.2f}, the "
+                    f"browser at {expected:.2f} (off by {origins[0] - expected:+.2f}, tolerance "
+                    f"{GOOGLE_BASELINE_TOLERANCE_PX} px)"
+                )
+        finally:
+            delete_drive_file(conversion.presentation_id)
+        assert not drive_file_exists(conversion.presentation_id), (
+            "the presentation is still in Drive"
+        )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestScriptLinesPlacedByBaseline:
+    def test_an_ellipsis_line_with_a_superscript_is_placed_from_its_text(
+        self, rotation_pptx: bytes
+    ) -> None:
+        """Round 3, item 2: "Revenue<sup>1</sup> grew in every region…", cut by its ellipsis.
+
+        The "…" takes the line's own baseline extent, not the superscript's
+        raised top, so the line is placed from its 20 px text within 1 px.
+        """
+        document = _document("ellipsis-superscript")
+        _, item = _text_item(_shapes(rotation_pptx, "ellipsis-superscript"), "Revenue", "the line")
+        assert item.text.endswith(ELLIPSIS), f"fixture drift: the line is not cut: {item.text!r}"
+
+        _assert_placed_from_its_text(item, document, "the ellipsis line")
+
+    @pytest.mark.parametrize("script", list(PREFLIGHT_LINES))
+    def test_a_preflight_script_is_a_baseline_shift(
+        self, rotation_pptx: bytes, script: str
+    ) -> None:
+        """Round 3, item 3: Tailwind Preflight's ``position: relative`` sub and sup.
+
+        Preflight sets ``vertical-align: baseline`` and moves the script by
+        ``top: -0.5em`` (sup) or ``bottom: -0.25em`` (sub). That is a baseline
+        shift: the line is placed from its own 20 px text within 1 px, and the
+        script run carries a superscript (or subscript) shift at its own 75%
+        size, sized for the renderers' shrink.
+        """
+        name = f"preflight-{script}"
+        document = _document(name)
+        lead, text, baseline = PREFLIGHT_SCRIPTS[script]
+        _, item = _text_item(_shapes(rotation_pptx, name), lead, name)
+
+        _assert_placed_from_its_text(item, document, f"the Preflight {script} line")
+        script_px = _px(browser_style(document, f"#target {script}")["fontSize"])
+        _assert_script_run_size(
+            item, _script_run(item, text), baseline, script_px, SUPERSCRIPT_SIZE_PX
+        )
+
+    def test_a_preflight_sup_shifts_as_its_vertical_align_twin(self, rotation_pptx: bytes) -> None:
+        """Round 3, item 3: Preflight's sup and the browser's own ``vertical-align: super`` one.
+
+        Both "1"s of "Revenue1 grew" in 20 px are written with the same
+        baseline shift, within 1 px.
+        """
+        _, preflight = _text_item(_shapes(rotation_pptx, "preflight-sup"), "Revenue", "Preflight")
+        _, twin = _text_item(_shapes(rotation_pptx, "superscript"), "Revenue", "the twin")
+        shifts = (_shift_px(_script_run(preflight, "1")), _shift_px(_script_run(twin, "1")))
+
+        assert shifts[0] > 0 and abs(shifts[0] - shifts[1]) <= GEOMETRY_TOLERANCE_PX, (
+            f"the Preflight sup is shifted {shifts[0]:.2f} px, its vertical-align twin "
+            f"{shifts[1]:.2f} px"
         )
 
 
