@@ -1,10 +1,9 @@
 # Usage attribution: every Tellr request is identifiable — design
 
-Date: 2026-11-18. Status: draft for review.
+Date: 2026-11-18. Status: approved.
 
-Decisions are marked **(decided)** when the owner made them, and **(my call)** when the
-designer made them and the owner has not yet confirmed them. Unmarked text describes the
-code as it stands on `main` at c1b11d9f (v0.5.7).
+Decisions marked **(decided)** were approved by the owner on 2026-11-19. Unmarked text
+describes the code as it stands on `main` at c1b11d9f (v0.5.7).
 
 ## Intent
 
@@ -70,7 +69,7 @@ clean environment, and a test install on a dev workspace.
 
 ## Design
 
-### 1. One version, everywhere (my call)
+### 1. One version, everywhere (decided)
 
 `_get_package_version()` returns the installed `databricks-tellr-app` wheel's version when
 the wheel is installed, and falls back to today's chain (`src._version`, `src.__version__`,
@@ -83,7 +82,7 @@ test import changes.
 The product **names** do not change. `tellr-app-system` and `tellr-app-<hash>` are the
 labels in use today, and anything that reads them must keep working across the upgrade. Only `product_version` changes, from `0.1.0` to the real version.
 
-### 2. No anonymous client (my call)
+### 2. No anonymous client (decided)
 
 Every `WorkspaceClient` Tellr builds carries a Tellr product and the real version.
 
@@ -96,11 +95,13 @@ Every `WorkspaceClient` Tellr builds carries a Tellr product and the real versio
 | `model_endpoint_catalog.py:201` | built from the system client's `Config` | verify it inherits the product; set it if not |
 
 One helper in `src/core/attribution.py` supplies the keyword arguments:
-`user_product_kwargs()` reads the request's username from `get_current_user()`
-(`src/core/user_context.py`, already a ContextVar the agent threads copy) and returns
-`{"product": "tellr-app-<hash>", "product_version": <version>}`, or
-`tellr-app-unknown` when no user is bound. No site makes an extra network call to learn
-the user.
+`user_product_kwargs(token)` returns `{"product": "tellr-app-<hash>", "product_version":
+<version>}`. It looks the label up by the user's token, which `_create_user_client`
+records when it first computes the hash; several of these clients are built in worker
+threads where the request's context is not visible, and every one of them holds the token.
+Without a recorded token it falls back to the request's user (`get_current_user()`), then
+to `tellr-app-unknown`. Only a SHA-256 of the token is kept. No site makes an extra
+network call to learn the user.
 
 The MCP HTTP client (`_UserMCPClient._session_run`) sends
 `User-Agent: tellr/<version> python-httpx/<httpx version>`: product first and the
@@ -113,7 +114,7 @@ a `config=` argument, and when `mcp_transport.py` opens an `httpx` client withou
 `User-Agent`. The Gateway guard exists because another product's tag was once dropped
 silently by an unrelated change; this is the same protection for the SDK and MCP clients.
 
-### 3. Lakebase linked to the app (my call; live-tested 19 Nov 2026)
+### 3. Lakebase linked to the app (decided; live-tested 19 Nov 2026)
 
 For an autoscaling install, the installer attaches the Lakebase branch to the app as an
 `AppResourcePostgres` resource named `app_database`. This is what makes the platform
@@ -158,7 +159,7 @@ this, and is the order the first test proved.
 Not yet confirmed: that billing then attributes the project's usage to the app. To be
 checked on the test install before release.
 
-### 4. A `component` tag on Gateway calls (my call)
+### 4. A `component` tag on Gateway calls (decided)
 
 The request tag becomes `{"source": "tellr", "component": "<value>"}`. `source` is
 unchanged, so every existing reader keeps working. `component` is one of a fixed set, and
@@ -176,23 +177,24 @@ optional `component`. The existing tests pin the header to exactly
 `{"source": "tellr"}`; they are updated to the new exact values, and one new test proves an
 unknown component falls back to `{"source": "tellr"}`.
 
-### 5. An `entrypoint` tag for decks made through Tellr's MCP server (my call)
+### 5. An `entrypoint` tag for decks made through Tellr's MCP server (decided)
 
-A chat job enqueued by `src/api/mcp_server.py` records `entrypoint="mcp"` in its job
-payload; the browser route records `"app"`. The job worker binds it to a ContextVar for the
-turn, and `gateway_request_headers` adds `"entrypoint"` to the tag when the variable is set
-to one of those two values. The graph builds its model once per call
-(`bind_structured_output_model`), so the tag is read at the right time. This is the only
-way to separate the LLM usage that other agents drive through Tellr from the usage its own
-users drive: calls made straight to the app's `/mcp` route are not recorded by the
-Gateway.
+`src/api/mcp_server.py` marks the turn `mcp` just before it enqueues the chat job, and the
+browser route marks it `app`. The mark is a ContextVar; `enqueue_job` already copies the
+context into the worker, so every model call of the turn sees it, and
+`gateway_request_headers` adds `"entrypoint"` to the tag when it is one of those two
+values. This separates what other agents use through Tellr from what its own users use.
+
+On `main` an MCP job runs the Legacy engine, whose deck calls do not go through the
+Gateway, so the `mcp` value shows on that job's title call today. It reaches the deck
+calls when MCP jobs run on the graph, with no further change.
 
 ## Considered and not included
 
 - **A per-user label on Gateway LLM calls.** Left out for privacy. It would put a
   per-person identifier on every LLM record, and the hash of an email local part can be
   guessed for a known name. The branch only keeps the per-user label the SDK clients
-  already send. **(my call: leave out; the owner can add it at review.)**
+  already send. **(decided: left out.)**
 - **A usage policy or custom tags** on the app or the Lakebase project (item 6 above).
 - **Moving the `/serving-endpoints` paths onto the Gateway** (item 8 above). The default
   judge runs inside `mlflow.genai.evaluate`, which builds its own client.
