@@ -68,6 +68,7 @@ import importlib.util
 import json
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -965,30 +966,40 @@ def google_slides_presentation(pptx: bytes, names: list[str]) -> GoogleSlidesCon
 
     Runs the fidelity harness's ``render_with_google_slides``: the deck is
     uploaded to Drive as a Google Slides presentation (named
-    ``tellr-export-fidelity <timestamp>``), read back through the Slides API
+    ``tellr-export-fidelity <timestamp>``), whose URL the harness records in
+    ``gslides_url.txt`` at once, then read back through the Slides API
     (``gslides.json``) and thumbnailed (one name per slide). The presentation
     stays in Drive: the caller deletes it with ``delete_drive_file`` once it
-    has read the JSON, in a ``finally``. When the harness fails after the
-    presentation was read back, it is deleted here before the error propagates.
+    has read the JSON, in a ``finally``. When the harness fails at any point
+    after the upload, the presentation the recorded URL names is deleted here
+    before the error propagates.
     """
     harness = fidelity_harness()
     with tempfile.TemporaryDirectory(prefix="tellr-gslides-") as directory:
         out_dir = Path(directory)
         pptx_path = out_dir / "export.pptx"
         pptx_path.write_bytes(pptx)
-        read_back = out_dir / "gslides.json"
+        recorded = out_dir / "gslides_url.txt"
         try:
             url = harness.render_with_google_slides(pptx_path, names, out_dir)
         except BaseException:
-            if read_back.exists():
-                delete_drive_file(
-                    json.loads(read_back.read_text(encoding="utf-8"))["presentationId"]
-                )
+            if recorded.exists():
+                delete_drive_file(_presentation_id(recorded.read_text(encoding="utf-8")))
             raise
-        presentation = json.loads(read_back.read_text(encoding="utf-8"))
+        presentation = json.loads((out_dir / "gslides.json").read_text(encoding="utf-8"))
     return GoogleSlidesConversion(
         presentation=presentation, url=url, presentation_id=presentation["presentationId"]
     )
+
+
+PRESENTATION_URL = re.compile(r"https://docs\.google\.com/presentation/d/([^/\s]+)/edit")
+
+
+def _presentation_id(recorded_url: str) -> str:
+    """The Drive file id of the presentation ``gslides_url.txt`` names."""
+    match = PRESENTATION_URL.search(recorded_url)
+    assert match, f"gslides_url.txt names no presentation: {recorded_url!r}"
+    return match.group(1)
 
 
 def slides_api_tables(presentation: dict, index: int) -> list[dict]:

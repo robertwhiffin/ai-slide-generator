@@ -15,6 +15,10 @@
 // and ::after is walked and laid out as its host's first child or last, and
 // each ::marker is drawn when its item is (emitMarker).
 //
+// Tables. A <table> the slide shows whole, as a grid an a:tbl can draw, is one
+// table item (snapshot_table.mjs), which holds its cells' fills, borders and
+// text; the walk still visits what its cells hold (nativeTable).
+//
 // /**
 //  * SlideModel = {
 //  *   width, height,                       // CSS px; the slide is 1280x720
@@ -26,7 +30,7 @@
 //  *   reference: {hiddenText: string},      // the words the page reads (its innerText)
 //  *                                         // that the slide does not show, single-spaced:
 //  *                                         // clipped, transparent and off-slide text
-//  *   stats: {elements, pseudoElements, shapes, lines, images, texts, truncated},
+//  *   stats: {elements, pseudoElements, shapes, lines, images, texts, tables, truncated},
 //  * }
 //  *
 //  * Every Item carries:
@@ -47,6 +51,8 @@
 //  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
 //  *   lines:[{runs:Run[]}]}]}
 //  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
+//  *  {kind:'table', x,y, colWidths, rowHeights, cells}
+//  *   (one native table; snapshot_table.mjs documents TableItem and TableCell)
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
 //  *   pseudo:null|'before'|'after'|'marker', hiddenWithin:boolean,
@@ -72,12 +78,14 @@ import { blendOver } from './emit_typography.cjs';
 import { GRADIENT_SOURCE } from './gradient.mjs';
 import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
 import { PSEUDO_HOST_ATTRIBUTE } from './pseudo.mjs';
+import { TABLE_SOURCE } from './snapshot_table.mjs';
 import { TEXT_SOURCE } from './snapshot_text.mjs';
 
 // Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
-// GRADIENT_SOURCE, TEXT_SOURCE and blendOver: queryOne, queryAll, elementChildrenOf,
-// domAccess, reportCollectionLoss, the two limits, splitTopLevelCommas,
-// parseLinearGradient, createTextLayout and blendOver are its free names. It is
+// GRADIENT_SOURCE, TEXT_SOURCE, TABLE_SOURCE and blendOver: queryOne, queryAll,
+// elementChildrenOf, domAccess, reportCollectionLoss, the two limits,
+// splitTopLevelCommas, parseLinearGradient, createTextLayout, createTableLayout
+// and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
 // from here arrives in `config`, and what pseudo.mjs read of the page's
 // pseudo-elements in `pseudoData` (PseudoData).
@@ -101,7 +109,7 @@ async function snapshotPage(config, pseudoData) {
 
   const items = [];
   const captures = [];
-  const stats = { elements: 0, pseudoElements: 0, shapes: 0, lines: 0, images: 0, texts: 0, truncated: false };
+  const stats = { elements: 0, pseudoElements: 0, shapes: 0, lines: 0, images: 0, texts: 0, tables: 0, truncated: false };
   let nextItemId = 0;
 
   // ─── colours ─────────────────────────────────────────────────────────
@@ -315,16 +323,22 @@ async function snapshotPage(config, pseudoData) {
     return inside;
   }
 
+  // solidColour(layer, backdrop) -> 'RRGGBB': the solid colour `layer`
+  // ({color, alpha}) shows painted over `backdrop` inside its innermost
+  // opacity group, each group then faded over the backdrop beneath it.
+  function solidColour(layer, backdrop) {
+    let painted = paintOver(layer, backdrop);
+    for (let depth = 0; painted.group && depth < WALK_STEP_LIMIT; depth++) {
+      const group = painted.group;
+      painted = paintOver({ color: painted.color, alpha: painted.alpha * group.opacity }, group.beneath);
+    }
+    return painted.color;
+  }
+
   // textColour(backdrop, s) -> 'RRGGBB': the solid colour the text of the
   // element whose computed style is `s` paints, over `backdrop`.
   function textColour(backdrop, s) {
-    const fill = parseColour(s.webkitTextFillColor) || parseColour(s.color) || UNREADABLE_TEXT_COLOUR;
-    let layer = paintOver(fill, backdrop);
-    for (let depth = 0; layer.group && depth < WALK_STEP_LIMIT; depth++) {
-      const group = layer.group;
-      layer = paintOver({ color: layer.color, alpha: layer.alpha * group.opacity }, group.beneath);
-    }
-    return layer.color;
+    return solidColour(parseColour(s.webkitTextFillColor) || parseColour(s.color) || UNREADABLE_TEXT_COLOUR, backdrop);
   }
 
   // ─── the slide background ────────────────────────────────────────────
@@ -1147,13 +1161,15 @@ async function snapshotPage(config, pseudoData) {
   // The slide root's ground is the slide background (BG_TRANSFER put it on
   // body), so its fill, shadow and rings are never painted a second time here.
   // `slice` is sideBorders': the sides a fragment of an inline box loses.
-  function emitBox(s, box, opacity, order, isSlideRoot, clip, slice) {
+  // `withoutBorder` leaves the border out: a collapsed native table's border
+  // is its grid's outer edges (snapshot_table.mjs).
+  function emitBox(s, box, opacity, order, isSlideRoot, clip, slice, withoutBorder) {
     const fill = isSlideRoot || clipsToText(s) ? null : paintedColour(s.backgroundColor, opacity);
     const sliced = Boolean(slice && (slice.Left || slice.Right));
-    let line = sliced ? null : uniformBorder(s, opacity, box.scale);
+    let line = sliced || withoutBorder ? null : uniformBorder(s, opacity, box.scale);
     const shadow = isSlideRoot ? null : outerShadow(s.boxShadow, opacity, box);
     const rings = isSlideRoot ? [] : spreadRings(s.boxShadow, opacity, box);
-    const sides = line ? null : sideBorders(s, opacity, box.scale, slice);
+    const sides = line || withoutBorder ? null : sideBorders(s, opacity, box.scale, slice);
     if (!fill && !line && !shadow && !rings.length && !(sides && sides.painted.length)) return;
     const corners = cornerShape(s, box);
     // The stroke centred on a bordered shape's edge needs a shape left inside the border box.
@@ -2061,7 +2077,10 @@ async function snapshotPage(config, pseudoData) {
 
   // The element's inline groups, as items now or waiting for the subtree they follow.
   function collectText(element, s, paint, seq, walk) {
-    const groups = textLayout.collectTextBlocks(element, s, walk);
+    placeGroups(textLayout.collectTextBlocks(element, s, walk), paint, seq);
+  }
+
+  function placeGroups(groups, paint, seq) {
     for (let index = 0; index < groups.length; index++) {
       const group = groups[index];
       if (!group.follows) {
@@ -2074,6 +2093,92 @@ async function snapshotPage(config, pseudoData) {
       else waitingText.set(group.follows, [entry]);
       waitingInOrder.push(entry);
     }
+  }
+
+  // ─── tables ──────────────────────────────────────────────────────────
+  // A <table> the slide shows whole, laid out as a grid an a:tbl can draw
+  // (snapshot_table.mjs collectTable), is one table item over its own box: the
+  // walk then draws no box of its parts and gives each cell's text to the cell
+  // (collectCellText), and visits everything the cells hold as anywhere else,
+  // so a pill, a picture or a cell's ::before is an item of its own over the
+  // table: the inline content of the table's context paints after its own box.
+  // Any other table is positioned items, as every slide box is drawn: one an
+  // a:tbl cannot draw, and one a clip cuts (R10j), which items are cut to and
+  // an a:tbl cannot be; a table the clip hides shows nothing either way.
+  //   tableParts: part element -> {cell: {model: TableCell, grid} | null}
+  const tableParts = new Map();
+  const tableLayout = createTableLayout({
+    parseColour,
+    paintedColour,
+    paintOver,
+    solidColour,
+    backdropInside,
+    opacityOf,
+    pseudoOf: (element) => pseudoHosts.get(element) || null,
+    rectOf,
+    fontOf: textLayout.fontOf,
+  });
+  // A line of text within this of its grid cell's edge still lies in it (layout rounding).
+  const CELL_TEXT_EPSILON_PX = 0.5;
+
+  // The TableLayout of a <table> drawn as a native table, its parts now owned
+  // by it, or null. `box` is its border box, `clips` its clipsOf, `walk`
+  // {opacity, frame, backdrop}: its cumulative opacity, its frame and what it sits on.
+  function nativeTable(element, name, s, box, clips, walk) {
+    if (name !== 'table' || walk.frame.angle || hasBoxEffect(s)) return null;
+    const shown = shownPart(boundsOf(box), clips.box);
+    if (!shown || shown.cut) return null;
+    const layout = tableLayout.collectTable(element, s, walk);
+    if (!layout) return null;
+    for (let index = 0; index < layout.parts.length; index++) {
+      tableParts.set(layout.parts[index], { cell: layout.cells.get(layout.parts[index]) || null });
+    }
+    return layout;
+  }
+
+  function pushTable(layout, order) {
+    items.push({ ...layout.item, id: nextItemId++, order });
+    stats.tables++;
+  }
+
+  // A native table cell's text: the cell's own paragraphs when its renderer
+  // can set its lines as the browser did (snapshot_text.mjs layoutCell) and
+  // fitCellText finds them room in the cell; else overlay text items, as any
+  // other block's. `cell` is its {model, grid}.
+  function collectCellText(element, s, paint, seq, walk, cell) {
+    const text = textLayout.layoutCell(element, s, walk);
+    if (text.native && fitCellText(cell, text)) {
+      cell.model.paragraphs = text.paragraphs();
+      cell.model.align = text.align;
+      cell.model.rtl = text.rtl;
+      return;
+    }
+    placeGroups(text.groups(), paint, seq);
+  }
+
+  // Whether a cell's lines lie in its grid cell; if so, makes them the room
+  // past the widest that a renderer needs so as not to wrap one (text.slack),
+  // as far as the margin on the side the alignment grows holds it (both sides
+  // of centred text), down to none. The other side keeps its margin, so the
+  // lines start where the browser started them; a cell its text overflows
+  // gives its text to overlay items instead.
+  function fitCellText(cell, text) {
+    if (!text.extent) return true;
+    const grid = cell.grid;
+    const margin = cell.model.margin;
+    if (text.extent.left < grid.left - CELL_TEXT_EPSILON_PX || text.extent.right > grid.right + CELL_TEXT_EPSILON_PX) return false;
+    const room = grid.right - grid.left - margin.left - margin.right - (text.extent.right - text.extent.left);
+    const deficit = text.slack - room;
+    if (!(deficit > 0)) return true;
+    if (text.align === 'center') {
+      margin.left = Math.max(0, margin.left - deficit / 2);
+      margin.right = Math.max(0, margin.right - deficit / 2);
+    } else if (text.align === 'right') {
+      margin.left = Math.max(0, margin.left - deficit);
+    } else {
+      margin.right = Math.max(0, margin.right - deficit);
+    }
+    return true;
   }
 
   // The walk is about to visit an element at `depth`, so every open subtree at
@@ -2178,16 +2283,21 @@ async function snapshotPage(config, pseudoData) {
     // rect, which spans every line it is on, is never a box of its own.
     // A box-only capture is the element's box: no native shape beside it.
     // A box-only capture of the element's own box, which a list marker may lie in.
+    // A part of a native table has no box of its own: the table item draws it.
+    const part = tableParts.get(element) || null;
     let picture = null;
-    if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
+    if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s) && !part) {
       const box = boxGeometry(element, clips.rect || rectOf(element), frame);
+      const table = box && !replaced ? nativeTable(element, name, s, box, clips, { opacity, frame, backdrop: state.backdrop }) : null;
       if (box && replaced) {
         emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
       } else if (box && element !== slideRoot && capturesBox(s, opacity, element)) {
         picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
       } else if (box) {
-        emitBox(s, box, opacity, place.box, element === slideRoot, clips.box);
+        emitBox(s, box, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
       }
+      // Over the table's own box, under everything its cells hold.
+      if (table) pushTable(table, place.box);
     }
     if (replaced) return;
     const backdrop = backdropInside(state.backdrop, s);
@@ -2196,7 +2306,9 @@ async function snapshotPage(config, pseudoData) {
     // An outside marker is inside its item's opacity group but not on its
     // background (emitMarker): its backdrop is what the item sits on.
     emitMarker(element, place.paint, seq, { ...inline, backdrop: groupInside(state.backdrop, s) }, picture);
-    collectText(element, s, place.paint, seq, inline);
+    // A table part holds no text but its cells' (snapshot_table.mjs readStructure).
+    if (part && part.cell) collectCellText(element, s, place.paint, seq, inline, part.cell);
+    else if (!part) collectText(element, s, place.paint, seq, inline);
     pushChildren(element, {
       ctx: place.ctx,
       paint: place.paint,
@@ -2290,6 +2402,7 @@ export const SNAPSHOT_SOURCE = `
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
 ${TEXT_SOURCE}
+${TABLE_SOURCE}
 ${blendOver.toString()}
   return await (${snapshotPage.toString()})(${JSON.stringify({
     slideRootMarker: SLIDE_ROOT_MARKER,

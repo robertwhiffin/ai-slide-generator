@@ -296,6 +296,10 @@ def render_with_google_slides(pptx_path: Path, names: list[str], out_dir: Path) 
         headers={"Content-Type": f"multipart/related; boundary={boundary}"},
     ))
     presentation_id = created["id"]
+    url = f"https://docs.google.com/presentation/d/{presentation_id}/edit"
+    # Recorded the moment the presentation exists, so a read below that fails
+    # still leaves its id to the caller (which may then delete it).
+    (out_dir / "gslides_url.txt").write_text(url + "\n", encoding="utf-8")
     presentation = json.loads(_google_request(
         f"https://slides.googleapis.com/v1/presentations/{presentation_id}", token
     ))
@@ -311,8 +315,6 @@ def render_with_google_slides(pptx_path: Path, names: list[str], out_dir: Path) 
         image = _google_request(thumbnail["contentUrl"], token)
         (gslides_dir / f"{names[index]}.png").write_bytes(image)
         time.sleep(0.4)  # thumbnail endpoint is rate limited per minute
-    url = f"https://docs.google.com/presentation/d/{presentation_id}/edit"
-    (out_dir / "gslides_url.txt").write_text(url + "\n", encoding="utf-8")
     return url
 
 

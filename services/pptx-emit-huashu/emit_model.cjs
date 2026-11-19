@@ -9,9 +9,11 @@
 // Only raster data: pictures are embedded (SDR-4437): from a capture or from the
 // item's own data: src. Anything else is skipped and announced on stderr. Text
 // items are written by emit_text.cjs, which names each run's typeface from the
-// webfonts the page loaded (model.fonts).
+// webfonts the page loaded (model.fonts), and native tables by emit_table.cjs.
 
+const { emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
+const { transparencyOf } = require('./emit_typography.cjs');
 
 const PX_PER_IN = 96;
 const PT_PER_PX = 0.75;
@@ -35,11 +37,6 @@ function inches(px) {
 
 function points(px) {
   return px * PT_PER_PX;
-}
-
-// pptxgenjs transparency is a whole percentage; 0 means opaque and writes no alpha.
-function transparencyOf(alpha) {
-  return Math.round((1 - alpha) * 100);
 }
 
 function withinInchLimit(...values) {
@@ -145,8 +142,15 @@ function emitImage(slide, item, data) {
   slide.addImage(options);
 }
 
+function sum(values) {
+  let total = 0;
+  for (const value of values) total += value;
+  return total;
+}
+
 function inRange(item) {
   if (item.kind === 'line') return withinInchLimit(item.x1, item.y1, item.x2, item.y2);
+  if (item.kind === 'table') return withinInchLimit(item.x, item.y, sum(item.colWidths), sum(item.rowHeights));
   return withinInchLimit(item.x, item.y, item.w, item.h);
 }
 
@@ -172,6 +176,8 @@ function emitSlide(pres, model, captures) {
       else skippedPictures += 1;
     } else if (item.kind === 'text') {
       emitText(slide, item, model.fonts);
+    } else if (item.kind === 'table') {
+      emitTable(slide, item, model.fonts);
     } else {
       throw new Error(`[html2pptx] the slide model holds an item kind the emitter does not know: ${item.kind}`);
     }

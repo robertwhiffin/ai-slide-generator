@@ -1,6 +1,7 @@
 'use strict';
 // Run typography: one run of the slide model (snapshot_text.mjs) as pptxgenjs
-// run options, and the colour blend every text colour is composited with.
+// run options, the colour blend every text colour is composited with, and the
+// transparency every fill and line alpha is written as.
 //
 // Weights (spec §5). A run has one bold flag, so 400 is the family and 700 is
 // the family plus bold. Any other weight of a webfont the page loaded is that
@@ -163,6 +164,12 @@ function runOptions(run, fonts) {
   };
 }
 
+// transparencyOf(alpha) -> the pptxgenjs transparency of a fill or line at
+// `alpha` (0..1): a whole percentage, where 0 means opaque and writes no alpha.
+function transparencyOf(alpha) {
+  return Math.round((1 - alpha) * 100);
+}
+
 // blendOver(color, alpha, backdrop) -> 'RRGGBB': `color` at `alpha` painted
 // over the opaque `backdrop`, each channel round(c * a + b * (1 - a)). Both
 // colours are 'RRGGBB'.
@@ -184,4 +191,4 @@ function blendOver(color, alpha, backdrop) {
   return blended.toUpperCase();
 }
 
-module.exports = { typefaceFor, runOptions, blendOver, xmlText };
+module.exports = { typefaceFor, runOptions, blendOver, transparencyOf, xmlText };

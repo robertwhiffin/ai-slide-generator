@@ -157,8 +157,10 @@ function writtenParagraphs(item, fonts) {
   return written;
 }
 
-// The pptxgenjs text array: every run carries its paragraph's spacing, and the
-// last run of every paragraph but the final one ends it.
+// textObjects(item, fonts) -> the pptxgenjs text array of `item`'s paragraphs
+// ({paragraphs, rtl}: a text item, or a native table cell, emit_table.cjs):
+// every run carries its paragraph's spacing, and the last run of every
+// paragraph but the final one ends it.
 function textObjects(item, fonts) {
   const objects = [];
   const written = writtenParagraphs(item, fonts);
@@ -209,4 +211,4 @@ function emitText(slide, item, fonts) {
   slide.addText(objects, options);
 }
 
-module.exports = { emitText };
+module.exports = { emitText, textObjects };

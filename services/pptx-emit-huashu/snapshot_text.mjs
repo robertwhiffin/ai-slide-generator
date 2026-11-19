@@ -1924,6 +1924,16 @@ function createTextLayout(env) {
     return hiddenParts.join('').replace(/\s+/g, ' ').trim();
   }
 
+  // The InlineGroup of one run of `el`'s inline content, from its decorations
+  // and its layout (layoutInlineRun, or null when none of its text paints),
+  // each read once; null when it paints nothing. `placement` is textBlock's.
+  function groupOf(run, decorations, layout, el, s, frame, placement) {
+    const blocks = [];
+    if (layout) blocksOf(layout, el, s, frame, placement, blocks);
+    if (!decorations.length && !blocks.length) return null;
+    return { follows: run.follows, decorations, blocks };
+  }
+
   // collectTextBlocks(el, s, walk) -> InlineGroup[]
   //   el, s   the element the snapshot walk is visiting and its computed style;
   //   walk    {opacity, frame, backdrop, decoration, clip}: its cumulative
@@ -1950,21 +1960,107 @@ function createTextLayout(env) {
     const groups = [];
     for (let index = 0; index < runs.length; index++) {
       const decorations = decorationsOf(runs[index].nodes, walk.frame);
-      const blocks = [];
       const layout = layoutInlineRun(runs[index].nodes, s, walk.frame.scale);
-      if (layout) blocksOf(layout, el, s, walk.frame, itemsAreBlocks ? 'text' : 'container', blocks);
-      if (!decorations.length && !blocks.length) continue;
-      groups.push({ follows: runs[index].follows, decorations, blocks });
+      const group = groupOf(runs[index], decorations, layout, el, s, walk.frame, itemsAreBlocks ? 'text' : 'container');
+      if (group) groups.push(group);
     }
     return groups;
+  }
+
+  // ─── table cells ─────────────────────────────────────────────────────
+  // A native table's cell (snapshot_table.mjs) holds its text as the a:tc's
+  // own paragraphs, laid out by the table's renderer inside the cell's
+  // margins. That keeps the browser's lines only while each line is one run of
+  // text the renderer sets straight through: a line cut at an atomic inline (a
+  // pill, a Harvey ball), at an inline element's edges (a chip) or at a word
+  // that paints nothing (isCut) has segments placed at their own x, and an
+  // inline element's box (a <mark>) is a decoration that must paint under its
+  // text, which a shape over the table cannot. Such a cell's text is overlay
+  // text items instead, as anywhere else on the slide.
+  //
+  // layoutCell(el, s, walk) -> CellText, reading the cell's inline content
+  // once (`walk` is collectTextBlocks'):
+  //   CellText = {native, rtl, align, extent, slack, paragraphs(), groups()}
+  //   native      its text can be the cell's own paragraphs (none at all included);
+  //   rtl         its paragraphs run right to left;
+  //   align       'left' | 'center' | 'right' as its paragraphs are written: a
+  //               justified cell starts from its start side, as textBlock writes it;
+  //   extent      {left, right} of its lines' text, or null for none;
+  //   slack       the width beyond its widest line its renderer needs so as not
+  //               to wrap a line the browser did not (spec §3 Text, Wrapping);
+  //   paragraphs  () -> Paragraph[]: its lines as text paragraphs, queued for the
+  //               metric probes (applyMetrics); call it once, and only when native;
+  //   groups      () -> InlineGroup[]: its text as overlay items, as
+  //               collectTextBlocks gives them; call it once, instead.
+  function layoutCell(el, s, walk) {
+    const runs = budget > 0 ? collectRuns(el, s, walk, false) : [];
+    const rtl = s.direction === 'rtl';
+    const align = alignmentOf(s, rtl);
+    const written = align === 'justify' ? (rtl ? 'right' : 'left') : align;
+    // A native table's cells hold no block-level child, so their inline content
+    // is one run; a second one is the overlay of a layout this cell cannot keep.
+    const single = runs.length === 1 && !runs[0].follows;
+    const decorations = [];
+    const layouts = [];
+    for (let index = 0; index < runs.length; index++) {
+      decorations.push(decorationsOf(runs[index].nodes, walk.frame));
+      layouts.push(layoutInlineRun(runs[index].nodes, s, walk.frame.scale));
+    }
+    const layout = single ? layouts[0] : null;
+    let cut = false;
+    let left = Infinity;
+    let right = -Infinity;
+    for (let index = 0; layout && index < layout.lines.length; index++) {
+      const line = layout.lines[index];
+      if (line.segments) cut = true;
+      if (!line.rect) continue;
+      left = Math.min(left, line.rect.left);
+      right = Math.max(right, line.rect.right);
+    }
+    const extent = right >= left ? { left, right } : null;
+    return {
+      native: runs.length === 0 || (single && !decorations[0].length && !cut),
+      rtl: layout ? layout.rtl : rtl,
+      align: written,
+      extent,
+      slack: extent ? (extent.right - extent.left) * SLACK_FRACTION + SLACK_PX : 0,
+      paragraphs: () => {
+        if (!layout) return [];
+        queueRuns(layout.lines, align, walk.frame);
+        return paragraphsOf(layout.lines);
+      },
+      groups: () => {
+        const groups = [];
+        for (let index = 0; index < runs.length; index++) {
+          const group = groupOf(runs[index], decorations[index], layouts[index], el, s, walk.frame, 'container');
+          if (group) groups.push(group);
+        }
+        return groups;
+      },
+    };
+  }
+
+  // fontOf(s, scale) -> {family, weight, italic, sizePx}: the face the element
+  // whose computed style is `s` sets its own text in, as a Run carries it: in a
+  // table cell, the face its renderer sizes an empty line, and each line's
+  // paragraph mark, by (the browser's line box holds a strut of it too).
+  function fontOf(s, scale) {
+    return {
+      family: familyOf(s.fontFamily),
+      weight: weightOf(s.fontWeight),
+      italic: s.fontStyle !== 'normal',
+      sizePx: (parseFloat(s.fontSize) || 0) * scale,
+    };
   }
 
   return {
     applyMetrics,
     collectTextBlocks,
     decorationOf,
+    fontOf,
     hiddenText,
     isInlineBox,
+    layoutCell,
     layoutInlineRun,
     loadedFonts,
     markerBlock,

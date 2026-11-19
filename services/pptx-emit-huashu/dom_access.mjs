@@ -105,6 +105,12 @@ export const DOM_ACCESS_SOURCE = `
       const createTextNode = realm.Document.prototype.createTextNode;
       const appendChild = realm.Node.prototype.appendChild;
       const removeNode = realm.Element.prototype.remove;
+      // How many grid rows and columns a table cell spans, and how many columns
+      // a <col> or <colgroup> spans, as the HTML table model reads them
+      // (snapshot_table.mjs): the attribute values parsed and clamped by the browser.
+      const cellRowSpan = describe(realm.HTMLTableCellElement.prototype, 'rowSpan');
+      const cellColSpan = describe(realm.HTMLTableCellElement.prototype, 'colSpan');
+      const columnSpan = describe(realm.HTMLTableColElement.prototype, 'span');
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -132,7 +138,10 @@ export const DOM_ACCESS_SOURCE = `
           typeof createElement !== 'function' ||
           typeof createTextNode !== 'function' ||
           typeof appendChild !== 'function' ||
-          typeof removeNode !== 'function') return null;
+          typeof removeNode !== 'function' ||
+          typeof cellRowSpan.get !== 'function' ||
+          typeof cellColSpan.get !== 'function' ||
+          typeof columnSpan.get !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -167,6 +176,10 @@ export const DOM_ACCESS_SOURCE = `
         createTextNode: (text) => createTextNode.call(document, text),
         appendChild: (parent, child) => appendChild.call(parent, child),
         remove: (el) => removeNode.call(el),
+        // Throw for an element that is not a table cell, or not a <col> or <colgroup>: callers check the tag first.
+        rowSpan: (cell) => cellRowSpan.get.call(cell),
+        colSpan: (cell) => cellColSpan.get.call(cell),
+        columnSpan: (column) => columnSpan.get.call(column),
       };
     } catch (e) {
       return null;
@@ -209,6 +222,9 @@ export const DOM_ACCESS_SOURCE = `
     createTextNode: (text) => document.createTextNode(text),
     appendChild: (parent, child) => parent.appendChild(child),
     remove: (el) => el.remove(),
+    rowSpan: (cell) => cell.rowSpan,
+    colSpan: (cell) => cell.colSpan,
+    columnSpan: (column) => column.span,
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.

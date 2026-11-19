@@ -22,12 +22,16 @@ browser's own:
   table's own background (and its radius and shadow) is a shape under the
   frame;
 * under ``border-collapse: collapse`` every shared edge has ONE line, the
-  winner CSS 2.1 picks: the wider border; on equal widths the style (double
-  over solid over dashed over dotted); then the origin (a cell's border over
-  its row's); then the cell further up or left. That winner is written on
+  winner CSS 2.1 picks: ``hidden`` over anything; then the wider border; on
+  equal widths the style (double over solid over dashed over dotted); then
+  the origin (a cell's border over its row's); then the cell further up, and
+  further left (right, in a right-to-left table). That winner is written on
   BOTH cells' sides. Neither PowerPoint nor Drive then
   sees one cell's ``noFill`` contradicting its neighbour's line. Every cell
   writes all four sides;
+* under ``border-collapse: separate`` with no spacing, two cells' borders
+  that meet paint side by side: alike, they are one line as wide as both;
+  in different colours, no ``a:tbl`` edge draws them;
 * the text runs follow the text-block rules (weights as named faces, bold
   only at 700, colours).
 
@@ -39,9 +43,11 @@ nothing is written twice. Text and boxes the table owns appear nowhere else.
 
 A table is emitted as positioned items instead (cell boxes as shapes, cell
 text as text items, all still editable) when ``a:tbl`` cannot draw it: it
-holds a nested table, or its cells stand apart (``border-collapse: separate``
+holds a nested table, or a cell holds a block-level child (a ``<p>``), or its
+cells stand apart (``border-collapse: separate``
 with visible ``border-spacing``: a filled or bordered cell, whose gaps no
-``a:tbl`` has). Spacing nothing shows (no cell fill, no cell border) keeps it
+``a:tbl`` has), or two separated borders side by side differ. Spacing nothing
+shows (no cell fill, no cell border) keeps it
 native. So is a table an ancestor's clip cuts (an ``a:tbl`` cannot be
 clipped): its items are clipped as any others are, and what the clip hides is
 absent. A ``<caption>`` is no grid cell: it is a text item at its rendered
@@ -166,6 +172,7 @@ HEADER_FILL = "FF5F46"
 INK = "1B3139"
 RULE = "DCE0E2"
 WHITE = "FFFFFF"
+ACCENT = "FF5F46"
 # .dk-bs tr.indent td:first-child { padding-left: 26px }
 INDENT_PADDING_PX = 26.0
 # The colours that meet on a total row's top edge: the row above's own bottom
@@ -249,6 +256,20 @@ TABLES_CSS = (
 .clipped th, .clipped td { padding: 8px 12px; text-align: left;
                            border-bottom: 1px solid var(--rule); }
 .clipped tr.tall td { height: 80px; background: #F1EFEB; }
+.hidden-edge { position: absolute; border-collapse: collapse; font-size: 18px;
+               background: #FFFFFF; }
+.hidden-edge td { padding: 10px 14px; }
+.hidden-edge tr.upper td { border-bottom: 4px solid #1B3139; }
+.hidden-edge tr.lower td { border-top: hidden; }
+.rtl-edge { position: absolute; border-collapse: collapse; font-size: 18px; direction: rtl; }
+.rtl-edge td { padding: 10px 14px; }
+.rtl-edge td:first-child { border-left: 2px solid #FF5F46; }
+.rtl-edge td + td { border-right: 2px solid #1B3139; }
+.doubled { position: absolute; border-collapse: separate; border-spacing: 0; font-size: 18px; }
+.doubled td { padding: 10px 14px; }
+.doubled tr.upper td { border-bottom: 2px solid #1B3139; }
+#alike tr.lower td { border-top: 2px solid #1B3139; }
+#unlike tr.lower td { border-top: 2px solid #FF5F46; }
 """
 )
 
@@ -374,6 +395,20 @@ NESTED_BODY = """<div class="slide">
 </div>"""
 OUTER_TEXTS = ("Programme", "Detail", "Platform", "People", "Hiring plan on track")
 
+BLOCKS_BODY = """<div class="slide">
+  <table id="blocks" class="ruled" style="left: 88px; top: 120px; width: 700px;">
+    <thead><tr><th>Programme</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>Platform</td><td>
+        <p style="margin: 0;">Unity Catalog governs every table</p>
+        <p style="margin: 0;">Lakeflow runs the pipelines</p>
+      </td></tr>
+      <tr><td>People</td><td>Hiring plan on track</td></tr>
+    </tbody>
+  </table>
+</div>"""
+BLOCKS_TABLE = "#blocks"
+
 FILLS_BODY = """<div class="slide">
   <table id="fills" class="ruled"
          style="left: 88px; top: 120px; width: 700px; background: #FFFFFF;">
@@ -473,6 +508,58 @@ CUT_ROW_FILL = "F1EFEB"
 # The same table, whole inside an overflow: hidden box tall enough to hold it.
 WHOLE_BOX = "#whole-box"
 
+PRECEDENCE_BODY = """<div class="slide">
+  <table id="hidden-edge" class="hidden-edge" style="left: 88px; top: 120px; width: 480px;">
+    <tbody>
+      <tr class="upper"><td>Revenue</td><td>1,240.0</td></tr>
+      <tr class="lower"><td>Gross profit</td><td>434.0</td></tr>
+    </tbody>
+  </table>
+  <table id="rtl-edge" class="rtl-edge" style="left: 680px; top: 120px; width: 480px;">
+    <tbody>
+      <tr><td>Revenue</td><td>1,240.0</td></tr>
+      <tr><td>Gross profit</td><td>434.0</td></tr>
+    </tbody>
+  </table>
+</div>"""
+# Along the top of row 1: the upper cells' own 4 px solid 1B3139 bottom against
+# the lower cells' border-top: hidden. hidden wins before width: no line.
+HIDDEN_EDGE_TABLE = "#hidden-edge"
+HIDDEN_EDGE_ROW = 1
+HIDDEN_EDGE_LOSER = ("solid", 4.0, INK)
+# A right-to-left table: each row's first cell is on the right. Along the edge
+# between its columns the right cell's own left border (2 px solid FF5F46)
+# against the left cell's own right border (2 px solid 1B3139): equal width,
+# style and origin, so the cell further right (in right to left) wins.
+RTL_EDGE_TABLE = "#rtl-edge"
+RTL_EDGE_WINNER = (ACCENT, 2.0)
+
+DOUBLED_BODY = """<div class="slide">
+  <table id="alike" class="doubled" style="left: 88px; top: 120px; width: 480px;">
+    <tbody>
+      <tr class="upper"><td>Revenue</td><td>1,240.0</td></tr>
+      <tr class="lower"><td>Gross profit</td><td>434.0</td></tr>
+    </tbody>
+  </table>
+  <table id="unlike" class="doubled" style="left: 680px; top: 120px; width: 480px;">
+    <tbody>
+      <tr class="upper"><td>Operating income</td><td>148.8</td></tr>
+      <tr class="lower"><td>Net income</td><td>97.8</td></tr>
+    </tbody>
+  </table>
+</div>"""
+# border-collapse: separate, border-spacing: 0: along the top of row 1 the upper
+# cells' own 2 px solid 1B3139 bottoms and the lower cells' own 2 px tops paint
+# side by side. In #alike both are 1B3139, one 4 px rule; in #unlike the lower
+# ones are FF5F46, two lines.
+ALIKE_TABLE = "#alike"
+UNLIKE_TABLE = "#unlike"
+DOUBLED_ROW = 1
+DOUBLED_SIDE_PX = 2.0
+DOUBLED_WIDTH_TOLERANCE_PX = 0.5
+# A line item lies along its band within this.
+LINE_TOLERANCE_PX = 1.0
+
 INLINE_BODIES = {
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
@@ -482,9 +569,12 @@ INLINE_BODIES = {
     "cards": CARDS_BODY,
     "plain": PLAIN_BODY,
     "nested": NESTED_BODY,
+    "blocks": BLOCKS_BODY,
     "fills": FILLS_BODY,
     "origin": ORIGIN_BODY,
     "clip": CLIP_BODY,
+    "precedence": PRECEDENCE_BODY,
+    "doubled": DOUBLED_BODY,
 }
 
 # A two-cell table added to the hostile-realm fixtures, after the prose.
@@ -770,6 +860,29 @@ def _assert_side(cell: Cell, side: str, winner: BrowserBorder, what: str) -> Non
         assert border.dash in (None, "solid"), (
             f"{what}: the {side} side is dashed {border.dash!r}; the browser's line is solid"
         )
+
+
+def _margin_problem(cell: Cell, side: str, expected: float, what: str) -> str | None:
+    """Why ``cell``'s margin on ``side`` is not ``expected`` px (within tolerance), if it is not."""
+    margin = cell.margins_px[side]
+    tolerance = max(expected * MARGIN_TOLERANCE_FRACTION, MARGIN_TOLERANCE_FLOOR_PX)
+    if margin is None or abs(margin - expected) > tolerance:
+        return f"{what}: {side} margin {margin}; the browser starts its content {expected:g} px in"
+    return None
+
+
+def _slot_under(frame: Shape, cell: BrowserCell) -> tuple[int, int]:
+    """The a:tbl slot whose grid cell is the browser cell's box: columns run left to right."""
+    assert frame.table is not None
+    under = [
+        (row, col)
+        for row, col, _ in _origin_cells(frame)
+        if _same_rect(table_cell_rect(frame, row, col), cell.rect)
+    ]
+    assert len(under) == 1, (
+        f"the browser cell {cell.text!r} at {cell.rect} lies on {len(under)} grid cells"
+    )
+    return under[0]
 
 
 def _cell_holding(browser: BrowserTable, point_x: float, point_y: float) -> BrowserCell:
@@ -1782,6 +1895,164 @@ class TestTableStructure:
             contradictions
         )
 
+    def test_a_hidden_border_beats_a_wider_solid_one_on_both_cells(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """``hidden`` on one side of an edge beats a wider solid border: no line on either cell.
+
+        Along the top of row 1 the upper cells' own 4 px solid ``1B3139``
+        bottom meets the lower cells' ``border-top: hidden``. CSS decides
+        ``hidden`` before width, and the browser paints no line there. In every
+        column the upper cell's ``lnB`` and the lower cell's ``lnT`` are written
+        and draw no line, and each margin along the edge is the cell's padding
+        alone: a hidden edge takes no width into either cell.
+        """
+        document = _inline_document("precedence")
+        shapes = slide_shapes(inline_export("precedence"))
+        (table,) = browser_tables(document, HIDDEN_EDGE_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the hidden-edge table")
+        _assert_grid_matches(frame, table, "the hidden-edge table")
+        lowers = [cell for cell in table.cells if cell.row == HIDDEN_EDGE_ROW]
+        pixels = browser_pixels(document, [(cell.x + cell.w / 2, cell.y) for cell in lowers])
+        problems = []
+        for lower, pixel in zip(lowers, pixels):
+            upper = table.cell_at(HIDDEN_EDGE_ROW - 1, lower.col)
+            what = f"the edge between {upper.text!r} and {lower.text!r}"
+            loser = upper.borders["bottom"]
+            meeting = (
+                (loser.style, loser.width_px, _css_colour(loser.color)[0]),
+                lower.borders["top"],
+            )
+            assert meeting[0] == HIDDEN_EDGE_LOSER and meeting[1].style == "hidden", (
+                f"fixture drift: {what} meets {loser} and {meeting[1]}"
+            )
+            assert _hex(pixel) != INK, f"fixture drift: the browser paints #{INK} on {what}"
+            for cell, side in ((upper, "bottom"), (lower, "top")):
+                origin = frame.table.rows[cell.row][cell.col]
+                if side not in origin.sides_written or origin.borders[side] is not None:
+                    problems.append(
+                        f"{what}: {cell.text!r} writes its {side} side as {origin.borders[side]} "
+                        f"(written: {sorted(origin.sides_written)}); the browser draws no line"
+                    )
+                problem = _margin_problem(
+                    origin, side, cell.padding[side], f"{what}, {cell.text!r}"
+                )
+                if problem:
+                    problems.append(problem)
+        assert not problems, "the hidden edge is not one unlined edge:\n  " + "\n  ".join(problems)
+        contradictions = _shared_edge_contradictions(frame)
+        assert not contradictions, "shared edges with two different sides:\n  " + "\n  ".join(
+            contradictions
+        )
+
+    def test_in_right_to_left_the_cell_further_right_wins_a_tie(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """In a right-to-left table an equal tie goes to the cell further right, on both cells.
+
+        ``direction: rtl`` puts each row's first cell on the right. Along the
+        edge between the two columns the right cell's own left border (2 px
+        solid ``FF5F46``) meets the left cell's own right border (2 px solid
+        ``1B3139``): equal width, style and origin, so position decides, and in
+        a right-to-left table the cell further right wins, as the screen shows.
+        The a:tbl's columns run left to right on the slide, each cell in the
+        grid cell under its browser box, and the winner is the right cell's
+        ``lnL`` and the left cell's ``lnR`` in every row.
+        """
+        document = _inline_document("precedence")
+        shapes = slide_shapes(inline_export("precedence"))
+        (table,) = browser_tables(document, RTL_EDGE_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the right-to-left table")
+        assert len(frame.table.col_widths) == table.columns and len(frame.table.row_heights) == len(
+            table.rows
+        ), f"the right-to-left grid is {frame.table.row_heights} by {frame.table.col_widths}"
+        edges = []
+        for row in range(len(table.rows)):
+            first, second = table.cell_at(row, 0), table.cell_at(row, 1)
+            assert first.x > second.x, (
+                f"fixture drift: row {row}'s first cell {first.rect} is not right of {second.rect}"
+            )
+            edges.append((first, second))
+        pixels = browser_pixels(document, [(right.x, right.y + right.h / 2) for right, _ in edges])
+        for (right, left), pixel in zip(edges, pixels):
+            what = f"the edge between {right.text!r} (right) and {left.text!r} (left)"
+            winner = _edge_winner(pixel, [right.borders["left"], left.borders["right"]], what)
+            assert (_css_colour(winner.color)[0], winner.width_px) == RTL_EDGE_WINNER, (
+                f"fixture drift: the browser paints #{_hex(pixel)} on {what}"
+            )
+            right_slot = _slot_under(frame, right)
+            left_slot = _slot_under(frame, left)
+            assert right_slot[0] == left_slot[0] and right_slot[1] > left_slot[1], (
+                f"{what}: the right cell is in slot {right_slot}, the left one in {left_slot}"
+            )
+            right_cell = frame.table.rows[right_slot[0]][right_slot[1]]
+            left_cell = frame.table.rows[left_slot[0]][left_slot[1]]
+            _assert_side(right_cell, "left", winner, f"{what}, lnL")
+            _assert_side(left_cell, "right", winner, f"{what}, lnR")
+        contradictions = _shared_edge_contradictions(frame)
+        assert not contradictions, "shared edges with two different sides:\n  " + "\n  ".join(
+            contradictions
+        )
+
+    def test_alike_separated_borders_side_by_side_are_one_line_as_wide_as_both(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """Separated, unspaced cells whose meeting borders are alike are one native line, both wide.
+
+        ``border-collapse: separate`` with ``border-spacing: 0``: the upper
+        cells' own 2 px solid ``1B3139`` bottoms and the lower cells' own 2 px
+        solid ``1B3139`` tops paint side by side, one 4 px rule on screen. The
+        table stays native, and in every column the upper cell's ``lnB`` and the
+        lower cell's ``lnT`` are that colour at the two widths' sum (within
+        0.5 px). The margin on each side of the edge is the cell's padding plus
+        its own whole border, where the browser starts its content.
+        """
+        document = _inline_document("doubled")
+        shapes = slide_shapes(inline_export("doubled"))
+        (table,) = browser_tables(document, ALIKE_TABLE)
+        assert table.border_collapse == "separate" and table.border_spacing == "0px", (
+            f"fixture drift: the alike table is {table.border_collapse} {table.border_spacing}"
+        )
+        _, frame = _frame_for(shapes, _grid_rect(table), "the alike doubled table")
+        _assert_grid_matches(frame, table, "the alike doubled table")
+        lowers = [cell for cell in table.cells if cell.row == DOUBLED_ROW]
+        band = [(cell.x + cell.w / 2, cell.y + offset) for cell in lowers for offset in (-1.5, 1.5)]
+        assert {_hex(pixel) for pixel in browser_pixels(document, band)} == {INK}, (
+            "fixture drift: the browser does not paint one 4 px ink rule along the edge"
+        )
+        problems = []
+        for lower in lowers:
+            upper = table.cell_at(DOUBLED_ROW - 1, lower.col)
+            what = f"the edge between {upper.text!r} and {lower.text!r}"
+            for cell, side in ((upper, "bottom"), (lower, "top")):
+                own = cell.borders[side]
+                assert (own.style, own.width_px, _css_colour(own.color)[0]) == (
+                    "solid",
+                    DOUBLED_SIDE_PX,
+                    INK,
+                ), f"fixture drift: {cell.text!r}'s {side} border is {own}"
+                origin = frame.table.rows[cell.row][cell.col]
+                border = origin.borders[side]
+                expected_pt = 2 * DOUBLED_SIDE_PX * PT_PER_PX
+                if (
+                    border is None
+                    or border.color != INK
+                    or abs((border.width_pt or 0.0) - expected_pt)
+                    > DOUBLED_WIDTH_TOLERANCE_PX * PT_PER_PX
+                ):
+                    problems.append(
+                        f"{what}: {cell.text!r}'s {side} side is {border}; the browser paints "
+                        f"{2 * DOUBLED_SIDE_PX:g} px ({expected_pt:g} pt) #{INK}"
+                    )
+                problem = _margin_problem(
+                    origin, side, cell.padding[side] + own.width_px, f"{what}, {cell.text!r}"
+                )
+                if problem:
+                    problems.append(problem)
+        assert not problems, "the doubled rule is not one line as wide as both:\n  " + (
+            "\n  ".join(problems)
+        )
+
     def test_fill_is_the_cells_then_the_rows_then_the_row_groups(
         self, inline_export: Callable[[str], bytes]
     ) -> None:
@@ -2028,6 +2299,100 @@ class TestPositionedTables:
             assert _normalised(origin.text) == _normalised(cell.text), (
                 f"slot ({cell.row}, {cell.col}) reads {origin.text!r}, the browser {cell.text!r}"
             )
+
+    def test_unlike_separated_borders_side_by_side_are_positioned_items(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """Separated, unspaced cells whose meeting borders differ in colour are positioned items.
+
+        With ``border-spacing: 0`` the upper cells' own 2 px solid ``1B3139``
+        bottoms meet the lower cells' own 2 px solid ``FF5F46`` tops: two
+        lines side by side, the ink above the edge and the accent below it,
+        which no one ``a:tbl`` edge draws. No native frame stands on the table;
+        in every column both lines are line items along their own 2 px bands,
+        and every cell's text is a text box.
+        """
+        document = _inline_document("doubled")
+        pptx = inline_export("doubled")
+        shapes = slide_shapes(pptx)
+        (table,) = browser_tables(document, UNLIKE_TABLE)
+        assert table.border_collapse == "separate" and table.border_spacing == "0px", (
+            f"fixture drift: the unlike table is {table.border_collapse} {table.border_spacing}"
+        )
+        grid = _grid_rect(table)
+        on_the_table = [
+            (position, table_extent(frame))
+            for position, frame in table_frames(shapes)
+            if overlaps(SimpleNamespace(**table_extent(frame)), SimpleNamespace(**grid))
+        ]
+        assert not on_the_table, (
+            f"a native table stands on the unlike table ({on_the_table}); no a:tbl edge draws "
+            f"two lines side by side:\n{_describe(shapes)}"
+        )
+        lowers = [cell for cell in table.cells if cell.row == DOUBLED_ROW]
+        bands = []
+        for lower in lowers:
+            upper = table.cell_at(DOUBLED_ROW - 1, lower.col)
+            bands.append((upper, INK, lower.y - DOUBLED_SIDE_PX / 2))
+            bands.append((lower, ACCENT, lower.y + DOUBLED_SIDE_PX / 2))
+        pixels = browser_pixels(document, [(cell.x + cell.w / 2, y) for cell, _, y in bands])
+        for (cell, colour, y), pixel in zip(bands, pixels):
+            assert _hex(pixel) == colour, (
+                f"fixture drift: the browser paints #{_hex(pixel)} along {cell.text!r}'s band at "
+                f"{y:g}, not #{colour}"
+            )
+            along = [
+                shape
+                for shape in shapes
+                if shape.kind == "line"
+                and shape.line == colour
+                and abs(shape.h) <= LINE_TOLERANCE_PX
+                and abs(shape.y + shape.h / 2 - y) <= LINE_TOLERANCE_PX
+                and shape.x <= cell.x + LINE_TOLERANCE_PX
+                and shape.x + shape.w >= cell.x + cell.w - LINE_TOLERANCE_PX
+            ]
+            assert len(along) == 1, (
+                f"{cell.text!r}: expected one #{colour} line along its band at {y:g}, found "
+                f"{len(along)}:\n{_describe(shapes)}"
+            )
+        for cell in table.cells:
+            assert _text_items(shapes, _normalised(cell.text)), (
+                f"the cell {cell.text!r} is not an editable text box:\n{_describe(shapes)}"
+            )
+
+    def test_a_cell_holding_blocks_makes_its_table_positioned_items(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A cell holding block-level paragraphs makes its table positioned items, every word kept.
+
+        A ``<p>`` in a ``<td>`` is a block of its own in the cell, which no
+        ``a:tc`` paragraph is, so no native frame stands on the table: each
+        cell's text, the two paragraphs included, is an editable text box, and
+        no word of the table is lost.
+        """
+        document = _inline_document("blocks")
+        pptx = inline_export("blocks")
+        shapes = slide_shapes(pptx)
+        (table,) = browser_tables(document, BLOCKS_TABLE)
+        grid = _grid_rect(table)
+        on_the_table = [
+            (position, table_extent(frame))
+            for position, frame in table_frames(shapes)
+            if overlaps(SimpleNamespace(**table_extent(frame)), SimpleNamespace(**grid))
+        ]
+        assert not on_the_table, (
+            f"a native table stands on the table whose cell holds blocks ({on_the_table}):\n"
+            f"{_describe(shapes)}"
+        )
+        for cell in table.cells:
+            for line in cell.text.splitlines():
+                if line.strip():
+                    assert _text_items(shapes, _normalised(line)), (
+                        f"the cell line {line!r} is not an editable text box:\n{_describe(shapes)}"
+                    )
+        assert slide_text_loss(pptx, 0, document) == [], (
+            "the table whose cell holds blocks lost text"
+        )
 
     def test_a_nested_table_makes_the_outer_table_positioned_items(
         self, inline_export: Callable[[str], bytes]
