@@ -10,7 +10,7 @@
 //
 // usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]
 //        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables
-//        node measure.cjs <document.html> --mode=fonts
+//        node measure.cjs <document.html> --mode=fonts|title
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 //        node measure.cjs <document.html> <point-json> --mode=hit|pixel
 //        node measure.cjs <document.html> <points-json> --mode=pixels
@@ -53,6 +53,9 @@
 //   --mode=fonts prints [{"family","weight","style","status"}, …], every face in
 //                document.fonts. It reads the whole document, so it takes no
 //                selector.
+//   --mode=title prints {"title":…}, document.title on the settled page, where
+//                a hostile fixture's script publishes what it replaced. It reads
+//                the whole document, so it takes no selector.
 //   --mode=probe takes, in place of the selector, a JSON array of probes
 //                [{"text":…, "css":…, "baseline":bool}, …] and prints
 //                [{"w":…,"h":…}, …], the size of each probe's text set in the
@@ -92,7 +95,7 @@
 // browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
 // browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
 // browser_pixel, browser_pixels, browser_tables, browser_each_pseudo,
-// browser_each_layout_box, browser_ellipsis).
+// browser_each_layout_box, browser_ellipsis, browser_title).
 
 const path = require('path');
 const zlib = require('zlib');
@@ -888,6 +891,12 @@ async function measureFonts(page) {
   });
 }
 
+// document.title once the page has settled: a hostile fixture's script reports
+// there whether its replacements took, which no slide text then carries.
+async function measureTitle(page) {
+  return { title: await page.evaluate(() => document.title) };
+}
+
 // Text set in the document's own fonts, outside its layout. Each probe is a
 // <div> appended to documentElement, absolutely positioned offscreen and
 // hidden, so it moves nothing else on the page, with white-space: pre so it
@@ -1256,6 +1265,7 @@ const MODES = {
   style: measureStyle,
   text: measureText,
   fonts: measureFonts,
+  title: measureTitle,
   probe: async (page, probesArgument) => {
     const measured = await measureProbes(page, probesArgument);
     return measured.error ? measured : measured.sizes;
@@ -1276,7 +1286,7 @@ const MODES = {
   },
 };
 // Modes that read the whole document rather than one element.
-const DOCUMENT_MODES = new Set(['fonts']);
+const DOCUMENT_MODES = new Set(['fonts', 'title']);
 
 function parseArguments(argv) {
   const positional = [];
@@ -1298,7 +1308,7 @@ async function main() {
     console.error(
       'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]\n' +
       '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables\n' +
-      '       node measure.cjs <document.html> --mode=fonts\n' +
+      '       node measure.cjs <document.html> --mode=fonts|title\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
       '       node measure.cjs <document.html> <point-json> --mode=hit|pixel\n' +
       '       node measure.cjs <document.html> <points-json> --mode=pixels\n' +

@@ -51,9 +51,18 @@ what the browser itself laid out for the same document.
   and ``browser_loaded_weights`` the webfont weights the page loaded.
   ``browser_probes`` sets text offscreen in the page's own fonts and reads its
   size; ``browser_natural_line_height`` is the ``line-height: normal`` probe.
+  ``browser_title`` reads ``document.title``, where a hostile fixture's
+  script reports what it replaced.
+* ``export_logged`` exports like ``export_documents`` and keeps what the
+  wrapper printed to stderr (``teed_stderr`` copies stderr for any block);
+  ``slide_summaries`` and ``text_missing_reports``
+  read the sidecar's own ``[html2pptx] slide summary`` and ``[html2pptx] text
+  missing:`` lines from it, never a line a slide's page logged.
 * ``text_loss`` runs the export fidelity harness's text-loss oracle
   (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck;
-  ``slide_text_loss`` runs it on one slide of a deck.
+  ``slide_text_loss`` runs it on one slide of a deck, and
+  ``reference_text_loss`` on given reference texts, with each slide's hidden
+  text when given.
 * ``node_json`` evaluates a script in the sidecar directory with ``node -e``,
   so a sidecar module's pure functions are testable without a browser.
 * ``corpus_slide`` / ``corpus_document`` load the committed brand corpus in
@@ -67,23 +76,28 @@ Chrome/Chromium are present; ``requires_node`` needs node alone.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib.util
+import io
 import json
 import os
 import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from types import ModuleType
+from typing import TextIO
 from unittest import mock
 
 import pytest
@@ -300,6 +314,109 @@ def export_documents(
     return _export_documents(
         documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch
     )
+
+
+# ---------------------------------------------------------------------------
+# The sidecar's log: what build_pptx_huashu echoes on stderr
+# ---------------------------------------------------------------------------
+
+# build_pptx_huashu echoes every sidecar stderr line with this prefix.
+SIDECAR_ECHO_PREFIX = "[huashu-emit] "
+# The lines render_slide.cjs itself logs for each slide (Task 12). A line the
+# slide's page logged reaches stderr as "Browser console: <text>" instead
+# (render_slide.cjs forwardConsole), so slide script cannot pass for either.
+SLIDE_SUMMARY_PREFIX = "[html2pptx] slide summary "
+TEXT_MISSING_PREFIX = "[html2pptx] text missing: "
+
+
+class _StderrTee(io.TextIOBase):
+    """A text stream that writes to every stream it holds: stderr stays visible while it is read."""
+
+    def __init__(self, *streams: TextIO) -> None:
+        super().__init__()
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
+@contextlib.contextmanager
+def teed_stderr() -> Iterator[io.StringIO]:
+    """For the block's duration, copy what is written to ``sys.stderr`` into the yielded buffer.
+
+    Everything still reaches the ``sys.stderr`` in effect when the block
+    began, so a tee inside the block (the harness's, PLAN-CORRECTIONS C8)
+    writes through to it.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(_StderrTee(sys.stderr, buffer)):
+        yield buffer
+
+
+@dataclass(frozen=True)
+class LoggedExport:
+    """An export through the production wrapper, with everything it printed to stderr."""
+
+    pptx: bytes
+    failures: list[dict]
+    stderr: str
+
+
+def export_logged(
+    documents: list[str],
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str = "snapshot",
+    target: str | None = None,
+) -> LoggedExport:
+    """``export_documents`` (with ``target`` when given), keeping what the wrapper printed.
+
+    ``build_pptx_huashu`` echoes the sidecar's stderr with ``print(...,
+    file=sys.stderr)``; it is teed into a buffer here and still reaches the
+    real stderr. Usable from module-scoped fixtures, where ``capsys`` is not.
+    """
+    with teed_stderr() as buffer:
+        pptx, failures = _export_documents(
+            documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch, target=target
+        )
+    return LoggedExport(pptx=pptx, failures=failures, stderr=buffer.getvalue())
+
+
+def _sidecar_lines(stderr: str) -> list[str]:
+    """The sidecar's own stderr lines, as the wrapper echoed them, without the echo prefix."""
+    return [
+        line.removeprefix(SIDECAR_ECHO_PREFIX)
+        for line in stderr.splitlines()
+        if line.startswith(SIDECAR_ECHO_PREFIX)
+    ]
+
+
+def slide_summaries(stderr: str) -> list[dict]:
+    """The JSON of every ``[html2pptx] slide summary <json>`` line, in the order logged.
+
+    Only lines the sidecar's Node side logged count: one a slide's page logged
+    reaches stderr behind ``Browser console:`` and is not a summary.
+    """
+    return [
+        json.loads(line.removeprefix(SLIDE_SUMMARY_PREFIX))
+        for line in _sidecar_lines(stderr)
+        if line.startswith(SLIDE_SUMMARY_PREFIX)
+    ]
+
+
+def text_missing_reports(stderr: str) -> list[list[str]]:
+    """The JSON array of every ``[html2pptx] text missing: <json array>`` line, in log order."""
+    return [
+        json.loads(line.removeprefix(TEXT_MISSING_PREFIX))
+        for line in _sidecar_lines(stderr)
+        if line.startswith(TEXT_MISSING_PREFIX)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +948,16 @@ def browser_text(document_html: str, selector: str = "body", index: int = 0) -> 
     return json.loads(_run_measure(document_html, selector, str(index), "--mode=text"))["text"]
 
 
+def browser_title(document_html: str) -> str:
+    """``document.title`` on the settled page.
+
+    A hostile fixture's script publishes there what it replaced and what a
+    reader of the poisoned realm now sees, so a test can prove the poisoning
+    took before it asserts anything else. The title is no slide text.
+    """
+    return json.loads(_run_measure(document_html, "--mode=title"))["title"]
+
+
 def _face_weights(weight: str) -> list[int]:
     """The hundreds a FontFace ``weight`` descriptor covers: ``"600"`` or a range ``"100 900"``."""
     bounds = [int(round(float(value))) for value in weight.split()]
@@ -991,6 +1118,35 @@ def slide_text_loss(pptx: bytes, index: int, document: str) -> list[str]:
         pptx_path.write_bytes(pptx)
         missing = harness.check_text_loss(pptx_path, names, out_dir)
     return missing.get(names[-1], [])
+
+
+def reference_text_loss(
+    pptx: bytes, references: list[str], hidden_text: list[str] | None = None
+) -> list[list[str]]:
+    """Per reference, the words the harness's ``check_text_loss`` reports missing from the deck.
+
+    ``references[i]`` is the rendered text expected of slide ``i`` (0-based):
+    a ``browser_text`` reading, or a hand-written one for a slide the deck
+    lacks. ``hidden_text[i]``, when given, is that slide's ``hiddenText`` (the
+    slide summary's, PLAN-CORRECTIONS C8), which ``check_text_loss`` takes as
+    its ``hidden_text`` keyword; without it the oracle is called with three
+    arguments, as before Task 12.
+    """
+    harness = fidelity_harness()
+    names = [f"slide-{position}" for position in range(1, len(references) + 1)]
+    with tempfile.TemporaryDirectory(prefix="tellr-text-loss-") as directory:
+        out_dir = Path(directory)
+        truth_dir = out_dir / "truth"
+        truth_dir.mkdir()
+        for name, reference in zip(names, references):
+            (truth_dir / f"{name}.txt").write_text(reference, encoding="utf-8")
+        pptx_path = out_dir / "export.pptx"
+        pptx_path.write_bytes(pptx)
+        if hidden_text is None:
+            missing = harness.check_text_loss(pptx_path, names, out_dir)
+        else:
+            missing = harness.check_text_loss(pptx_path, names, out_dir, hidden_text=hidden_text)
+    return [missing.get(name, []) for name in names]
 
 
 # ---------------------------------------------------------------------------
