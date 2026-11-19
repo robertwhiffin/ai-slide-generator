@@ -291,7 +291,7 @@ TABLES_CSS = (
 .loose { position: absolute; border-collapse: collapse; font-size: 18px; table-layout: fixed; }
 .loose td { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
 #relative td { position: relative; }
-#overflow td.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#overflow td.ellipsis { overflow: hidden; text-overflow: clip; white-space: nowrap; }
 #overflow td.fits { overflow: hidden; }
 .grad { position: absolute; border-collapse: collapse; font-size: 18px;
         background: linear-gradient(90deg, #FFFFFF, #F1EFEB); border: 3px solid #1B3139; }
@@ -2562,11 +2562,13 @@ class TestTableStructure:
         """A cell whose own overflow clip cuts its text keeps the table native, its text overlaid.
 
         The table is one native frame on the browser's grid. One cell
-        (``overflow: hidden``, ``text-overflow: ellipsis``, ``nowrap``) holds a
+        (``overflow: hidden``, ``text-overflow: clip``, ``nowrap``) holds a
         line far wider than its padding box: its ``a:tc`` holds no text, and its
         overlay text reads exactly the words its clip shows at least 2 px of,
         in order; no word past the clip is on the slide. The cell beside it
-        clips too, but its text fits: it stays the ``a:tc``'s own.
+        clips too, but its text fits: it stays the ``a:tc``'s own. A cell cut by
+        ``text-overflow: ellipsis`` instead reads as the screen shows it
+        (``test_export_snapshot_rotation.py``).
         """
         document = _inline_document("loose")
         shapes = slide_shapes(inline_export("loose"))

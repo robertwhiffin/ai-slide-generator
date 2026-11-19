@@ -8,8 +8,8 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]
-//        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|tables
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]
+//        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 //        node measure.cjs <document.html> <point-json> --mode=hit|pixel
@@ -24,6 +24,15 @@
 //                order, from one page load. The index is ignored.
 //   --mode=each-padding-box prints the padding box (as --mode=padding-box) of
 //                every match of selector, in document order.
+//   --mode=each-layout-box prints, for every match of selector in document
+//                order, {"x","y","w","h","offsetWidth","offsetHeight",
+//                "writingMode","transform"}: its bounds, its untransformed
+//                layout size and its computed writing-mode and transform,
+//                from one page load. See measureEachLayoutBox.
+//   --mode=ellipsis prints where a single-line text-overflow: ellipsis cut
+//                falls, read from the screen: {"clip","content","characters",
+//                "cut","inkEnd","glyphInkEnd","ellipsisInkStart",
+//                "ellipsisInkColour","visibleCount","style"}. See measureEllipsis.
 //   --mode=rects prints [{"x":…,"y":…,"w":…,"h":…}, …], the element's
 //                getClientRects(): one border-box rect per box fragment, which
 //                for an inline element is one per line it spans. See
@@ -79,7 +88,8 @@
 // browser_each_rect, browser_client_rects, browser_padding_box,
 // browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
 // browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
-// browser_pixel, browser_pixels, browser_tables, browser_each_pseudo).
+// browser_pixel, browser_pixels, browser_tables, browser_each_pseudo,
+// browser_each_layout_box, browser_ellipsis).
 
 const path = require('path');
 const zlib = require('zlib');
@@ -252,6 +262,247 @@ async function measureEach(page, selector, box) {
     }
     return { boxes };
   }, { selector, box, limit: MATCH_LIMIT });
+}
+
+// The layout box of every match of selector, in document order, from the one
+// settled page. getBoundingClientRect() is a transformed element's
+// axis-aligned bounds, not its box: a box turned by a rotation is its
+// untransformed layout size (offsetWidth x offsetHeight, which no transform
+// changes, rounded by the DOM to whole px) turned about the centre its bounds
+// share. Each match reports both, with its computed writing-mode (under
+// vertical-rl, vertical-lr and the sideways modes its lines run down the
+// page, so its inline length is its offsetHeight) and its computed transform
+// (a matrix(), or none).
+async function measureEachLayoutBox(page, selector) {
+  return page.evaluate(({ selector, limit }) => {
+    const matches = document.querySelectorAll(selector);
+    if (matches.length === 0) {
+      return { error: `selector ${selector} matched no element` };
+    }
+    if (!(matches.length <= limit)) {
+      return { error: `selector ${selector} matched ${matches.length} elements; more than ${limit} is not a real slide` };
+    }
+    const boxes = [];
+    for (let index = 0; index < matches.length; index++) {
+      const element = matches[index];
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      boxes.push({
+        x: rect.x,
+        y: rect.y,
+        w: rect.width,
+        h: rect.height,
+        offsetWidth: element.offsetWidth,
+        offsetHeight: element.offsetHeight,
+        writingMode: style.writingMode,
+        transform: style.transform,
+      });
+    }
+    return { boxes };
+  }, { selector, limit: MATCH_LIMIT });
+}
+
+// Where a single-line text-overflow: ellipsis cut falls, read from the screen.
+// Range rects cannot show it: a character the cut hides still reports the rect
+// it was laid out at, and the "…" Chrome paints in its place is no DOM text.
+// So the mode takes three screenshots of the settled page, differing only in
+// how the element (the index-th match of selector, the box whose overflow and
+// text-overflow cut its line) paints its text:
+//   shown    as it is: the visible characters, then the "…";
+//   clipped  with text-overflow: clip on the element, so the characters after
+//            the visible ones paint on, cut only by the overflow clip;
+//   blank    with every glyph in it transparent, the "…" included.
+// Inside the element's padding box (its overflow clip edge), each device
+// pixel column is compared:
+//   cut          the first column where shown and clipped differ: there the
+//                "…" or the first hidden character starts to paint, right
+//                after the last visible character's advance;
+//   inkEnd       past the last column where shown and blank differ: where the
+//                "…" ink ends;
+//   glyphInkEnd  past the last such column before the cut: where the last
+//                visible glyph's ink ends;
+//   ellipsisInkStart  the first such column at or after the cut: where the
+//                "…" ink starts;
+//   ellipsisInkColour  {r, g, b} of the shown pixel that differs most from
+//                blank at or after the cut: the middle of a dot, which its
+//                glyph covers fully, so the colour the "…" is painted in.
+// All in CSS px, at device scale 2; null when no column qualifies. The
+// characters are the element's painted code points, each with the Range rect
+// it was laid out at, in DOM order (collapsed white space reads as one space
+// and a collapsed space is not painted, as --mode=lines reads them), and
+// visibleCount is how many of them lie left of the cut: those whose rect's
+// midpoint is. Midpoints, because the cut column sits on the boundary between
+// the last visible character and the next within a side bearing either way,
+// and every character is wider than twice a bearing. The element's computed
+// textOverflow, overflowX, whiteSpace and direction come back as `style`, so a
+// test can guard its fixture. A left-to-right line is assumed: under
+// direction: rtl the cut is at the left, and this mode reports an error.
+const ELLIPSIS_MARK = 'data-tellr-measure-ellipsis';
+// A device pixel differs when a channel differs by more than this.
+const ELLIPSIS_CHANNEL_THRESHOLD = 16;
+const STILL_CSS = 'transition: none !important; animation: none !important;';
+const CLIPPED_CSS = `[${ELLIPSIS_MARK}] { text-overflow: clip !important; ${STILL_CSS} }`;
+const BLANK_CSS =
+  `[${ELLIPSIS_MARK}], [${ELLIPSIS_MARK}] * { color: transparent !important; ` +
+  '-webkit-text-fill-color: transparent !important; text-shadow: none !important; ' +
+  `text-decoration-color: transparent !important; ${STILL_CSS} }`;
+
+async function measureEllipsis(page, selector, index) {
+  const read = await page.evaluate(({ selector, index, mark }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const element = matches[index];
+    const style = getComputedStyle(element);
+    if (style.direction !== 'ltr') {
+      return { error: `selector ${selector} is direction ${style.direction}; the ellipsis scan reads left-to-right lines only` };
+    }
+    const px = (value) => parseFloat(value) || 0;
+    const rect = element.getBoundingClientRect();
+    const clip = {
+      x: rect.x + px(style.borderLeftWidth),
+      y: rect.y + px(style.borderTopWidth),
+      w: rect.width - px(style.borderLeftWidth) - px(style.borderRightWidth),
+      h: rect.height - px(style.borderTopWidth) - px(style.borderBottomWidth),
+    };
+    const content = {
+      x: clip.x + px(style.paddingLeft),
+      y: clip.y + px(style.paddingTop),
+      w: clip.w - px(style.paddingLeft) - px(style.paddingRight),
+      h: clip.h - px(style.paddingTop) - px(style.paddingBottom),
+    };
+    const CSS_WHITE_SPACE = /^[ \t\n\r\f]$/;
+    const characters = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const data = node.data;
+      let offset = 0;
+      while (offset < data.length) {
+        const length = data.codePointAt(offset) > 0xffff ? 2 : 1;
+        const character = data.slice(offset, offset + length);
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, offset + length);
+        offset += length;
+        const whitespace = CSS_WHITE_SPACE.test(character);
+        const rects = range.getClientRects();
+        let painted = null;
+        for (let rectIndex = 0; rectIndex < rects.length; rectIndex++) {
+          if (rects[rectIndex].width > 0 || (!whitespace && rects[rectIndex].height > 0)) {
+            painted = rects[rectIndex];
+            break;
+          }
+        }
+        if (!painted) continue;
+        characters.push({ text: whitespace ? ' ' : character, left: painted.left, right: painted.right });
+      }
+    }
+    element.setAttribute(mark, '');
+    return {
+      clip,
+      content,
+      characters,
+      style: {
+        textOverflow: style.textOverflow,
+        overflowX: style.overflowX,
+        whiteSpace: style.whiteSpace,
+        direction: style.direction,
+      },
+    };
+  }, { selector, index, mark: ELLIPSIS_MARK });
+  if (read.error) return read;
+
+  let shown;
+  let clipped;
+  let blank;
+  try {
+    shown = decodePng(await page.screenshot({ type: 'png' }));
+    const clipping = await page.addStyleTag({ content: CLIPPED_CSS });
+    clipped = decodePng(await page.screenshot({ type: 'png' }));
+    await clipping.evaluate((node) => node.remove());
+    await page.addStyleTag({ content: BLANK_CSS });
+    blank = decodePng(await page.screenshot({ type: 'png' }));
+  } catch (error) {
+    return { error: `the ellipsis screenshots could not be read: ${error.message}` };
+  }
+  if (shown.width !== clipped.width || shown.width !== blank.width ||
+      shown.height !== clipped.height || shown.height !== blank.height) {
+    return { error: 'the ellipsis screenshots differ in size' };
+  }
+  const scale = shown.width / page.viewportSize().width;
+  const left = Math.max(0, Math.floor(read.clip.x * scale));
+  const right = Math.min(shown.width, Math.ceil((read.clip.x + read.clip.w) * scale));
+  const top = Math.max(0, Math.floor(read.clip.y * scale));
+  const bottom = Math.min(shown.height, Math.ceil((read.clip.y + read.clip.h) * scale));
+  const differsAt = (other, column) => {
+    for (let row = top; row < bottom; row++) {
+      const at = (row * shown.width + column) * shown.channels;
+      const otherAt = (row * other.width + column) * other.channels;
+      for (let channel = 0; channel < 3; channel++) {
+        if (Math.abs(shown.pixels[at + channel] - other.pixels[otherAt + channel]) > ELLIPSIS_CHANNEL_THRESHOLD) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // The pixel of one column whose colour differs most from blank, as
+  // {score, r, g, b}: the summed channel difference and the shown colour.
+  const strongestInk = (column) => {
+    let strongest = null;
+    for (let row = top; row < bottom; row++) {
+      const at = (row * shown.width + column) * shown.channels;
+      const blankAt = (row * blank.width + column) * blank.channels;
+      let score = 0;
+      for (let channel = 0; channel < 3; channel++) {
+        score += Math.abs(shown.pixels[at + channel] - blank.pixels[blankAt + channel]);
+      }
+      if (!strongest || score > strongest.score) {
+        strongest = { score, r: shown.pixels[at], g: shown.pixels[at + 1], b: shown.pixels[at + 2] };
+      }
+    }
+    return strongest;
+  };
+  let cutColumn = null;
+  let lastInk = null;
+  let lastGlyphInk = null;
+  let firstEllipsisInk = null;
+  let ellipsisInk = null;
+  for (let column = left; column < right; column++) {
+    if (cutColumn === null && differsAt(clipped, column)) cutColumn = column;
+    if (!differsAt(blank, column)) continue;
+    lastInk = column;
+    if (cutColumn === null) {
+      lastGlyphInk = column;
+      continue;
+    }
+    if (firstEllipsisInk === null) firstEllipsisInk = column;
+    const ink = strongestInk(column);
+    if (ink && (!ellipsisInk || ink.score > ellipsisInk.score)) ellipsisInk = ink;
+  }
+  const css = (column) => (column === null ? null : column / scale);
+  const cut = css(cutColumn);
+  let visibleCount = 0;
+  if (cut !== null) {
+    while (visibleCount < read.characters.length) {
+      const character = read.characters[visibleCount];
+      if (!((character.left + character.right) / 2 < cut)) break;
+      visibleCount++;
+    }
+  }
+  return {
+    clip: read.clip,
+    content: read.content,
+    characters: read.characters,
+    style: read.style,
+    cut,
+    inkEnd: lastInk === null ? null : css(lastInk + 1),
+    glyphInkEnd: lastGlyphInk === null ? null : css(lastGlyphInk + 1),
+    ellipsisInkStart: css(firstEllipsisInk),
+    ellipsisInkColour: ellipsisInk ? { r: ellipsisInk.r, g: ellipsisInk.g, b: ellipsisInk.b } : null,
+    visibleCount: cut === null ? null : visibleCount,
+  };
 }
 
 // What the browser shows at a point, by hit testing: document.elementFromPoint
@@ -980,6 +1231,11 @@ const MODES = {
     const measured = await measureEach(page, selector, 'padding');
     return measured.error ? measured : measured.boxes;
   },
+  'each-layout-box': async (page, selector) => {
+    const measured = await measureEachLayoutBox(page, selector);
+    return measured.error ? measured : measured.boxes;
+  },
+  ellipsis: measureEllipsis,
   lines: async (page, selector, index) => {
     const measured = await measureLines(page, selector, index);
     return measured.error ? measured : measured.lines;
@@ -1027,8 +1283,8 @@ async function main() {
   const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
-      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]\n' +
-      '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|tables\n' +
+      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]\n' +
+      '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
       '       node measure.cjs <document.html> <point-json> --mode=hit|pixel\n' +

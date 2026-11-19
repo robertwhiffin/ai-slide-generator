@@ -35,7 +35,11 @@ what the browser itself laid out for the same document.
   ``browser_client_rects`` reads its box fragments, one per line an inline
   element spans, and ``browser_padding_box`` the box its overflow clips to.
   ``browser_each_rect`` and ``browser_each_padding_box`` read the same boxes
-  for every match of a selector from one page load.
+  for every match of a selector from one page load, and
+  ``browser_each_layout_box`` each match's bounds with its untransformed
+  offset size and writing mode, the oracle for a rotated box.
+  ``browser_ellipsis`` reads where a ``text-overflow: ellipsis`` line is cut
+  from the screen, by comparing screenshots column by column.
   ``browser_hit_id`` says what the browser shows at a point, by hit testing.
   ``browser_each_pseudo`` reads the box and rendered text of each match's
   ``::before``, ``::after`` or ``::marker``, which no page API reports, from
@@ -348,6 +352,99 @@ def browser_each_padding_box(document_html: str, selector: str) -> list[dict]:
     """
     boxes = json.loads(_run_measure(document_html, selector, "--mode=each-padding-box"))
     return [{key: float(box[key]) for key in ("x", "y", "w", "h")} for box in boxes]
+
+
+def browser_each_layout_box(document_html: str, selector: str) -> list[dict]:
+    """The layout box of EVERY match of ``selector``, in document order: bounds and offset size.
+
+    One ``{"x", "y", "w", "h", "offset_w", "offset_h", "writing_mode",
+    "transform"}`` per match, all read from one settled page:
+
+    * ``x y w h`` is ``getBoundingClientRect()``, in CSS px: for a transformed
+      element, the axis-aligned bounds of the turned box, not the box;
+    * ``offset_w`` x ``offset_h`` is its untransformed layout size
+      (``offsetWidth`` x ``offsetHeight``, which the DOM rounds to whole px and
+      no transform changes): the box a rotation turns about the centre it
+      shares with its bounds;
+    * ``writing_mode`` and ``transform`` are computed, as the browser
+      serialises them (``"vertical-rl"``, ``"matrix(0, -1, 1, 0, 0, 0)"``,
+      ``"none"``). Under a vertical writing mode the lines run down the page,
+      so the inline length is ``offset_h``.
+    """
+    boxes = json.loads(_run_measure(document_html, selector, "--mode=each-layout-box"))
+    return [
+        {
+            **{key: float(box[key]) for key in ("x", "y", "w", "h")},
+            "offset_w": float(box["offsetWidth"]),
+            "offset_h": float(box["offsetHeight"]),
+            "writing_mode": box["writingMode"],
+            "transform": box["transform"],
+        }
+        for box in boxes
+    ]
+
+
+@dataclass(frozen=True)
+class BrowserEllipsis:
+    """Where a single-line ``text-overflow: ellipsis`` cut falls, as the screen shows it.
+
+    ``browser_ellipsis`` reads it; every x is in CSS px.
+    """
+
+    text: str  # every painted character of the element, in DOM order
+    visible: str  # its characters left of the cut: what the screen shows before the "…"
+    cut: float | None  # where the "…" (or, unclipped, the first hidden character) starts
+    ink_end: float | None  # where the last ink in the clip ends: the "…" ink
+    glyph_ink_end: float | None  # where the last visible glyph's ink ends
+    ellipsis_ink_start: float | None  # where the "…" ink starts
+    # (r, g, b) the "…" is painted in: its most strongly inked pixel; None without one
+    ellipsis_ink_colour: tuple[int, int, int] | None
+    clip: dict  # its padding box {"x", "y", "w", "h"}: the overflow clip edge
+    content: dict  # its content box {"x", "y", "w", "h"}: the line box's extent
+    style: dict[str, str]  # computed textOverflow, overflowX, whiteSpace, direction
+
+
+def browser_ellipsis(document_html: str, selector: str, index: int = 0) -> BrowserEllipsis:
+    """Where Chrome cuts the ``index``-th match of ``selector``'s ellipsis line, from the screen.
+
+    Range rects cannot show an ellipsis cut: a hidden character still reports
+    the rect it was laid out at, and the "…" is no DOM text. So
+    ``measure.cjs --mode=ellipsis`` compares three screenshots of the settled
+    page, column by column inside the element's padding box: as it is, with
+    the element's ``text-overflow`` set to ``clip`` (the hidden characters
+    paint on in place of the "…"), and with its glyphs transparent (no ink at
+    all). The first column where the first two differ is the ``cut``, right
+    after the last visible character's advance; ``glyph_ink_end`` is where the
+    ink before it ends, and ``ink_end`` where the "…" ink ends.
+    ``ellipsis_ink_colour`` is the shown colour of the pixel past the cut that
+    differs most from the glyph-less page: the middle of a dot, which the "…"
+    covers fully, so the colour Chrome paints it in. ``visible`` is
+    the element's painted characters (white space collapsed as the browser
+    collapsed it) whose Range rect's midpoint lies left of the cut, in DOM
+    order. The element must be one left-to-right line; ``text`` is all of it.
+    """
+    measured = json.loads(_run_measure(document_html, selector, str(index), "--mode=ellipsis"))
+    characters = measured["characters"]
+    count = measured["visibleCount"]
+
+    def optional(key: str) -> float | None:
+        return None if measured[key] is None else float(measured[key])
+
+    colour = measured["ellipsisInkColour"]
+    return BrowserEllipsis(
+        text="".join(character["text"] for character in characters),
+        visible="".join(character["text"] for character in characters[: count or 0]),
+        cut=optional("cut"),
+        ink_end=optional("inkEnd"),
+        glyph_ink_end=optional("glyphInkEnd"),
+        ellipsis_ink_start=optional("ellipsisInkStart"),
+        ellipsis_ink_colour=(
+            None if colour is None else (int(colour["r"]), int(colour["g"]), int(colour["b"]))
+        ),
+        clip=_measured_rect(measured["clip"]),
+        content=_measured_rect(measured["content"]),
+        style=dict(measured["style"]),
+    )
 
 
 def _measured_rect(rect: dict | None) -> dict | None:
