@@ -921,3 +921,40 @@ def test_a_talk_track_only_write_leaves_the_notes(factory, session_id):
     got = _write(factory, session_id, "<p>v2</p>", talk_track="Beat.", talk_track_source="user")
     assert _columns(factory) == [("Beat.", "user", "Fresh notes.", "model")]
     assert _view(got) == ("<p>v2</p>", "Beat.", "user", "Fresh notes.", "model")
+
+
+# A plain Agent-mode deck (no design system) paints its ground with the deck
+# style's ground piece, so the builder's root is ``div.dk-slide`` with no
+# ``slide`` token (src/core/skills/builder.py, NO BOUND SECTION / DECK STYLE).
+# Found live (plan Task 8): every slide of three such decks kept both asides in
+# its HTML and stored an empty talk track and notes.
+_DK_FRAGMENT = (
+    '<div class="dk-slide dk-slide--dark" style="padding:56px 88px"><h1>T</h1>'
+    '<aside data-presenter="talk-track" hidden><p>Say one.</p><p>Say two.</p></aside>'
+    '<aside data-presenter="speaker-notes" hidden><p>Source: none.</p></aside></div>'
+)
+
+
+def test_a_fragment_whose_sole_root_has_no_slide_class_owns_its_asides():
+    out = html_utils.extract_presenter_text(_DK_FRAGMENT)
+    assert out == (
+        '<div class="dk-slide dk-slide--dark" style="padding:56px 88px"><h1>T</h1></div>',
+        "Source: none.",
+        "Say one.\n\nSay two.",
+    )
+    assert extract_speaker_notes(_DK_FRAGMENT)[1] == "Source: none."
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Two top-level elements and no .slide: no single slide root to own it.
+        '<div class="a"><aside data-presenter="talk-track" hidden>x</aside></div><div class="b"></div>',
+        # An aside beside the sole root, not inside it.
+        '<div class="dk-slide"><h1>T</h1></div><aside data-presenter="talk-track" hidden>x</aside>',
+    ],
+)
+def test_a_fragment_without_a_single_root_holding_the_aside_leaves_it(raw):
+    out = html_utils.extract_presenter_text(raw)
+    assert out == (raw, None, None)
+    assert out[0] is raw
