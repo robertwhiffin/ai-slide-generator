@@ -187,7 +187,7 @@ def _require_slide_permission(
 def _check_deck_permission_for_session(
     session_id: str,
     min_permission: PermissionLevel = PermissionLevel.CAN_VIEW,
-) -> None:
+) -> PermissionLevel:
     """Look up a session by string ID, resolve root, and enforce deck permission.
 
     (Moved from sessions.py.)
@@ -200,6 +200,9 @@ def _check_deck_permission_for_session(
     Args:
         session_id: The string session_id passed to the endpoint.
         min_permission: Minimum required permission level.
+
+    Returns:
+        The caller's actual permission level.
 
     Raises:
         HTTPException 404: If the session does not exist (stale tab, deleted session, wrong ID).
@@ -214,7 +217,7 @@ def _check_deck_permission_for_session(
             detail=f"Session not found: {session_id}",
         ) from None
     with get_db_session() as db:
-        _require_session_access(session_info, db, min_permission)
+        return _require_session_access(session_info, db, min_permission)
 
 
 def _require_conversation_creator(session_id: str) -> None:
