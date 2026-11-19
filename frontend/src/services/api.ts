@@ -875,21 +875,23 @@ export const api = {
   },
 
   /**
-   * Save a slide's speaker notes only (never touches the slide HTML)
+   * Save a slide's talk track and/or speaker notes (never touches the slide HTML).
+   * Only the keys present in `fields` are sent; an empty string is a real save.
    */
   async updateSlideNotes(
     index: number,
-    speakerNotes: string,
+    fields: { speaker_notes?: string; talk_track?: string },
     sessionId: string,
     slideId?: string,
     expectedVersion?: number
-  ): Promise<{ index: number; slide_id: string; speaker_notes: string; version: number }> {
+  ): Promise<{ index: number; slide_id: string; speaker_notes: string; talk_track: string; version: number }> {
     const response = await fetch(`${API_BASE_URL}/api/slides/${index}/notes`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId,
-        speaker_notes: speakerNotes,
+        ...(fields.speaker_notes !== undefined ? { speaker_notes: fields.speaker_notes } : {}),
+        ...(fields.talk_track !== undefined ? { talk_track: fields.talk_track } : {}),
         slide_id: slideId,
         expected_version: expectedVersion,
       }),

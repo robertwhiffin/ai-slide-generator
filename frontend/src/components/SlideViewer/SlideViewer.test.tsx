@@ -175,16 +175,19 @@ describe('SlideViewer — fixed findings excluded from hasUnseen prop (:525)', (
   });
 });
 
-// ── Task 9 (D6, D8): the drawer's Notes tab inside the viewer ────────────────
+// ── Presenter plan Task 4: the drawer's two boxes inside the viewer ──────────
 //
 // The plain renderViewer above is read-only with sessionId={null}. These tests
 // need an editable viewer: sessionId "s1", an onSlideChange spy, readOnly false,
 // and the drawer persisted OPEN on the Notes tab. Paging uses the window
 // keydown listener (SlideViewer.tsx onKeyDown), which skips typing targets, so
-// focus must stay off the textarea when a test pages.
+// focus must stay off the textareas when a test pages.
 
-/** Two slides with distinct notes; no content_hash, so auto-verify stays idle. */
-function makeNotesDeck(notes: [string, string] = ['N1', 'N2']): SlideDeck {
+/** Two slides with distinct talk tracks and notes; no content_hash, so auto-verify stays idle. */
+function makeNotesDeck(
+  notes: [string, string] = ['N1', 'N2'],
+  talk: [string, string] = ['T1', 'T2'],
+): SlideDeck {
   return {
     title: 'Notes Deck',
     slide_count: 2,
@@ -192,8 +195,16 @@ function makeNotesDeck(notes: [string, string] = ['N1', 'N2']): SlideDeck {
     external_scripts: [],
     scripts: '',
     slides: [
-      { index: 0, slide_id: 'slide-1', html: '<div>slide 1</div>', scripts: '', speaker_notes: notes[0], speaker_notes_source: 'model' },
-      { index: 1, slide_id: 'slide-2', html: '<div>slide 2</div>', scripts: '', speaker_notes: notes[1], speaker_notes_source: 'model' },
+      {
+        index: 0, slide_id: 'slide-1', html: '<div>slide 1</div>', scripts: '',
+        speaker_notes: notes[0], speaker_notes_source: 'model',
+        talk_track: talk[0], talk_track_source: 'model',
+      },
+      {
+        index: 1, slide_id: 'slide-2', html: '<div>slide 2</div>', scripts: '',
+        speaker_notes: notes[1], speaker_notes_source: 'model',
+        talk_track: talk[1], talk_track_source: 'model',
+      },
     ],
   };
 }
@@ -226,43 +237,65 @@ function renderEditableViewer(deck: SlideDeck, { readOnly = false }: { readOnly?
 }
 
 const nextSlide = () => fireEvent.keyDown(window, { key: 'ArrowRight' });
+const talkEditor = () => screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
 const notesEditor = () => screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
 
-describe('SlideViewer: Notes tab (Task 9)', () => {
+/** The second argument of the first api.updateSlideNotes call: the fields object. */
+function sentFields(): Record<string, unknown> {
+  return vi.mocked(api.updateSlideNotes).mock.calls[0][1] as unknown as Record<string, unknown>;
+}
+
+describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: null } as never);
   });
 
-  it('the Notes tab follows the current slide', () => {
-    // Sabotage target: pass slides[0].speaker_notes (or a fixed index) instead of currentSlide's notes.
+  it('both boxes follow the current slide', () => {
+    // Sabotage target: pass slides[0]'s fields (or a fixed index) instead of currentSlide's.
     renderEditableViewer(makeNotesDeck());
+    expect(talkEditor().value).toBe('T1');
     expect(notesEditor().value).toBe('N1');
 
     nextSlide();
+    expect(talkEditor().value).toBe('T2');
     expect(notesEditor().value).toBe('N2');
   });
 
-  it('saving notes calls the notes route for the current slide and refreshes the deck', async () => {
-    // Sabotage target: save through api.updateSlide, or pass index 0 / slides[0].slide_id from a stale closure.
-    const refreshed = makeNotesDeck(['N1', 'N2, then the chart.']);
-    refreshed.slides[1].speaker_notes_source = 'user';
+  it('a slide with no talk_track value shows an empty talk box', () => {
+    // Sabotage target: pass currentSlide.talk_track through unguarded (undefined reaches the textarea).
+    const deck = makeNotesDeck();
+    delete deck.slides[0].talk_track;
+    delete deck.slides[0].talk_track_source;
+    renderEditableViewer(deck);
+    expect(talkEditor().value).toBe('');
+    expect(notesEditor().value).toBe('N1');
+  });
+
+  it('saving the talk track sends { talk_track } for the current slide, then refreshes the deck', async () => {
+    // Sabotage target: send the notes too, pass a bare string, save through api.updateSlide,
+    // or pass index 0 / slides[0].slide_id from a stale closure.
+    const refreshed = makeNotesDeck(['N1', 'N2'], ['T1', 'T2, then the chart.']);
+    refreshed.slides[1].talk_track_source = 'user';
     vi.mocked(api.updateSlideNotes).mockResolvedValue({
-      index: 1, slide_id: 'slide-2', speaker_notes: 'N2, then the chart.', version: 2,
+      index: 1, slide_id: 'slide-2', talk_track: 'T2, then the chart.', speaker_notes: 'N2', version: 2,
     } as never);
     vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: refreshed } as never);
 
     const { onSlideChange } = renderEditableViewer(makeNotesDeck());
     nextSlide();
-    expect(notesEditor().value).toBe('N2');
+    expect(talkEditor().value).toBe('T2');
 
-    fireEvent.change(notesEditor(), { target: { value: 'N2, then the chart.' } });
-    fireEvent.click(screen.getByTestId('drawer-notes-save'));
+    // A dirty notes draft must not ride along with the talk save.
+    fireEvent.change(notesEditor(), { target: { value: 'N2, unsaved.' } });
+    fireEvent.change(talkEditor(), { target: { value: 'T2, then the chart.' } });
+    fireEvent.click(screen.getByTestId('drawer-talk-save'));
 
     await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(refreshed));
     const saveMock = vi.mocked(api.updateSlideNotes);
     expect(saveMock).toHaveBeenCalledTimes(1);
-    expect(saveMock.mock.calls[0].slice(0, 4)).toEqual([1, 'N2, then the chart.', 's1', 'slide-2']);
+    expect(saveMock.mock.calls[0].slice(0, 4)).toEqual([1, { talk_track: 'T2, then the chart.' }, 's1', 'slide-2']);
+    expect(Object.keys(sentFields())).toEqual(['talk_track']);
     expect(api.updateSlide).not.toHaveBeenCalled();
     // The refresh follows the save, for the same session.
     expect(api.getSlides).toHaveBeenCalledWith('s1');
@@ -270,8 +303,60 @@ describe('SlideViewer: Notes tab (Task 9)', () => {
     expect(Math.max(...getSlidesOrder)).toBeGreaterThan(saveMock.mock.invocationCallOrder[0]);
   });
 
-  it('a version conflict alerts, refreshes the deck, and the drawer shows its error', async () => {
-    // Sabotage target: swallow the error in handleSaveNotes instead of rethrowing it to the drawer.
+  it('saving the notes sends { speaker_notes } for the current slide, then refreshes the deck', async () => {
+    // Sabotage target: send the talk track too, or keep the old bare-string second argument.
+    const refreshed = makeNotesDeck(['N1', 'N2, then the chart.']);
+    refreshed.slides[1].speaker_notes_source = 'user';
+    vi.mocked(api.updateSlideNotes).mockResolvedValue({
+      index: 1, slide_id: 'slide-2', talk_track: 'T2', speaker_notes: 'N2, then the chart.', version: 2,
+    } as never);
+    vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: refreshed } as never);
+
+    const { onSlideChange } = renderEditableViewer(makeNotesDeck());
+    nextSlide();
+    expect(notesEditor().value).toBe('N2');
+
+    fireEvent.change(talkEditor(), { target: { value: 'T2, unsaved.' } });
+    fireEvent.change(notesEditor(), { target: { value: 'N2, then the chart.' } });
+    fireEvent.click(screen.getByTestId('drawer-notes-save'));
+
+    await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(refreshed));
+    const saveMock = vi.mocked(api.updateSlideNotes);
+    expect(saveMock).toHaveBeenCalledTimes(1);
+    expect(saveMock.mock.calls[0].slice(0, 4)).toEqual([1, { speaker_notes: 'N2, then the chart.' }, 's1', 'slide-2']);
+    expect(Object.keys(sentFields())).toEqual(['speaker_notes']);
+    expect(api.updateSlide).not.toHaveBeenCalled();
+    expect(api.getSlides).toHaveBeenCalledWith('s1');
+    const getSlidesOrder = vi.mocked(api.getSlides).mock.invocationCallOrder;
+    expect(Math.max(...getSlidesOrder)).toBeGreaterThan(saveMock.mock.invocationCallOrder[0]);
+  });
+
+  it('a version conflict on a talk-track save alerts, refreshes the deck, and only the talk box shows its error', async () => {
+    // Sabotage target: swallow the error in the save handler instead of rethrowing it to the drawer.
+    const conflict = Object.assign(new Error('Deck was modified by another user'), { status: 409 });
+    vi.mocked(api.updateSlideNotes).mockRejectedValue(conflict);
+    const latest = makeNotesDeck(['N1', 'N2'], ['Someone else\'s T1', 'T2']);
+    vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: latest } as never);
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+
+    try {
+      const { onSlideChange } = renderEditableViewer(makeNotesDeck());
+      fireEvent.change(talkEditor(), { target: { value: 'T1, edited.' } });
+      fireEvent.click(screen.getByTestId('drawer-talk-save'));
+
+      expect(await screen.findByTestId('drawer-talk-error')).toBeInTheDocument();
+      expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
+      expect(vi.mocked(api.updateSlideNotes).mock.calls[0][1]).toEqual({ talk_track: 'T1, edited.' });
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(latest));
+      expect(api.updateSlide).not.toHaveBeenCalled();
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('a version conflict on a notes save alerts, refreshes the deck, and the notes box shows its error', async () => {
+    // Sabotage target: swallow the error in the save handler instead of rethrowing it to the drawer.
     const conflict = Object.assign(new Error('Deck was modified by another user'), { status: 409 });
     vi.mocked(api.updateSlideNotes).mockRejectedValue(conflict);
     const latest = makeNotesDeck(['Someone else\'s N1', 'N2']);
@@ -284,6 +369,8 @@ describe('SlideViewer: Notes tab (Task 9)', () => {
       fireEvent.click(screen.getByTestId('drawer-notes-save'));
 
       expect(await screen.findByTestId('drawer-notes-error')).toHaveTextContent('Could not save the notes.');
+      expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
+      expect(vi.mocked(api.updateSlideNotes).mock.calls[0][1]).toEqual({ speaker_notes: 'N1, edited.' });
       expect(alertSpy).toHaveBeenCalledTimes(1);
       await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(latest));
       expect(api.updateSlide).not.toHaveBeenCalled();
@@ -292,15 +379,19 @@ describe('SlideViewer: Notes tab (Task 9)', () => {
     }
   });
 
-  it('a read-only viewer gets no notes editor', () => {
-    // Sabotage target: drop `readOnly ||` from the onSaveNotes gate on the FeedbackDrawer mount.
+  it('a read-only viewer shows both fields as text and gets no editors', () => {
+    // Sabotage target: drop `readOnly ||` from the onSaveNotes gate, or stop passing talkTrack to the drawer.
     renderEditableViewer(makeNotesDeck(), { readOnly: true });
 
+    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T1');
     expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N1');
-    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
-    expect(screen.queryByTestId('drawer-notes-save')).toBeNull();
+    expect(document.querySelector('textarea')).toBeNull();
+    for (const id of ['drawer-talk-input', 'drawer-talk-save', 'drawer-notes-input', 'drawer-notes-save']) {
+      expect(screen.queryByTestId(id)).toBeNull();
+    }
 
     nextSlide();
+    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T2');
     expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N2');
   });
 });

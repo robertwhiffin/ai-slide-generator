@@ -12,11 +12,89 @@ interface FeedbackDrawerProps {
   /** A turn is running: Apply and Discuss send a chat message, so they wait (Dismiss sends nothing). */
   actionsDisabled?: boolean;
   speakerNotes?: string;
-  /** The current slide's id; a change resets the notes draft. */
+  talkTrack?: string;
+  /** The current slide's id; a change resets both drafts. */
   slideKey?: string;
-  /** Absent = read-only viewer (no editor). */
-  onSaveNotes?: (notes: string) => Promise<void>;
+  /** Absent = read-only viewer (no editor). Each call carries only the saved box's field. */
+  onSaveNotes?: (fields: { speaker_notes?: string; talk_track?: string }) => Promise<void>;
 }
+
+interface PresenterTextBoxProps {
+  idPrefix: 'drawer-talk' | 'drawer-notes';
+  label: string;
+  sublabel: string;
+  placeholder: string;
+  saveLabel: string;
+  errorText: string;
+  value: string;
+  slideKey?: string;
+  onSave: (text: string) => Promise<void>;
+}
+
+const PresenterTextBox: React.FC<PresenterTextBoxProps> = ({
+  idPrefix, label, sublabel, placeholder, saveLabel, errorText, value, slideKey, onSave,
+}) => {
+  // The draft resets when this box's own field changes or the slide switches.
+  // An unsaved draft is discarded on a slide switch (accepted).
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setDraft(value);
+  }, [slideKey, value]);
+  useEffect(() => {
+    setFailed(false);
+  }, [slideKey]);
+  const save = useCallback(async () => {
+    if (saving) return;
+    setSaving(true);
+    setFailed(false);
+    try {
+      await onSave(draft);
+    } catch {
+      setFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  }, [onSave, saving, draft]);
+  const labelId = `${idPrefix}-label`;
+  const subId = `${idPrefix}-sublabel`;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline gap-2">
+        <span id={labelId} className="text-xs font-medium text-foreground">{label}</span>
+        <span id={subId} className="text-[11px] text-muted-foreground">{sublabel}</span>
+      </div>
+      <textarea
+        data-testid={`${idPrefix}-input`}
+        aria-labelledby={labelId}
+        aria-describedby={subId}
+        placeholder={placeholder}
+        value={draft}
+        maxLength={20000}
+        onChange={e => setDraft(e.target.value)}
+        rows={4}
+        className="w-full resize-y rounded-md border border-border bg-background p-2 text-xs text-foreground"
+      />
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          data-testid={`${idPrefix}-save`}
+          disabled={saving || draft === value}
+          onClick={save}
+        >
+          {saveLabel}
+        </Button>
+        {failed && (
+          <span data-testid={`${idPrefix}-error`} role="alert" className="text-xs text-destructive">
+            {errorText}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
 
 export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
   findings,
@@ -24,6 +102,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
   hasUnseen,
   actionsDisabled = false,
   speakerNotes = '',
+  talkTrack = '',
   slideKey,
   onSaveNotes,
 }) => {
@@ -43,27 +122,8 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
     });
   }, []);
 
-  // Notes draft: reset whenever the slide or its saved notes change. An unsaved
-  // draft is discarded on a slide switch (accepted).
-  const [draft, setDraft] = useState(speakerNotes);
-  const [saving, setSaving] = useState(false);
-  const [saveFailed, setSaveFailed] = useState(false);
-  useEffect(() => {
-    setDraft(speakerNotes);
-    setSaveFailed(false);
-  }, [slideKey, speakerNotes]);
-  const saveNotes = useCallback(async () => {
-    if (!onSaveNotes || saving) return;
-    setSaving(true);
-    setSaveFailed(false);
-    try {
-      await onSaveNotes(draft);
-    } catch {
-      setSaveFailed(true);
-    } finally {
-      setSaving(false);
-    }
-  }, [onSaveNotes, saving, draft]);
+  const saveTalk = useCallback((text: string) => onSaveNotes!({ talk_track: text }), [onSaveNotes]);
+  const saveNotesField = useCallback((text: string) => onSaveNotes!({ speaker_notes: text }), [onSaveNotes]);
 
   // Pointer down: record drag origin and capture the pointer so moves/up fire
   // even when the pointer moves fast and leaves the thin handle element.
@@ -171,44 +231,46 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
               never auto-switch tabs (spec §5.3). */}
           {activeTab === 'notes' ? (
             onSaveNotes ? (
-              <div className="flex flex-col gap-2 py-2">
-                <textarea
-                  data-testid="drawer-notes-input"
-                  aria-label="Speaker notes"
-                  placeholder="Add speaker notes for this slide."
-                  value={draft}
-                  maxLength={20000}
-                  onChange={e => setDraft(e.target.value)}
-                  rows={4}
-                  className="w-full resize-y rounded-md border border-border bg-background p-2 text-xs text-foreground"
+              <div className="flex flex-col gap-3 py-2">
+                <PresenterTextBox
+                  idPrefix="drawer-talk"
+                  label="Talk track"
+                  sublabel="What you say."
+                  placeholder="Add a talk track for this slide."
+                  saveLabel="Save talk track"
+                  errorText="Could not save the talk track."
+                  value={talkTrack}
+                  slideKey={slideKey}
+                  onSave={saveTalk}
                 />
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    data-testid="drawer-notes-save"
-                    disabled={saving || draft === speakerNotes}
-                    onClick={saveNotes}
-                  >
-                    Save notes
-                  </Button>
-                  {saveFailed && (
-                    <span data-testid="drawer-notes-error" role="alert" className="text-xs text-destructive">
-                      Could not save the notes.
-                    </span>
-                  )}
-                </div>
+                <PresenterTextBox
+                  idPrefix="drawer-notes"
+                  label="Notes"
+                  sublabel="What you need to know."
+                  placeholder="Add notes for this slide."
+                  saveLabel="Save notes"
+                  errorText="Could not save the notes."
+                  value={speakerNotes}
+                  slideKey={slideKey}
+                  onSave={saveNotesField}
+                />
                 <p data-testid="drawer-notes-hint" className="text-[11px] text-muted-foreground">
-                  Notes you save here are kept when the slide is rebuilt. Chat does not edit notes yet.
+                  Chat rewrites the talk track only when it rebuilds the slide.
                 </p>
               </div>
-            ) : speakerNotes.trim() !== '' ? (
-              <p
-                data-testid="drawer-notes"
-                className="whitespace-pre-wrap break-words py-2 text-xs text-foreground"
-              >
-                {speakerNotes}
-              </p>
+            ) : talkTrack.trim() !== '' || speakerNotes.trim() !== '' ? (
+              <div className="flex flex-col gap-2 py-2">
+                {talkTrack.trim() !== '' && (
+                  <p data-testid="drawer-talk" className="whitespace-pre-wrap break-words text-xs text-foreground">
+                    {talkTrack}
+                  </p>
+                )}
+                {speakerNotes.trim() !== '' && (
+                  <p data-testid="drawer-notes" className="whitespace-pre-wrap break-words text-xs text-foreground">
+                    {speakerNotes}
+                  </p>
+                )}
+              </div>
             ) : (
               <p data-testid="drawer-notes-empty" className="py-4 text-xs text-muted-foreground">
                 No speaker notes for this slide.

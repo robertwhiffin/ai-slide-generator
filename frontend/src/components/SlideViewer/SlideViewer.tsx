@@ -461,11 +461,11 @@ const ViewerBody = forwardRef<
 
   // Notes-only save (D8): never touches the slide HTML. Mirrors handleUpdateSlide's
   // refresh and conflict handling, and rethrows so the drawer shows its error.
-  const handleSaveNotes = async (index: number, slideId: string, notes: string) => {
+  const handleSaveNotes = async (index: number, slideId: string, fields: { speaker_notes?: string; talk_track?: string }) => {
     if (!sessionId || !onSlideChange) return;
     const editId = ++deckEditCounterRef.current;
     try {
-      await api.updateSlideNotes(index, notes, sessionId, slideId);
+      await api.updateSlideNotes(index, fields, sessionId, slideId);
       const result = await api.getSlides(sessionId);
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange(result.slide_deck);
@@ -786,11 +786,12 @@ const ViewerBody = forwardRef<
           callbacks={{ ...callbacks, onDismissFinding: handleDismiss }}
           actionsDisabled={insertDisabled}
           speakerNotes={currentSlide?.speaker_notes ?? ''}
+          talkTrack={currentSlide?.talk_track ?? ''}
           slideKey={currentSlide?.slide_id}
           onSaveNotes={
             readOnly || !sessionId || !onSlideChange || !currentSlide
               ? undefined
-              : (notes) => handleSaveNotes(currentIndex, currentSlide.slide_id, notes)
+              : (fields) => handleSaveNotes(currentIndex, currentSlide.slide_id, fields)
           }
         />
       </div>
