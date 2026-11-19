@@ -8,7 +8,7 @@ The presenter view is a second, private window that shows what to say and what c
 
 | Capability | Entry point | What happens |
 | --- | --- | --- |
-| Open the presenter view | P in presentation mode (a P with Cmd, Ctrl or Alt held is left to the browser, so Cmd+P still prints), or the "Presenter view" toolbar button | A pop-up window opens at `/sessions/<id>/present`, or the open one comes to the front |
+| Open the presenter view | P in presentation mode, or the "Presenter view" toolbar button | A pop-up window opens at `/sessions/<id>/present`, or the open one comes to the front |
 | Follow the slides | Automatic | The presenter shows the slide presentation mode reports, within one second |
 | Step from the presenter | Next and Back buttons, Right and Left, Space and Backspace, Page Down and Page Up (what most presentation clickers send) | The presenter asks presentation mode to move; both windows then show the new slide |
 | Read the notes | N or the Notes button in the presenter | A drawer with the slide's notes opens; Esc closes it |
@@ -55,13 +55,15 @@ Browsers allow a pop-up only during a user action. So `window.open` runs directl
 - the `message` handler that receives a P forwarded from the sandboxed slide frame (`tellr:slide-key`, the same bridge the arrow keys use);
 - the toolbar button's click handler.
 
+A P with Cmd, Ctrl or Alt held is left to the browser, so Cmd+P still prints.
+
 A pop-up blocker can still refuse. Then `openPresenterWindow` returns `null`, nothing is remembered, and presenting carries on. The toolbar button is the fallback, since a direct click is the most reliable way to open a pop-up.
 
 ---
 
 ## The Channel
 
-Both windows join a same-origin `BroadcastChannel` named `tellr-present:<sessionId>`. Each session has its own channel, so two decks presented at once never mix.
+Both windows join a same-origin `BroadcastChannel` named `tellr-present:<sessionId>`. Each session has its own channel, so two decks presented at once never mix. When `BroadcastChannel` is unavailable, `joinPresenterChannel` does nothing, and the presenter reads "Slides: not linked" without an error.
 
 | Message | Sent by | Shape |
 | --- | --- | --- |
@@ -81,7 +83,7 @@ Both windows join a same-origin `BroadcastChannel` named `tellr-present:<session
 
 ### "Open presentation"
 
-The button focuses the window that opened the presenter (`window.opener`) when it is still there. With no opener, it opens a new tab and never replaces the presenter. A viewer (`my_permission: 'CAN_VIEW'` in the `getSlides` response) gets `/sessions/<id>/view`. Everyone else gets `/sessions/<id>/edit`. From there the user presses Present again, and the link returns with the first heartbeat.
+The button focuses the window that opened the presenter (`window.opener`) when it is still there. With no opener, it opens a new tab and never replaces the presenter. A viewer (`my_permission: 'CAN_VIEW'` in the `getSlides` response) gets `/sessions/<id>/view`. Everyone else gets `/sessions/<id>/edit`. From there the user presses Present again, and the link returns with its first state message.
 
 ---
 
@@ -89,14 +91,14 @@ The button focuses the window that opened the presenter (`window.opener`) when i
 
 The audience sees the slides window, so that window decides which slide is current. The presenter never moves on its own. Next, Back and the keys in the presenter only post a command, and the presenter changes slide when the answering state message arrives.
 
-This keeps the two windows from drifting apart. A command lost while presentation mode is closed does nothing, instead of moving the presenter away from what the audience sees. It also means a reopened presentation mode resets the presenter to its own position on the first heartbeat.
+This keeps the two windows from drifting apart. A command lost while presentation mode is closed does nothing, instead of moving the presenter away from what the audience sees. It also means a reopened presentation mode resets the presenter to its own position on its first state message.
 
 ### Deck freshness
 
 Presentation mode snapshots the deck when it opens, so chat edits do not reload the slides in front of an audience. The presenter compares its own deck with the posted `deckVersion`:
 
 - When the posted version changes and differs from the deck it holds, the presenter fetches the deck again. A heartbeat with the same version never triggers a fetch.
-- When the fetched deck's version still differs from the posted one, the presenter shows "Slides changed. Reopen the presentation to see them." This happens when chat edited the deck after Present was pressed.
+- Whenever the deck the presenter holds has a different version from the posted one, it shows "Slides changed. Reopen the presentation to see them." That includes the moment a refetch is in flight. The banner stays when the refetched deck still differs, which happens when chat edited the deck after Present was pressed.
 
 ---
 
@@ -118,3 +120,11 @@ The presenter page has no text box, editor or save control. Talk tracks and note
 - `frontend/src/components/Presenter/PresenterPage.test.tsx`: the layout, stepping only on state messages, the link timeout, "Open presentation", refetch on a new deck version, the first-run hint, cleanup on close, and the read-only page.
 - `frontend/src/components/PresentationMode/PresentationMode.test.tsx` ("PresentationMode presenter view"): opening from P, the button and the key bridge, state posting and the heartbeat, clamped commands, leaving the channel and clearing the heartbeat on close, and the N panel order.
 - `frontend/src/App.presenterRoute.test.tsx`: the editor overlays never mount on the presenter route, and stay on the editor routes.
+
+---
+
+## Cross-References
+
+- `docs/technical/presentation-mode.md`: The slides window that drives the presenter view
+- `docs/technical/export-features.md`: PDF and PowerPoint export functionality
+- `docs/superpowers/specs/2026-11-18-speaker-notes-presenter-design.md`: The design spec for speaker notes and the presenter view

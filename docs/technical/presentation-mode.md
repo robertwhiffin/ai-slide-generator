@@ -14,6 +14,7 @@ Presentation mode displays slides in a keyboard-navigable viewer that shows one 
 | Present (fullscreen) | F key or toolbar button inside the overlay | Browser fullscreen (`document.documentElement.requestFullscreen()`) |
 | Start at current slide | "Present" button | Opens at whichever slide is most visible in the scroll viewport (or the selected one) |
 | Download HTML | "Export" → "Save as HTML" in SlidePanel header | Standalone `.html` file with all slides |
+| Presenter view | P key or "Presenter view" toolbar button inside the overlay | A second window with the talk track and a preview of the next slide, driven by this overlay (see `presenter-view.md`) |
 | Debug mode | `?debug=true` or `localStorage.debug='true'` | Shows Raw HTML tabs |
 
 ---
@@ -248,6 +249,7 @@ Navigation is handled by a single keydown function stored in a ref so it can be 
 | ← / ↑ | Previous slide |
 | Home / End | Jump to first / last slide |
 | N | Toggle the speaker notes panel |
+| P | Open the presenter view window (ignored with Cmd, Ctrl or Alt held, so Cmd+P still prints) |
 | F | Toggle browser fullscreen |
 | Esc | Exit (two-stage — see Full-Window section above) |
 
@@ -376,10 +378,11 @@ The iframe wrapper uses CSS `transform: scale()` to scale the 1280×720px iframe
 | Home | Jump to first slide |
 | End | Jump to last slide |
 | N | Toggle the speaker notes panel |
+| P | Open the presenter view window (ignored with Cmd, Ctrl or Alt held) |
 | F | Toggle browser fullscreen |
 | Escape | Exit fullscreen (if active) → exit presentation (if already full-window) |
 
-A navigation hint (`← → Navigate · N Notes · F Fullscreen · Esc Exit`) appears in the top-left for the first ~3 seconds after open, then fades out so it stops covering slide content. In fullscreen the hint stays hidden.
+A navigation hint (`← → Navigate · N Notes · P Presenter view · F Fullscreen · Esc Exit`; the P entry shows only when the presenter view is available) appears in the top-left for the first ~3 seconds after open, then fades out so it stops covering slide content. In fullscreen the hint stays hidden.
 
 ---
 
@@ -403,23 +406,29 @@ The overlay has three pieces of chrome, all of which **auto-hide in fullscreen**
 - `pointerEvents: 'none'` so clicks pass through to the iframe
 
 ### Toolbar (Top Right)
-- Three interactive buttons rendered with inline SVG icons (Unicode glyphs like `⤢ / ⤡ / ✕` render inconsistently across fonts/OSes):
+- Interactive buttons rendered with inline SVG icons (Unicode glyphs like `⤢ / ⤡ / ✕` render inconsistently across fonts/OSes):
   - Notes toggle (`N` shortcut equivalent): `data-testid="presentation-notes-toggle"`, `aria-pressed` reflects the panel state
   - Fullscreen toggle (`F` shortcut equivalent) — icon swaps between "enter" and "exit" arrows
   - Close (`Esc` shortcut equivalent)
 - `pointerEvents` flips to `none` while hidden so users can't accidentally click an invisible button
+- A "Presenter view" button (`data-testid="presentation-presenter-open"`) sits beside them when the component has a `sessionId`. It opens the presenter window, like P.
 
 ### Navigation Hint (Top Left)
-- `← → Navigate · N Notes · F Fullscreen · Esc Exit`
+- `← → Navigate · N Notes · P Presenter view · F Fullscreen · Esc Exit` (without the P entry when there is no `sessionId`)
 - Visible only for the first ~3 seconds after open, then fades out (opacity transition)
 - `pointerEvents: 'none'`
 
 ### Speaker Notes Panel (Bottom Center)
 - Press `N` or click the notes button in the toolbar to show or hide it. It starts hidden.
-- Shows the current slide's `speaker_notes` as plain text (`white-space: pre-wrap`). Notes are never rendered as HTML.
+- Shows the current slide's talk track first. When the slide has no talk track, it falls back to the `speaker_notes`. Both appear as plain text (`white-space: pre-wrap`) and are never rendered as HTML.
 - Reads from the mount-time deck snapshot, like the slides themselves, so notes saved after presentation starts appear on the next presentation.
-- A slide without notes shows "No speaker notes for this slide."
+- A slide with neither a talk track nor notes shows "No speaker notes for this slide."
 - Sits above the slide counter, scrolls when long (max height 30vh), and stays visible in fullscreen once toggled on.
+
+### Presenter Window Link
+- Presentation mode opens the presenter window with P (without Cmd, Ctrl or Alt) or the "Presenter view" toolbar button. Both need a `sessionId`.
+- While open, it posts its state (`index`, `total`, `deckVersion`) on a per-session `BroadcastChannel` when it joins, on every slide change, and once a second. It also applies `next`, `prev` and `goto` commands from the presenter, clamped to the deck.
+- This overlay is the only source of truth for the current slide. See `presenter-view.md` for the message shapes and timing.
 
 ---
 
@@ -485,7 +494,7 @@ Because the parent cannot read the iframe's document, keyboard events cross the 
 2. **Slide transitions:** Add CSS transitions when `currentSlideIndex` changes (fade, slide, etc.)
 3. **Touch gestures:** Add swipe detection for mobile/tablet navigation
 4. **Timer/clock:** Add presentation timer overlay
-5. **Remote control:** WebSocket integration to sync presenter/audience views
+5. ~~**Remote control:**~~ Done: the presenter view follows and steers this overlay over a `BroadcastChannel` (see `presenter-view.md`)
 6. **Slide thumbnails:** Add thumbnail strip for quick navigation
 7. ~~**Notes panel:**~~ Done: shown as a bottom panel rather than a side panel
 8. **Export enhancements:** Add options for PDF export, reveal.js format, or PowerPoint
@@ -498,6 +507,7 @@ Because the parent cannot read the iframe's document, keyboard events cross the 
 - `docs/technical/slide-parser-and-script-management.md` — How `SlideDeck` stores CSS, scripts, and slides
 - `docs/technical/backend-overview.md` — API endpoints that provide slide data
 - `docs/technical/export-features.md` — PDF and PowerPoint export functionality
+- `docs/technical/presenter-view.md`: The presenter window and the channel this overlay posts its state on
 
 ---
 
