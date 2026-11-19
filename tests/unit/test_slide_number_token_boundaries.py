@@ -20,7 +20,7 @@ boundary                                                 how it is driven here
 graph COMPLETE event)
 version preview ``GET /api/slides/versions/{n}``         HTTP, full stack
 version restore ``POST /api/slides/versions/{n}/restore``  HTTP, full stack (A2)
-MCP ``_render_deck_response``                            the shared serialiser
+MCP ``get_deck`` preview (``_get_deck_impl``)            the tool's implementation
 SSE ``slide_ready`` (``_release_slides``)                the foreman's release
 ``/chat/poll`` ``slides`` and ``slide_revisions``        HTTP over real rows (A6)
 ======================================================  ===========================
@@ -651,7 +651,7 @@ def test_a_deck_mutation_stores_tokens_not_numbers(
 
 
 # ===========================================================================
-# MCP: get_deck / get_deck_status share _render_deck_response
+# MCP: get_deck's preview (get_deck_status's ready poll builds it the same way)
 # ===========================================================================
 
 
@@ -666,21 +666,38 @@ def mcp_db():
     engine.dispose()
 
 
-def _render_mcp(db, deck_dict: dict) -> dict:
-    """``_render_deck_response`` as ``get_deck`` calls it, with no design system."""
-    from src.api.mcp_server import _render_deck_response
+def _render_mcp(db, deck_dict: dict):
+    """``get_deck``'s reply for a session holding *deck_dict*, with no design system
+    (C27: driven through ``_get_deck_impl``, never a private render helper)."""
+    import asyncio
+
+    from src.api import mcp_server
 
     @contextlib.contextmanager
     def fake_db_session():
         yield db
 
     manager = MagicMock()
-    manager.get_session.return_value = {"agent_config": {}}
-    with patch("src.api.mcp_server.get_db_session", fake_db_session), patch(
+    manager.get_session.return_value = {
+        "session_id": "mcp-token-session",
+        "title": "MCP deck",
+        "agent_config": {},
+    }
+    manager.get_slide_deck.return_value = deck_dict
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, patch(
+        "src.api.mcp_server.permission_service"
+    ) as permission, patch(
+        "src.api.mcp_server.get_session_manager", return_value=manager
+    ), patch(
         "src.api.services.session_manager.get_session_manager", return_value=manager
+    ), patch("src.api.mcp_server.get_db_session", fake_db_session), patch(
+        "src.api.mcp_server._public_app_url", return_value=""
     ):
-        return _render_deck_response(
-            deck_dict, {"session_id": "mcp-token-session", "title": "MCP deck"}, ""
+        auth_scope.return_value.__enter__.return_value = MagicMock(user_name="mk@example.com")
+        auth_scope.return_value.__exit__.return_value = False
+        permission.can_view_deck.return_value = True
+        return asyncio.run(
+            mcp_server._get_deck_impl(request=MagicMock(), session_id="mcp-token-session")
         )
 
 
@@ -692,27 +709,25 @@ def _deck_dict(htmls: List[str]) -> dict:
 
 
 class TestMcpDeckRender:
-    def test_the_deck_and_the_html_document_are_numbered(self, mcp_db):
+    def test_the_preview_is_numbered(self, mcp_db):
         result = _render_mcp(mcp_db, _deck_dict([_slide(m) for m in MARKERS]))
 
-        assert _htmls(result["deck"]["slides"]) == [
-            _slide("MK-ALPHA", _numbered(1, 3)),
-            _slide("MK-BRAVO", _numbered(2, 3)),
-            _slide("MK-CHARLIE", _numbered(3, 3)),
-        ]
-        document = result["html_document"]
-        assert _slide("MK-BRAVO", _numbered(2, 3)) in document
-        assert "{{slide:" not in document, (
-            "the standalone document an MCP client renders carries a literal token"
+        assert result.payload["slide_count"] == 3
+        preview = result.preview_html
+        assert preview is not None
+        for position, marker in enumerate(MARKERS, start=1):
+            assert _slide(marker, _numbered(position, 3)) in preview
+        assert "{{slide:" not in preview, (
+            "the preview an MCP client renders carries a literal token"
         )
 
     def test_a_legacy_deck_is_byte_identical(self, mcp_db):
         stored = [_legacy_slide(m) for m in MARKERS]
         result = _render_mcp(mcp_db, _deck_dict(stored))
 
-        assert _htmls(result["deck"]["slides"]) == stored
+        assert result.payload["slide_count"] == 3
         for html in stored:
-            assert html in result["html_document"]
+            assert html in result.preview_html
 
 
 # ===========================================================================

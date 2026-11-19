@@ -24,7 +24,16 @@ logger = logging.getLogger(__name__)
 # — is treated as CSS text by the parser and cannot escape. Stripping
 # tag-shaped substrings more broadly would corrupt legitimate CSS such as
 # `content: '<foo>'` and data-URI SVGs (`url('data:image/svg+xml,<svg></svg>')`).
-_STYLE_CLOSER_RE = re.compile(r"</\s*style\s*>", re.IGNORECASE)
+#
+# The tokenizer ends the element at `</style` followed by whitespace, `/` or
+# `>` (`</style x>`, `</style/>` and `</STYLE\t>` all close it), and at `</style`
+# where the css ends, since our own closer follows on the next line. Each one
+# has its `</` written as `<\/`: one pass, and nothing it writes can form a new
+# closer (removing the match could: `<</style/style>` would leave `</style>`).
+# Inside a CSS string `\/` is an escaped `/`, so `content:'</style>'` keeps
+# its value.
+_STYLE_CLOSER_RE = re.compile(r"</(?=\s*style(?:[\s/>]|\Z))", re.IGNORECASE)
+_STYLE_CLOSER_ESCAPED = "<\\/"
 
 
 class SlideDeck:
@@ -592,12 +601,15 @@ class SlideDeck:
             script_tag_parts.append(f'  <script src="{escaped_src}"></script>')
         external_script_tags = "\n".join(script_tag_parts)
 
-        # Issue 2 (narrowed): Strip only </style> closers from CSS before embedding
-        # in the <style> block. Broader tag stripping would corrupt legitimate CSS
-        # content such as string literals (`content: '<foo>'`) and inline-SVG data
-        # URIs; it is also unnecessary because <style> is a raw-text element and
-        # </style> is the only sequence that can end it. See _STYLE_CLOSER_RE.
-        safe_css = _STYLE_CLOSER_RE.sub("", self.css) if self.css else ""
+        # Issue 2 (narrowed): Neutralise only </style closers in the CSS before
+        # embedding it in the <style> block. Broader tag stripping would corrupt
+        # legitimate CSS content such as string literals (`content: '<foo>'`) and
+        # inline-SVG data URIs; it is also unnecessary because <style> is a raw-text
+        # element and its end tag is the only sequence that can end it. See
+        # _STYLE_CLOSER_RE.
+        safe_css = (
+            _STYLE_CLOSER_RE.sub(lambda _m: _STYLE_CLOSER_ESCAPED, self.css) if self.css else ""
+        )
 
         slide_html = "\n".join(slide.html for slide in self.slides)
         aggregated_scripts = self.scripts  # IIFE-wrapped per existing property

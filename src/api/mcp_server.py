@@ -16,12 +16,15 @@ the caller-facing integration guide.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from fastapi import Request
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import TextContent
 
 from src.api.mcp_auth import MCPAuthError, mcp_auth_scope
 from src.api.routes.chat import (
@@ -48,14 +51,21 @@ from src.core.settings_db import (
     get_default_slide_style_id,
     get_default_template_id,
 )
-from src.domain.slide_deck import SlideDeck
+from src.services import design_system_service
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.generation_rollback import RESTORE_PENDING_MESSAGE, RollbackResult
 from src.services.identity_provider import resolve_display_name
+from src.services.mcp_deck_preview import (
+    MAX_PREVIEW_SLIDES,
+    MCP_RESULT_BUDGET_BYTES,
+    build_deck_preview,
+    ds_asset_ids_in,
+)
 from src.services.permission_service import get_permission_service
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
 )
+from src.utils.preview_images import SVG_INLINE_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -211,13 +221,46 @@ MCP_STOPPED_ERROR = "This generation was stopped in Tellr. The deck is unchanged
 def _deck_edit_url(session_id: str, *, base_url: Optional[str] = None) -> str:
     """The Tellr editor URL for a deck (relative when no public base URL is set).
 
-    The one writer of this URL: the error copy and ``_render_deck_response``'s
+    The one writer of this URL: the error copy and ``_deck_links``'s
     ``deck_url`` both come from here. ``base_url`` defaults to
     ``_public_app_url()``; a caller that already read it passes it in.
     """
     if base_url is None:
         base_url = _public_app_url()
     return f"{base_url}/sessions/{session_id}/edit"
+
+
+def _deck_links(session_id: str, base_url: str) -> dict:
+    """``deck_url`` (editor) and ``deck_view_url`` (view-only), the first keys of every response."""
+    return {
+        "deck_url": _deck_edit_url(session_id, base_url=base_url),
+        "deck_view_url": (
+            f"{base_url}/sessions/{session_id}/view"
+            if base_url
+            else f"/sessions/{session_id}/view"
+        ),
+    }
+
+
+@dataclass
+class McpToolReply:
+    """A tool result: a JSON part, then (when there is one) the preview HTML part."""
+
+    payload: dict
+    preview_html: Optional[str] = None
+
+    def to_content(self) -> list[TextContent]:
+        items = [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    self.payload, ensure_ascii=False, indent=2, default=str
+                ),
+            )
+        ]
+        if self.preview_html is not None:
+            items.append(TextContent(type="text", text=self.preview_html))
+        return items
 
 
 async def _enter_turn_or_tool_error(
@@ -391,9 +434,10 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
 @mcp.tool(
     name="create_deck",
     description=(
-        "Generate a new slide deck from a natural-language prompt. Returns a "
-        "session_id and a request_id; the caller polls get_deck_status for "
-        "completion. The resulting deck is attributed to the calling user and "
+        "Generate a new slide deck from a natural-language prompt. Returns "
+        "`deck_url` and `deck_view_url` at once, plus a session_id and a "
+        "request_id; show `deck_url` to the user now, and poll "
+        "get_deck_status for completion. The resulting deck is attributed to the calling user and "
         "appears in their tellr UI. It is an Agent deck with the app's default "
         "tools for a new deck (for example Genie One, when an admin turned that "
         "default on). Any slide count belongs in the prompt, for example "
@@ -544,6 +588,7 @@ async def _create_deck_impl(
             )
 
             return {
+                **_deck_links(session_id, _public_app_url()),
                 "session_id": session_id,
                 "request_id": request_id,
                 "status": "pending",
@@ -560,80 +605,107 @@ async def _create_deck_impl(
 
 
 # ---------------------------------------------------------------------------
-# Deck response serializer (shared by get_deck_status and get_deck)
+# Deck reply builder (shared by get_deck_status and get_deck)
 # ---------------------------------------------------------------------------
 
 
-def _render_deck_response(
-    deck_dict: Optional[dict], session: dict, base_url: str
-) -> dict:
-    """Serialize a session's deck into the MCP response fields.
+# The longest preview note the builder (or the fallback below) can write, with 6-digit
+# counts: the placeholder that sizes item 1 before the real preview exists.
+_LONGEST_PREVIEW_NOTE = (
+    "Showing 999999 of 999999 slides as a preview "
+    "(standard fonts, images not shown). Open the full deck in tellr."
+)
+# When building the preview fails, the reply still carries the links and this note.
+_PREVIEW_UNAVAILABLE_NOTE = "A preview is not available for this deck. Open the full deck in tellr."
 
-    Returns a dict carrying ``slide_count``, ``title``, ``deck``,
-    ``html_document``, ``deck_url``, and ``deck_view_url``. This helper
-    is extracted so ``get_deck_status`` and ``get_deck`` (Task 9) produce
-    identical response shapes without drift between the two tools.
 
-    Args:
-        deck_dict: Structured deck payload as returned by
-            ``SessionManager.get_slide_deck(session_id)``. Typically has
-            ``title``, ``slides``, ``css``, ``external_scripts``, and
-            ``head_meta`` keys. May be ``None`` when the session has no
-            deck yet (empty deck is rendered in that case).
-        session: Session info from ``SessionManager.get_session(session_id)``.
-            Used for ``session_id`` (required for URL construction) and
-            ``title`` fallback when the deck has no title.
-        base_url: Public app URL prefix for building deck URLs. Empty
-            string yields relative URLs.
+def _build_deck_reply(
+    deck_dict: Optional[dict],
+    session: dict,
+    session_id: str,
+    base_url: str,
+    *,
+    head: dict,
+    tail: dict,
+) -> McpToolReply:
+    """The deck-shaped reply shared by ``get_deck_status`` (ready) and ``get_deck``.
 
-    Image and design-system asset placeholders are substituted at this shared
-    response boundary so both MCP deck-returning tools emit standalone data
-    without expanding the persisted snapshot. Design-system assets are scoped
-    to the session's active design system and fail closed when it has none.
+    The payload is ``head`` (links first, then ids/status), ``title``, ``slide_count``,
+    ``preview``, then ``tail``. The preview is built from the persisted deck after
+    slide-number tokens, with no image-library or design-system byte read: only small
+    SVGs scoped to the session's active design system are inlined. Its HTML ceiling is
+    the result budget minus the UTF-8 bytes of the JSON part, sized with a worst-case
+    ``preview`` entry first, so a long ``reply`` shrinks the preview rather than
+    pushing the whole result over budget.
 
-    ``SlideDeck.from_dict`` rebuilds the deck from the substituted snapshot,
-    including per-slide scripts/metadata and head metadata.
+    A failure anywhere in building the preview (the css scanners, the SVG read) is
+    logged and costs only the preview: the reply is then the JSON part alone, links
+    first, with ``preview.included`` false and ``_PREVIEW_UNAVAILABLE_NOTE``.
     """
-    deck_dict = deck_dict or {}
-    session_id = session["session_id"]
-
     from src.api.services.chat_service import resolve_active_design_system_id
-    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
-    from src.utils.image_utils import substitute_deck_dict_images
     from src.utils.slide_number_tokens import substitute_deck_slide_numbers
 
-    substitute_deck_slide_numbers(deck_dict)
-    design_system_id = resolve_active_design_system_id(session_id)
-    with get_db_session() as db:
-        substitute_deck_dict_images(deck_dict, db)
-        substitute_deck_dict_ds_assets(
-            deck_dict,
-            db,
-            design_system_id=design_system_id,
-        )
+    deck_dict = deck_dict or {}
 
-    if deck_dict:
-        deck = SlideDeck.from_dict(
+    title = session.get("title") or deck_dict.get("title")
+    slide_count = len(deck_dict.get("slides") or [])
+
+    def payload_with(preview: dict) -> dict:
+        return {
+            **head,
+            "title": title,
+            "slide_count": slide_count,
+            "preview": preview,
+            **tail,
+        }
+
+    placeholder = {
+        "included": True,
+        "slides_shown": 999999,
+        "slides_total": 999999,
+        "images_hidden": 999999,
+        "note": _LONGEST_PREVIEW_NOTE,
+    }
+    item1_bytes = len(
+        McpToolReply(payload_with(placeholder)).to_content()[0].text.encode("utf-8")
+    )
+    max_html_bytes = MCP_RESULT_BUDGET_BYTES - item1_bytes - 256
+
+    try:
+        substitute_deck_slide_numbers(deck_dict)
+        asset_ids = ds_asset_ids_in(deck_dict)
+        svg_assets: dict[int, str] = {}
+        if asset_ids:
+            design_system_id = resolve_active_design_system_id(session_id)
+            with get_db_session() as db:
+                svg_assets = design_system_service.get_small_svg_assets(
+                    db,
+                    asset_ids,
+                    design_system_id=design_system_id,
+                    max_bytes=SVG_INLINE_MAX_BYTES,
+                )
+
+        preview = build_deck_preview(
             deck_dict,
             title=deck_dict.get("title") or session.get("title"),
+            deck_url=head["deck_url"],
+            svg_assets=svg_assets,
+            max_html_bytes=max_html_bytes,
         )
-    else:
-        deck = SlideDeck(title=session.get("title"))
-
-    deck_url = _deck_edit_url(session_id, base_url=base_url)
-    deck_view_url = (
-        f"{base_url}/sessions/{session_id}/view"
-        if base_url
-        else f"/sessions/{session_id}/view"
-    )
-    return {
-        "slide_count": len(deck.slides),
-        "title": session.get("title") or deck.title,
-        "deck": deck.to_dict(),
-        "html_document": deck.to_html_document(),
-        "deck_url": deck_url,
-        "deck_view_url": deck_view_url,
-    }
+    except Exception:
+        logger.exception("MCP deck preview failed; replying without it (session_id=%s)", session_id)
+        return McpToolReply(
+            payload_with(
+                {
+                    "included": False,
+                    "slides_shown": 0,
+                    "slides_total": slide_count,
+                    "images_hidden": 0,
+                    "note": _PREVIEW_UNAVAILABLE_NOTE,
+                }
+            )
+        )
+    return McpToolReply(payload_with(preview.as_payload()), preview.html)
 
 
 # ---------------------------------------------------------------------------
@@ -643,11 +715,16 @@ def _render_deck_response(
 
 @mcp.tool(
     name="get_deck_status",
+    structured_output=False,
     description=(
-        "Poll the status of a deck generation or edit job. Returns "
-        "lightweight status while pending/running; when ready, returns the "
-        "complete deck as structured slide data, a standalone HTML "
-        "document, and URLs into tellr's full editor and view-only surfaces. "
+        "Poll the status of a deck generation or edit job. Every response "
+        "starts with `deck_url` (the full editor) and `deck_view_url` "
+        "(view-only); show `deck_url` to the user. Returns lightweight "
+        "status while pending/running. When ready, the response is a JSON "
+        "part (links first, then title, slide_count and the reply) plus a "
+        f"second part that is a **preview** HTML page of at most {MAX_PREVIEW_SLIDES} slides "
+        "with standard fonts and images not shown. The full deck and all "
+        "editing are at `deck_url`. "
         "A ready turn may leave the deck UNCHANGED (the assistant may "
         "answer or ask a question instead of editing). Show `reply` (the "
         "assistant's final message of the turn) to the user; `deck_changed` "
@@ -666,17 +743,18 @@ async def get_deck_status(
     ctx: Context,
     session_id: str,
     request_id: str,
-) -> dict:
-    return await _get_deck_status_impl(
+) -> list[TextContent]:
+    reply = await _get_deck_status_impl(
         request=_request_from_context(ctx),
         session_id=session_id,
         request_id=request_id,
     )
+    return reply.to_content()
 
 
 async def _get_deck_status_impl(
     request: Request, session_id: str, request_id: str
-) -> dict:
+) -> McpToolReply:
     """Implementation, separated from the decorated tool for testability.
 
     Mirrors the data-access pattern of ``GET /api/chat/poll/{request_id}``:
@@ -686,7 +764,8 @@ async def _get_deck_status_impl(
     ready/error terminal state we have to fall back to the persisted
     ``chat_request`` DB row, then re-fetch the deck via
     ``SessionManager.get_slide_deck`` since neither ``get_job_status``
-    nor ``get_session`` carry the structured deck payload.
+    nor ``get_session`` carry the structured deck payload. Every branch's payload
+    starts with the deck links.
     """
     try:
         with mcp_auth_scope(request):
@@ -696,6 +775,8 @@ async def _get_deck_status_impl(
                 )
 
             session_manager = get_session_manager()
+            base = _public_app_url()
+            links = _deck_links(session_id, base)
 
             # Phase 1: in-memory fast path. The worker updates this dict as
             # it transitions pending -> running, and the timeout sweeper
@@ -708,20 +789,22 @@ async def _get_deck_status_impl(
                 job_status = entry.get("status", "pending")
 
                 if job_status in ("pending", "running"):
-                    return {
+                    return McpToolReply({
+                        **links,
                         "session_id": session_id,
                         "request_id": request_id,
                         "status": job_status,
                         "progress": entry.get("progress"),
-                    }
+                    })
 
                 if job_status == "failed":
-                    return {
+                    return McpToolReply({
+                        **links,
                         "session_id": session_id,
                         "request_id": request_id,
                         "status": "failed",
                         "error": entry.get("error", "Generation failed"),
-                    }
+                    })
                 # Any other status ("error", "completed", "success",
                 # unexpected values): fall through to DB for authoritative
                 # state. Worker-raised errors also land in the DB via
@@ -750,12 +833,13 @@ async def _get_deck_status_impl(
             db_status = chat_request.get("status")
 
             if db_status in ("pending", "running"):
-                return {
+                return McpToolReply({
+                    **links,
                     "session_id": session_id,
                     "request_id": request_id,
                     "status": db_status,
                     "progress": None,
-                }
+                })
 
             if db_status == "cancelled":
                 # Only a stop (``cancel_chat``, by the request's sender) writes
@@ -769,38 +853,42 @@ async def _get_deck_status_impl(
                     # it, so it is not "unchanged". Report the request's own
                     # restore-pending copy until a retry settles the request
                     # (it then records the final outcome and clears the copy).
-                    return {
+                    return McpToolReply({
+                        **links,
                         "session_id": session_id,
                         "request_id": request_id,
                         "status": "failed",
                         "error": chat_request.get("error_message")
                         or RESTORE_PENDING_MESSAGE,
-                    }
-                return {
+                    })
+                return McpToolReply({
+                    **links,
                     "session_id": session_id,
                     "request_id": request_id,
                     "status": "failed",
                     "error": MCP_STOPPED_ERROR,
-                }
+                })
 
             if db_status == "error":
-                return {
+                return McpToolReply({
+                    **links,
                     "session_id": session_id,
                     "request_id": request_id,
                     "status": "failed",
                     "error": chat_request.get("error_message")
                     or "Generation failed",
-                }
+                })
 
             if db_status != "completed":
                 # Unknown terminal state — surface as failure so callers
                 # aren't left polling forever.
-                return {
+                return McpToolReply({
+                    **links,
                     "session_id": session_id,
                     "request_id": request_id,
                     "status": "failed",
                     "error": f"Unknown job status: {db_status!r}",
-                }
+                })
 
             # Ready path. The worker stored the deck via
             # SessionManager.save_slide_deck (from inside send_message_streaming)
@@ -808,8 +896,6 @@ async def _get_deck_status_impl(
             # authoritative.
             session = session_manager.get_session(session_id)
             deck_dict = session_manager.get_slide_deck(session_id)
-            base = _public_app_url()
-            deck_fields = _render_deck_response(deck_dict, session, base)
 
             # ``result`` is a JSON blob the worker wrote. Per
             # job_queue.process_chat_request, keys are: slides, raw_html,
@@ -886,25 +972,32 @@ async def _get_deck_status_impl(
                         None,
                     )
 
-            return {
-                "session_id": session_id,
-                "request_id": request_id,
-                "status": "ready",
-                **deck_fields,
-                "replacement_info": result.get("replacement_info"),
-                "reply": reply,
-                "deck_changed": deck_changed,
-                "messages": messages,
-                "metadata": {
-                    "tool_calls": result_metadata.get("tool_calls"),
-                    "latency_ms": result_metadata.get("latency_ms")
-                    or result_metadata.get("latency_seconds"),
-                    "experiment_url": result.get("experiment_url"),
-                    "session_title": result.get("session_title"),
-                    "clarification_needed": clarification_needed,
-                    "clarification": clarification,
+            return _build_deck_reply(
+                deck_dict,
+                session,
+                session_id,
+                base,
+                head={
+                    **links,
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": "ready",
                 },
-            }
+                tail={
+                    "reply": reply,
+                    "deck_changed": deck_changed,
+                    "replacement_info": result.get("replacement_info"),
+                    "metadata": {
+                        "tool_calls": result_metadata.get("tool_calls"),
+                        "latency_ms": result_metadata.get("latency_ms")
+                        or result_metadata.get("latency_seconds"),
+                        "experiment_url": result.get("experiment_url"),
+                        "session_title": result.get("session_title"),
+                        "clarification_needed": clarification_needed,
+                        "clarification": clarification,
+                    },
+                },
+            )
     except MCPToolError:
         raise
     except MCPAuthError as e:
@@ -962,8 +1055,9 @@ def _require_agent_deck_owner(session_id: str, user_name: str) -> None:
         "(e.g. \"On slides 1 and 4, shorten the titles\"). A change is made to "
         "this same deck, so the session_id and deck_url stay stable; "
         "get_deck_status's deck_changed says whether the turn changed it. "
-        "Returns a request_id; poll get_deck_status until it completes, and show the "
-        "user the `reply` it returns, which is the architect's answer or a "
+        "Returns `deck_url` and `deck_view_url` at once (show `deck_url` to "
+        "the user) and a request_id; poll get_deck_status until it completes, "
+        "and show the user the `reply` it returns, which is the architect's answer or a "
         "summary of what changed. Only the deck's owner can edit it over MCP, "
         "and only decks made in Agent mode; for anything else, open the deck "
         "in Tellr."
@@ -1048,6 +1142,7 @@ async def _edit_deck_impl(
             )
 
             return {
+                **_deck_links(session_id, _public_app_url()),
                 "session_id": session_id,
                 "request_id": request_id,
                 "status": "pending",
@@ -1068,29 +1163,33 @@ async def _edit_deck_impl(
 
 @mcp.tool(
     name="get_deck",
+    structured_output=False,
     description=(
         "Retrieve the current state of a deck without submitting new work. "
-        "Returns structured slide data, a standalone HTML document, and "
-        "URLs into tellr's editor — same payload as a ready get_deck_status "
-        "response, without status/request_id/messages. Idempotent; no job "
-        "queue interaction. Use when you have a session_id from earlier and "
-        "want to re-render without polling."
+        "The response is a JSON part (`deck_url` and `deck_view_url` first, "
+        "then title and slide_count) plus a second part that is a **preview** "
+        f"HTML page of at most {MAX_PREVIEW_SLIDES} slides with standard fonts and images not "
+        "shown. The full deck and all editing are at `deck_url`; show "
+        "`deck_url` to the user. Idempotent; no job queue interaction. Use "
+        "when you have a session_id from earlier and want to see the deck "
+        "without polling."
     ),
 )
-async def get_deck(ctx: Context, session_id: str) -> dict:
-    return await _get_deck_impl(
+async def get_deck(ctx: Context, session_id: str) -> list[TextContent]:
+    reply = await _get_deck_impl(
         request=_request_from_context(ctx),
         session_id=session_id,
     )
+    return reply.to_content()
 
 
-async def _get_deck_impl(request: Request, session_id: str) -> dict:
+async def _get_deck_impl(request: Request, session_id: str) -> McpToolReply:
     """Implementation, separated from the decorated tool for testability.
 
     Idempotent read-only counterpart to ``get_deck_status``'s ready branch:
-    no job-queue interaction, no ``request_id``/``status``/``messages`` in
-    the response. Reuses ``_render_deck_response`` so the deck-shaped
-    fields stay identical to those in a ready ``get_deck_status`` reply.
+    no job-queue interaction, no ``request_id``/``status`` in the response.
+    Reuses ``_build_deck_reply`` so the deck-shaped fields stay identical to
+    those in a ready ``get_deck_status`` reply.
     """
     try:
         with mcp_auth_scope(request):
@@ -1108,12 +1207,14 @@ async def _get_deck_impl(request: Request, session_id: str) -> dict:
             deck_dict = sm.get_slide_deck(session_id) or {}
             base = _public_app_url()
 
-            deck_fields = _render_deck_response(deck_dict, session, base)
-
-            return {
-                "session_id": session_id,
-                **deck_fields,
-            }
+            return _build_deck_reply(
+                deck_dict,
+                session,
+                session_id,
+                base,
+                head={**_deck_links(session_id, base), "session_id": session_id},
+                tail={},
+            )
     except MCPToolError:
         raise
     except MCPAuthError as e:
