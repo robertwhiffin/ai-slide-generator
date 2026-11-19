@@ -22,7 +22,11 @@ from typing import Any, Mapping, Optional
 from src.domain.slide_deck import SlideDeck
 from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
 from src.utils.preview_css import google_fonts_imports, strip_embedded_font_faces, trim_css
-from src.utils.preview_images import hide_images_in_css, hide_images_in_html
+from src.utils.preview_images import (
+    hide_images_in_css,
+    hide_images_in_html,
+    share_repeated_svg_images,
+)
 
 MAX_PREVIEW_SLIDES = 10
 MCP_RESULT_BUDGET_BYTES = 150_000
@@ -41,14 +45,12 @@ _FRAME_CLASS = "tellr-preview-frame"
 # excluded as there. Unlike the app's host (``<body>`` itself), the frames are children of
 # ``<body>``, so ``flex:none`` stops a deck that lays its body out as a flex column (Legacy
 # decks and the app's own HTML export do) from shrinking them to fit the window.
-_FRAME_STYLE = (
-    "  <style>\n"
+_FRAME_RULES = (
     f".{_FRAME_CLASS}{{position:relative!important;width:1280px!important;"
     "height:720px!important;flex:none!important;overflow:hidden;margin:16px auto}\n"
     f".{_FRAME_CLASS}>:not(#tellr-host-frame-boost):not(.slide-wrapper){{"
     "position:absolute!important;inset:0!important;width:100%!important;"
     "height:100%!important;box-sizing:border-box!important;overflow:hidden}\n"
-    "  </style>"
 )
 _BOX_STYLE = (
     "font-family:system-ui,sans-serif;font-size:14px;padding:10px 16px;"
@@ -94,17 +96,23 @@ def _framed(slide_html: str) -> str:
     return f'<div class="{_FRAME_CLASS}">\n{slide_html}\n</div>'
 
 
-def _add_frame_style_and_strip(page: str, strip: str, *, has_deck_style: bool) -> str:
-    """Close ``<head>`` with the frame rules and open ``<body>`` with the strip.
+def _add_frame_style_and_strip(
+    page: str, strip: str, *, has_deck_style: bool, shared_css: str = ""
+) -> str:
+    """Close ``<head>`` with the frame rules (and any shared-image rules) and open
+    ``<body>`` with the strip.
 
     The deck's css cannot hold a style closer (``to_html_document`` neutralises them) and
     the title and script srcs are escaped, so the first head/body boundary after the
     deck's style block (or, with none, the first at all) is the document's own, whatever
-    text the css or the slides carry.
+    text the css or the slides carry. ``shared_css`` comes from
+    ``share_repeated_svg_images``, whose URIs percent-encode ``<``, so it cannot close the
+    block either.
     """
     at = page.index(_HEAD_BODY, page.index(_STYLE_END) if has_deck_style else 0)
     rest = page[at + len(_HEAD_BODY) :]
-    return f"{page[:at]}\n{_FRAME_STYLE}{_HEAD_BODY}{strip}\n{rest}"
+    style = f"  <style>\n{_FRAME_RULES}{shared_css}  </style>"
+    return f"{page[:at]}\n{style}{_HEAD_BODY}{strip}\n{rest}"
 
 
 def _note(shown: int, total: int) -> str:
@@ -142,23 +150,31 @@ def build_deck_preview(
     # their images are not counted.
     limit = max(0, min(total, max_slides))
     used_texts: list[str] = []
-    framed: list[dict] = []
+    prepared: list[dict] = []
     slide_hidden: list[int] = []
     for slide in slides[:limit]:
         slide_html, hidden = hide_images_in_html(slide.get("html") or "", svg_assets)
         scripts = slide.get("scripts") or ""
         used_texts.append(slide_html + "\n" + scripts)
-        framed.append({**slide, "html": _framed(slide_html), "scripts": scripts})
+        prepared.append({**slide, "html": slide_html, "scripts": scripts})
         slide_hidden.append(hidden)
 
     strip = _link_div(deck_url, _STRIP_COPY)
     for k in range(limit, 0, -1):
         trimmed = trim_css(css, "\n".join(used_texts[:k]))
         page_css = f"{imports}\n{trimmed}" if imports and trimmed else imports or trimmed
+        # An SVG shown on several of these slides (a logo in every footer) is sent once.
+        shown_htmls, shared_css = share_repeated_svg_images([s["html"] for s in prepared[:k]])
+        framed = [
+            {**slide, "html": _framed(slide_html)}
+            for slide, slide_html in zip(prepared[:k], shown_htmls)
+        ]
         page = SlideDeck.from_dict(
-            {**deck, "slides": framed[:k], "css": page_css}, title=title
+            {**deck, "slides": framed, "css": page_css}, title=title
         ).to_html_document()
-        page = _add_frame_style_and_strip(page, strip, has_deck_style=bool(page_css))
+        page = _add_frame_style_and_strip(
+            page, strip, has_deck_style=bool(page_css), shared_css=shared_css
+        )
         if k < total:
             left = total - k
             word = "slide" if left == 1 else "slides"

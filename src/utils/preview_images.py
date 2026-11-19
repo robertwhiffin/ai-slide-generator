@@ -15,6 +15,9 @@ The preview carries no image bytes and no base64. :func:`hide_images_in_html` an
 Only the edited values change; everything else comes back byte-for-byte, so the text is
 never parsed and re-serialised.
 
+:func:`share_repeated_svg_images` then sends an SVG that several ``<img>`` tags show (a logo
+on every slide) once, as a css background, instead of once per tag.
+
 Every pattern here runs in linear time on unclosed or malformed input: each repeated part
 stops at the first character it cannot contain (a ``url(`` body at a quote or paren, a tag
 body at a ``<`` outside quotes), and no two adjacent parts can both match the same run, so
@@ -27,10 +30,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import html as html_lib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Optional
-from urllib.parse import quote, unquote_to_bytes
+from urllib.parse import quote, unquote, unquote_to_bytes
 
 from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
 from src.utils.image_utils import IMAGE_PLACEHOLDER_PATTERN
@@ -292,6 +296,16 @@ def _rewrite_tag(match: re.Match, svg_assets: Mapping[int, str]) -> tuple[str, i
     return f"<{tag_name}{body}>", hidden
 
 
+def _img_src_key(raw: str) -> str:
+    """An ``<img src>`` attribute's value as the browser reads it (quotes and entities gone)."""
+    return html_lib.unescape(_unquote_attr(raw))
+
+
+def _is_text_svg_uri(value: str) -> bool:
+    head = value[: len(_SVG_URI_PREFIX)].lower()
+    return head == _SVG_URI_PREFIX and ";base64" not in value[: value.find(",") + 1].lower()
+
+
 def hide_images_in_html(html: str, svg_assets: Mapping[int, str]) -> tuple[str, int]:
     """Hide or inline every image source in slide *html*; returns ``(html, hidden_count)``.
 
@@ -312,3 +326,98 @@ def hide_images_in_html(html: str, svg_assets: Mapping[int, str]) -> tuple[str, 
     html, urls = _css_urls(html, svg_assets, reuse_quote=True)
     html, swept = _sweep(html, svg_assets, NOTICE_IMG_SRC, html=True)
     return html, total + urls + swept
+
+
+# ---------------------------------------------------------------------------
+# Repeated SVGs: sent once
+# ---------------------------------------------------------------------------
+
+SHARED_IMG_CLASS_PREFIX = "tellr-pv-img-"
+# The root ``<svg …>`` start tag, quote-aware.
+_SVG_ROOT = re.compile(r"<svg\b((?:\"[^\"]*\"|'[^']*'|[^'\"<>])*)>", re.IGNORECASE)
+# What gives an ``<img>`` its intrinsic size and shape.
+_SIZE_ATTRS = ("width", "height", "viewbox", "preserveaspectratio")
+
+
+def _sized_placeholder(svg_text: str) -> Optional[str]:
+    """An empty SVG URI with *svg_text*'s size and shape, or None when it has no root."""
+    root = _SVG_ROOT.search(svg_text)
+    if root is None:
+        return None
+    kept = [
+        f'{attr.group(1)}="{_unquote_attr(attr.group(2)).replace(chr(34), "")}"'
+        for attr in _ATTRIBUTE.finditer(root.group(1))
+        if attr.group(2) is not None and attr.group(1).lower() in _SIZE_ATTRS
+    ]
+    return svg_data_uri(" ".join(['<svg xmlns="http://www.w3.org/2000/svg"', *kept]) + "/>")
+
+
+def _rewrite_shared(match: re.Match, shared: Mapping[str, tuple[str, str]]) -> str:
+    """Point one ``<img>`` at its shared SVG: placeholder ``src`` plus the shared class."""
+    tag_name, body = match.group(1), match.group(2)
+    if tag_name.lower() != "img":
+        return match.group(0)
+    src_attr = class_attr = None
+    for attr in _ATTRIBUTE.finditer(body):
+        name = attr.group(1).lower()
+        if name == "src" and attr.group(2) is not None and src_attr is None:
+            src_attr = attr
+        elif name == "class" and class_attr is None:
+            class_attr = attr
+    if src_attr is None or _img_src_key(src_attr.group(2)) not in shared:
+        return match.group(0)
+    class_name, placeholder = shared[_img_src_key(src_attr.group(2))]
+    edits = [(src_attr.start(), src_attr.end(), f'src="{placeholder}"')]
+    if class_attr is None:
+        edits.append((src_attr.end(), src_attr.end(), f' class="{class_name}"'))
+    else:
+        existing = _unquote_attr(class_attr.group(2) or "").replace('"', "")
+        edits.append((class_attr.start(), class_attr.end(), f'class="{existing} {class_name}"'))
+    for start, end, replacement in sorted(edits, reverse=True):
+        body = body[:start] + replacement + body[end:]
+    return f"<{tag_name}{body}>"
+
+
+def share_repeated_svg_images(
+    htmls: Sequence[str], *, min_bytes: int = 512
+) -> tuple[list[str], str]:
+    """Send each SVG that two or more ``<img>`` tags show once; returns ``(htmls, css)``.
+
+    A text ``data:image/svg+xml,`` ``src`` of at least *min_bytes* that appears twice or more
+    across *htmls* becomes one ``css`` rule painting it as the image's background. Every
+    ``<img>`` that showed it gets that rule's class and an empty placeholder SVG with the
+    same ``width``/``height``/``viewBox``, so its box and layout do not change. Classes are
+    numbered in first-use order. ``css`` is ``""`` when nothing is shared.
+    """
+    counts: dict[str, int] = {}
+    for html in htmls:
+        for match in _IMG_OR_SOURCE_TAG.finditer(html):
+            if match.group(1).lower() != "img":
+                continue
+            for attr in _ATTRIBUTE.finditer(match.group(2)):
+                if attr.group(1).lower() == "src" and attr.group(2) is not None:
+                    value = _img_src_key(attr.group(2))
+                    if _is_text_svg_uri(value) and len(value) >= min_bytes:
+                        counts[value] = counts.get(value, 0) + 1
+                    break
+
+    shared: dict[str, tuple[str, str]] = {}
+    rules: list[str] = []
+    for value, uses in counts.items():
+        if uses < 2:
+            continue
+        svg_text = unquote(value[len(_SVG_URI_PREFIX):])
+        placeholder = _sized_placeholder(svg_text)
+        if placeholder is None or len(placeholder) >= len(value):
+            continue
+        class_name = f"{SHARED_IMG_CLASS_PREFIX}{len(shared) + 1}"
+        shared[value] = (class_name, placeholder)
+        rules.append(
+            f'.{class_name}{{background-image:url("{svg_data_uri(svg_text)}")!important;'
+            "background-size:100% 100%!important;background-repeat:no-repeat!important;"
+            "background-position:center!important}\n"
+        )
+    if not shared:
+        return list(htmls), ""
+    rewritten = [_IMG_OR_SOURCE_TAG.sub(lambda m: _rewrite_shared(m, shared), h) for h in htmls]
+    return rewritten, "".join(rules)
