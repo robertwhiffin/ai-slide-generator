@@ -4,12 +4,14 @@ A label is a product name, a version or one of a fixed list of feature names.
 Nothing here ever carries a prompt, deck content, user text or a customer name.
 The version lookup (``package_version``, and so ``system_product_kwargs``) returns
 a fallback instead of raising: a label must never be the reason a request or a
-deploy fails.
+deploy fails.  A user's product name is remembered under a SHA-256 of their token,
+never the token itself, so a client built in a worker thread can still be labelled.
 """
 
 from __future__ import annotations
 
 import hashlib
+import threading
 from functools import lru_cache
 from importlib import metadata
 from typing import Final
@@ -58,3 +60,60 @@ def hash_username(username: str) -> str:
 def system_product_kwargs() -> dict[str, str]:
     """``product=`` / ``product_version=`` for a client that runs as the app."""
     return {"product": PRODUCT_NAME_SYSTEM, "product_version": package_version()}
+
+
+#: At least as many tokens as the user-client cache holds at once.
+_MAX_TOKEN_PRODUCTS: Final[int] = 200
+#: SHA-256 of a user token -> that user's product name.  Never the token itself.
+_token_products: dict[str, str] = {}
+_token_products_lock = threading.Lock()
+
+
+def _token_key(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def remember_user_product(token: str, product: str) -> None:
+    """Record the product name of the user who owns ``token`` (oldest entry dropped at the cap).
+
+    Remembering a token again replaces its product name and makes it the newest entry.
+    """
+    key = _token_key(token)
+    with _token_products_lock:
+        _token_products.pop(key, None)
+        while len(_token_products) >= _MAX_TOKEN_PRODUCTS:
+            _token_products.pop(next(iter(_token_products)))
+        _token_products[key] = product
+
+
+def user_product_kwargs(token: str | None = None) -> dict[str, str]:
+    """``product=`` / ``product_version=`` for a client that runs as a user.
+
+    The product remembered for ``token`` (works in any thread), else the hash of
+    the request's user, else ``tellr-app-unknown``.  Makes no network call.
+    """
+    product: str | None = None
+    if token:
+        key = _token_key(token)
+        with _token_products_lock:
+            product = _token_products.get(key)
+    if product is None:
+        try:
+            from src.core.user_context import get_current_user
+
+            username = get_current_user()
+        except Exception:  # noqa: BLE001 - a label never fails a request
+            username = None
+        product = (
+            f"{PRODUCT_NAME_USER_PREFIX}{hash_username(username)}"
+            if username
+            else PRODUCT_NAME_UNKNOWN
+        )
+    return {"product": product, "product_version": package_version()}
+
+
+def mcp_user_agent() -> str:
+    """User-Agent of Tellr's MCP HTTP client: product first, the library's own kept after it."""
+    import httpx
+
+    return f"tellr/{package_version()} python-httpx/{httpx.__version__}"

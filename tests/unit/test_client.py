@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from src.core.attribution import package_version
 from src.core.databricks_client import (
     DatabricksClientError,
     create_user_client,
@@ -118,11 +119,13 @@ class TestUserClient:
                 # Verify two-stage creation: initial client then final with product tracking
                 assert mock_ws.call_count == 2
 
-                # Stage 1: Initial client to get username
+                # Stage 1: Initial client to get username, labelled as the app
                 mock_ws.assert_any_call(
                     host="https://test.cloud.databricks.com",
                     token="test-user-token-123",
                     auth_type="pat",
+                    product="tellr-app-system",
+                    product_version=package_version(),
                 )
 
                 # Stage 2: Final client with product tracking (hashed "test.user")

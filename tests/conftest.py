@@ -151,6 +151,28 @@ def clear_package_version_cache():
     package_version.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def forget_remembered_user_products():
+    """Forget every token's remembered product name before and after each test.
+
+    ``attribution`` keeps one process-wide map from a token's SHA-256 to its
+    user's product name, filled whenever a user client is built.  Tests reuse
+    fixed tokens for different users, and some fill the map to its cap, so a
+    label remembered under one test would name the user in the tests after it,
+    in that worker.  ``getattr``: the map may not exist yet (the fixture
+    predates it), and the teardown reads it again in case a test replaced it.
+    """
+    from src.core import attribution
+
+    remembered = getattr(attribution, "_token_products", None)
+    if remembered is not None:
+        remembered.clear()
+    yield
+    remembered = getattr(attribution, "_token_products", None)
+    if remembered is not None:
+        remembered.clear()
+
+
 @pytest.fixture
 def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).

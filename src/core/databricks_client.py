@@ -32,6 +32,8 @@ from src.core.attribution import (
     PRODUCT_NAME_USER_PREFIX,
     hash_username,
     package_version,
+    remember_user_product,
+    system_product_kwargs,
 )
 from src.core.user_context import get_current_user
 
@@ -408,8 +410,11 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
     the Databricks Apps proxy.
 
     Uses a two-stage creation process:
-    1. Create initial client to fetch the username
-    2. Recreate client with product tracking using hashed username
+    1. Create initial client to fetch the username, labelled as the app
+       (``tellr-app-system``) since the user is not known yet
+    2. Recreate client with product tracking using hashed username, and
+       remember that label for the token (``attribution.remember_user_product``)
+       so clients built from the same token in a worker thread carry it too
 
     Args:
         token: User's access token from request headers
@@ -449,6 +454,7 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
             host=host,
             token=token,
             auth_type="pat",
+            **system_product_kwargs(),
         )
 
         # Get username for product tracking (and, for the caller, the identity)
@@ -458,6 +464,10 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
             username = current_user.user_name or "unknown"
             user_hash = _hash_username(username)
             product_name = f"{PRODUCT_NAME_USER_PREFIX}{user_hash}"
+            # Only a resolved user is remembered: the fallback below must never
+            # replace a label already known for this token (``/Me`` is rate-limited,
+            # and a failed lookup is retried on the next request).
+            remember_user_product(token, product_name)
             logger.info(
                 "create_user_client: got username for product tracking",
                 extra={"username": username, "user_hash": user_hash},
