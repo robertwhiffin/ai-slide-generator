@@ -432,16 +432,25 @@ growth rule):
 | line-height 1.6, a 20 px run on line 2 | −4.35, −7.35, −6.07 | −0.19, −0.63, +0.65 |
 | line-height 26 px, a 20 px run on line 2 | −1.76, −3.76, −2.88 | −1.76, −0.88, −0.32 |
 
-**Nudges** (ruling R11h). A same-size `position: relative` move is no script: the run stays
-plain, and since no run carries a move, it stands on its line's baseline. Where the line also
-holds unmoved text, the line is placed from that text; where every word of it is moved, the
-whole line is placed where it is moved (20 px):
+**Nudges** (rulings R11h and R11k). A same-size `position: relative` move is no script: the run
+stays plain, and since no run carries a move, it stands on its line's baseline. Whether a box
+settles or moves is the box's: where every word of the whole box shares one move, the box is
+placed where it is moved; in any other box each nudged word settles on its line's baseline (a
+line all of it moved is then drawn off by its own move, and no line after it moves). Growth and
+spacing are always read from the settled lines, so a move is never growth. A "…" shares the
+move of the words of its line (20 px, line-height 29 px for three lines):
 
-| case | as a script (R11h's base) | every nudge put back on the baseline | now |
-|---|---|---|---|
-| "Revenue ▲ 12% up", the ▲ up 3 px | +0.12 | +0.12 | +0.12 |
-| the whole line up 3 px | +1.20 | +3.12 | −0.08 |
-| the whole line down 4 px | +21.20 | −4.08 | +0.08 |
+| case | as a script (R11h's base) | every nudge settled (r4) | per line (r5) | per box (now) |
+|---|---|---|---|---|
+| "Revenue ▲ 12% up", the ▲ up 3 px | +0.12 | +0.12 | +0.12 | +0.12 |
+| the whole line up 3 px | +1.20 | +3.12 | −0.08 | −0.08 |
+| the whole line down 4 px | +21.20 | −4.08 | +0.08 | +0.08 |
+| a line cut by its "…", moved down 4 px | – | −4.08 | −4.08 | +0.08 |
+| the same moved up 3 px | – | +2.92 | +0.04 | +0.04 |
+| three lines, line 2 down 4 px | – | −0.12, −3.68, +0.76 | −0.12, +0.48, +4.60 | −0.12, −3.68, +0.76 |
+| three lines, line 1 down 4 px | – | −4.12, +0.32, +0.76 | +0.04, +4.48, +4.60 | −4.12, +0.32, +0.76 |
+| three lines, line 2 up 3 px | – | −0.12, +3.32, +0.76 | −0.12, +3.32, +3.32 | −0.12, +3.32, +0.76 |
+| three lines in one span, down 4 px | – | −4.12, −3.68, −3.24 | +0.04, +0.48, +0.60 | +0.04, +0.48, +0.60 |
 
 ## Runs behind this record
 

@@ -128,6 +128,33 @@ PLAIN_WORDS = (
 )
 
 
+UP = "position:relative; top:-3px"
+DOWN = "position:relative; top:4px"
+ELLIPSIS_BOX = " width:150px; overflow:hidden; text-overflow:ellipsis;"
+THREE_LINES = (("Alpha", " one"), ("Gamma", " two"), ("Delta", " three"))
+
+
+def _three_lines(moves: tuple[str | None, ...] | str) -> ProbeSlide:
+    """Three 20 px lines at line-height 29 px, line n leading with #l<n>.
+
+    ``moves`` is each line's relative move (None: unmoved), or one move for a
+    span holding every line.
+    """
+    lines = [
+        f'<span id="l{number}">{word}</span>{rest}'
+        for number, (word, rest) in enumerate(THREE_LINES, start=1)
+    ]
+    if isinstance(moves, str):
+        inner = f'<span style="{moves}">{"<br>".join(lines)}</span>'
+    else:
+        inner = "<br>".join(
+            f'<span style="{move}">{line}</span>' if move else line
+            for line, move in zip(lines, moves)
+        )
+    words = tuple((word, f"#l{number}", 20) for number, (word, _) in enumerate(THREE_LINES, 1))
+    return ProbeSlide(_paragraph(20, "29px", inner), words)
+
+
 def _plain(line_height: str, words: tuple[tuple[str, int | None, str], ...]) -> ProbeSlide:
     """A 16 px paragraph whose line n leads with #l<n>, at its own size where one is given."""
     lines = []
@@ -223,6 +250,20 @@ SLIDES: dict[str, ProbeSlide] = {
     "nudge-whole-line-down": _one_line(
         20, f'<span style="position:relative; top:4px">{REVENUE} grew 12%</span>', "Revenue", None
     ),
+    # The same nudges in a line cut by its ellipsis, and in a box of three lines
+    # (ruling R11k): one line moved, or every line in one moved span.
+    "nudge-ellipsis-down": _one_line(
+        20, f'<span style="{DOWN}">{REVENUE} grew strongly this year</span>', "Revenue", None,
+        ELLIPSIS_BOX,
+    ),
+    "nudge-ellipsis-up": _one_line(
+        20, f'<span style="{UP}">{REVENUE} grew strongly this year</span>', "Revenue", None,
+        ELLIPSIS_BOX,
+    ),
+    "nudge-3-lines-line-2-down": _three_lines((None, DOWN, None)),
+    "nudge-3-lines-line-1-down": _three_lines((DOWN, None, None)),
+    "nudge-3-lines-line-2-up": _three_lines((None, UP, None)),
+    "nudge-3-lines-all-down": _three_lines(DOWN),
     # Paragraphs with no script run whose later lines the browser grows.
     "plain-1.4-28px-line-2": _plain(
         "1.4", (("Alpha", None, " body text"), ("Gamma", 28, " big figure"),

@@ -1521,21 +1521,22 @@ function createTextLayout(env) {
   // `rect` bounds every token; `body` the tokens set on the line's own
   // baseline, every run but a superscript or subscript, whose raise or drop
   // moves its rect off the line (null for a line of script runs alone), each
-  // where the renderers draw it (bodyBounds: a nudged token on the baseline of
-  // the line's unmoved text, or, where all of it is moved, the whole line
-  // where it is moved): the line is placed by its body, the script run
-  // carrying its shift itself.
+  // settled on that baseline (settledBounds: a nudged token unmoved), which is
+  // where the line is placed and its growth read; `movedBody` the same tokens
+  // where the browser moved them, and `nudge` the move they all share
+  // (sharedNudgeOf), which places a box all of whose text one move shares
+  // (textBlock). The script run carries its shift itself.
   function assembleLine(line, lineHeight) {
     const tokens = line.tokens;
     let first = 0;
     let last = tokens.length - 1;
     while (first <= last && tokens[first].collapsible) first++;
     while (last >= first && tokens[last].collapsible) last--;
-    const settles = holdsUnmovedText(tokens, first, last);
     const runs = [];
     const extents = [];
     let rect = null;
     let body = null;
+    let movedBody = null;
     let column = 0;
     let previousCollapsible = false;
     for (let index = first; index <= last; index++) {
@@ -1571,33 +1572,53 @@ function createTextLayout(env) {
         });
       }
       rect = unionBounds(rect, bounds);
-      if (!token.style.baseline) body = unionBounds(body, bodyBounds(token, settles));
-    }
-    if (tokens.length && !runs.length) return null;
-    return { runs, extents, rect, body, lineHeight };
-  }
-
-  // Whether tokens[first..last] hold text that no relative position nudges
-  // and no baseline shift moves: a word the line's baseline sets where the
-  // browser drew it (spaces paint nothing, so they do not count).
-  function holdsUnmovedText(tokens, first, last) {
-    for (let index = first; index <= last; index++) {
-      const token = tokens[index];
-      if (token.kind === 'text' && !token.style.baseline && !token.nudge && /\S/.test(token.text)) {
-        return true;
+      if (!token.style.baseline) {
+        body = unionBounds(body, settledBounds(token));
+        movedBody = unionBounds(movedBody, bounds);
       }
     }
-    return false;
+    if (tokens.length && !runs.length) return null;
+    return { runs, extents, rect, body, movedBody, nudge: sharedNudgeOf(tokens, first, last), lineHeight };
   }
 
-  // A text token's bounds where the renderers draw it on its line, which
-  // carries no relative position: with the line's unmoved text (`settles`,
-  // holdsUnmovedText), on that text's baseline, its rect less its nudge;
-  // where every word of the line is moved, the whole line is drawn where it
-  // is moved, and the token at its rect.
-  function bodyBounds(token, settles) {
+  // The relative move (slide px down) every word of tokens[first..last]
+  // shares, scripts included: 0 for none, NaN where they differ, and null
+  // where the tokens hold no word (spaces paint nothing, so they do not count).
+  function sharedNudgeOf(tokens, first, last) {
+    let shared = null;
+    for (let index = first; index <= last; index++) {
+      const token = tokens[index];
+      if (token.kind !== 'text' || !/\S/.test(token.text)) continue;
+      const nudge = token.nudge || 0;
+      if (shared === null) shared = nudge;
+      else if (shared !== nudge) return NaN;
+    }
+    return shared;
+  }
+
+  // The move every word of a box's lines shares, when it shares one that is
+  // not 0: then no word is where its line's baseline sets it, and the whole
+  // box is placed where it is moved (task-11 ruling R11k); 0 for a box whose
+  // words are unmoved or moved apart, whose nudged words settle on their
+  // lines' baselines.
+  function boxNudgeOf(lines) {
+    let shared = null;
+    for (let index = 0; index < lines.length; index++) {
+      const nudge = lines[index].nudge;
+      if (nudge === null || nudge === undefined) continue;
+      if (Number.isNaN(nudge)) return 0;
+      if (shared === null) shared = nudge;
+      else if (shared !== nudge) return 0;
+    }
+    return shared || 0;
+  }
+
+  // A text token's bounds settled on its line's baseline, which carries no
+  // relative position: its rect, less the move of a relative position that
+  // nudges it (its nudge).
+  function settledBounds(token) {
     const nudge = token.nudge || 0;
-    if (!nudge || !settles) return token.rect;
+    if (!nudge) return token.rect;
     const rect = token.rect;
     return { left: rect.left, top: rect.top - nudge, right: rect.right, bottom: rect.bottom - nudge };
   }
@@ -1823,12 +1844,18 @@ function createTextLayout(env) {
     const style = runStyle(ellipsis.context, scale);
     // The "…" stands on the line's own baseline, in the block's style: across,
     // it spans the line's body, the text no super- or subscript moves
-    // (assembleLine body), the whole line where all of it is moved.
+    // (assembleLine body), the whole line where all of it is moved. Chrome
+    // paints it unmoved, but the renderers draw it with its line, so where
+    // every word of the line shares one move it shares that move too (its
+    // nudge, at the moved body): it then neither settles a moved box nor,
+    // settled, moves a mixed one (task-11 ruling R11k).
+    const shared = sharedNudgeOf(tokens, 0, tokens.length - 1);
+    const nudge = shared ? shared : 0;
     let body = null;
-    const settles = holdsUnmovedText(tokens, 0, tokens.length - 1);
     for (let index = 0; index < tokens.length; index++) {
       const token = tokens[index];
-      if (token.kind === 'text' && !token.style.baseline) body = unionBounds(body, bodyBounds(token, settles));
+      if (token.kind !== 'text' || token.style.baseline) continue;
+      body = unionBounds(body, nudge ? token.rect : settledBounds(token));
     }
     const top = body ? body.top : line.top;
     const bottom = body ? body.bottom : line.bottom;
@@ -1844,6 +1871,7 @@ function createTextLayout(env) {
       tabSize: DEFAULT_TAB_SIZE,
       segment,
       origin: null,
+      nudge,
     });
     line.tokens = kept;
     const words = hidden.join('').trim();
@@ -2041,7 +2069,10 @@ function createTextLayout(env) {
   //   for left-aligned text, both sides for centred, left for right-aligned.
   // * Vertically it spans its lines: from the first line's top to the last
   //   line's bottom in normal flow, each line's text on its own baseline
-  //   (assembleLine body), so a superscript does not lift its line. Taken as
+  //   (assembleLine body), so a superscript does not lift its line, and a
+  //   nudged word settled on that baseline: the export moves no single run.
+  //   A box all of whose words one relative move shares is placed where they
+  //   are moved instead, whole (boxNudgeOf; task-11 ruling R11k). Taken as
   //   the union, so the box holds every line whatever order they come in.
   //   Its top is the first line's glyph top; the emitter (emit_text.cjs)
   //   raises the box by the first-line offset calibrated against PowerPoint
@@ -2052,6 +2083,7 @@ function createTextLayout(env) {
   //   past the browser's (scripts/export_fidelity/CALIBRATION.md, A3).
   function textBlock(layout, element, s, frame, placement) {
     const lines = layout.lines;
+    const moved = boxNudgeOf(lines) !== 0;
     let left = Infinity;
     let right = -Infinity;
     let top = Infinity;
@@ -2061,7 +2093,8 @@ function createTextLayout(env) {
       if (!rect) continue;
       // Across, a line is where its own baseline's text is: a superscript
       // stands above it and a subscript below it, carrying its shift itself.
-      const body = lines[index].body || rect;
+      // A box all of whose words one move shares is where they are moved.
+      const body = (moved ? lines[index].movedBody : lines[index].body) || rect;
       left = Math.min(left, rect.left);
       right = Math.max(right, rect.right);
       top = Math.min(top, body.top);

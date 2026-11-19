@@ -343,6 +343,22 @@ RELATIVE_LINES = {
 # The nudged lines placed from their text: one ▲ moved among plain words, and
 # a whole line moved up and down, by one span or by one span per word.
 NUDGED_LINES = ("nudge", "whole-line-up", "whole-line-down", "whole-line-two-spans")
+# R11k: the relative moves of the nudge cases below.
+NUDGE_DOWN = "position:relative; top:4px"
+NUDGE_UP = "position:relative; top:-3px"
+# A 150 px line cut by its ellipsis, all of its text in one nudged span.
+NUDGED_ELLIPSIS_MOVES = {"down": NUDGE_DOWN, "up": NUDGE_UP}
+# Three 20 px lines at line-height 29 px: the move of each line (None:
+# unmoved), or ALL_LINES for one span holding every line.
+ALL_LINES = "all"
+NUDGED_BLOCKS = {
+    "line-2-down": (None, NUDGE_DOWN, None),
+    "line-1-down": (NUDGE_DOWN, None, None),
+    "line-2-up": (None, NUDGE_UP, None),
+    "all-down": ALL_LINES,
+}
+NUDGED_BLOCK_WORDS = (("Alpha", " one"), ("Gamma", " two"), ("Delta", " three"))
+NUDGED_BLOCK_PITCH_PX = 29.0
 # Important 2 (round 4): script runs at the end of their line, and later lines
 # the browser grew, in a 20 px paragraph (40 px where named) at the left of the
 # slide. Each case: its font size, its line height (None: normal) and its
@@ -473,6 +489,26 @@ def _twin_list(angle_css: str) -> str:
         f'<div class="slide"><ol id="t" style="{base} left:640px; top:250px; '
         f'transform:rotate({angle_css});">{TWIN_LIST_ITEMS}</ol>'
         f'<ol id="w" style="{base} left:60px; top:540px;">{TWIN_LIST_ITEMS}</ol></div>'
+    )
+
+
+def _nudged_block(moves: tuple | str) -> str:
+    """Three lines at line-height 29 px, each moved as ``moves`` says (``NUDGED_BLOCKS``)."""
+    lines = [
+        f'<span id="l{number}">{word}</span>{rest}'
+        for number, (word, rest) in enumerate(NUDGED_BLOCK_WORDS, start=1)
+    ]
+    if moves == ALL_LINES:
+        inner = f'<span style="{NUDGE_DOWN}">{"<br>".join(lines)}</span>'
+    else:
+        inner = "<br>".join(
+            f'<span style="{move}">{line}</span>' if move else line
+            for line, move in zip(lines, moves)
+        )
+    return (
+        '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
+        f"margin:0; font-size:20px; line-height:{NUDGED_BLOCK_PITCH_PX:g}px; "
+        f'white-space:nowrap;">{inner}</p></div>'
     )
 
 
@@ -662,6 +698,17 @@ SLIDES: dict[str, str] = {
         )
         for name, (css_class, line, _, _) in RELATIVE_LINES.items()
     },
+    # R11k: nudged lines cut by an ellipsis, and nudges in a box of three lines.
+    **{
+        f"nudged-ellipsis-{name}": (
+            '<div class="slide"><p id="target" style="position:absolute; left:100px; '
+            "top:150px; margin:0; font-size:20px; white-space:nowrap; width:150px; "
+            f'overflow:hidden; text-overflow:ellipsis;"><span style="{move}">'
+            '<span id="lead">Revenue</span> grew strongly this year</span></p></div>'
+        )
+        for name, move in NUDGED_ELLIPSIS_MOVES.items()
+    },
+    **{f"nudged-block-{name}": _nudged_block(moves) for name, moves in NUDGED_BLOCKS.items()},
 }
 
 # R11a: each single-line vertical label, its text and the angle it is turned by.
@@ -2394,6 +2441,71 @@ class TestRelativeInlines:
         _, item = _text_item(_shapes(rotation_pptx, slide), "Revenue", slide)
 
         _assert_placed_from_its_text(item, _document(slide), f"the {name} line")
+
+    @pytest.mark.parametrize("name", list(NUDGED_ELLIPSIS_MOVES))
+    def test_a_nudged_line_cut_by_an_ellipsis_is_placed_from_its_moved_text(
+        self, rotation_pptx: bytes, name: str
+    ) -> None:
+        """R11k: a line all of whose text one span moves, cut by its ellipsis.
+
+        Chrome paints the "…" unmoved, but no run can carry a move, so the
+        export draws it with its line; the "…" shares the line's move, so the
+        line is still all moved and is placed from its moved text: the box top
+        is the first-line offset above the moved "Revenue"'s glyph top, within
+        1 px. Taken as unmoved text, the "…" would settle the line, 4 px high.
+        """
+        slide = f"nudged-ellipsis-{name}"
+        _, item = _text_item(_shapes(rotation_pptx, slide), "Revenue", slide)
+        assert item.text.endswith(ELLIPSIS), f"fixture drift: the line is not cut: {item.text!r}"
+
+        _assert_placed_from_its_text(item, _document(slide), f"the {name} ellipsis line")
+
+    @pytest.mark.parametrize("name", list(NUDGED_BLOCKS))
+    def test_a_nudge_in_a_box_of_three_lines_moves_no_other_line(
+        self, rotation_pptx: bytes, name: str
+    ) -> None:
+        """R11k: settled or moved is the box's, and growth is read from settled lines.
+
+        Three 20 px lines at line-height 29 px:
+        * one line moved by a span of its own (down 4 px, or up 3 px), the
+          others unmoved: the box is mixed, so the moved line settles on the
+          baseline its spacing gives it and the unmoved lines keep their place:
+          the box top is the first-line offset above the unmoved grid's first
+          line, and the lines after the first carry the plain spacing as space
+          before (29 - 1.2 x 20 = 5 px, 3.75 pt), no growth;
+        * every line in one span moved down 4 px: the box is moved, its top
+          the offset above the moved first line, and its spacing plain again.
+        Within 1 px; spcBef within a hundredth of a point.
+        """
+        slide = f"nudged-block-{name}"
+        document = _document(slide)
+        rects = browser_each_rect(document, "#l1, #l2, #l3")
+        moves = NUDGED_BLOCKS[name]
+        unmoved = (
+            [0] if moves == ALL_LINES else [index for index, move in enumerate(moves) if not move]
+        )
+        tops = [rects[index]["y"] - index * NUDGED_BLOCK_PITCH_PX for index in unmoved]
+        assert max(tops) - min(tops) <= GEOMETRY_TOLERANCE_PX, f"fixture drift: {rects}"
+        style = browser_style(document, "#target")
+        family = style["fontFamily"].split(",")[0].strip().strip("\"'")
+        ascent = browser_ascent(document, family, int(style["fontWeight"]), SUPERSCRIPT_SIZE_PX)
+        expected = single_line_box_top(tops[0], SUPERSCRIPT_SIZE_PX, ascent)
+        _, item = _text_item(_shapes(rotation_pptx, slide), "Alpha", slide)
+
+        assert abs(item.y - expected) <= GEOMETRY_TOLERANCE_PX, (
+            f"{slide}: its box top is {item.y:.2f}, the unmoved lines' first line needs "
+            f"{expected:.2f} (off by {item.y - expected:.2f})"
+        )
+        spacing = _gap_px(SUPERSCRIPT_SIZE_PX, NUDGED_BLOCK_PITCH_PX) * PT_PER_PX
+        for word, _ in NUDGED_BLOCK_WORDS[1:]:
+            paragraph = _paragraph_opening_with(item, word, slide)
+            assert (
+                paragraph.space_before_pt is not None
+                and abs(paragraph.space_before_pt - spacing) <= SPACE_BEFORE_TOLERANCE_PT
+            ), (
+                f"{slide}: {word!r}'s paragraph has spcBef {paragraph.space_before_pt}; the "
+                f"plain spacing is {spacing:.2f} pt, and a nudge is no growth"
+            )
 
 
 def _script_line_body(name: str) -> str:
