@@ -8,7 +8,9 @@ export interface Slide {
   scripts: string;  // JavaScript for this slide's charts (e.g., Chart.js initialization)
   verification?: VerificationResult;  // LLM as Judge verification result (merged from verification_map)
   content_hash?: string;  // Hash of slide content for verification lookup
-  speaker_notes?: string;  // Plain-text speaker notes; never HTML
+  talk_track?: string;  // Plain-text talk track (what the presenter says); never HTML
+  talk_track_source?: 'model' | 'user' | null;  // Who wrote the talk track last
+  speaker_notes?: string;  // Plain-text notes (what the presenter needs to know); never HTML
   speaker_notes_source?: 'model' | 'user' | null;
   created_by?: string;
   created_at?: string;   // ISO 8601 timestamp

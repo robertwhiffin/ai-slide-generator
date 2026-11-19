@@ -11,6 +11,7 @@ import type { SlideDeck, Slide, SlideContext, StageSlideContext, ReplacementInfo
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayItem, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
+import { presenterPaneText } from './presenterText';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -1842,7 +1843,7 @@ export const api = {
         session_id: sessionId || null,
         title: deck.title || 'slides',
         images,
-        notes: deck.slides.map((s) => s.speaker_notes ?? ''),
+        notes: deck.slides.map((s) => presenterPaneText(s)),
         width_px: 1280,
         height_px: 720,
       }),

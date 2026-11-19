@@ -23,6 +23,7 @@ import {
   type ExtractRecordsResult,
 } from './sandboxedExportFrame';
 import { trustedExportRuntimeMarkup } from './exportFrameRuntime';
+import { presenterPaneText } from './presenterText';
 
 export { WALKER_SOURCE } from './exportWalkerSource';
 
@@ -123,11 +124,7 @@ export function buildCompositeHtml(deck: SlideDeck): string {
   // Escape '<' so a literal "</script>" inside notes cannot close the JSON
   // element; \u003c parses back to '<' via JSON.parse.
   const notes = JSON.stringify(
-    slides.map((s) => {
-      const legacy = (s as unknown as { notes?: string }).notes;
-      // A present speaker_notes string wins even when empty (server rule, slide_notes_text).
-      return typeof s.speaker_notes === 'string' ? s.speaker_notes : legacy || '';
-    }),
+    slides.map((s) => presenterPaneText(s as unknown as { talk_track?: string; speaker_notes?: string; notes?: string })),
   ).replace(/</g, '\\u003c');
 
   // F-CR-25: CSP stays first; the trusted runtime follows. Slide scripts still

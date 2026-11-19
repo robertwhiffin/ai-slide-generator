@@ -935,11 +935,21 @@ async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsReques
 
 
 def slide_notes_text(slide: dict) -> str:
-    """Speaker notes for a slide dict: ``speaker_notes`` when it is a str, else ``notes``."""
+    """Notes pane text: the talk track, then "Notes:", then the notes.
+
+    ``speaker_notes`` wins whenever it is a str, even "" (a cleared note never
+    comes back from a stale ``notes`` key). ``notes`` is read only when
+    ``speaker_notes`` is absent or not a str. A non-str talk track counts as "".
+    Each field is stripped. With one field empty, only the other is returned.
+    """
     sn = slide.get("speaker_notes")
-    if isinstance(sn, str):
-        return sn
-    return slide.get("notes") or ""
+    notes = sn if isinstance(sn, str) else (slide.get("notes") or "")
+    talk = slide.get("talk_track")
+    talk = talk if isinstance(talk, str) else ""
+    talk, notes = talk.strip(), notes.strip()
+    if talk and notes:
+        return f"{talk}\n\nNotes:\n{notes}"
+    return talk or notes
 
 
 class ExportPPTXFromImagesRequest(BaseModel):

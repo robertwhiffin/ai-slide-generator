@@ -3,6 +3,10 @@
 Covers the shared ``slide_notes_text`` helper, the screenshot PPTX route
 (``/pptx/editable/from-images``), the Google Slides huashu route, and a
 regression lock on the huashu PPTX route.
+
+Presenter plan Task 3: the notes pane holds the talk track, then a line
+``Notes:``, then the notes. With one field empty, only the other is written,
+with no heading. Surrounding whitespace on each field is trimmed.
 """
 
 import base64
@@ -56,6 +60,21 @@ def _deck() -> dict:
 EXPECTED_DECK_NOTES = ["Say A.", "Legacy B.", ""]
 
 
+# Presenter plan Task 3: slides with both fields, talk track only, notes only.
+def _two_field_deck() -> dict:
+    return {
+        "title": "Two-field deck",
+        "slides": [
+            {"html": "<div class='slide'>A</div>", "talk_track": "Say A.", "speaker_notes": "Know A."},
+            {"html": "<div class='slide'>B</div>", "talk_track": "Say B.", "speaker_notes": ""},
+            {"html": "<div class='slide'>C</div>", "speaker_notes": "Know C."},
+        ],
+    }
+
+
+EXPECTED_TWO_FIELD_NOTES = ["Say A.\n\nNotes:\nKnow A.", "Say B.", "Know C."]
+
+
 # ---------------------------------------------------------------------------
 # slide_notes_text
 # ---------------------------------------------------------------------------
@@ -80,6 +99,62 @@ def test_slide_notes_text_prefers_speaker_notes(slide, expected):
     from src.api.routes.export import slide_notes_text
 
     assert slide_notes_text(slide) == expected
+
+
+# Presenter plan Task 3: talk track, then "Notes:", then notes.
+
+
+def test_pane_has_talk_track_then_notes_heading_then_notes():
+    # Sabotage target: notes before the talk track, or a missing/renamed "Notes:" heading.
+    from src.api.routes.export import slide_notes_text
+
+    assert (
+        slide_notes_text({"talk_track": "Say A.", "speaker_notes": "Know B."})
+        == "Say A.\n\nNotes:\nKnow B."
+    )
+
+
+def test_talk_track_only_has_no_heading():
+    # Sabotage target: always write the "Notes:" heading, or ignore talk_track.
+    from src.api.routes.export import slide_notes_text
+
+    assert slide_notes_text({"talk_track": "Say A.", "speaker_notes": ""}) == "Say A."
+
+
+def test_notes_only_slide_exports_unchanged():
+    # Review Focus 2: a pre-migration slide (no talk_track) exports exactly as before.
+    from src.api.routes.export import slide_notes_text
+
+    assert slide_notes_text({"speaker_notes": "Know B."}) == "Know B."
+
+
+def test_legacy_notes_key_still_read_when_speaker_notes_absent():
+    from src.api.routes.export import slide_notes_text
+
+    assert slide_notes_text({"notes": "old"}) == "old"
+
+
+def test_cleared_notes_stay_cleared():
+    from src.api.routes.export import slide_notes_text
+
+    assert slide_notes_text({"speaker_notes": "", "notes": "old"}) == ""
+
+
+def test_each_field_is_trimmed_before_joining():
+    # Sabotage target: drop the .strip() on either field.
+    from src.api.routes.export import slide_notes_text
+
+    assert (
+        slide_notes_text({"talk_track": "  Say A.\n", "speaker_notes": "\n Know B.  "})
+        == "Say A.\n\nNotes:\nKnow B."
+    )
+    assert slide_notes_text({"talk_track": "   ", "speaker_notes": " Know B.\n"}) == "Know B."
+
+
+def test_non_string_talk_track_is_ignored():
+    from src.api.routes.export import slide_notes_text
+
+    assert slide_notes_text({"talk_track": None, "speaker_notes": "Know B."}) == "Know B."
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +253,9 @@ def google_huashu_env(monkeypatch):
     )
     monkeypatch.setattr("src.services.pptx_from_html_huashu.build_pptx_huashu", fake_build)
 
+    # Tests may swap the deck via recorded["chat"].get_slides.return_value.
+    recorded["chat"] = chat
+
     app.dependency_overrides[get_db] = lambda: MagicMock()
     try:
         yield recorded
@@ -193,13 +271,22 @@ def test_google_slides_from_huashu_sends_speaker_notes(client, google_huashu_env
     assert [s["notes"] for s in sent] == EXPECTED_DECK_NOTES
 
 
+def test_google_slides_from_huashu_sends_talk_track_then_notes(client, google_huashu_env):
+    # Presenter plan Task 3. Sabotage target: google_slides.py from-huashu bypasses
+    # slide_notes_text, or the helper drops talk_track.
+    google_huashu_env["chat"].get_slides.return_value = _two_field_deck()
+    resp = client.post(GOOGLE_FROM_HUASHU, json={"session_id": "s1"})
+    assert resp.status_code == 200, resp.text
+    sent = google_huashu_env["slides_html"]
+    assert [s["notes"] for s in sent] == EXPECTED_TWO_FIELD_NOTES
+
+
 # ---------------------------------------------------------------------------
 # /pptx/editable/huashu/from-html (regression lock)
 # ---------------------------------------------------------------------------
 
 
-def test_huashu_export_sends_speaker_notes(client, monkeypatch):
-    # Sabotage target: return "" from slide_notes_text (or drop speaker_notes at the huashu route).
+def _run_huashu_export(client, monkeypatch, deck: dict) -> list[dict]:
     recorded: dict = {}
 
     def fake_build(title, slides_html, *, bypass_validation=False):
@@ -207,7 +294,7 @@ def test_huashu_export_sends_speaker_notes(client, monkeypatch):
         return b"x", []
 
     chat = MagicMock()
-    chat.get_slides.return_value = _deck()
+    chat.get_slides.return_value = deck
 
     ex = "src.api.routes.export"
     monkeypatch.setattr(f"{ex}._check_deck_permission_for_session", lambda *a, **k: None)
@@ -218,4 +305,17 @@ def test_huashu_export_sends_speaker_notes(client, monkeypatch):
 
     resp = client.post(HUASHU_FROM_HTML, json={"session_id": "s1"})
     assert resp.status_code == 200, resp.text
-    assert [s["notes"] for s in recorded["slides_html"]] == EXPECTED_DECK_NOTES
+    return recorded["slides_html"]
+
+
+def test_huashu_export_sends_speaker_notes(client, monkeypatch):
+    # Sabotage target: return "" from slide_notes_text (or drop speaker_notes at the huashu route).
+    sent = _run_huashu_export(client, monkeypatch, _deck())
+    assert [s["notes"] for s in sent] == EXPECTED_DECK_NOTES
+
+
+def test_huashu_export_sends_talk_track_then_notes(client, monkeypatch):
+    # Presenter plan Task 3. Sabotage target: the huashu route bypasses slide_notes_text,
+    # or the helper drops talk_track.
+    sent = _run_huashu_export(client, monkeypatch, _two_field_deck())
+    assert [s["notes"] for s in sent] == EXPECTED_TWO_FIELD_NOTES
