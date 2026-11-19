@@ -14,7 +14,7 @@ Presentation mode displays slides in a keyboard-navigable viewer that shows one 
 | Present (fullscreen) | F key or toolbar button inside the overlay | Browser fullscreen (`document.documentElement.requestFullscreen()`) |
 | Start at current slide | "Present" button | Opens at whichever slide is most visible in the scroll viewport (or the selected one) |
 | Download HTML | "Export" → "Save as HTML" in SlidePanel header | Standalone `.html` file with all slides |
-| Presenter view | P key or "Presenter view" toolbar button inside the overlay | A second window with the talk track and a preview of the next slide, driven by this overlay (see `presenter-view.md`) |
+| Presenter view | P key or "Presenter view" toolbar button inside the overlay | A second window with the talk track, previews of this slide and the next, and a Notes panel, driven by this overlay (see `presenter-view.md`) |
 | Debug mode | `?debug=true` or `localStorage.debug='true'` | Shows Raw HTML tabs |
 
 ---
@@ -429,6 +429,8 @@ The overlay has three pieces of chrome, all of which **auto-hide in fullscreen**
 - Presentation mode opens the presenter window with P (without Cmd, Ctrl or Alt) or the "Presenter view" toolbar button. Both need a `sessionId`.
 - While open, it posts its state (`index`, `total`, `deckVersion`) on a per-session `BroadcastChannel` when it joins, on every slide change, and once a second. It also applies `next`, `prev` and `goto` commands from the presenter, clamped to the deck.
 - This overlay is the only source of truth for the current slide. See `presenter-view.md` for the message shapes and timing.
+- A presenter opened mid-deck learns the slide from the next state message, within one second. It shows no link status in this release.
+- In the presenter window, N or its Notes button slides a Notes panel in from the right, over the Up next preview only. The talk track, Coming up and the current slide's preview stay as they are. This is separate from the N panel in this overlay.
 
 ---
 

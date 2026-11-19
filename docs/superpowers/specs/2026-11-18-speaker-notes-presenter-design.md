@@ -1,6 +1,9 @@
 # Speaker notes and presenter view: design
 
-**Status.** Approved by the author on 2026-11-18, all four sections.
+**Status.** Approved by the author on 2026-11-18, all four sections. Changed by the author on
+2026-11-19 in sections 1, 3 and 4: three drawer tabs instead of two stacked boxes, a notes panel
+over Up next instead of a bottom drawer, and link status and "Open presentation" deferred to a
+later pull request.
 
 **Goal.** Every Tellr deck arrives with a talk track and notes for each slide. A presenter can
 read them in a private presenter window while the audience sees only the slides. People can edit
@@ -23,14 +26,19 @@ slide (`data-whole-say` in html-it).
 **While building.** The user asks for a deck as usual. Each slide arrives with a talk track and
 notes the agent wrote. No extra steps, and no extra model calls.
 
-**In the editor.** The drawer's Notes tab holds two labeled boxes, each with its own Save:
+**In the editor.** The drawer has three tabs, "AI feedback", "Talk track" and "Notes". Each of the
+two new tabs holds one box with its own Save:
 - **Talk track:** "What you say." Two to four short spoken beats, ending on the slide's question.
 - **Notes:** "What you need to know." Sources for each figure, the likely question and its answer,
   and what to stress.
 
 Text a person saves is kept when the agent rebuilds the slide. Text the agent wrote is refreshed
-when the slide is rebuilt. The hint reads: "Chat rewrites the talk track only when it rebuilds the
-slide." Chat cannot edit notes on their own in this release.
+when the slide is rebuilt. The hint sits beside "Save talk track" and reads: "Chat rewrites the
+talk track only when it rebuilds the slide." Chat cannot edit notes on their own in this release.
+A read-only viewer of a slide with no talk track sees "No talk track for this slide."
+
+*Changed by the author on 2026-11-19.* The first build stacked both boxes on one Notes tab. At the
+drawer's height that needed a scroll, so each box now has its own tab.
 
 **When presenting.**
 - Present works as today.
@@ -40,14 +48,22 @@ slide." Chat cannot edit notes on their own in this release.
   - **Read aloud**: the talk track, large;
   - **Coming up**: the next slide's title and the first beat of its talk track;
   - **On screen now** and **Up next**: previews of the current and next slide;
-  - a **Notes** drawer, opened with N or a button;
-  - a bottom bar with Back, Next, a key hint, and a "Slides: linked" status.
+  - a bottom bar with Back, Next, Notes and a key hint.
+- N or the Notes button slides a **Notes** panel in from the right. It lies exactly over the Up
+  next preview, from the previews' label row to just above the bottom bar. It has a small eyebrow,
+  "Notes · this slide", and the heading "Notes". The header, Read aloud, Coming up and On screen
+  now stay as they are. Esc closes it. The page fits the window open or closed, with no scrolling.
 - Next and Back in either window move both.
 - The first time it opens, the window says: "Share only the slides window. Full screen on one
   screen will cover this window."
 - The presenter window is read-only in this release.
 - The existing N panel over the slides stays as the one-screen option, hidden by default. It
   shows the talk track.
+
+*Changed by the author on 2026-11-19.* The first build opened the notes as a drawer below the
+previews. At 1900x1036 the presenter had to scroll to read the notes, and then lost sight of Read
+aloud. The panel follows html-it 0.5.1's presenter notes drawer, but covers only Up next. The link
+status ("Slides: linked") and the "Open presentation" button move to a later pull request.
 
 **Exports.** The PowerPoint and Google Slides notes pane holds the talk track, then a "Notes:"
 heading, then the notes. (html-it 0.5.1 writes only the script; this is a deliberate extension.)
@@ -111,14 +127,19 @@ start with empty text but get the editor, presenter view, and exports.
 - **Sync.** Both windows join a same-origin `BroadcastChannel` named `tellr-present:<sessionId>`.
   Presentation mode is the only source of truth. It posts `{type: "state", index, total,
   deckVersion}` on every slide change and every second while open. The presenter posts
-  `{type: "cmd", action: "next" | "prev" | "goto", index?}` and renders only what arrives. "Slides:
-  linked" shows while state messages arrive; after three seconds without one it reads "Slides: not
-  linked" and offers "Open presentation".
+  `{type: "cmd", action: "next" | "prev" | "goto", index?}` and renders only what arrives. A
+  presenter opened mid-deck learns the slide from the next state message.
+- **Link status (deferred, 2026-11-19).** The "Slides: linked" status, the "Open presentation"
+  button and the three-second timeout are not in this release. They will come in a later pull
+  request, with the `my_permission` field the button needs.
 - **Previews.** Both previews reuse the existing sandboxed slide frame (`sandbox="allow-scripts"`,
   no same-origin) at a reduced scale. They are passive in this release.
 - **Freshness.** The presenter refetches the deck when `deckVersion` changes.
 - **Keys in the presenter window.** Right and Left (or Space and Backspace) send next and prev; N
-  toggles the Notes drawer; Esc closes the drawer.
+  toggles the Notes panel; Esc closes the panel.
+- **Notes panel.** Positioned against the previews row over the Up next column, so it takes no
+  space and moves nothing. It slides in with a short transform transition, and with none under
+  `prefers-reduced-motion`. Long notes scroll inside it.
 
 ## 4. Testing (approved)
 
@@ -126,11 +147,12 @@ start with empty text but get the editor, presenter view, and exports.
   arrival path (Agent-mode builder and fixer, `Legacy mode` parse and replacement, user HTML save,
   notes-only save); the export helper writes talk track, then "Notes:", then notes; the migration
   adds the two new columns idempotently.
-- **Frontend unit (Vitest).** Notes tab with two boxes and separate saves; presenter page renders
-  each section; channel sync both ways; P and the button open the window; the first-run hint;
-  "not linked" after silence.
+- **Frontend unit (Vitest).** Talk track and Notes tabs, each with its box and its own save;
+  presenter page renders each section; channel sync both ways; P and the button open the window;
+  the first-run hint; the Notes panel over Up next, with the top section unchanged; no link status.
 - **End to end (Playwright).** Open a deck, present, open the presenter view, step both ways, and
-  check the talk track and notes shown match the stored fields.
+  check the talk track and notes shown match the stored fields. With the notes open, check that the
+  panel lies over Up next, Read aloud keeps its width, and the page does not scroll.
 - **Eval harness.** Builder candidate against `v1-baseline` on the train split, then held-out once
   on the finalist. Report pass rate, output tokens, and latency in the PR.
 - **Live check on a local Tellr.** Build decks in Agent mode with no design system and confirm

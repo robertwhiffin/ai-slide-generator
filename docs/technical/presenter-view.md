@@ -11,7 +11,7 @@ The presenter view is a second, private window that shows what to say and what c
 | Open the presenter view | P in presentation mode, or the "Presenter view" toolbar button | A pop-up window opens at `/sessions/<id>/present`, or the open one comes to the front |
 | Follow the slides | Automatic | The presenter shows the slide presentation mode reports, within one second |
 | Step from the presenter | Next and Back buttons, Right and Left, Space and Backspace, Page Down and Page Up (what most presentation clickers send) | The presenter asks presentation mode to move; both windows then show the new slide |
-| Read the notes | N or the Notes button in the presenter | A drawer with the slide's notes opens; Esc closes it |
+| Read the notes | N or the Notes button in the presenter | A panel with the slide's notes slides in over the Up next preview; N, the button or Esc closes it |
 | One-screen option | N in presentation mode | A panel over the slides shows the talk track, or the notes when there is no talk track |
 
 The presenter page shows, top to bottom:
@@ -20,12 +20,28 @@ The presenter page shows, top to bottom:
 2. **Read aloud:** the talk track in large type, one paragraph per beat. Beats are separated by a blank line.
 3. **Coming up:** the next slide's title and the first beat of its talk track, or "End of deck".
 4. **On screen now** and **Up next:** passive previews of the current and the next slide.
-5. The Notes drawer, closed by default.
-6. A bottom bar with Back, Next, Notes, a key hint, and the link status.
+5. A bottom bar with Back, Next, Notes and a key hint.
+
+The Notes panel is closed by default. When open, it covers only the Up next preview (see "The Notes Panel" below).
+
+The page always fits the window, so it never scrolls. The previews take the space left under Coming up, and never less than 40% of the page. Each preview is the largest 16:9 box that fits its column and that height. A long talk track scrolls inside Read aloud, so the previews keep their room.
 
 The first time the page opens, it shows: "Share only the slides window. Full screen on one screen will cover this window." The `localStorage` key `tellr-presenter-hint-seen` is set as soon as the hint shows, so it appears once per browser. A "Got it" button hides it right away.
 
 The elapsed clock starts when the presenter page loads, not when the first slide changes.
+
+---
+
+## The Notes Panel
+
+The panel follows the presenter notes drawer in html-it 0.5.1 (`template-present-notes.html`): the eyebrow, the heading and the slide-in. Its look is Tellr's own dark presenter palette and fonts. Unlike html-it's drawer, which runs the full height of the right side, it covers only the Up next preview, so the talk track always stays whole (the author's choice, 2026-11-19).
+
+- **Where it sits.** It lies exactly over the Up next column. Its left and right edges are Up next's. Its top is the label row of the two previews, and it reaches down to just above the bottom bar. It is positioned against the previews row (`position: absolute`), so it takes no space and moves nothing.
+- **What stays in view.** The header, Read aloud, Coming up and On screen now keep their size and place, open or closed. Back, Next and Notes stay in the bottom bar.
+- **What it shows.** A small uppercase eyebrow, "Notes · this slide", then the heading "Notes", then the slide's notes, one paragraph per block. A blank line separates blocks. A slide without notes reads "No speaker notes for this slide." Long notes scroll inside the panel.
+- **Opening and closing.** N and the Notes button (`aria-label="Show notes"`, pressed while open) toggle it. Esc closes it. Neither key moves the slides.
+- **Motion.** It slides in from the right with a 280 ms transform transition. Closed, it waits just past the right edge and is hidden (`visibility: hidden`, `aria-hidden`), so it is out of the tab order. Under `prefers-reduced-motion` it appears and disappears with no transition.
+- **Last slide.** There is no Up next preview, and the panel opens over the same column.
 
 ---
 
@@ -63,7 +79,7 @@ A pop-up blocker can still refuse. Then `openPresenterWindow` returns `null`, no
 
 ## The Channel
 
-Both windows join a same-origin `BroadcastChannel` named `tellr-present:<sessionId>`. Each session has its own channel, so two decks presented at once never mix. When `BroadcastChannel` is unavailable, `joinPresenterChannel` does nothing, and the presenter reads "Slides: not linked" without an error.
+Both windows join a same-origin `BroadcastChannel` named `tellr-present:<sessionId>`. Each session has its own channel, so two decks presented at once never mix. When `BroadcastChannel` is unavailable, `joinPresenterChannel` does nothing. The presenter then stays on slide 1 without an error.
 
 | Message | Sent by | Shape |
 | --- | --- | --- |
@@ -78,12 +94,8 @@ Both windows join a same-origin `BroadcastChannel` named `tellr-present:<session
 ### Timing
 
 - Presentation mode posts a state message when it joins, on every slide change, and every `STATE_HEARTBEAT_MS` (1000 ms) while open. Closing presentation mode clears the heartbeat and closes the channel.
-- The presenter reads "Slides: linked" while state messages arrive. After `LINK_TIMEOUT_MS` (3000 ms) with none, it reads "Slides: not linked" and offers "Open presentation". Each state message restarts that timer.
-- Before the first state message, the presenter shows slide 1 and "Slides: not linked".
-
-### "Open presentation"
-
-The button focuses the window that opened the presenter (`window.opener`) when it is still there. With no opener, it opens a new tab and never replaces the presenter. A viewer (`my_permission: 'CAN_VIEW'` in the `getSlides` response) gets `/sessions/<id>/view`. Everyone else gets `/sessions/<id>/edit`. From there the user presses Present again, and the link returns with its first state message.
+- Before the first state message, the presenter shows slide 1. A presenter opened mid-deck learns the slide from the next heartbeat, within one second.
+- The presenter shows no link status in this release. A "Slides: linked" status and an "Open presentation" button are planned for a later release.
 
 ---
 
@@ -104,21 +116,22 @@ Presentation mode snapshots the deck when it opens, so chat edits do not reload 
 
 ## Previews
 
-Each preview is a 16:9 box holding a 1280x720 frame built with `buildSlideDocument`, laid out with `slideHostFrameStyle`, and scaled to the box width. The frames use `sandbox="allow-scripts"` without same-origin access, like every other slide frame, and `pointer-events: none`. They are passive in this release. On the last slide only "On screen now" shows.
+Each preview is a 16:9 box holding a 1280x720 frame built with `buildSlideDocument`, laid out with `slideHostFrameStyle`, and scaled to the box width. The box is sized in script to the largest 16:9 rectangle that fits its column's width and height, as html-it's presenter does. The frames use `sandbox="allow-scripts"` without same-origin access, like every other slide frame, and `pointer-events: none`. They are passive in this release. On the last slide only "On screen now" shows.
 
 ---
 
 ## Read-Only Scope
 
-The presenter page has no text box, editor or save control. Talk tracks and notes are edited in the editor's Notes tab. The page can only step the slides and open or close the Notes drawer.
+The presenter page has no text box, editor or save control. Talk tracks and notes are edited in the editor drawer, on its "Talk track" and "Notes" tabs. The page can only step the slides and open or close the Notes panel.
 
 ---
 
 ## Testing
 
 - `frontend/src/services/__tests__/presenterChannel.test.ts`: names and timings, round trips, the shape check, window reuse per session, and a blocked pop-up.
-- `frontend/src/components/Presenter/PresenterPage.test.tsx`: the layout, stepping only on state messages, the link timeout, "Open presentation", refetch on a new deck version, the first-run hint, cleanup on close, and the read-only page.
+- `frontend/src/components/Presenter/PresenterPage.test.tsx`: the layout, stepping only on state messages, no link status, the Notes panel (its place over Up next, an unchanged top section, the slide-in and the reduced-motion opt-out, N, the button and Esc), refetch on a new deck version, the first-run hint, cleanup on close, and the read-only page.
 - `frontend/src/components/PresentationMode/PresentationMode.test.tsx` ("PresentationMode presenter view"): opening from P, the button and the key bridge, state posting and the heartbeat, clamped commands, leaving the channel and clearing the heartbeat on close, and the N panel order.
+- `frontend/tests/e2e/presenter-view.spec.ts`, with its steps in `frontend/tests/helpers/presenter-flow.ts`: in a real browser, P opens the presenter on the slide presentation mode shows, the two windows step both ways, and the open Notes panel lies over Up next, leaves Read aloud its full width, and the page does not scroll.
 - `frontend/src/App.presenterRoute.test.tsx`: the editor overlays never mount on the presenter route, and stay on the editor routes.
 
 ---
