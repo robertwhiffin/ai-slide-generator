@@ -179,12 +179,15 @@ def _sole_root_without_slide(soup: BeautifulSoup) -> Optional[Tag]:
 
     A plain Agent-mode deck paints its ground with the deck style's ground piece,
     so the builder's root is, for example, ``div.dk-slide`` with no ``slide``
-    token. Such a one-slide fragment still owns the asides inside its root.
+    token. Such a one-slide fragment still owns the asides inside its root. A
+    presenter aside is never that root: it is not inside a slide.
     """
     if soup.find(class_="slide") is not None:
         return None
     tops = soup.find_all(recursive=False)
-    return tops[0] if len(tops) == 1 else None
+    if len(tops) != 1 or _is_presenter_aside(tops[0]):
+        return None
+    return tops[0]
 
 
 def pop_presenter_asides(

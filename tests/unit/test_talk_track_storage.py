@@ -952,6 +952,10 @@ def test_a_fragment_whose_sole_root_has_no_slide_class_owns_its_asides():
         '<div class="a"><aside data-presenter="talk-track" hidden>x</aside></div><div class="b"></div>',
         # An aside beside the sole root, not inside it.
         '<div class="dk-slide"><h1>T</h1></div><aside data-presenter="talk-track" hidden>x</aside>',
+        # The sole top-level element is the aside itself: no slide holds it, so
+        # it must not own itself and empty the fragment.
+        '<aside data-presenter="talk-track" hidden><p>x</p></aside>',
+        '\n  <aside data-presenter="speaker-notes" hidden>n</aside>\n',
     ],
 )
 def test_a_fragment_without_a_single_root_holding_the_aside_leaves_it(raw):
