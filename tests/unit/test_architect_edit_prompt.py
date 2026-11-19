@@ -70,7 +70,8 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 # Addendum A Task B5b), then both for the whole-block fence and one footer on every slide
 # except the cover (evals/configs/{builder,fixer}/one-footer.yaml, Ruling RA15), then the
 # builder for main's SOURCE LINE block merged beside its DECK STYLE block
-# (evals/configs/builder/one-footer-source.yaml, Ruling RA19).
+# (evals/configs/builder/one-footer-source.yaml, Ruling RA19), then the builder for the
+# PRESENTER TEXT block (evals/configs/builder/presenter-text.yaml, 2026-11-18).
 # build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt,
@@ -78,7 +79,8 @@ HEAD_OTHER_ROLE_CONTENT_HASHES = {
     # (evals/configs/data_analyst/multi-source.yaml, Task 8b), then for its read-only rule
     # worded as the spec words it (evals/configs/data_analyst/multi-source-b.yaml, final review).
     "data_analyst": "26ca3192ebf6da1ac6f9482d0579ec183a1e353e356cbf064e576f73f07a026e",
-    "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
+    # Re-pinned for the PRESENTER TEXT block (evals/configs/builder/presenter-text.yaml).
+    "builder": "d2aea387aa38044b2ee13b30f04a4ee259d00a9c47b5338047c89168657c6e51",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",

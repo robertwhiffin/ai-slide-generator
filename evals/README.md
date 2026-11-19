@@ -2253,3 +2253,59 @@ Profile `tellr-dev`, judge `databricks-claude-sonnet-5`, run at the merge commit
   (dry run first) did not refuse. It confirmed that the measured config's hash is the packaged
   architect's, and it wrote nothing. The data_analyst stays `multi-source-b` (`26ca3192`): main
   did not change it.
+
+## Builder: talk track and notes asides, 2026-11-18
+
+The builder now ends every slide with two hidden asides: `data-presenter="talk-track"` (what the
+presenter says, two to four spoken beats) and `data-presenter="speaker-notes"` (the source of each
+figure, the likely question, what to stress). Tellr moves both into the slide's own fields when the
+slide arrives, so they never reach the gate, the reviewers or the rendered slide. The config is
+`evals/configs/builder/presenter-text.yaml` (`d2aea387`): the v1 prompt (`one-footer-source`,
+`a0b6c836`) plus one PRESENTER TEXT block after DATA ABSENT FALLBACK, and nothing else.
+
+- **Setup.** Builder `system.ai.claude-sonnet-5-5`, judge `databricks-claude-sonnet-5`, profile
+  `fevm-novartis-br-qa`, 3 repeats, all 8 cases per split. Train cases digest `eb3f1cde`, held-out
+  `04278c99`. The renderer attached to a shared local browser over the Chrome DevTools Protocol.
+  Run `55d82a81` is void (no browser, so no render) and is not counted.
+- **Asides as attributes, not classes.** A first candidate marked the asides with
+  `class="talk-track"` and `class="speaker-notes"` (`3e3e587f`, `6c5c7a3e`). It scored 0.625 on
+  train: every `deck_style_*` row failed 0/3, because the deck-style scorer rejects classes that
+  neither the template CSS nor the deck style defines. The author chose the `data-presenter`
+  attribute instead. The scorer was not changed.
+
+Latency is the builder call, one call per slide. USD/row is the builder call at list price (Sonnet
+5.5, USD 2 / 10 per million input / output tokens).
+
+| Run | Config | Split | Rows | Pass rate | Mean (p95) latency | Mean in/out tokens | USD/row |
+|---|---|---|---|---|---|---|---|
+| B1 e95f6430 | v1-baseline | train | 24 | 0.958 | 13.3 s (24.0 s) | 12.5k / 1.72k | 0.042 |
+| C0 3e3e587f | presenter-text, class form | train | 24 | 0.625 | 17.2 s (37.9 s) | 13.6k / 2.29k | 0.050 |
+| C1 bbc9880a | presenter-text | train | 24 | 1.000 | 16.9 s (32.8 s) | 12.9k / 2.29k | 0.049 |
+| B2 f98ae682 | v1-baseline | held-out | 24 | 1.000 | 9.9 s (27.8 s) | 12.0k / 1.24k | 0.036 |
+| C2 191a1440 | presenter-text | held-out | 24 | 1.000 | 13.2 s (34.3 s) | 12.9k / 1.76k | 0.043 |
+
+The run metrics record mean and 95th-percentile latency, not the median, so the table shows p95.
+
+What it showed:
+
+- **Train.** The candidate passed 24/24, against 23/24 for the baseline. The baseline's one miss
+  was `chart_no_data` (2/3). No case dropped.
+- **The asides arrive.** All 24 candidate train rows carry both asides on the slide root. Each talk
+  track has three or four beats, and none uses "click", "tap" or "on the slide" (counted from the
+  run's traces).
+- **Held-out** (aggregate only). The candidate scored 1.000, the same as the baseline on the same
+  model, judge and day. Calibration on held-out trusted the judge on 5 of 8 cases. It did not
+  trust `deck_style_code` and `deck_style_table` (the judge failed the reference) or
+  `deck_style_icons` (the judge passed the should-fail output).
+- **Cost of the asides.** Output grows by about 0.5k tokens a slide on both splits (+33% on train,
+  +42% on held-out). Mean latency grows by about 3.5 s a slide. Input grows by about 0.4k to 0.9k
+  tokens for the longer prompt.
+- **Spend: about USD 13 at most** (estimated). The five counted runs cost about USD 5.3 in builder
+  calls from measured tokens, plus the judge at USD 0.05 a call (an upper bound) and the void run.
+- **Promotion.** `python -m evals.harness.promote --config builder=evals/configs/builder/presenter-text.yaml --run-id builder=bbc9880acfff4cdbbf5b7a936b79bbc2`
+  (dry run first) moved the builder from `a0b6c836` to `d2aea387`. The by-hand pins that followed:
+  - `src/core/skills/builder.py` `INSTRUCTIONS`, byte for byte;
+  - `HEAD_OTHER_ROLE_CONTENT_HASHES["builder"]` → `d2aea387`;
+  - `OUTSIDE_DECK_STYLE_DIGESTS["builder"]` → `f414c40b`. The block applies to every slide, so
+    it sits outside the DECK STYLE block;
+  - the contract re-record (`frontend/tests/fixtures/graphLifecycleContract.json`).
