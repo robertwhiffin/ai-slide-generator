@@ -235,7 +235,7 @@ from src.services.template_sections import (
 )
 from src.utils.generated_images import sanitize_generated_images
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
-from src.utils.html_utils import extract_speaker_notes, strip_inter_tag_escapes
+from src.utils.html_utils import extract_presenter_text, strip_inter_tag_escapes
 from src.utils.image_refs import (
     IMAGE_REF_RE,
     reconcile_html,
@@ -1772,6 +1772,7 @@ def _write_reviewed_row(
     initiated_by: Optional[str],
     mutation: DeckMutationContext,
     speaker_notes: Optional[str] = None,
+    talk_track: Optional[str] = None,
 ) -> str:
     """Commit one reviewed slide row and return its content hash.
 
@@ -1809,6 +1810,7 @@ def _write_reviewed_row(
         modified_by=initiated_by,
         mutation=mutation,
         speaker_notes=speaker_notes,
+        talk_track=talk_track,
     )
     return content_hash
 
@@ -6768,7 +6770,9 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                     toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
-            stripped, captured["notes"] = extract_speaker_notes(regenerated)
+            stripped, captured["notes"], captured["talk"] = extract_presenter_text(
+                regenerated
+            )
             return stripped
 
         def _on_retry() -> None:
@@ -6778,14 +6782,16 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 metadata={"node": "builder", "position": position},
             )
 
-        # The owned notes aside leaves the HTML BEFORE the gate scans it, so
-        # presenter prose never costs a corrective retry (D4).
-        first_html, speaker_notes = extract_speaker_notes(out.html)
-        captured = {"notes": speaker_notes}
+        # The owned presenter asides (talk track and notes) leave the HTML BEFORE
+        # the gate scans it, so presenter prose never costs a corrective retry
+        # (D4).  A retry's answer wins for BOTH fields.
+        first_html, speaker_notes, talk_track = extract_presenter_text(out.html)
+        captured = {"notes": speaker_notes, "talk": talk_track}
         html, _retried = gate_emitted_html(
             first_html, _regenerate, session_id, on_retry=_on_retry
         )
         speaker_notes = captured["notes"]
+        talk_track = captured["talk"]
         html = strip_inter_tag_escapes(html)
         # AI Gateway MCP connections and the architect's generate_image tool: on
         # a turn a tool made images in (only its payload carries the key) an
@@ -6821,14 +6827,18 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             return {}
         return {"placeheld_positions": scoped(turn_id, {position})}
 
-    if speaker_notes is None and payload.get("notes_reset"):
-        speaker_notes = ""
+    if payload.get("notes_reset"):
+        if speaker_notes is None:
+            speaker_notes = ""
+        if talk_track is None:
+            talk_track = ""
     record = {
         **payload,
         "graph_release_id": payload["graph_release_id"],
         "html": html,
         "scripts": out.scripts,
         "speaker_notes": speaker_notes,
+        "talk_track": talk_track,
     }
     return {"slides": scoped(turn_id, {position: record})}
 
@@ -6890,6 +6900,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     scripts = payload.get("scripts") or ""
     initiated_by = payload.get("initiated_by")
     speaker_notes = payload.get("speaker_notes")
+    talk_track = payload.get("talk_track")
     mutation = _deck_mutation_context(
         session_id,
         payload.get("graph_release_id"),
@@ -6959,6 +6970,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
                 initiated_by=initiated_by,
                 mutation=mutation,
                 speaker_notes=speaker_notes,
+                talk_track=talk_track,
             )
             _emit(
                 StreamEventType.ASSISTANT,
@@ -6980,6 +6992,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
                         "original_html": html,
                         "original_scripts": scripts,
                         "original_speaker_notes": speaker_notes,
+                        "original_talk_track": talk_track,
                         "finding": objective[0].model_dump(),
                         "findings": [f.model_dump() for f in findings],
                         "payload": payload,
@@ -7039,6 +7052,7 @@ def _land_original(
         initiated_by=initiated_by,
         mutation=mutation,
         speaker_notes=entry.get("original_speaker_notes"),
+        talk_track=entry.get("original_talk_track"),
     )
     return findings
 
@@ -7230,7 +7244,9 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                     toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
-            stripped, captured["notes"] = extract_speaker_notes(regenerated)
+            stripped, captured["notes"], captured["talk"] = extract_presenter_text(
+                regenerated
+            )
             return stripped
 
         def _on_retry() -> None:
@@ -7240,13 +7256,14 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 metadata={"node": "fixer", "position": position},
             )
 
-        # Notes leave the HTML before the gate scans it (D4).
-        first_html, fixed_notes = extract_speaker_notes(out.html)
-        captured = {"notes": fixed_notes}
+        # The talk track and notes leave the HTML before the gate scans it (D4).
+        first_html, fixed_notes, fixed_talk = extract_presenter_text(out.html)
+        captured = {"notes": fixed_notes, "talk": fixed_talk}
         html, _retried = gate_emitted_html(
             first_html, _regenerate, session_id, on_retry=_on_retry
         )
         fixed_notes = captured["notes"]
+        fixed_talk = captured["talk"]
         html = strip_inter_tag_escapes(html)
     except TurnFencedError:
         # The turn was stopped (its tool loop checks between rounds): not a failed
@@ -7278,6 +7295,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                     "html": html,
                     "scripts": out.scripts,
                     "speaker_notes": fixed_notes,
+                    "talk_track": fixed_talk,
                     "changed": bool(getattr(out, "changed", False)),
                     "change_summary": getattr(out, "change_summary", ""),
                 }
@@ -7354,6 +7372,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
         winner_html = entry.get("original_html", "")
         winner_scripts = entry.get("original_scripts", "")
         winner_notes = entry.get("original_speaker_notes")
+        winner_talk = entry.get("original_talk_track")
         findings = prior_findings
 
         if fixed_html:
@@ -7396,6 +7415,8 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                     winner_scripts = fixed_scripts
                     if fixed.get("speaker_notes") is not None:
                         winner_notes = fixed["speaker_notes"]
+                    if fixed.get("talk_track") is not None:
+                        winner_talk = fixed["talk_track"]
                     verdict = "fixed"
                     findings = [
                         f.model_copy(update={"status": "fixed"})
@@ -7437,6 +7458,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             initiated_by=initiated_by,
             mutation=mutation,
             speaker_notes=winner_notes,
+            talk_track=winner_talk,
         )
     except TurnFencedError:
         # The turn was stopped and the row write refused: not a delivery failure.
@@ -7670,6 +7692,7 @@ def _write_draft_row(
             modified_by=record.get("initiated_by"),
             mutation=mutation,
             speaker_notes=record.get("speaker_notes"),
+            talk_track=record.get("talk_track"),
         )
     except TurnFencedError:
         raise

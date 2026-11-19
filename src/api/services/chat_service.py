@@ -63,7 +63,7 @@ from src.services.persisted_graph_release import (
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
-    extract_speaker_notes,
+    extract_presenter_text,
     split_script_by_canvas,
 )
 from src.utils.ds_asset_utils import (
@@ -351,17 +351,27 @@ def _turn_still_live(request_id: str) -> bool:
         return True
 
 
-def _carry_speaker_notes(
-    new_slide: Slide, orig_notes: Optional[str], orig_source: Optional[str]
-) -> None:
-    """Carry a replaced slide's notes onto its replacement.
+_PRESENTER_FIELDS = ("speaker_notes", "talk_track")
 
-    User-written notes always survive; model notes are kept only when the
-    replacement brought its own.
+
+def _carry_presenter_text(new_slide: Slide, orig: Any) -> None:
+    """Carry a replaced slide's talk track and notes onto its replacement.
+
+    Per field, on its own: user text always survives; model text is kept only
+    when the replacement brought none (``None``).  An empty aside (``""``) from
+    the replacement clears a model field.  *orig* is a ``Slide`` or a dict with
+    the same keys.
     """
-    if orig_source == "user" or new_slide.speaker_notes is None:
-        new_slide.speaker_notes = orig_notes
-        new_slide.speaker_notes_source = orig_source
+    for field in _PRESENTER_FIELDS:
+        if isinstance(orig, dict):
+            orig_text = orig.get(field)
+            orig_src = orig.get(f"{field}_source")
+        else:
+            orig_text = getattr(orig, field, None)
+            orig_src = getattr(orig, f"{field}_source", None)
+        if orig_src == "user" or getattr(new_slide, field) is None:
+            setattr(new_slide, field, orig_text)
+            setattr(new_slide, f"{field}_source", orig_src)
 
 
 class ChatService:
@@ -1605,11 +1615,7 @@ class ChatService:
                             for idx, slide_idx in enumerate(valid_refs):
                                 if idx < len(new_deck.slides):
                                     _orig = existing_deck.slides[slide_idx]
-                                    _carry_speaker_notes(
-                                        new_deck.slides[idx],
-                                        _orig.speaker_notes,
-                                        _orig.speaker_notes_source,
-                                    )
+                                    _carry_presenter_text(new_deck.slides[idx], _orig)
                                     existing_deck.slides[slide_idx] = new_deck.slides[idx]
                             self._reindex_slide_ids(existing_deck)
                             current_deck = existing_deck
@@ -3555,6 +3561,8 @@ class ChatService:
                 "created_at": orig.created_at,
                 "speaker_notes": orig.speaker_notes,
                 "speaker_notes_source": orig.speaker_notes_source,
+                "talk_track": orig.talk_track,
+                "talk_track_source": orig.talk_track_source,
             })
             original_slide_ids.append(orig.slide_id)
 
@@ -3601,11 +3609,7 @@ class ChatService:
             if idx < len(original_authors):
                 slide.created_by = original_authors[idx]["created_by"]
                 slide.created_at = original_authors[idx]["created_at"]
-                _carry_speaker_notes(
-                    slide,
-                    original_authors[idx]["speaker_notes"],
-                    original_authors[idx]["speaker_notes_source"],
-                )
+                _carry_presenter_text(slide, original_authors[idx])
             if _user:
                 slide.stamp_modified(_user)
                 if not slide.created_by:
@@ -3882,8 +3886,9 @@ class ChatService:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
         # Page-number markers a reader rendered go back to tokens before storing.
         html = retokenise_slide_numbers(html)
-        # Notes the user typed into the HTML move out of it into the notes field.
-        html, _notes = extract_speaker_notes(html)
+        # A talk track or notes the user typed into the HTML move out of it into
+        # their own fields.
+        html, _notes, _talk = extract_presenter_text(html)
 
         # Preserve original slide's metadata and scripts before updating
         original_slide = current_deck.slides[index]
@@ -3910,12 +3915,17 @@ class ChatService:
             created_by=original_slide.created_by,
             created_at=original_slide.created_at,
         )
-        if _notes is None:
-            new_slide.speaker_notes = original_slide.speaker_notes
-            new_slide.speaker_notes_source = original_slide.speaker_notes_source
-        else:
-            new_slide.speaker_notes = _notes
-            new_slide.speaker_notes_source = "user" if _notes else None
+        # Per field: no aside keeps the old pair; an aside is the user's text
+        # (an empty one clears the field).
+        for field, typed in (("speaker_notes", _notes), ("talk_track", _talk)):
+            if typed is None:
+                setattr(new_slide, field, getattr(original_slide, field))
+                setattr(
+                    new_slide, f"{field}_source", getattr(original_slide, f"{field}_source")
+                )
+            else:
+                setattr(new_slide, field, typed)
+                setattr(new_slide, f"{field}_source", "user" if typed else None)
         try:
             _user = get_current_username()
         except Exception:
@@ -3967,18 +3977,20 @@ class ChatService:
         self,
         session_id: str,
         index: int,
-        speaker_notes: str,
+        speaker_notes: Optional[str] = None,
         *,
+        talk_track: Optional[str] = None,
         slide_id: Optional[str] = None,
         expected_version: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Save a slide's speaker notes alone (notes-only save, D8 and D10).
+        """Save a slide's speaker notes and/or talk track alone (D8 and D10).
 
-        Changes only the notes and their source on the cached slide object: no HTML
-        change, no Slide rebuild, no stamp_modified, no save point. The saved notes
-        are user notes (source "user", or None when empty). If the save fails the
-        old pair is restored on the cached slide so the cache never serves notes
-        that were not persisted.
+        Changes only the fields given (a field passed as ``None`` is left
+        untouched) and their sources on the cached slide object: no HTML change,
+        no Slide rebuild, no stamp_modified, no save point. Each saved field is
+        the user's (source "user", or None when empty). If the save fails both
+        old pairs are restored on the cached slide so the cache never serves text
+        that was not persisted.
 
         Raises:
             ValueError: no deck, bad index, or ``slide_id`` does not match the slide.
@@ -3996,10 +4008,16 @@ class ChatService:
                 f"Slide at index {index} is {slide.slide_id!r}, not {slide_id!r}"
             )
 
-        notes = speaker_notes if speaker_notes.strip() else ""
-        old_notes, old_source = slide.speaker_notes, slide.speaker_notes_source
-        slide.speaker_notes = notes
-        slide.speaker_notes_source = "user" if notes else None
+        old_pairs = {
+            field: (getattr(slide, field), getattr(slide, f"{field}_source"))
+            for field in _PRESENTER_FIELDS
+        }
+        for field, value in (("speaker_notes", speaker_notes), ("talk_track", talk_track)):
+            if value is None:
+                continue
+            text = value if value.strip() else ""
+            setattr(slide, field, text)
+            setattr(slide, f"{field}_source", "user" if text else None)
 
         session_manager = get_session_manager()
         try:
@@ -4019,7 +4037,9 @@ class ChatService:
                 ),
             )
         except Exception:
-            slide.speaker_notes, slide.speaker_notes_source = old_notes, old_source
+            for field, (old_text, old_src) in old_pairs.items():
+                setattr(slide, field, old_text)
+                setattr(slide, f"{field}_source", old_src)
             raise
         self._record_deck_version(session_id, save_result)
 
@@ -4030,7 +4050,8 @@ class ChatService:
         return {
             "index": index,
             "slide_id": slide.slide_id,
-            "speaker_notes": slide.speaker_notes,
+            "speaker_notes": slide.speaker_notes or "",
+            "talk_track": slide.talk_track or "",
             "version": (save_result or {}).get("version"),
         }
 
@@ -4232,9 +4253,10 @@ class ChatService:
             else blank_slide_shell([s.html for s in current_deck.slides], landed)
         )
         insert_notes: Optional[str] = None
+        insert_talk: Optional[str] = None
         if html is not None:
             slide_html = retokenise_slide_numbers(slide_html)
-            slide_html, insert_notes = extract_speaker_notes(slide_html)
+            slide_html, insert_notes, insert_talk = extract_presenter_text(slide_html)
         if not has_slide_wrapper(slide_html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
@@ -4256,6 +4278,8 @@ class ChatService:
             modified_at=created,
             speaker_notes=insert_notes,
             speaker_notes_source="user" if insert_notes else None,
+            talk_track=insert_talk,
+            talk_track_source="user" if insert_talk else None,
         )
         try:
             _user = get_current_username()

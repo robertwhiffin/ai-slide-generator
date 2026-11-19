@@ -191,6 +191,7 @@ def test_a_notes_save_bumps_the_version_and_returns_it(env):
         "index": 1,
         "slide_id": slide_id,
         "speaker_notes": "Pause here.",
+        "talk_track": "",
         "version": before + 1,
     }
     assert env.fixture.version() == before + 1
@@ -398,13 +399,21 @@ def stub_service(monkeypatch, events):
 
     class _Stub:
         def update_slide_notes(
-            self, session_id, index, speaker_notes, *, slide_id=None, expected_version=None
+            self,
+            session_id,
+            index,
+            speaker_notes=None,
+            *,
+            talk_track=None,
+            slide_id=None,
+            expected_version=None,
         ):
             stub.calls.append(
                 {
                     "session_id": session_id,
                     "index": index,
                     "speaker_notes": speaker_notes,
+                    "talk_track": talk_track,
                     "slide_id": slide_id,
                     "expected_version": expected_version,
                 }
@@ -508,6 +517,7 @@ def test_the_notes_route_never_marks_the_spec_dirty(route):
             "session_id": SID,
             "index": 1,
             "speaker_notes": "Pause here.",
+            "talk_track": None,
             "slide_id": "sid-b",
             "expected_version": 7,
         }
@@ -541,6 +551,7 @@ def test_the_notes_route_passes_optional_fields_as_none(route):
             "session_id": SID,
             "index": 0,
             "speaker_notes": "Pause here.",
+            "talk_track": None,
             "slide_id": None,
             "expected_version": None,
         }

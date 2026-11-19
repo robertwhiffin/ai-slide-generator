@@ -38,7 +38,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from src.api.routes._authz import (
@@ -81,12 +81,23 @@ class ReorderRequest(BaseModel):
 
 
 class UpdateSlideNotesRequest(BaseModel):
-    """Request to save a slide's speaker notes alone."""
+    """Request to save a slide's speaker notes and/or talk track alone.
+
+    A field left out (or ``null``) is not touched; ``""`` clears it.  At least
+    one of the two must be given.
+    """
 
     session_id: str
-    speaker_notes: str = Field(max_length=20000)
+    speaker_notes: Optional[str] = Field(default=None, max_length=20000)
+    talk_track: Optional[str] = Field(default=None, max_length=20000)
     slide_id: Optional[str] = None
     expected_version: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _require_a_field(self) -> "UpdateSlideNotesRequest":
+        if self.speaker_notes is None and self.talk_track is None:
+            raise ValueError("Give speaker_notes, talk_track, or both")
+        return self
 
 
 class UpdateSlideRequest(BaseModel):
@@ -435,6 +446,7 @@ async def update_slide_notes(index: int, request: UpdateSlideNotesRequest, db: S
             request.session_id,
             index,
             request.speaker_notes,
+            talk_track=request.talk_track,
             slide_id=request.slide_id,
             expected_version=request.expected_version,
         )
