@@ -794,11 +794,7 @@ export const api = {
   /**
    * Get slide deck for a session
    */
-  async getSlides(sessionId: string): Promise<{
-    session_id: string;
-    slide_deck: SlideDeck | null;
-    my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
-  }> {
+  async getSlides(sessionId: string): Promise<{ session_id: string; slide_deck: SlideDeck | null }> {
     const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/slides`);
 
     if (!response.ok) {

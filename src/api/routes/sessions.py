@@ -1079,12 +1079,11 @@ async def get_session_slides(session_id: str):
         session_id: Session identifier
 
     Returns:
-        Slide deck info or null if no deck, plus the caller's ``my_permission``
-        (the presenter window reads it to reopen /view or /edit).
+        Slide deck info or null if no deck
     """
     try:
         # Permission check: require CAN_VIEW on the deck
-        permission = await asyncio.to_thread(
+        await asyncio.to_thread(
             _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
         )
 
@@ -1095,11 +1094,7 @@ async def get_session_slides(session_id: str):
             _drop_knitted_html(deck)
             await asyncio.to_thread(_substitute_deck_images, deck, session_id)
 
-        return {
-            "session_id": session_id,
-            "slide_deck": deck,
-            "my_permission": permission.value,
-        }
+        return {"session_id": session_id, "slide_deck": deck}
 
     except SessionNotFoundError:
         raise HTTPException(

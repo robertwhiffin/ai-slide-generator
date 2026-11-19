@@ -4,11 +4,13 @@
  *   - It loads the deck with api.getSlides and renders, for the slide presentation mode reports: "Slide N of M",
  *     the slide title (first h1/h2 of the slide HTML, else "Slide N"), an m:ss elapsed clock, Read aloud (the talk
  *     track), Coming up (next slide's title and first talk-track paragraph, or "End of deck"), the "On screen now"
- *     and "Up next" sandboxed previews, a Notes drawer, and a bottom bar with Back, Next, Notes and link status.
+ *     and "Up next" sandboxed previews, a Notes panel, and a bottom bar with Back, Next and Notes.
  *   - Presentation mode is the only source of truth: Next/Back (buttons and keys) post `cmd` messages and the
  *     shown slide changes only when a `state` message arrives.
- *   - "Slides: linked" while state messages arrive; after 3 s of silence "Slides: not linked" and an
- *     "Open presentation" button that focuses the opener, or opens the editor in a NEW tab.
+ *   - The Notes panel (N, the Notes button, Esc) slides in from the right as an overlay on the "Up next" column:
+ *     from the Up next label row down to just above the bottom bar. The header, Read aloud, Coming up and
+ *     "On screen now" stay exactly as they are (author, 2026-11-19).
+ *   - There is no link status and no "Open presentation" button in this release (author, 2026-11-19).
  *   - A posted deckVersion that differs from the one seen before triggers a refetch; when the fetched deck still
  *     differs from the posted version, it says "Slides changed. Reopen the presentation to see them."
  *   - A first-run hint shows once (localStorage `tellr-presenter-hint-seen`). The page is read-only.
@@ -18,13 +20,13 @@
  *
  * SABOTAGE targets:
  *   - move the shown slide on the presenter's own Next, without a state message -> "do not move" RED.
- *   - change the link timeout to 30 s                                           -> "not linked after 3 seconds" RED.
- *   - window.location.assign the editor from "Open presentation"               -> "with no opener" RED.
- *   - always open /edit from "Open presentation", whatever my_permission says   -> "view-only presenter" RED.
+ *   - render the Notes panel in the flow below the previews                     -> "overlays only the Up next" RED.
+ *   - leave the panel's transform at rest when it opens                         -> "slides in" RED.
+ *   - narrow the top section while the panel is open                            -> "exactly as they were" RED.
  *   - never refetch on a new deckVersion                                        -> "new deckVersion" RED.
  *   - set the hint key only on dismiss, or never                               -> "first-run hint" RED.
  */
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SlideDeck } from '../../types/slide';
@@ -125,9 +127,8 @@ function deck(version = 4): SlideDeck {
 
 const getSlides = vi.mocked(api.getSlides);
 
-/** `my_permission` sits beside `slide_deck` in GET /api/sessions/{id}/slides; omitted unless a test passes it. */
-function respondWith(d: SlideDeck, my_permission?: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE') {
-  return my_permission ? { session_id: 's1', slide_deck: d, my_permission } : { session_id: 's1', slide_deck: d };
+function respondWith(d: SlideDeck) {
+  return { session_id: 's1', slide_deck: d };
 }
 
 /** Flush pending promises (the mocked fetch) and the React work they schedule, without moving the clock. */
@@ -187,11 +188,6 @@ function pressKey(key: string) {
   fireEvent.keyDown(document.body, { key });
 }
 
-/** jsdom's window.opener cannot be spied on; define it per test and remove it afterwards. */
-function setOpener(value: unknown) {
-  Object.defineProperty(window, 'opener', { configurable: true, writable: true, value });
-}
-
 function iframeByTitle(title: string): HTMLIFrameElement | null {
   return document.querySelector(`iframe[title="${title}"]`);
 }
@@ -206,7 +202,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setOpener(null);
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -214,14 +209,13 @@ afterEach(() => {
 
 // ---------------------------------------------------------------------------------------------------------------
 describe('PresenterPage', () => {
-  it('loads the deck for the route session and shows slide 1, not linked, before any state arrives', async () => {
+  it('loads the deck for the route session and shows slide 1 before any state arrives', async () => {
     await renderPresenter();
 
     expect(getSlides).toHaveBeenCalledWith('s1');
     expect(screen.getByText('Slide 1 of 3')).toBeInTheDocument();
     expect(screen.getByText('Revenue up')).toBeInTheDocument();
     expect(screen.getByText('Beat 1a.')).toBeInTheDocument();
-    expect(screen.getByText('Slides: not linked')).toBeInTheDocument();
   });
 
   it('renders every section for the slide presentation mode reports', async () => {
@@ -260,7 +254,6 @@ describe('PresenterPage', () => {
     expect(screen.getByRole('button', { name: /^back/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^next/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /notes/i })).toBeInTheDocument();
-    expect(screen.getByText('Slides: linked')).toBeInTheDocument();
   });
 
   it('the elapsed clock advances in m:ss', async () => {
@@ -369,93 +362,151 @@ describe('PresenterPage', () => {
     expect(drawerOpen()).toBe(false);
   });
 
-  // Review Focus 4: presentation mode closed while the presenter stays open.
-  it('shows not linked after 3 seconds of silence', async () => {
+  it('the Notes panel names this slide: a small eyebrow, a Notes heading, then the notes', async () => {
+    getSlides.mockResolvedValue(
+      respondWith({
+        ...deck(),
+        slides: deck().slides.map((sl, i) =>
+          i === 0 ? { ...sl, speaker_notes: 'Para one.\n\nPara two.' } : sl,
+        ),
+      } as SlideDeck),
+    );
     const slides = slidesWindow();
     await renderPresenter();
     slides.state(0);
-    expect(screen.getByText('Slides: linked')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open presentation' })).toBeNull();
+    pressKey('n');
 
-    await advance(2999);
-    expect(screen.getByText('Slides: linked')).toBeInTheDocument();
+    const panel = screen.getByTestId('presenter-notes-drawer');
+    expect(within(panel).getByText(/^notes · this slide$/i)).toBeInTheDocument();
+    expect(within(panel).getByRole('heading', { name: 'Notes' })).toBeInTheDocument();
+    // One paragraph per block of the notes.
+    expect(within(panel).getByText('Para one.').tagName).toBe('P');
+    expect(within(panel).getByText('Para two.').tagName).toBe('P');
+  });
 
-    await advance(1);
-    expect(screen.getByText('Slides: not linked')).toBeInTheDocument();
-    expect(screen.queryByText('Slides: linked')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Open presentation' })).toBeInTheDocument();
+  it('a slide without notes says so in the panel', async () => {
+    getSlides.mockResolvedValue(
+      respondWith({ ...deck(), slides: deck().slides.map((sl) => ({ ...sl, speaker_notes: '' })) } as SlideDeck),
+    );
+    const slides = slidesWindow();
+    await renderPresenter();
+    slides.state(0);
+    pressKey('n');
+    expect(screen.getByTestId('presenter-notes-drawer')).toHaveTextContent('No speaker notes for this slide.');
+  });
 
-    // Next and Back still work without throwing, and the slide stays put.
-    expect(() => {
-      fireEvent.click(screen.getByRole('button', { name: /^next/i }));
-      fireEvent.click(screen.getByRole('button', { name: /^back/i }));
-    }).not.toThrow();
+  // Sabotage target: render the panel in the page flow below the previews (the old bottom drawer),
+  // or pin it to the whole page instead of the Up next column.
+  it('the Notes panel overlays only the Up next column, above the bottom bar', async () => {
+    const slides = slidesWindow();
+    const { container } = await renderPresenter();
+    slides.state(1);
+
+    const footer = container.querySelector('footer')!;
+    const onScreen = iframeByTitle('On screen now')!.closest('figure')!;
+    const upNext = iframeByTitle('Up next')!.closest('figure')!;
+    const previews = onScreen.parentElement!;
+    expect(upNext.parentElement).toBe(previews);
+    const onScreenBefore = onScreen.outerHTML;
+    const upNextBefore = upNext.outerHTML;
+
+    pressKey('n');
+    const panel = screen.getByTestId('presenter-notes-drawer');
+
+    // Positioned over the previews row, not in the flow: it shares the previews box with Up next,
+    // and that box is its positioning box.
+    expect(panel.parentElement).toBe(previews);
+    expect(getComputedStyle(previews).position).toBe('relative');
+    const style = getComputedStyle(panel);
+    expect(style.position).toBe('absolute');
+    expect(style.top).toBe('0px');
+    expect(style.right).toBe('0px');
+    expect(style.bottom).toBe('0px');
+    // Its left edge is Up next's: half the row plus half the 24px column gap.
+    expect(style.left.replace(/\s+/g, '')).toBe('calc(50%+12px)');
+    expect(getComputedStyle(previews).columnGap || getComputedStyle(previews).gap).toMatch(/^24px/);
+    expect(panel.contains(footer)).toBe(false);
+
+    // The previews themselves do not change; the panel sits on top of Up next.
+    expect(onScreen.outerHTML).toBe(onScreenBefore);
+    expect(upNext.outerHTML).toBe(upNextBefore);
+  });
+
+  // Sabotage target: narrow or move the top section when the panel opens.
+  it('opening the panel leaves the header, Read aloud and Coming up exactly as they were', async () => {
+    const slides = slidesWindow();
+    const { container } = await renderPresenter();
+    slides.state(1);
+
+    const sectionOf = (label: string) => screen.getByText(label).closest('section')!;
+    const top = () =>
+      [container.querySelector('main > header')!, sectionOf('Read aloud'), sectionOf('Coming up')].map(
+        (el) => el.outerHTML,
+      );
+    const before = top();
+
+    pressKey('n');
+    expect(top()).toEqual(before);
+    const panel = screen.getByTestId('presenter-notes-drawer');
+    for (const el of [sectionOf('Read aloud'), sectionOf('Coming up')]) expect(panel.contains(el)).toBe(false);
+
+    pressKey('Escape');
+    expect(top()).toEqual(before);
+  });
+
+  it('on the last slide the panel still opens over the Up next column, beside On screen now', async () => {
+    const slides = slidesWindow();
+    await renderPresenter();
+    slides.state(2);
+    pressKey('n');
+
+    const panel = screen.getByTestId('presenter-notes-drawer');
+    expect(drawerOpen()).toBe(true);
+    expect(panel).toHaveTextContent('Know 3.');
+    expect(panel.parentElement).toBe(iframeByTitle('On screen now')!.closest('figure')!.parentElement);
+  });
+
+  // Sabotage target: leave the transform at rest, or drop the reduced-motion opt-out.
+  it('the Notes panel slides in from the right with a short transition, and none under reduced motion', async () => {
+    const slides = slidesWindow();
+    await renderPresenter();
+    slides.state(0);
+
+    const panel = screen.getByTestId('presenter-notes-drawer');
+    expect(panel.style.transform).toMatch(/translateX\(10[0-9]%\)/);
+    expect(panel).toHaveAttribute('aria-hidden', 'true');
+    expect(panel.className).toMatch(/\btransition-/);
+    expect(panel.className).toMatch(/\bmotion-reduce:transition-none\b/);
+
+    pressKey('n');
+    expect(panel.style.transform).toMatch(/^(none|translateX\(0(px|%)?\))$/);
+    expect(panel).not.toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByRole('button', { name: 'Show notes' })).toHaveAttribute('aria-pressed', 'true');
+
+    pressKey('Escape');
+    expect(panel.style.transform).toMatch(/translateX\(10[0-9]%\)/);
+    expect(screen.getByRole('button', { name: 'Show notes' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  // The author moved link status and "Open presentation" to a later pull request (2026-11-19).
+  it('shows no link status and no Open presentation button, before, during or after state messages', async () => {
+    const linkStatus = () => screen.queryByText(/slides:\s*(not\s+)?linked/i);
+    const openButton = () => screen.queryByRole('button', { name: /open presentation/i });
+
+    const slides = slidesWindow();
+    await renderPresenter();
+    expect(linkStatus()).toBeNull();
+    expect(openButton()).toBeNull();
+
+    slides.state(0);
+    expect(linkStatus()).toBeNull();
+    expect(openButton()).toBeNull();
+
+    // Long silence: still nothing, and the slide stays put.
+    await advance(10_000);
+    expect(linkStatus()).toBeNull();
+    expect(openButton()).toBeNull();
     expect(screen.getByText('Slide 1 of 3')).toBeInTheDocument();
-
-    // A heartbeat from a reopened presentation links it again.
-    slides.state(0);
-    expect(screen.getByText('Slides: linked')).toBeInTheDocument();
-  });
-
-  it('each state message restarts the 3 second link timer', async () => {
-    const slides = slidesWindow();
-    await renderPresenter();
-    slides.state(0);
-
-    for (let i = 0; i < 5; i++) {
-      await advance(1000);
-      slides.state(0);
-    }
-    expect(screen.getByText('Slides: linked')).toBeInTheDocument();
-  });
-
-  it('"Open presentation" focuses the window that opened the presenter', async () => {
-    const opener = { focus: vi.fn() };
-    setOpener(opener);
-    const open = vi.spyOn(window, 'open').mockReturnValue(null);
-
-    await renderPresenter();
-    await advance(3000);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open presentation' }));
-    expect(opener.focus).toHaveBeenCalledTimes(1);
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it('"Open presentation" with no opener opens the editor in a new tab, never replacing the presenter', async () => {
-    setOpener(null);
-    const open = vi.spyOn(window, 'open').mockReturnValue(null);
-
-    await renderPresenter();
-    await advance(3000);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open presentation' }));
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(open.mock.calls[0][0]).toBe('/sessions/s1/edit');
-    expect(open.mock.calls[0][1]).toBe('_blank');
-
-    // The presenter is still here: no in-app navigation to the editor route.
-    expect(screen.queryByText('EDITOR ROUTE')).toBeNull();
-    expect(screen.getByText('Slides: not linked')).toBeInTheDocument();
-  });
-
-  // Sabotage target: always opens /edit, ignoring my_permission.
-  it('a view-only presenter opens the view page when there is no opener', async () => {
-    setOpener(null);
-    getSlides.mockResolvedValue(respondWith(deck(), 'CAN_VIEW'));
-    const open = vi.spyOn(window, 'open').mockReturnValue(null);
-
-    await renderPresenter();
-    await advance(3000);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open presentation' }));
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(open.mock.calls[0][0]).toBe('/sessions/s1/view');
-    expect(open.mock.calls[0][1]).toBe('_blank');
-
-    // The presenter is still here: no in-app navigation away.
-    expect(screen.queryByText('EDITOR ROUTE')).toBeNull();
-    expect(screen.getByText('Slides: not linked')).toBeInTheDocument();
   });
 
   // Sabotage target: never refetch on a deckVersion change.
@@ -517,7 +568,7 @@ describe('PresenterPage', () => {
     expect(screen.queryByText(HINT)).toBeNull();
   });
 
-  // Sabotage target: leave the channel open, or the link timer pending, when the presenter page goes away.
+  // Sabotage target: leave the channel open, or the clock pending, when the presenter page goes away.
   it('closing the presenter leaves the channel and leaves no timer behind', async () => {
     const slides = slidesWindow();
     const view = await renderPresenter();

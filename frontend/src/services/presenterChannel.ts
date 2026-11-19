@@ -16,8 +16,6 @@ export const channelName = (sessionId: string) => `tellr-present:${sessionId}`;
 export const presenterWindowName = (sessionId: string) => `tellr-presenter-${sessionId}`;
 export const presenterUrl = (sessionId: string) => `/sessions/${sessionId}/present`;
 export const PRESENTER_FEATURES = 'popup,width=1200,height=760';
-/** The presenter reads "Slides: not linked" after this long with no state message. */
-export const LINK_TIMEOUT_MS = 3000;
 /** Presentation mode re-posts its state this often while open. */
 export const STATE_HEARTBEAT_MS = 1000;
 

@@ -115,32 +115,6 @@ def test_session_read_includes_the_deck_by_default(api, deck_session):
 # -- html_content ----------------------------------------------------------------
 
 
-def test_slides_read_reports_the_callers_permission(api, deck_session):
-    """The presenter window reads ``my_permission`` off this response to pick
-    /view or /edit when it reopens the presentation (whole-branch review).
-
-    Sabotage target: drop ``my_permission`` from GET /api/sessions/{id}/slides,
-    or stop returning the level from ``_check_deck_permission_for_session``.
-    """
-    resp = api.get(f"/api/sessions/{deck_session}/slides")
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["my_permission"] == "CAN_MANAGE"
-
-
-def test_slides_read_reports_view_for_a_view_only_caller(api, deck_session):
-    from src.database.models.profile_contributor import PermissionLevel
-
-    with patch(
-        "src.api.routes._authz._get_session_permission_for_info",
-        return_value=(True, PermissionLevel.CAN_VIEW),
-    ):
-        resp = api.get(f"/api/sessions/{deck_session}/slides")
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["my_permission"] == "CAN_VIEW"
-
-
 def test_slides_read_does_not_send_html_content(api, deck_session):
     resp = api.get(f"/api/sessions/{deck_session}/slides")
 

@@ -14,7 +14,7 @@
  * pathname match covers both. That is also why this does not call
  * `setupMocks(page)`: several of its routes pin `http://127.0.0.1:8000`.
  */
-import { expect, type BrowserContext, type Page, type Route } from '@playwright/test';
+import { expect, type BrowserContext, type Locator, type Page, type Route } from '@playwright/test';
 import {
   mockAvailableTools,
   mockDeckPrompts,
@@ -52,7 +52,6 @@ export const PRESENTER_SLIDES = [
 
 const presenterSlidesResponse = {
   session_id: SESSION_ID,
-  my_permission: 'CAN_MANAGE',
   slide_deck: {
     title: 'Moving to the Cloud',
     slide_count: PRESENTER_SLIDES.length,
@@ -166,6 +165,13 @@ function readAloud(presenter: Page) {
     .filter({ has: presenter.getByRole('heading', { name: 'Read aloud', exact: true }) });
 }
 
+/** The presenter's Coming up box. */
+function comingUp(presenter: Page) {
+  return presenter
+    .locator('section')
+    .filter({ has: presenter.getByRole('heading', { name: 'Coming up', exact: true }) });
+}
+
 async function expectBothOnSlide(page: Page, presenter: Page, index: number) {
   const n = index + 1;
   await expect(presentationOverlay(page).getByText(`${n} / ${PRESENTER_SLIDES.length}`, { exact: true })).toBeVisible();
@@ -176,9 +182,56 @@ async function expectBothOnSlide(page: Page, presenter: Page, index: number) {
   }
 }
 
+/** Left, top, right and bottom of a locator's box, rounded. */
+async function edges(locator: Locator) {
+  const b = (await locator.boundingBox())!;
+  return {
+    left: Math.round(b.x),
+    top: Math.round(b.y),
+    right: Math.round(b.x + b.width),
+    bottom: Math.round(b.y + b.height),
+    width: Math.round(b.width),
+  };
+}
+
 /**
- * Open presentation mode, open the presenter with P, then step forward from the
- * presenter and back from the presentation, and open the presenter's notes.
+ * The open Notes panel covers only the Up next column: from the Up next label
+ * row down to just above the bottom bar. Read aloud keeps its width, Coming up
+ * stays above the panel, "On screen now" stays beside it, and the page does
+ * not scroll.
+ */
+async function expectNotesPanelOverlay(presenter: Page, readAloudWidthClosed: number) {
+  const drawer = presenter.getByTestId('presenter-notes-drawer');
+  const upNext = presenter.locator('figure').filter({ has: presenter.locator('iframe[title="Up next"]') });
+  const onScreen = presenter.locator('figure').filter({ has: presenter.locator('iframe[title="On screen now"]') });
+  const upNextEdges = await edges(upNext);
+  // Wait for the slide-in transition to finish: the panel's left edge meets Up next's.
+  await expect.poll(async () => (await edges(drawer)).left).toBe(upNextEdges.left);
+
+  const panel = await edges(drawer);
+  const bar = await edges(presenter.locator('footer'));
+  expect(panel.right).toBe(upNextEdges.right);
+  expect(panel.top).toBe(upNextEdges.top);
+  expect(panel.bottom).toBeLessThanOrEqual(bar.top);
+  expect(panel.top).toBeGreaterThanOrEqual((await edges(comingUp(presenter))).bottom);
+  expect(panel.left).toBeGreaterThanOrEqual((await edges(onScreen)).right);
+  expect((await edges(readAloud(presenter))).width).toBe(readAloudWidthClosed);
+  await expect(presenter.getByRole('heading', { name: 'Read aloud', exact: true })).toBeInViewport();
+  // The figure, not the iframe: the iframe's own box is the unscaled 1280x720 frame.
+  await expect(onScreen).toBeInViewport({ ratio: 1 });
+  await expect(presenter.locator('footer')).toBeInViewport();
+
+  const scroll = await presenter.evaluate(() => ({
+    scrollHeight: document.documentElement.scrollHeight,
+    innerHeight: window.innerHeight,
+  }));
+  expect(scroll.scrollHeight).toBeLessThanOrEqual(scroll.innerHeight);
+}
+
+/**
+ * Open presentation mode, move it to slide 2, open the presenter with P, then
+ * step forward from the presenter and back from the presentation, and slide
+ * the presenter's notes panel in and out.
  */
 export async function presenterFlow(context: BrowserContext, baseURL: string) {
   const unmocked: string[] = [];
@@ -196,29 +249,41 @@ export async function presenterFlow(context: BrowserContext, baseURL: string) {
     await expect(presentationOverlay(page)).toBeVisible({ timeout: 5000 });
     await expect(presentationOverlay(page).getByText(`1 / ${PRESENTER_SLIDES.length}`, { exact: true })).toBeVisible();
 
+    // Move the presentation to slide 2 first: a fresh presenter starts on slide 1, so showing slide 2
+    // proves it learned the slide from presentation mode's state message.
+    await page.keyboard.press('ArrowRight');
+    await expect(presentationOverlay(page).getByText(`2 / ${PRESENTER_SLIDES.length}`, { exact: true })).toBeVisible();
+
     // P on the presentation overlay opens the presenter as a pop-up in this context.
     [presenter] = await Promise.all([context.waitForEvent('page'), page.keyboard.press('p')]);
     // A pop-up starts on about:blank; wait until it reaches the presenter route.
     await presenter.waitForURL((url) => url.pathname === `/sessions/${SESSION_ID}/present`);
+    await expectBothOnSlide(page, presenter, 1);
 
-    // Linked: presentation mode's state message has arrived.
-    await expect(presenter.getByText('Slides: linked', { exact: true })).toBeVisible({ timeout: 10000 });
-    await expectBothOnSlide(page, presenter, 0);
+    // No link status in this release.
+    await expect(presenter.getByText(/slides:\s*(not\s+)?linked/i)).toHaveCount(0);
+    await expect(presenter.getByRole('button', { name: /open presentation/i })).toHaveCount(0);
 
     // Forward from the presenter: it only asks; presentation mode moves, then reports back.
     await presenter.keyboard.press('ArrowRight');
-    await expectBothOnSlide(page, presenter, 1);
+    await expectBothOnSlide(page, presenter, 2);
 
     // Back from the presentation window: the presenter follows.
     await page.keyboard.press('ArrowLeft');
-    await expectBothOnSlide(page, presenter, 0);
+    await expectBothOnSlide(page, presenter, 1);
 
-    // N in the presenter opens the notes drawer for the slide on screen.
+    // N in the presenter slides the notes panel in from the right, for the slide on screen.
+    const readAloudWidthClosed = (await edges(readAloud(presenter))).width;
     await presenter.keyboard.press('n');
     const drawer = presenter.getByTestId('presenter-notes-drawer');
     await expect(drawer).toBeVisible();
-    await expect(drawer).toContainText(PRESENTER_SLIDES[0].notes);
-    await expect(drawer).not.toContainText(PRESENTER_SLIDES[1].notes);
+    await expect(drawer).toContainText(PRESENTER_SLIDES[1].notes);
+    await expect(drawer).not.toContainText(PRESENTER_SLIDES[0].notes);
+    await expectNotesPanelOverlay(presenter, readAloudWidthClosed);
+
+    // Esc closes it again.
+    await presenter.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
   } finally {
     // The catch-all's 404s, for whoever debugs a failure. None of them are presenter calls.
     if (unmocked.length > 0) console.log(`[presenter-view] unmocked API calls (404): ${[...new Set(unmocked)].join(', ')}`);

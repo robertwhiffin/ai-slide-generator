@@ -90,8 +90,11 @@ describe('presenterChannel names and timings', () => {
     expect(mod.channelName('abc')).toBe('tellr-present:abc');
     expect(mod.presenterWindowName('abc')).toBe('tellr-presenter-abc');
     expect(mod.PRESENTER_FEATURES).toBe('popup,width=1200,height=760');
-    expect(mod.LINK_TIMEOUT_MS).toBe(3000);
     expect(mod.STATE_HEARTBEAT_MS).toBe(1000);
+  });
+
+  it('carries no link timeout: link status waits for a later release', () => {
+    expect('LINK_TIMEOUT_MS' in mod).toBe(false);
   });
 });
 

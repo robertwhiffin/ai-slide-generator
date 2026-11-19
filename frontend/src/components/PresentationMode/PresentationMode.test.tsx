@@ -466,7 +466,7 @@ describe('PresentationMode presenter view', () => {
     }
   });
 
-  // Review Focus 4: closing presentation mode must go silent so the presenter can say "not linked".
+  // Review Focus 4: closing presentation mode must go silent, so no stale state reaches the presenter.
   it('stops posting after presentation mode closes', () => {
     const presenter = presenterWindow();
     const { unmount } = renderWithSession();
