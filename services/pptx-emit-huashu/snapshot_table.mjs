@@ -47,22 +47,31 @@
 // (the half gap a separated table's spacing leaves). snapshot.mjs takes off
 // the room its text needs to keep the browser's lines (fitCellText).
 //
+// A cell's content stays the cell's own wherever an a:tbl paragraph can hold
+// it. A cell holding block layout (a <div>, a <p>, a float: R10n) keeps the
+// table native, its fill and borders on its a:tc, and gives its whole content
+// to the walk as overlay items at their measured places (paragraphs null): its
+// lines are blocks of their own, which no a:tc paragraph is. So does a cell
+// whose line holds an atomic inline, an edged inline or a painted inline box,
+// and one whose own overflow clip cuts its text (layoutCell, fitCellText).
+//
 // What no a:tbl can draw is positioned items instead: cell boxes as shapes,
 // cell text as text items, all editable, as every slide box is drawn. A table
 // is native only when (collectTable returns null otherwise):
 // * it is a <table> laid out as display: table holding no nested <table>,
 //   whose children are captions, column groups, columns, row groups and rows,
-//   each the table part its tag is, rows holding cells, cells holding
-//   inline-level content and absolutely positioned boxes only
-//   (holdsInlineContent), and no part but a cell generating a ::before or
-//   ::after (each would be an anonymous table box);
-// * every part paints as a cell of an a:tbl can: shown, static, untransformed,
-//   without a background image, a shadow or an effect, and no cell clips its
-//   own content;
+//   each the table part its tag is, holding no text of their own, rows holding
+//   cells, and no part but a cell generating a ::before or ::after (each would
+//   be an anonymous table box);
+// * every part paints as a cell of an a:tbl can: shown, in flow (static, or
+//   relative where gridOf finds it on its grid), untransformed, without a
+//   background image, a shadow or an effect;
 // * its cells do not stand apart (R10a): a separated table whose spacing
 //   exceeds SPACING_VISIBLE_PX on either axis has no cell that paints a fill
-//   or a border;
+//   or a border, and no separated cell that paints rounds its corners;
 // * any two separated borders side by side are the same colour and style (R10l);
+// * its spans can be read and its grid holds at most COLLECTION_ITEM_LIMIT
+//   slots (an [html2pptx] line says when not: slotsOf);
 // * the browser's cell boxes are its grid (gridOf).
 // snapshot.mjs checks the rest before it asks: the table is shown, untouched
 // by any clip (R10j) and unrotated.
@@ -73,7 +82,9 @@
 //  *   item      the TableItem, its cells' text still to come (snapshot.mjs);
 //  *   parts     every element whose box the item draws: row groups, rows,
 //  *             columns, column groups and cells;
-//  *   cells     cell element -> {model: TableCell, grid: {left, top, right, bottom}}.
+//  *   cells     cell element -> {model: TableCell, grid: {left, top, right, bottom},
+//  *             blocks}: blocks when it holds block layout (holdsInlineContent),
+//  *             whose content is overlay items whatever it holds.
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
@@ -174,20 +185,26 @@ function createTableLayout(env) {
   // Whether a table part paints and lays out as the part of an a:tbl it
   // becomes: shown, in flow, untransformed, its background a colour at most,
   // with no shadow and no effect. Opacity it may have: its fill keeps it as
-  // alpha and its text and lines are composited through it.
+  // alpha and its text and lines are composited through it. Relative
+  // positioning keeps it in flow; an offset that moves it off its grid cell
+  // is caught by gridOf.
   function plainPart(s) {
-    return s.visibility === 'visible' && s.position === 'static' &&
+    return s.visibility === 'visible' && (s.position === 'static' || s.position === 'relative') &&
       s.transform === 'none' && !isSet(s.rotate, 'none') && !isSet(s.scale, 'none') && !isSet(s.translate, 'none') &&
       s.filter === 'none' && !isSet(s.backdropFilter, 'none') && s.mixBlendMode === 'normal' &&
       !isSet(s.clipPath, 'none') && !isSet(s.maskImage, 'none') && !isSet(s.webkitMaskImage, 'none') &&
       !isSet(s.boxShadow, 'none') && !isSet(s.backgroundImage, 'none');
   }
 
-  // The part an element is, by its tag, when it lays out as that part.
+  // The part an element is, by its tag, when it lays out as that part. A
+  // cell's own ::before and ::after are its content (holdsInlineContent reads
+  // how they lay out); any other part's would be an anonymous table box.
   function partOf(element, s) {
     const name = tagOf(element);
     if (!Object.prototype.hasOwnProperty.call(PART_DISPLAY, name) || s.display !== PART_DISPLAY[name]) return null;
-    if (name !== 'caption' && (!plainPart(s) || generatesContent(element))) return null;
+    if (name === 'caption') return name;
+    const cell = name === 'td' || name === 'th';
+    if (!plainPart(s) || (!cell && generatesContent(element))) return null;
     return name;
   }
 
@@ -266,10 +283,8 @@ function createTableLayout(env) {
       const cs = window.getComputedStyle(cells[index]);
       if (cs.display === 'none') continue;
       const part = partOf(cells[index], cs);
-      // A cell's overflow clips its own content, which no a:tc does.
-      if ((part !== 'td' && part !== 'th') || cs.overflowX !== 'visible' || cs.overflowY !== 'visible') return false;
-      if (!holdsInlineContent(cells[index])) return false;
-      row.cells.push({ element: cells[index], style: cs });
+      if (part !== 'td' && part !== 'th') return false;
+      row.cells.push({ element: cells[index], style: cs, blocks: !holdsInlineContent(cells[index]) });
       parts.push(cells[index]);
       if (parts.length > COLLECTION_ITEM_LIMIT) return false;
     }
@@ -292,12 +307,14 @@ function createTableLayout(env) {
   }
 
   // Whether a cell holds inline-level content only, which its paragraphs and
-  // the items over it can draw: a block-level child (a <p>, a ::before laid
-  // out as a block) would be a block of its own in the cell, and a float
-  // would move its lines aside, which no a:tc paragraph does. The children of
-  // an inline box and of a display: contents one are its own; an atomic
-  // inline and an out-of-flow box are items of their own, whatever they
-  // hold. Bounded by WALK_STEP_LIMIT in depth and COLLECTION_ITEM_LIMIT in all.
+  // the items over it can draw. A cell that does not holds block layout
+  // (R10n): a block-level child (a <div>, a <p>, a ::before laid out as a
+  // block) is a block of its own in the cell, and a float moves the lines
+  // beside it, which no a:tc paragraph does, so the walk overlays its whole
+  // content. The children of an inline box and of a display: contents one are
+  // its own; an atomic inline and an out-of-flow box are items of their own,
+  // whatever they hold. Bounded by WALK_STEP_LIMIT in depth and
+  // COLLECTION_ITEM_LIMIT in all; past either it holds block layout.
   function holdsInlineContent(cell) {
     const generated = env.pseudoOf(cell);
     const pseudos = generated ? [generated.before, generated.after] : [];
@@ -333,7 +350,7 @@ function createTableLayout(env) {
   function readColumns(element, part, s, columns, parts) {
     parts.push(element);
     if (part === 'col') {
-      return addColumns(columns, Number(dom.columnSpan(element)), s, null);
+      return addColumns(columns, spanOf(dom.columnSpan, element), s, null);
     }
     const held = elementChildrenOf(element);
     let shown = 0;
@@ -342,25 +359,47 @@ function createTableLayout(env) {
       if (cs.display === 'none') continue;
       if (partOf(held[index], cs) !== 'col') return false;
       parts.push(held[index]);
-      if (!addColumns(columns, Number(dom.columnSpan(held[index])), cs, s)) return false;
+      if (!addColumns(columns, spanOf(dom.columnSpan, held[index]), cs, s)) return false;
       shown++;
     }
-    return shown > 0 || addColumns(columns, Number(dom.columnSpan(element)), null, s);
+    return shown > 0 || addColumns(columns, spanOf(dom.columnSpan, element), null, s);
   }
 
   function addColumns(columns, span, style, groupStyle) {
+    if (span === null) return positioned('a column\'s span could not be read');
     const count = Number.isInteger(span) && span > 0 ? span : 1;
-    if (columns.length + count > WALK_STEP_LIMIT) return false;
+    if (columns.length + count > WALK_STEP_LIMIT) return positioned('its columns pass ' + WALK_STEP_LIMIT);
     for (let index = 0; index < count; index++) columns.push({ style, groupStyle });
     return true;
+  }
+
+  // A span the browser lays a cell or column out with (dom_access.mjs rowSpan,
+  // colSpan, columnSpan), or null when it cannot be read: an element tagged
+  // td, th, col or colgroup that slide script made in another namespace is no
+  // table element, and its pristine getter throws.
+  function spanOf(read, element) {
+    try {
+      return Number(read(element));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Announces why a table whose structure is plain still cannot be an a:tbl,
+  // and gives the positioned-items answer, null (falsy for addColumns' callers).
+  function positioned(reason) {
+    console.warn('[html2pptx] native table: ' + reason + '; it exports as positioned items');
+    return null;
   }
 
   // ─── the grid ────────────────────────────────────────────────────────
   // slotsOf(groups) -> {rows, cells, slots, columns} | null: the rows in order,
   // each cell with its grid slot and spans in HTML column order, slots[r][c]
   // the index in `cells` of the cell covering slot (r, c), and the column
-  // count. Null past WALK_STEP_LIMIT rows or columns, or COLLECTION_ITEM_LIMIT
-  // slots: no slide holds such a table.
+  // count. Null, announced (positioned), when a span cannot be read, past
+  // WALK_STEP_LIMIT rows or columns, or past COLLECTION_ITEM_LIMIT slots in
+  // the grid's area or under its cells: no slide holds such a table, and its
+  // grid would be that many cells.
   function slotsOf(groups) {
     const rows = [];
     const groupEnd = [];
@@ -371,7 +410,8 @@ function createTableLayout(env) {
         groupEnd.push(end);
       }
     }
-    if (!rows.length || rows.length > WALK_STEP_LIMIT) return null;
+    if (!rows.length) return null;
+    if (rows.length > WALK_STEP_LIMIT) return positioned('its ' + rows.length + ' rows pass ' + WALK_STEP_LIMIT);
     const slots = [];
     for (let row = 0; row < rows.length; row++) slots.push([]);
     const cells = [];
@@ -383,20 +423,26 @@ function createTableLayout(env) {
         const read = rows[row].cells[index];
         while (slots[row][column] !== undefined) column++;
         const reach = groupEnd[row] - row;
-        const rowSpanRead = Number(dom.rowSpan(read.element));
-        const colSpanRead = Number(dom.colSpan(read.element));
+        const rowSpanRead = spanOf(dom.rowSpan, read.element);
+        const colSpanRead = spanOf(dom.colSpan, read.element);
+        if (rowSpanRead === null || colSpanRead === null) return positioned('a cell\'s spans could not be read');
         const rowspan = rowSpanRead === 0 ? reach : Math.min(Math.max(1, rowSpanRead || 1), reach);
         const colspan = Math.max(1, colSpanRead || 1);
-        if (column + colspan > WALK_STEP_LIMIT) return null;
+        if (column + colspan > WALK_STEP_LIMIT) return positioned('its columns pass ' + WALK_STEP_LIMIT);
         covered += rowspan * colspan;
-        if (covered > COLLECTION_ITEM_LIMIT) return null;
+        if (covered > COLLECTION_ITEM_LIMIT) return positioned('its cells cover more than ' + COLLECTION_ITEM_LIMIT + ' grid slots');
         for (let down = 0; down < rowspan; down++) {
           for (let across = 0; across < colspan; across++) slots[row + down][column + across] = cells.length;
         }
-        cells.push({ element: read.element, style: read.style, row, col: column, rowspan, colspan });
+        cells.push({ element: read.element, style: read.style, blocks: read.blocks, row, col: column, rowspan, colspan });
         column += colspan;
         columns = Math.max(columns, column);
       }
+    }
+    // Every slot of the grid is a cell of the a:tbl, those no cell covers included.
+    if (rows.length * columns > COLLECTION_ITEM_LIMIT) {
+      return positioned('its grid of ' + rows.length + ' rows by ' + columns + ' columns passes ' +
+        COLLECTION_ITEM_LIMIT + ' slots');
     }
     return columns > 0 ? { rows, cells, slots, columns } : null;
   }
@@ -810,6 +856,7 @@ function createTableLayout(env) {
       model.cells.push({
         element: read.element,
         style: read.style,
+        blocks: read.blocks,
         row: read.row,
         visualCol,
         rowspan: read.rowspan,
@@ -933,7 +980,7 @@ function createTableLayout(env) {
         paragraphs: cell.element ? null : [],
       };
       modelCells.push(modelCell);
-      if (cell.element) cells.set(cell.element, { model: modelCell, grid: gridRect });
+      if (cell.element) cells.set(cell.element, { model: modelCell, grid: gridRect, blocks: cell.blocks });
     }
     modelCells.sort((a, b) => a.row - b.row || a.col - b.col);
     return {

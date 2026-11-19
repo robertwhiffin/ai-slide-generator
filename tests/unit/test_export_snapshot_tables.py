@@ -36,15 +36,18 @@ browser's own:
   only at 700, colours).
 
 What sits in a cell and is no text (a Harvey ball's picture, a delta pill's
-shape) is its own item, overlaid on the table at its browser rect inside its
-cell. A cell whose line holds such an atomic inline gives up its native text:
-the line's text is overlay text items, and the cell's ``a:tc`` holds none, so
-nothing is written twice. Text and boxes the table owns appear nowhere else.
+shape, a cell's ``::before`` dot) is its own item, overlaid on the table at its
+browser rect inside its cell. A cell whose line holds such an atomic inline
+gives up its native text: the line's text is overlay text items, and the
+cell's ``a:tc`` holds none, so nothing is written twice. So does a cell holding
+block layout (a ``<div>``, a ``<p>``, a float), whose content is overlaid at its
+measured place, and a cell whose own overflow clip cuts its text, whose
+overlays are cut as any others are: the table stays native, the cell's fill
+and borders on its ``a:tc``. Text and boxes the table owns appear nowhere else.
 
 A table is emitted as positioned items instead (cell boxes as shapes, cell
 text as text items, all still editable) when ``a:tbl`` cannot draw it: it
-holds a nested table, or a cell holds a block-level child (a ``<p>``), or its
-cells stand apart (``border-collapse: separate``
+holds a nested table, or its cells stand apart (``border-collapse: separate``
 with visible ``border-spacing``: a filled or bordered cell, whose gaps no
 ``a:tbl`` has), or two separated borders side by side differ. Spacing nothing
 shows (no cell fill, no cell border) keeps it
@@ -73,11 +76,14 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterator
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
@@ -89,12 +95,16 @@ from tests.fixtures.export_snapshot_support import (
     BrowserTable,
     Cell,
     Shape,
+    browser_ascent,
+    browser_each_pseudo,
     browser_each_rect,
+    browser_line_boxes,
     browser_padding_box,
     browser_pixels,
     browser_rect,
     browser_style,
     browser_tables,
+    browser_text,
     corpus_document,
     delete_drive_file,
     export_corpus,
@@ -104,6 +114,7 @@ from tests.fixtures.export_snapshot_support import (
     overlaps,
     requires_google_slides,
     requires_huashu_sidecar,
+    single_line_box_top,
     slide_document,
     slide_shapes,
     slide_text_loss,
@@ -265,6 +276,28 @@ TABLES_CSS = (
 .rtl-edge td { padding: 10px 14px; }
 .rtl-edge td:first-child { border-left: 2px solid #FF5F46; }
 .rtl-edge td + td { border-right: 2px solid #1B3139; }
+.colrow { position: absolute; border-collapse: collapse; font-size: 18px; }
+.colrow td { padding: 10px 14px; }
+.colrow col.first { border-left: 4px solid #FF5F46; }
+.colrow tr { border-left: 4px solid #1B3139; }
+.ruled .sub { font-size: 13px; color: var(--ink-2); }
+.dots { position: absolute; border-collapse: collapse; font-size: 18px; }
+.dots td { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+#dots-inline td:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: #FF5F46; margin-right: 8px; }
+#dots-absolute td:first-child { padding-left: 28px; }
+#dots-absolute td:first-child::before { content: ''; position: absolute; margin-left: -16px;
+  margin-top: 8px; width: 8px; height: 8px; border-radius: 50%; background: #FF5F46; }
+.loose { position: absolute; border-collapse: collapse; font-size: 18px; table-layout: fixed; }
+.loose td { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+#relative td { position: relative; }
+#overflow td.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#overflow td.fits { overflow: hidden; }
+.grad { position: absolute; border-collapse: collapse; font-size: 18px;
+        background: linear-gradient(90deg, #FFFFFF, #F1EFEB); border: 3px solid #1B3139; }
+.grad td { padding: 8px 12px; border-bottom: 1px solid #DCE0E2; }
+.foreign td { display: table-cell; padding: 8px 12px; }
+#area td { padding: 0; }
 .doubled { position: absolute; border-collapse: separate; border-spacing: 0; font-size: 18px; }
 .doubled td { padding: 10px 14px; }
 .doubled tr.upper td { border-bottom: 2px solid #1B3139; }
@@ -399,15 +432,33 @@ BLOCKS_BODY = """<div class="slide">
   <table id="blocks" class="ruled" style="left: 88px; top: 120px; width: 700px;">
     <thead><tr><th>Programme</th><th>Detail</th></tr></thead>
     <tbody>
-      <tr><td>Platform</td><td>
-        <p style="margin: 0;">Unity Catalog governs every table</p>
-        <p style="margin: 0;">Lakeflow runs the pipelines</p>
-      </td></tr>
+      <tr><td>Platform</td><td id="block-cell"><div id="block-first">Unity Catalog</div><div
+        id="block-second" class="sub">Governs every table and model</div></td></tr>
       <tr><td>People</td><td>Hiring plan on track</td></tr>
     </tbody>
   </table>
+  <table id="trap" class="ruled" style="left: 88px; top: 380px; width: 700px;">
+    <tbody>
+      <tr><td>Segment</td><td id="trap-cell">Revenue<div class="sub">FY24 restated</div></td></tr>
+      <tr><td>Industrial</td><td>632.4</td></tr>
+    </tbody>
+  </table>
 </div>"""
+# A cell holding two stacked <div>s: block layout, which keeps the table native
+# and is overlaid at its measured place.
 BLOCKS_TABLE = "#blocks"
+BLOCK_CELL_SLOT = (1, 1)
+BLOCK_TEXTS = (
+    ("#block-first", "Unity Catalog"),
+    ("#block-second", "Governs every table and model"),
+)
+# A cell's own text with no white space before the block that follows it: the
+# text is an anonymous block of the cell, overlaid once, never its a:tc paragraph.
+TRAP_TABLE = "#trap"
+TRAP_CELL = "#trap-cell"
+TRAP_SLOT = (0, 1)
+# Each of the cell's lines, and the element its text is set in.
+TRAP_LINES = (("Revenue", TRAP_CELL), ("FY24 restated", f"{TRAP_CELL} .sub"))
 
 FILLS_BODY = """<div class="slide">
   <table id="fills" class="ruled"
@@ -521,7 +572,20 @@ PRECEDENCE_BODY = """<div class="slide">
       <tr><td>Gross profit</td><td>434.0</td></tr>
     </tbody>
   </table>
+  <table id="colrow" class="colrow" style="left: 88px; top: 360px; width: 480px;">
+    <colgroup><col class="first"><col></colgroup>
+    <tbody>
+      <tr><td>Operating income</td><td>148.8</td></tr>
+      <tr><td>Net income</td><td>97.8</td></tr>
+    </tbody>
+  </table>
 </div>"""
+# Along the table's left edge: the first column's own 4 px solid FF5F46 left
+# border against each row's own 4 px solid 1B3139 left border. Equal width and
+# style, so origin decides: a row beats a column.
+COLROW_TABLE = "#colrow"
+COLROW_WINNER = (INK, 4.0)
+COLROW_LOSER = ACCENT
 # Along the top of row 1: the upper cells' own 4 px solid 1B3139 bottom against
 # the lower cells' border-top: hidden. hidden wins before width: no line.
 HIDDEN_EDGE_TABLE = "#hidden-edge"
@@ -557,8 +621,86 @@ UNLIKE_TABLE = "#unlike"
 DOUBLED_ROW = 1
 DOUBLED_SIDE_PX = 2.0
 DOUBLED_WIDTH_TOLERANCE_PX = 0.5
-# A line item lies along its band within this.
+# A line item lies along its band within this, and a text box at its browser line box.
 LINE_TOLERANCE_PX = 1.0
+LINE_BOX_TOLERANCE_PX = 1.0
+
+DOTS_BODY = """<div class="slide">
+  <table id="dots-inline" class="dots" style="left: 88px; top: 120px; width: 480px;">
+    <tbody>
+      <tr><td>On track</td><td>Platform</td></tr>
+      <tr><td>At risk</td><td>People</td></tr>
+    </tbody>
+  </table>
+  <table id="dots-absolute" class="dots" style="left: 680px; top: 120px; width: 480px;">
+    <tbody>
+      <tr><td>Shipped</td><td>Lakeflow</td></tr>
+      <tr><td>Blocked</td><td>Hiring</td></tr>
+    </tbody>
+  </table>
+</div>"""
+# Each first cell's ::before status dot: an inline-block in its line, or out of
+# the flow (position: absolute). Both are items of their own over the table.
+DOT_TABLES = ("#dots-inline", "#dots-absolute")
+DOT_FILL = ACCENT
+# A dot's shape is its CDP box within this.
+DOT_TOLERANCE_PX = 0.5
+
+LOOSE_BODY = """<div class="slide">
+  <table id="relative" class="loose" style="left: 88px; top: 120px; width: 480px;">
+    <tbody>
+      <tr><td>Revenue</td><td>1,240.0</td></tr>
+      <tr><td>Gross profit</td><td>434.0</td></tr>
+    </tbody>
+  </table>
+  <table id="overflow" class="loose" style="left: 680px; top: 120px; width: 480px;">
+    <tbody>
+      <tr><td>Programme</td><td id="ellipsis-cell" class="ellipsis"><span class="w">Unity</span>
+        <span class="w">Catalog</span> <span class="w">governs</span> <span class="w">every</span>
+        <span class="w">table,</span> <span class="w">view</span> <span class="w">and</span>
+        <span class="w">model</span> <span class="w">across</span>
+        <span class="w">clouds</span></td></tr>
+      <tr><td>People</td><td id="fits-cell" class="fits">Hiring plan on track</td></tr>
+    </tbody>
+  </table>
+</div>"""
+RELATIVE_TABLE = "#relative"
+OVERFLOW_TABLE = "#overflow"
+ELLIPSIS_CELL = "#ellipsis-cell"
+ELLIPSIS_WORDS = "#ellipsis-cell .w"
+ELLIPSIS_WORD_TEXTS = (
+    "Unity",
+    "Catalog",
+    "governs",
+    "every",
+    "table,",
+    "view",
+    "and",
+    "model",
+    "across",
+    "clouds",
+)
+ELLIPSIS_SLOT = (0, 1)
+FITS_SLOT = (1, 1)
+# A word a clip shows less than this of, along the axis it cuts, is not slide text.
+MINIMUM_VISIBLE_PX = 2.0
+
+CAPTURED_BODY = """<div class="slide">
+  <table id="grad" class="grad" style="left: 88px; top: 120px; width: 640px;">
+    <tbody>
+      <tr><td>Revenue</td><td>1,240.0</td></tr>
+      <tr><td>Gross profit</td><td>434.0</td></tr>
+      <tr><td>Operating income</td><td>148.8</td></tr>
+    </tbody>
+  </table>
+</div>"""
+# A collapsed table whose own background is a gradient, so its box is a
+# box-only picture under the frame: 1 px DCE0E2 rules between its rows and a
+# 3 px 1B3139 border around it, which the a:tbl draws and the picture must not.
+GRAD_TABLE = "#grad"
+GRAD_BORDER = (INK, 3.0)
+# A picture pixel is a colour within this per channel.
+PIXEL_TOLERANCE = 8
 
 INLINE_BODIES = {
     "caption": CAPTION_BODY,
@@ -575,6 +717,9 @@ INLINE_BODIES = {
     "clip": CLIP_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
+    "dots": DOTS_BODY,
+    "loose": LOOSE_BODY,
+    "captured": CAPTURED_BODY,
 }
 
 # A two-cell table added to the hostile-realm fixtures, after the prose.
@@ -587,6 +732,83 @@ HOSTILE_TABLE = (
 )
 HOSTILE_CELLS = ("Pass one", "Pass two")
 HOSTILE_TEXT_NODES = "hostile_text_nodes"
+
+# A table with a rowspan, a colspan and a <col span="2">, its third column filled.
+SPANS_BODY = """<div class="slide">
+  <table id="spans" class="ruled" style="left: 88px; top: 120px; width: 640px;">
+    <colgroup><col span="2"><col style="background: #F1EFEB;"></colgroup>
+    <thead><tr><th>Segment</th><th>Quarter</th><th class="num">Revenue</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="2">Industrial</td><td>Q1</td><td class="num">120.0</td></tr>
+      <tr><td>Q2</td><td class="num">131.5</td></tr>
+      <tr><td colspan="2">Total</td><td class="num">251.5</td></tr>
+    </tbody>
+  </table>
+</div>"""
+SPANS_TABLE = "#spans"
+SPANS_COLUMN_FILL = ("F1EFEB", 2)
+# Slide script that makes the page realm's span getters lie: every cell spans 7
+# rows and 9 columns, every column 5. It publishes on document.title what it
+# replaced and what a reader of the realm now sees.
+POISONED_SPANS_SCRIPT = (
+    "<script>(function () {"
+    "var report = { configurable: {}, bites: {}, redefineResult: 'ok' };"
+    "function poison(proto, name, label, value) {"
+    " var descriptor = Object.getOwnPropertyDescriptor(proto, name);"
+    " report.configurable[label] = !!(descriptor && descriptor.configurable);"
+    " try { Object.defineProperty(proto, name, { configurable: true,"
+    "   get: function () { return value; } }); }"
+    " catch (error) { report.redefineResult = 'refused ' + label + ': ' + error.message; } }"
+    "poison(HTMLTableCellElement.prototype, 'rowSpan', 'HTMLTableCellElement.rowSpan', 7);"
+    "poison(HTMLTableCellElement.prototype, 'colSpan', 'HTMLTableCellElement.colSpan', 9);"
+    "poison(HTMLTableColElement.prototype, 'span', 'HTMLTableColElement.span', 5);"
+    "var cell = document.createElement('td'); var column = document.createElement('col');"
+    "report.bites = { rowSpan: cell.rowSpan === 7, colSpan: cell.colSpan === 9,"
+    " span: column.span === 5 };"
+    "document.title = JSON.stringify(report);"
+    "})();</script>"
+)
+POISONED_SPANS = (
+    "HTMLTableCellElement.rowSpan",
+    "HTMLTableCellElement.colSpan",
+    "HTMLTableColElement.span",
+)
+
+# A row whose second cell slide script makes in another namespace: tagged td and
+# laid out as a table cell (the deck's td rule), but no HTMLTableCellElement, so
+# no span of it can be read.
+FOREIGN_BODY = """<div class="slide">
+  <table id="foreign" class="ruled foreign" style="left: 88px; top: 120px; width: 640px;">
+    <tbody><tr id="foreign-row"><td>Native cell</td></tr></tbody>
+  </table>
+  <script>(function () {
+    var cell = document.createElementNS('http://example.com/not-html', 'td');
+    cell.appendChild(document.createTextNode('Foreign cell'));
+    document.getElementById('foreign-row').appendChild(cell);
+  })();</script>
+</div>"""
+FOREIGN_TABLE = "#foreign"
+FOREIGN_TEXTS = ("Native cell", "Foreign cell")
+
+# A table slide script grows to 1,001 rows over 1,000 columns: a grid of
+# 1,001,000 slots, past COLLECTION_ITEM_LIMIT (1,000,000), though only one row
+# shows (the rest are empty and unpadded).
+AREA_BODY = """<div class="slide">
+  <table id="area" style="position: absolute; left: 88px; top: 120px; border-collapse: collapse;
+                          font-size: 18px;">
+    <tbody id="area-body"><tr><td colspan="1000" style="padding: 4px 8px;">Wide</td></tr></tbody>
+  </table>
+  <script>(function () {
+    var body = document.getElementById('area-body');
+    for (var row = 0; row < 1000; row++) body.insertRow().insertCell();
+  })();</script>
+</div>"""
+AREA_TABLE = "#area"
+AREA_TEXT = "Wide"
+SLIDE_WIDTH_PX = 1280
+SLIDE_HEIGHT_PX = 720
+# What the snapshot announces when a table is past a bound or unreadable.
+NATIVE_TABLE_LINE = "[html2pptx] native table"
 
 # The Drive round trip converts fixture 05 and the collapse document in one deck.
 GOOGLE_SLIDE_NAMES = ("05-balance-sheet", "collapse")
@@ -883,6 +1105,78 @@ def _slot_under(frame: Shape, cell: BrowserCell) -> tuple[int, int]:
         f"the browser cell {cell.text!r} at {cell.rect} lies on {len(under)} grid cells"
     )
     return under[0]
+
+
+def _frames_over(shapes: list[Shape], area: dict) -> list[tuple[int, dict]]:
+    """(spTree index, grid extent) of every native table whose grid overlaps ``area``."""
+    return [
+        (position, table_extent(frame))
+        for position, frame in table_frames(shapes)
+        if overlaps(SimpleNamespace(**table_extent(frame)), SimpleNamespace(**area))
+    ]
+
+
+def _assert_text_at_line(
+    shapes: list[Shape], line: dict, area: dict, what: str, document: str, styled: str
+) -> int:
+    """The one text item reading a browser line box's text in ``area``: at that line within 1 px.
+
+    Its box starts at the line's left, is the line's height, and its top is
+    where ``emit_text.cjs`` places a one-line box over that line's glyphs
+    (``single_line_box_top``, from the face ``styled``, the selector of the
+    element the line's text is set in, measured in the browser), each within
+    ``LINE_BOX_TOLERANCE_PX``. Returns its spTree index.
+    """
+    items = [
+        (position, shape)
+        for position, shape in _text_items(shapes, line["text"])
+        if _centre_inside(shape, area, 0.0)
+    ]
+    assert len(items) == 1, (
+        f"{what}: expected one text box reading {line['text']!r} in {area}, found "
+        f"{len(items)}:\n{_describe(shapes)}"
+    )
+    position, item = items[0]
+    style = browser_style(document, styled)
+    family = style["fontFamily"].split(",")[0].strip().strip("\"'")
+    size_px = float(style["fontSize"].removesuffix("px"))
+    ascent = browser_ascent(document, family, int(style["fontWeight"]), size_px, style["fontStyle"])
+    top = single_line_box_top(line["y"], size_px, ascent)
+    edges = ((item.x, line["x"]), (item.y, top), (item.h, line["h"]))
+    assert all(abs(emitted - measured) <= LINE_BOX_TOLERANCE_PX for emitted, measured in edges), (
+        f"{what}: the text box {_rect(item)} is not at its browser line box {line}, whose "
+        f"one-line box top is {top:.2f}"
+    )
+    return position
+
+
+def _cell_text_written_once(shapes: list[Shape], text: str) -> int:
+    """How many times ``text`` is written: as a native cell's text, plus text boxes holding it."""
+    return _cell_texts(shapes).count(text) + len(_text_items(shapes, text))
+
+
+def _picture_pixel(image: Image.Image, picture: Shape, x: float, y: float) -> tuple[int, ...]:
+    """The pixel of ``picture``'s PNG that shows slide point (x, y)."""
+    column = int((x - picture.x) / picture.w * image.width)
+    row = int((y - picture.y) / picture.h * image.height)
+    return image.getpixel(
+        (min(max(column, 0), image.width - 1), min(max(row, 0), image.height - 1))
+    )
+
+
+def _near(pixel: tuple[int, ...], colour: str) -> bool:
+    """Whether ``pixel`` paints ``colour``, within ``PIXEL_TOLERANCE`` per channel."""
+    expected = (int(colour[0:2], 16), int(colour[2:4], 16), int(colour[4:6], 16))
+    painted = len(pixel) < 4 or pixel[3] > 0
+    return painted and all(
+        abs(channel - want) <= PIXEL_TOLERANCE for channel, want in zip(pixel, expected)
+    )
+
+
+def _with_script(body: str, script: str) -> str:
+    """A slide body with ``script`` as the last thing its slide holds."""
+    head, tail = body.rsplit("</div>", 1)
+    return head + script + "</div>" + tail
 
 
 def _cell_holding(browser: BrowserTable, point_x: float, point_y: float) -> BrowserCell:
@@ -2091,6 +2385,305 @@ class TestTableStructure:
             f"frame (spTree {frame_position}); found {[(p, _rect(s)) for p, s in grounds]}"
         )
 
+    def test_a_rows_border_beats_its_columns_at_the_tables_edge(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """At equal width and style, a row's border beats a column's on the table's own edge.
+
+        Along the table's left edge each row's own left border (4 px solid
+        ``1B3139``) meets the first column's own left border (4 px solid
+        ``FF5F46``). Width and style tie, so origin decides: a row beats a
+        column, as the screen shows in every row. Each row's first cell writes
+        the row's line as its ``lnL``.
+        """
+        document = _inline_document("precedence")
+        shapes = slide_shapes(inline_export("precedence"))
+        (table,) = browser_tables(document, COLROW_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the column-and-row table")
+        firsts = [cell for cell in table.cells if cell.col == 0]
+        pixels = browser_pixels(document, [(cell.x + 1, cell.y + cell.h / 2) for cell in firsts])
+        for cell, pixel in zip(firsts, pixels):
+            row_border = table.row_borders[cell.row]["left"]
+            what = f"the table's left edge beside {cell.text!r}"
+            assert (
+                row_border.style,
+                row_border.width_px,
+                _css_colour(row_border.color)[0],
+            ) == ("solid", COLROW_WINNER[1], COLROW_WINNER[0]) and cell.borders["left"].style == (
+                "none"
+            ), f"fixture drift: {what} meets the row's {row_border} and {cell.borders['left']}"
+            assert _hex(pixel) == COLROW_WINNER[0] != COLROW_LOSER, (
+                f"fixture drift: the browser paints #{_hex(pixel)} on {what}"
+            )
+            _assert_side(frame.table.rows[cell.row][0], "left", row_border, f"{what}, lnL")
+        contradictions = _shared_edge_contradictions(frame)
+        assert not contradictions, "shared edges with two different sides:\n  " + "\n  ".join(
+            contradictions
+        )
+
+    def test_a_cell_holding_block_layout_keeps_the_table_native(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A cell holding block layout keeps its table native, its content overlaid.
+
+        One cell holds two stacked ``<div>``s. The table is ONE native
+        ``a:tbl`` on the browser's grid; that cell's ``a:tc`` holds no text;
+        each div's line is one text box inside the cell, at its browser line
+        box within 1 px; and every other cell keeps its text in its own ``a:tc``.
+        """
+        document = _inline_document("blocks")
+        shapes = slide_shapes(inline_export("blocks"))
+        (table,) = browser_tables(document, BLOCKS_TABLE)
+        grid = _grid_rect(table)
+        on_the_table = _frames_over(shapes, grid)
+        assert len(on_the_table) == 1, (
+            f"expected one native table on the table whose cell holds blocks, found "
+            f"{on_the_table}:\n{_describe(shapes)}"
+        )
+        _, frame = _frame_for(shapes, grid, "the table whose cell holds blocks")
+        _assert_grid_matches(frame, table, "the table whose cell holds blocks")
+        block = table.cell_at(*BLOCK_CELL_SLOT)
+        origin = frame.table.rows[block.row][block.col]
+        assert not _normalised(origin.text), (
+            f"the cell holding blocks writes {origin.text!r} in its a:tc; its content is overlaid"
+        )
+        for selector, text in BLOCK_TEXTS:
+            lines = browser_line_boxes(document, selector)
+            assert [line["text"] for line in lines] == [text], f"fixture drift: {selector} {lines}"
+            _assert_text_at_line(
+                shapes, lines[0], block.rect, f"the block {selector}", document, selector
+            )
+        for cell in table.cells:
+            if (cell.row, cell.col) == BLOCK_CELL_SLOT:
+                continue
+            written = frame.table.rows[cell.row][cell.col]
+            assert _normalised(written.text) == _normalised(cell.text), (
+                f"slot ({cell.row}, {cell.col}) reads {written.text!r}, the browser {cell.text!r}"
+            )
+
+    def test_text_running_into_a_block_in_a_cell_is_overlay_text_written_once(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A cell's own text that runs straight into a block child is overlaid once, not its a:tc's.
+
+        ``<td>Revenue<div>FY24 restated</div></td>``: "Revenue" is the cell's
+        own text and the div a block after it, with no white space between.
+        The cell holds block layout, so the table stays native and the cell's
+        ``a:tc`` holds no text (not "Revenue" alone, as one paragraph of its
+        own): each of the cell's two browser lines is one text box at its line
+        box within 1 px, and neither is written anywhere else.
+        """
+        document = _inline_document("blocks")
+        shapes = slide_shapes(inline_export("blocks"))
+        (table,) = browser_tables(document, TRAP_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the table whose cell runs into a block")
+        trap = table.cell_at(*TRAP_SLOT)
+        lines = browser_line_boxes(document, TRAP_CELL)
+        assert tuple(line["text"] for line in lines) == tuple(text for text, _ in TRAP_LINES), (
+            f"fixture drift: {lines}"
+        )
+        origin = frame.table.rows[trap.row][trap.col]
+        assert not _normalised(origin.text), (
+            f"the cell writes {origin.text!r} in its a:tc; its content is overlaid"
+        )
+        for line, (_, styled) in zip(lines, TRAP_LINES):
+            _assert_text_at_line(
+                shapes, line, trap.rect, f"the cell's line {line['text']!r}", document, styled
+            )
+            written = _cell_text_written_once(shapes, line["text"])
+            assert written == 1, (
+                f"{line['text']!r} is written {written} times:\n{_describe(shapes)}"
+            )
+
+    @pytest.mark.parametrize("selector", DOT_TABLES)
+    def test_a_cells_pseudo_element_dot_is_an_item_over_the_native_table(
+        self, inline_export: Callable[[str], bytes], selector: str
+    ) -> None:
+        """A cell's ``::before`` dot is an item of its own over the table, which stays native.
+
+        Each first cell draws a status dot as its ``::before``: an inline-block
+        in its line, or an absolutely positioned box. The table is one native
+        frame on the browser's grid; each dot is one shape filled ``FF5F46`` at
+        its pseudo-element's box within 0.5 px, inside its cell, after the frame
+        in the spTree; each cell's text is written exactly once.
+        """
+        document = _inline_document("dots")
+        shapes = slide_shapes(inline_export("dots"))
+        (table,) = browser_tables(document, selector)
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), f"the {selector} table")
+        _assert_grid_matches(frame, table, f"the {selector} table")
+        hosts = [cell for cell in table.cells if cell.col == 0]
+        dots = browser_each_pseudo(document, f"{selector} td:first-child", "before")
+        assert len(dots) == len(hosts) and all(dots), f"fixture drift: {selector} dots {dots}"
+        for host, dot in zip(hosts, dots):
+            box = {key: dot[key] for key in ("x", "y", "w", "h")}
+            what = f"{host.text!r}'s dot at {box}"
+            at_dot = [
+                (position, shape)
+                for position, shape in enumerate(shapes)
+                if shape.kind == "shape"
+                and shape.fill == DOT_FILL
+                and _same_rect(_box(shape), box, DOT_TOLERANCE_PX)
+            ]
+            assert len(at_dot) == 1, (
+                f"{what}: expected one {DOT_FILL} shape at its box, found {len(at_dot)}:\n"
+                f"{_describe(shapes)}"
+            )
+            position, item = at_dot[0]
+            assert _inside(_box(item), host.rect) and position > frame_position, (
+                f"{what}: the shape {_rect(item)} at spTree {position} is not inside its cell "
+                f"{host.rect} over the table at {frame_position}"
+            )
+        for cell in table.cells:
+            written = _cell_text_written_once(shapes, _normalised(cell.text))
+            assert written == 1, f"{cell.text!r} is written {written} times:\n{_describe(shapes)}"
+
+    def test_relatively_positioned_cells_keep_the_table_native(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """Cells with ``position: relative`` and no offset lie on the grid: the table is native.
+
+        One native frame on the browser's grid, each ``a:tc`` reading its cell.
+        """
+        document = _inline_document("loose")
+        shapes = slide_shapes(inline_export("loose"))
+        (table,) = browser_tables(document, RELATIVE_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the relatively positioned table")
+        _assert_grid_matches(frame, table, "the relatively positioned table")
+        for cell in table.cells:
+            written = frame.table.rows[cell.row][cell.col]
+            assert _normalised(written.text) == _normalised(cell.text), (
+                f"slot ({cell.row}, {cell.col}) reads {written.text!r}, the browser {cell.text!r}"
+            )
+
+    def test_a_cell_that_clips_its_overflow_keeps_the_table_native(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A cell whose own overflow clip cuts its text keeps the table native, its text overlaid.
+
+        The table is one native frame on the browser's grid. One cell
+        (``overflow: hidden``, ``text-overflow: ellipsis``, ``nowrap``) holds a
+        line far wider than its padding box: its ``a:tc`` holds no text, and its
+        overlay text reads exactly the words its clip shows at least 2 px of,
+        in order; no word past the clip is on the slide. The cell beside it
+        clips too, but its text fits: it stays the ``a:tc``'s own.
+        """
+        document = _inline_document("loose")
+        shapes = slide_shapes(inline_export("loose"))
+        (table,) = browser_tables(document, OVERFLOW_TABLE)
+        _, frame = _frame_for(shapes, _grid_rect(table), "the table whose cell clips")
+        _assert_grid_matches(frame, table, "the table whose cell clips")
+        clip = browser_padding_box(document, ELLIPSIS_CELL)
+        words = browser_each_rect(document, ELLIPSIS_WORDS)
+        assert len(words) == len(ELLIPSIS_WORD_TEXTS), f"fixture drift: {len(words)} words"
+        right = clip["x"] + clip["w"]
+        shown = [
+            text
+            for text, rect in zip(ELLIPSIS_WORD_TEXTS, words)
+            if min(rect["x"] + rect["w"], right) - max(rect["x"], clip["x"]) >= MINIMUM_VISIBLE_PX
+        ]
+        hidden = [text for text in ELLIPSIS_WORD_TEXTS if text not in shown]
+        assert shown and hidden, f"fixture drift: the clip shows {shown} and hides {hidden}"
+        cell = table.cell_at(*ELLIPSIS_SLOT)
+        origin = frame.table.rows[cell.row][cell.col]
+        assert not _normalised(origin.text), (
+            f"the clipped cell writes {origin.text!r} in its a:tc; its text is overlaid"
+        )
+        overlay = sorted(
+            (
+                shape
+                for shape in shapes
+                if shape.kind == "text"
+                and cell.y <= shape.y + shape.h / 2 <= cell.y + cell.h
+                and cell.x - INSIDE_TOLERANCE_PX <= shape.x < right
+            ),
+            key=lambda shape: shape.x,
+        )
+        read = " ".join(_normalised(shape.text) for shape in overlay)
+        assert read == " ".join(shown), (
+            f"the clipped cell's overlay reads {read!r}; its clip shows {' '.join(shown)!r}"
+        )
+        leaked = [
+            word
+            for word in hidden
+            if any(
+                word in _normalised(shape.text).split() for shape in shapes if shape.kind == "text"
+            )
+            or any(word in text.split() for text in _cell_texts(shapes))
+        ]
+        assert not leaked, f"words past the clip are on the slide: {leaked}"
+        fits = table.cell_at(*FITS_SLOT)
+        written = frame.table.rows[fits.row][fits.col]
+        assert _normalised(written.text) == _normalised(fits.text), (
+            f"the cell whose text fits reads {written.text!r}, the browser {fits.text!r}"
+        )
+
+    def test_a_captured_table_box_holds_none_of_the_lines_its_grid_draws(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A collapsed native table whose own box is a picture leaves its lines to the grid.
+
+        The table's background is a gradient, so its box is a box-only picture
+        under the frame. Its 1 px ``DCE0E2`` rules and its 3 px ``1B3139``
+        border are drawn by the ``a:tbl``: the picture shows none of them where
+        the screen does (it would draw every line twice), and the grid writes
+        them, the rules on both cells of each edge and the border on its outer
+        cells.
+        """
+        document = _inline_document("captured")
+        shapes = slide_shapes(inline_export("captured"))
+        (table,) = browser_tables(document, GRAD_TABLE)
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the captured table")
+        pictures = [
+            (position, shape)
+            for position, shape in enumerate(shapes)
+            if shape.kind == "picture" and _same_rect(_box(shape), table.rect)
+        ]
+        assert len(pictures) == 1 and pictures[0][0] < frame_position, (
+            f"expected the table's box as one picture at {table.rect} under the frame (spTree "
+            f"{frame_position}):\n{_describe(shapes)}"
+        )
+        picture = pictures[0][1]
+        image = Image.open(BytesIO(picture.image)).convert("RGBA")
+        lowers = [cell for cell in table.cells if cell.row > 0]
+        rule_points = [
+            (lower, (lower.x + lower.w / 2, lower.y + offset))
+            for lower in lowers
+            for offset in (-1.0, -0.5, 0.0, 0.5)
+        ]
+        firsts = [cell for cell in table.cells if cell.col == 0]
+        border_points = [(cell, (cell.x, cell.y + cell.h / 2)) for cell in firsts]
+        pixels = browser_pixels(document, [point for _, point in rule_points + border_points])
+        on_rules = [
+            (lower, point)
+            for (lower, point), pixel in zip(rule_points, pixels[: len(rule_points)])
+            if _hex(pixel) == RULE
+        ]
+        assert {id(lower) for lower, _ in on_rules} == {id(lower) for lower in lowers}, (
+            "fixture drift: the browser does not paint a DCE0E2 rule along every row edge"
+        )
+        assert all(_hex(pixel) == INK for pixel in pixels[len(rule_points) :]), (
+            "fixture drift: the browser does not paint the 1B3139 border along the left edge"
+        )
+        drawn_twice = [
+            f"{colour} at {point}"
+            for colour, points in ((RULE, on_rules), (INK, border_points))
+            for _, point in points
+            if _near(_picture_pixel(image, picture, *point), colour)
+        ]
+        assert not drawn_twice, "the table's picture paints lines its grid draws too: " + ", ".join(
+            drawn_twice
+        )
+        for lower in lowers:
+            upper = table.cell_at(lower.row - 1, lower.col)
+            what = f"the edge between {upper.text!r} and {lower.text!r}"
+            rule = upper.borders["bottom"]
+            _assert_side(frame.table.rows[upper.row][upper.col], "bottom", rule, f"{what}, lnB")
+            _assert_side(frame.table.rows[lower.row][lower.col], "top", rule, f"{what}, lnT")
+        border = BrowserBorder(width_px=GRAD_BORDER[1], style="solid", color="rgb(27, 49, 57)")
+        for cell in firsts:
+            _assert_side(frame.table.rows[cell.row][0], "left", border, f"{cell.text!r}, lnL")
+
 
 # ---------------------------------------------------------------------------
 # When a:tbl cannot draw a table: positioned items, all editable
@@ -2360,40 +2953,6 @@ class TestPositionedTables:
                 f"the cell {cell.text!r} is not an editable text box:\n{_describe(shapes)}"
             )
 
-    def test_a_cell_holding_blocks_makes_its_table_positioned_items(
-        self, inline_export: Callable[[str], bytes]
-    ) -> None:
-        """A cell holding block-level paragraphs makes its table positioned items, every word kept.
-
-        A ``<p>`` in a ``<td>`` is a block of its own in the cell, which no
-        ``a:tc`` paragraph is, so no native frame stands on the table: each
-        cell's text, the two paragraphs included, is an editable text box, and
-        no word of the table is lost.
-        """
-        document = _inline_document("blocks")
-        pptx = inline_export("blocks")
-        shapes = slide_shapes(pptx)
-        (table,) = browser_tables(document, BLOCKS_TABLE)
-        grid = _grid_rect(table)
-        on_the_table = [
-            (position, table_extent(frame))
-            for position, frame in table_frames(shapes)
-            if overlaps(SimpleNamespace(**table_extent(frame)), SimpleNamespace(**grid))
-        ]
-        assert not on_the_table, (
-            f"a native table stands on the table whose cell holds blocks ({on_the_table}):\n"
-            f"{_describe(shapes)}"
-        )
-        for cell in table.cells:
-            for line in cell.text.splitlines():
-                if line.strip():
-                    assert _text_items(shapes, _normalised(line)), (
-                        f"the cell line {line!r} is not an editable text box:\n{_describe(shapes)}"
-                    )
-        assert slide_text_loss(pptx, 0, document) == [], (
-            "the table whose cell holds blocks lost text"
-        )
-
     def test_a_nested_table_makes_the_outer_table_positioned_items(
         self, inline_export: Callable[[str], bytes]
     ) -> None:
@@ -2467,6 +3026,104 @@ class TestTablesInAHostileRealm:
         assert cells == HOSTILE_CELLS, (
             f"the hostile slide's table reads {cells}, not the slide's {HOSTILE_CELLS}"
         )
+
+    def test_span_getters_that_lie_leave_the_grid_the_browsers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slide script makes ``rowSpan``, ``colSpan`` and column ``span`` lie: the grid holds.
+
+        Its script replaces the page realm's ``HTMLTableCellElement`` ``rowSpan``
+        and ``colSpan`` getters (7 and 9) and ``HTMLTableColElement``'s ``span``
+        (5), and publishes on ``document.title`` that a reader of the realm now
+        sees them. The export reads the spans the browser lays the table out
+        with: one native frame on the benign twin's grid, span for span, and
+        only the third column, which its second ``<col>`` fills, filled.
+        """
+        hostile_body = _with_script(SPANS_BODY, POISONED_SPANS_SCRIPT)
+        report = json.loads(browser_text(slide_document(hostile_body, css=TABLES_CSS), "title"))
+        assert report["redefineResult"] == "ok" and all(
+            report["configurable"].get(name) for name in POISONED_SPANS
+        ), f"the poisoning was refused: {report}"
+        assert all(report["bites"].values()), f"a replacement did not take effect: {report}"
+        (benign,) = browser_tables(slide_document(SPANS_BODY, css=TABLES_CSS), SPANS_TABLE)
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
+        )
+        pptx, failures = export_slides([hostile_body], css=TABLES_CSS, monkeypatch=monkeypatch)
+        assert pptx and failures == [], f"the hostile slide did not export: {failures}"
+        shapes = slide_shapes(pptx)
+        _, frame = _frame_for(shapes, _grid_rect(benign), "the table with lying span getters")
+        _assert_grid_matches(frame, benign, "the table with lying span getters")
+        fill, column = SPANS_COLUMN_FILL
+        filled = {
+            (cell.row, cell.col): _owner(frame, cell.row, cell.col).fill for cell in benign.cells
+        }
+        problems = [
+            f"slot {slot} is filled {found}"
+            for slot, found in filled.items()
+            if found != (fill if slot[1] == column else None)
+        ]
+        assert not problems, f"only column {column} is #{fill}:\n  " + "\n  ".join(problems)
+
+    def test_a_cell_whose_spans_cannot_be_read_makes_its_table_positioned_items(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A row cell slide script makes in another namespace leaves its table positioned items.
+
+        The element is tagged ``td`` and laid out as a table cell, but it is no
+        ``HTMLTableCellElement``, so no span of it can be read. The slide still
+        exports, with no native frame on the table, every cell's text as a text
+        box, and the reason announced with an ``[html2pptx]`` line.
+        """
+        document = slide_document(FOREIGN_BODY, css=TABLES_CSS)
+        assert browser_rect(document, "#foreign-row > :last-child")["w"] > 0, (
+            "fixture drift: the foreign cell is not laid out"
+        )
+        area = browser_rect(document, FOREIGN_TABLE)
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
+        )
+        capsys.readouterr()
+        pptx, failures = export_slides([FOREIGN_BODY], css=TABLES_CSS, monkeypatch=monkeypatch)
+        stderr = capsys.readouterr().err
+        assert pptx and failures == [], f"the slide did not export: {failures}"
+        shapes = slide_shapes(pptx)
+        assert not _frames_over(shapes, area), (
+            f"a native table stands on the table whose cell spans are unreadable:\n"
+            f"{_describe(shapes)}"
+        )
+        for text in FOREIGN_TEXTS:
+            assert _text_items(shapes, text), f"{text!r} is not a text box:\n{_describe(shapes)}"
+        assert NATIVE_TABLE_LINE in stderr, f"no {NATIVE_TABLE_LINE!r} line on stderr"
+
+    def test_a_grid_past_the_slot_limit_is_positioned_items(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A table whose grid passes ``COLLECTION_ITEM_LIMIT`` slots is positioned items, announced.
+
+        Slide script grows the table to 1,001 rows over 1,000 columns, though
+        only one row shows. Its grid is never built: the slide exports within
+        the hostile bound, with no native frame, its one line of text a text
+        box, and an ``[html2pptx]`` line saying why.
+        """
+        document = slide_document(AREA_BODY, css=TABLES_CSS)
+        area = browser_rect(document, AREA_TABLE)
+        assert 0 < area["h"] < SLIDE_HEIGHT_PX and 0 < area["w"] < SLIDE_WIDTH_PX, (
+            f"fixture drift: the grown table is {area}, not inside the slide"
+        )
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
+        )
+        capsys.readouterr()
+        pptx, failures = export_slides([AREA_BODY], css=TABLES_CSS, monkeypatch=monkeypatch)
+        stderr = capsys.readouterr().err
+        assert pptx and failures == [], f"the slide did not export: {failures}"
+        shapes = slide_shapes(pptx)
+        assert not _frames_over(shapes, area), (
+            f"a native table stands on the table past the slot limit:\n{_describe(shapes)}"
+        )
+        assert _text_items(shapes, AREA_TEXT), f"{AREA_TEXT!r} is not a text box"
+        assert NATIVE_TABLE_LINE in stderr, f"no {NATIVE_TABLE_LINE!r} line on stderr"
 
 
 # ---------------------------------------------------------------------------

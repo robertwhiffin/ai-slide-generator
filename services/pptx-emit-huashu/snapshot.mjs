@@ -56,12 +56,14 @@
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
 //  *   pseudo:null|'before'|'after'|'marker', hiddenWithin:boolean,
-//  *   paint:{borderColors:string[4], boxShadow:string}|null}
+//  *   paint:{borderColors:string[4], boxShadow:string}|null, bordersHidden:boolean}
 //  *   (the picture's rect, which its image item shares; selector, the target
 //  *   element, or for a pseudo-element target (pseudo set) its host, named by
 //  *   the host attribute '[data-tellr-pseudo-host="<n>"]'; hiddenWithin when
 //  *   descendants of a subtree target carry data-tellr-capture-hidden; paint,
-//  *   for a box target, its computed border colours and shadow; capture.cjs
+//  *   for a box target, its computed border colours and shadow; bordersHidden
+//  *   for a box target whose borders, and those of all it holds, the picture
+//  *   leaves out: a collapsed native table, whose grid draws them; capture.cjs
 //  *   reads them. `failed` when the target could not be named.)
 //  *
 //  * Units: CSS px on the slide. `alpha` is 0..1 and already includes the cumulative
@@ -1781,8 +1783,10 @@ async function snapshotPage(config, pseudoData) {
 
   // A capture of `element` (computed style `s`) in `mode`, for what `clip`
   // shows of `bounds`, and its picture item at `order`. Returns the Capture,
-  // or null when the clip hides it all.
-  function pushCapture(element, s, mode, bounds, order, clip) {
+  // or null when the clip hides it all. `withoutBorders` leaves the borders of
+  // a box target and of all it holds out of its picture: a collapsed native
+  // table's grid draws them, as emitBox's withoutBorder does for its shape.
+  function pushCapture(element, s, mode, bounds, order, clip, withoutBorders) {
     const generated = isPseudo(element);
     const shown = shownPart(paintedBounds(element, bounds), clip);
     if (!shown) return null;
@@ -1808,6 +1812,7 @@ async function snapshotPage(config, pseudoData) {
       paint: mode === 'box' && !(generated && element.type === 'marker')
         ? { borderColors: [s.borderTopColor, s.borderRightColor, s.borderBottomColor, s.borderLeftColor], boxShadow: s.boxShadow }
         : null,
+      bordersHidden: Boolean(withoutBorders) && mode === 'box',
     };
     captures.push(capture);
     // A pseudo-element's host is named already; every other target is named once the reads are done.
@@ -2144,8 +2149,15 @@ async function snapshotPage(config, pseudoData) {
   // A native table cell's text: the cell's own paragraphs when its renderer
   // can set its lines as the browser did (snapshot_text.mjs layoutCell) and
   // fitCellText finds them room in the cell; else overlay text items, as any
-  // other block's. `cell` is its {model, grid}.
+  // other block's. A cell holding block layout (R10n) is overlaid whole,
+  // whatever its first run holds: its own text is an anonymous block beside
+  // its block children, and the walk places each where the browser did.
+  // `cell` is its {model, grid, blocks}.
   function collectCellText(element, s, paint, seq, walk, cell) {
+    if (cell.blocks) {
+      collectText(element, s, paint, seq, walk);
+      return;
+    }
     const text = textLayout.layoutCell(element, s, walk);
     if (text.native && fitCellText(cell, text)) {
       cell.model.paragraphs = text.paragraphs();
@@ -2292,7 +2304,8 @@ async function snapshotPage(config, pseudoData) {
       if (box && replaced) {
         emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
       } else if (box && element !== slideRoot && capturesBox(s, opacity, element)) {
-        picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
+        picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box,
+          Boolean(table && table.collapse));
       } else if (box) {
         emitBox(s, box, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
       }

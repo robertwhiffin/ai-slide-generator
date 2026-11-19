@@ -6,7 +6,7 @@
 //   captureAll(page, captures) -> Map<captureId, 'data:image/png;base64,…'>
 //
 // `captures` is model.captures (snapshot.mjs): {id, x,y,w,h, mode, selector,
-// pseudo, hiddenWithin, paint}. The snapshot has already named each target
+// pseudo, hiddenWithin, paint, bordersHidden}. The snapshot has already named each target
 // with data-tellr-capture="<id>"; a pseudo-element target is named by its
 // host's data-tellr-pseudo-host attribute, which pseudo.mjs set. For each
 // capture, in id order and one at a time:
@@ -133,6 +133,11 @@ function isolationCss(capture) {
 //   border or shadow drawn in currentColor follows; each is pinned to the
 //   colour the slide paints it in, on the pseudo-element for a pseudo-element
 //   target.
+// * A box target whose borders are drawn elsewhere (bordersHidden: a
+//   collapsed native table, whose grid draws its own and its cells' collapsed
+//   borders, which the browser paints even for hidden cells) has every border
+//   of it and of all it holds transparent instead. A border's colour moves
+//   nothing, so the picture is laid out as the slide is.
 function retainedCss(capture) {
   const { selector, pseudo } = targetOf(capture);
   const boost = BOOST;
@@ -141,11 +146,15 @@ function retainedCss(capture) {
   if (capture.mode === 'subtree' && capture.hiddenWithin) {
     rules.push(`${selector} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
   }
+  const bordersHidden = capture.mode === 'box' && capture.bordersHidden === true && !pseudo;
+  if (bordersHidden) {
+    rules.push(`${selector}${boost}, ${selector} *${boost} { border-color: transparent !important; }`);
+  }
   const paint = capture.mode === 'box' && capture.paint ? capture.paint : null;
   if (paint) {
     const declarations = [];
     const sides = ['top', 'right', 'bottom', 'left'];
-    const colours = Array.isArray(paint.borderColors) ? paint.borderColors : [];
+    const colours = Array.isArray(paint.borderColors) && !bordersHidden ? paint.borderColors : [];
     for (let index = 0; index < sides.length; index++) {
       const colour = colours[index];
       if (typeof colour === 'string' && colour && COMPUTED_VALUE.test(colour)) {

@@ -793,6 +793,29 @@ def browser_ascent(
     return float(sizes[0]["ascent"])
 
 
+def emit_text_constant(name: str) -> float:
+    """The value of ``const NAME = <number>;`` in the sidecar's ``emit_text.cjs``."""
+    source = (Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_text.cjs").read_text(encoding="utf-8")
+    found = re.findall(rf"^const {re.escape(name)} = (-?[\d.]+);", source, re.MULTILINE)
+    assert len(found) == 1, f"emit_text.cjs defines `const {name} = <number>;` {len(found)} times"
+    return float(found[0])
+
+
+def single_line_box_top(glyph_top: float, size_px: float, ascent_px: float) -> float:
+    """The top ``emit_text.cjs`` gives a one-line text box whose glyph top is ``glyph_top``.
+
+    Its calibrated first-line offset at single spacing: ``B x sizePx + C x
+    ascentPx`` above the glyph top (``FIRST_LINE_B`` and ``FIRST_LINE_C``;
+    ``CALIBRATION.md`` records them, and the line-spacing suite pins both),
+    so the renderers draw the line where the browser drew its glyphs.
+    """
+    offset = (
+        emit_text_constant("FIRST_LINE_B") * size_px
+        + emit_text_constant("FIRST_LINE_C") * ascent_px
+    )
+    return glyph_top - offset
+
+
 # ---------------------------------------------------------------------------
 # The export fidelity harness's text-loss oracle, and sidecar modules in Node
 # ---------------------------------------------------------------------------

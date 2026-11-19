@@ -1976,7 +1976,9 @@ function createTextLayout(env) {
   // that paints nothing (isCut) has segments placed at their own x, and an
   // inline element's box (a <mark>) is a decoration that must paint under its
   // text, which a shape over the table cannot. Such a cell's text is overlay
-  // text items instead, as anywhere else on the slide.
+  // text items instead, as anywhere else on the slide. So is all a cell holding
+  // block layout holds (snapshot_table.mjs holdsInlineContent), which never
+  // comes here.
   //
   // layoutCell(el, s, walk) -> CellText, reading the cell's inline content
   // once (`walk` is collectTextBlocks'):
@@ -1997,8 +1999,9 @@ function createTextLayout(env) {
     const rtl = s.direction === 'rtl';
     const align = alignmentOf(s, rtl);
     const written = align === 'justify' ? (rtl ? 'right' : 'left') : align;
-    // A native table's cells hold no block-level child, so their inline content
-    // is one run; a second one is the overlay of a layout this cell cannot keep.
+    // A cell holding block layout never comes here (snapshot.mjs collectCellText
+    // overlays it whole), so a cell's inline content is one run; more than one
+    // is a layout no a:tc paragraph keeps, and is overlaid.
     const single = runs.length === 1 && !runs[0].follows;
     const decorations = [];
     const layouts = [];
