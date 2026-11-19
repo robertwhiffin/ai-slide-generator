@@ -478,7 +478,7 @@ base: v1
 prompt_file: presenter-text.md
 ```
 
-- [ ] **Step 3: Baseline and candidate on train.** Profile `<profile>`, a workspace profile the author chooses, which must serve `databricks-claude-sonnet-5-5` and the judge `databricks-claude-sonnet-5`).
+- [ ] **Step 3: Baseline and candidate on train.** Profile `<profile>`, a workspace profile the author chooses, which must serve `databricks-claude-sonnet-5-5` and the judge `databricks-claude-sonnet-5`.
 
 ```bash
 uv run python -m evals.run_eval --agent builder --config v1-baseline --repeats 3 --profile <profile>

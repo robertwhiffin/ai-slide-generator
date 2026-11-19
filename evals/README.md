@@ -2264,7 +2264,7 @@ slide arrives, so they never reach the gate, the reviewers or the rendered slide
 `a0b6c836`) plus one PRESENTER TEXT block after DATA ABSENT FALLBACK, and nothing else.
 
 - **Setup.** Builder `system.ai.claude-sonnet-5-5`, judge `databricks-claude-sonnet-5`, profile
-  `fevm-novartis-br-qa`, 3 repeats, all 8 cases per split. Train cases digest `eb3f1cde`, held-out
+  a field workspace profile, 3 repeats, all 8 cases per split. Train cases digest `eb3f1cde`, held-out
   `04278c99`. The renderer attached to a shared local browser over the Chrome DevTools Protocol.
   Run `55d82a81` is void (no browser, so no render) and is not counted.
 - **Asides as attributes, not classes.** A first candidate marked the asides with
