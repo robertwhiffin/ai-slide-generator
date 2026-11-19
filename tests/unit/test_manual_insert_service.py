@@ -450,6 +450,8 @@ def _seed_rows_whole(shape: str = "bare") -> Dict[str, Dict[str, Any]]:
             # speaker notes (2026-11-06): the seeded rows carry none.
             "speaker_notes": None,
             "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         }
     return out
 

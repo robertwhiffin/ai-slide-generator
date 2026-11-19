@@ -157,6 +157,8 @@ class SlideWriter:
         mutation: Optional[DeckMutationContext] = None,
         speaker_notes: Optional[str] = None,
         speaker_notes_source: str = "model",
+        talk_track: Optional[str] = None,
+        talk_track_source: str = "model",
     ) -> None:
         """Commit a slide row to the database.
 
@@ -198,6 +200,8 @@ class SlideWriter:
             slide_id: Stable per-slide id; defaults to a fresh uuid4 on insert.
             speaker_notes: Notes text, or None to preserve (see above).
             speaker_notes_source: "model" or "user"; only used with speaker_notes.
+            talk_track: Talk track text, same rules as speaker_notes.
+            talk_track_source: "model" or "user"; only used with talk_track.
 
         Raises:
             SessionNotFoundError: if session_id does not match any session.
@@ -225,6 +229,9 @@ class SlideWriter:
             if speaker_notes is not None:
                 slide_dict["speaker_notes"] = speaker_notes
                 slide_dict["speaker_notes_source"] = speaker_notes_source
+            if talk_track is not None:
+                slide_dict["talk_track"] = talk_track
+                slide_dict["talk_track_source"] = talk_track_source
             if modified_by is not None:
                 # created_by is only consumed on INSERT; on UPDATE the helper's
                 # partial mode leaves an existing created_by alone.
@@ -776,6 +783,12 @@ def _row_to_dict(row: SessionSlide) -> Dict[str, Any]:
         "speaker_notes_source": (
             row.speaker_notes_source
             if row.speaker_notes and row.speaker_notes_source in ("model", "user")
+            else None
+        ),
+        "talk_track": row.talk_track or "",
+        "talk_track_source": (
+            row.talk_track_source
+            if row.talk_track and row.talk_track_source in ("model", "user")
             else None
         ),
         "created_by": row.created_by,

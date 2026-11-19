@@ -551,9 +551,9 @@ def _upsert_slide_row(
         position: 0-based slide position.
         slide_dict: the slide's fields (``html``, ``slide_id``, ``scripts``,
             ``created_by``, ``created_at``, ``modified_by``, ``modified_at``,
-            ``speaker_notes``, ``speaker_notes_source``).  INSERT and the
-            full-identity UPDATE write ``speaker_notes or None`` and keep the
-            source only when notes are non-empty.
+            ``speaker_notes``, ``speaker_notes_source``, ``talk_track``,
+            ``talk_track_source``).  INSERT and the full-identity UPDATE write
+            each text ``or None`` and keep its source only when it is non-empty.
         now_dt: naive-UTC timestamp to use when the slide carries none.  Pass None
             to leave the timestamp NULL instead — the backfill does this, because
             fabricating "now" for a historical slide would misreport when it was
@@ -587,7 +587,8 @@ def _upsert_slide_row(
                 existing values intact instead of clearing them;
               * an absent/None ``speaker_notes`` leaves the notes unchanged, ``""``
                 clears them, and a non-user write never replaces notes whose
-                ``speaker_notes_source`` is ``"user"``.
+                ``speaker_notes_source`` is ``"user"``; ``talk_track`` follows the
+                same rules on its own (user-wins is per field).
             PR3 relies on these semantics (a reviewer rewrites HTML without
             touching the verdict; the foreman attaches a spec fragment without
             disturbing verification).
@@ -612,6 +613,8 @@ def _upsert_slide_row(
     slide_id = slide_dict.get("slide_id")
     notes = slide_dict.get("speaker_notes")
     source = slide_dict.get("speaker_notes_source")
+    talk = slide_dict.get("talk_track")
+    talk_source = slide_dict.get("talk_track_source")
 
     spec_json = json.dumps(deck_spec_slide) if deck_spec_slide is not None else None
 
@@ -645,11 +648,18 @@ def _upsert_slide_row(
                 )
             if spec_json is not None:
                 existing.deck_spec_slide = spec_json
-            if notes is not None and not (
-                existing.speaker_notes_source == "user" and source != "user"
-            ):
-                existing.speaker_notes = notes or None
-                existing.speaker_notes_source = (source or "model") if notes else None
+            for field in ("speaker_notes", "talk_track"):
+                text_value = slide_dict.get(field)
+                src = slide_dict.get(f"{field}_source")
+                if text_value is not None and not (
+                    getattr(existing, f"{field}_source") == "user" and src != "user"
+                ):
+                    setattr(existing, field, text_value or None)
+                    setattr(
+                        existing,
+                        f"{field}_source",
+                        (src or "model") if text_value else None,
+                    )
         else:
             # Full-identity rewrite: the row describes the slide now at this
             # position, so identity AND the verification record move with the
@@ -669,6 +679,8 @@ def _upsert_slide_row(
             existing.deck_spec_slide = spec_json if spec_json is not None else base_spec
             existing.speaker_notes = notes or None
             existing.speaker_notes_source = source if notes else None
+            existing.talk_track = talk or None
+            existing.talk_track_source = talk_source if talk else None
         return existing
 
     # INSERT.  id is a fresh uuid4, NOT slide_id: `id` is String(64) UNIQUE
@@ -683,6 +695,8 @@ def _upsert_slide_row(
         scripts=scripts,
         speaker_notes=notes or None,
         speaker_notes_source=source if notes else None,
+        talk_track=talk or None,
+        talk_track_source=talk_source if talk else None,
         created_by=created_by,
         created_at=created_at,
         modified_by=modified_by,
@@ -837,6 +851,8 @@ def _snapshot_row(row: SessionSlide) -> Dict[str, Any]:
         "scripts": row.scripts,
         "speaker_notes": row.speaker_notes,
         "speaker_notes_source": row.speaker_notes_source,
+        "talk_track": row.talk_track,
+        "talk_track_source": row.talk_track_source,
         "slide_id": row.slide_id,
         "created_by": row.created_by,
         "created_at": row.created_at,
@@ -2851,6 +2867,13 @@ class SessionManager:
                             and slide_row.speaker_notes_source in ("model", "user")
                             else None
                         ),
+                        "talk_track": slide_row.talk_track or "",
+                        "talk_track_source": (
+                            slide_row.talk_track_source
+                            if slide_row.talk_track
+                            and slide_row.talk_track_source in ("model", "user")
+                            else None
+                        ),
                         "created_by": slide_row.created_by,
                         "created_at": (
                             slide_row.created_at.isoformat() + "Z"
@@ -2981,6 +3004,13 @@ class SessionManager:
                         slide.get("speaker_notes_source")
                         if slide["speaker_notes"]
                         and slide.get("speaker_notes_source") in ("model", "user")
+                        else None
+                    )
+                    slide["talk_track"] = slide.get("talk_track") or ""
+                    slide["talk_track_source"] = (
+                        slide.get("talk_track_source")
+                        if slide["talk_track"]
+                        and slide.get("talk_track_source") in ("model", "user")
                         else None
                     )
                     if slide.get("html"):

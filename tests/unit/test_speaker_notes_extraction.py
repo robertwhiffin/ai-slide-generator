@@ -291,3 +291,87 @@ def test_an_empty_aside_beside_a_filled_one_adds_no_blank_paragraph():
     popped = pop_speaker_notes(soup)
     (root,) = find_slide_roots(soup)
     assert notes_for_root(root, popped) == "One."
+
+
+# ---------------------------------------------------------------------------
+# Talk track beside the notes (presenter plan, Task 1): the back-compatible
+# helpers pop BOTH asides, so a talk-track aside never leaks into slide HTML.
+# The builder marks asides with data-presenter="talk-track|speaker-notes"; the
+# class forms stay accepted.
+# ---------------------------------------------------------------------------
+
+
+def test_pop_speaker_notes_also_removes_talk_track_asides():
+    # Sabotage target: pop_speaker_notes popping only speaker-notes asides (the
+    # talk-track aside would stay in every parsed slide's HTML).
+    html = (
+        '<div class="slide"><p>x</p><aside data-presenter="talk-track" hidden><p>Say it.</p></aside>'
+        '<aside data-presenter="speaker-notes" hidden>Check Q2.</aside></div>'
+    )
+    soup = BeautifulSoup(html, "html.parser")
+    popped = pop_speaker_notes(soup)
+    assert [text for _, text in popped] == ["Check Q2."]
+    assert soup.find("aside") is None
+    assert str(soup) == '<div class="slide"><p>x</p></div>'
+
+
+def test_a_sibling_talk_track_lets_the_wrapper_promote():
+    # The talk track uses the same ownership rule: a section holding only the
+    # slide and the aside is promoted once the aside is popped.
+    from src.utils.html_utils import pop_presenter_asides, text_for_root
+
+    html = (
+        '<section class="dark"><div class="slide"><p>x</p></div>'
+        '<aside class="talk-track">Say it.</aside></section>'
+    )
+    soup = BeautifulSoup(html, "html.parser")
+    popped = pop_presenter_asides(soup)
+    assert soup.find("aside") is None
+    (root,) = find_slide_roots(soup)
+    assert root.name == "section"
+    assert text_for_root(root, popped["talk_track"]) == "Say it."
+    assert text_for_root(root, popped["speaker_notes"]) is None
+
+
+@pytest.mark.parametrize(
+    "talk_attr,notes_attr",
+    [
+        ('data-presenter="talk-track" hidden', 'data-presenter="speaker-notes" hidden'),
+        ('class="talk-track"', 'class="speaker-notes"'),
+        ('data-presenter="talk-track" hidden', 'class="speaker-notes"'),
+    ],
+    ids=["data-presenter", "class", "mixed"],
+)
+def test_both_sibling_asides_in_a_wrapping_section_are_owned(talk_attr, notes_attr):
+    # Sabotage target: a per-marker ownership check whose "only other element child
+    # is the .slide" rule counts the OTHER presenter aside, so a section holding the
+    # slide plus both asides owns neither and both leak into the slide HTML.
+    from src.utils.html_utils import extract_presenter_text, pop_presenter_asides, text_for_root
+
+    html = (
+        '<section class="dark"><div class="slide"><p>x</p></div>'
+        f'<aside {talk_attr}>Say it.</aside>'
+        f'<aside {notes_attr}>Check Q2.</aside></section>'
+    )
+    out, notes, talk = extract_presenter_text(html)
+    assert out == '<section class="dark"><div class="slide"><p>x</p></div></section>'
+    assert (notes, talk) == ("Check Q2.", "Say it.")
+
+    soup = BeautifulSoup(html, "html.parser")
+    popped = pop_presenter_asides(soup)
+    (root,) = find_slide_roots(soup)
+    assert root.name == "section"
+    assert text_for_root(root, popped["talk_track"]) == "Say it."
+    assert text_for_root(root, popped["speaker_notes"]) == "Check Q2."
+
+
+def test_other_asides_beside_presenter_asides_are_untouched():
+    html = (
+        '<div class="slide"><aside class="callout">c</aside><aside data-presenter="other">o</aside>'
+        '<aside data-presenter="talk-track">T</aside><aside class="speaker-notes">S</aside></div>'
+    )
+    out, notes = extract_speaker_notes(html)
+    assert out == (
+        '<div class="slide"><aside class="callout">c</aside><aside data-presenter="other">o</aside></div>'
+    )
+    assert notes == "S"

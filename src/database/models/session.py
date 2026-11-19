@@ -621,6 +621,8 @@ class SessionSlide(Base):
     # "model" or "user" (a user edit is never replaced by a model write).
     speaker_notes = Column(Text, nullable=True)
     speaker_notes_source = Column(String(16), nullable=True)
+    talk_track = Column(Text, nullable=True)
+    talk_track_source = Column(String(16), nullable=True)
 
     # Authorship and timestamps
     created_by = Column(String(255), nullable=True)

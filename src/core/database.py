@@ -1592,6 +1592,8 @@ def _migrate_session_slide_speaker_notes(
     for col_name, col_def in (
         ("speaker_notes", "TEXT NULL"),
         ("speaker_notes_source", "VARCHAR(16) NULL"),
+        ("talk_track", "TEXT NULL"),
+        ("talk_track_source", "VARCHAR(16) NULL"),
     ):
         if col_name not in cols:
             logger.info("Migration: adding %s to session_slides", col_name)

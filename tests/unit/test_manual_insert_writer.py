@@ -259,6 +259,8 @@ def _real_row(marker: str, position: int, day: int) -> Dict[str, Any]:
         # Sabotage target: _snapshot_row dropping speaker_notes(_source) strands notes on a moved row.
         "speaker_notes": f"notes for {marker}",
         "speaker_notes_source": "user",
+        "talk_track": f"talk for {marker}",
+        "talk_track_source": "user",
     }
 
 
@@ -769,6 +771,8 @@ def _assert_new_row(row: Dict[str, Any], *, html: str = BLANK_HTML) -> None:
         # A blank manual insert brings no notes (speaker notes, 2026-11-06).
         "speaker_notes": None,
         "speaker_notes_source": None,
+        "talk_track": None,
+        "talk_track_source": None,
     }, f"the inserted row is not exactly the given slide with no record or fragment: {row}"
 
 
@@ -1775,6 +1779,8 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
             "deck_spec_slide": None,
             "speaker_notes": None,
             "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
         "MK-LEGACYTWO": {
             "session_id": owner_pk,
@@ -1791,6 +1797,8 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
             "deck_spec_slide": None,
             "speaker_notes": None,
             "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
         "MK-LEGACYTHREE": {
             "session_id": owner_pk,
@@ -1807,6 +1815,8 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
             "deck_spec_slide": None,
             "speaker_notes": None,
             "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
     }
 

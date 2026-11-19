@@ -97,6 +97,8 @@ _ROW_SLIDE_BASELINE_KEYS = {
     # speaker notes (2026-11-06): one more per-slide field, always a string
     "speaker_notes",
     "speaker_notes_source",
+    "talk_track",
+    "talk_track_source",
 }
 
 # The frontend SlideFinding declaration, field for field.  ``plainMessage`` and
