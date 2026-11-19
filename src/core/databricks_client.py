@@ -27,6 +27,12 @@ import yaml
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.iam import User
 
+from src.core.attribution import (
+    PRODUCT_NAME_SYSTEM,
+    PRODUCT_NAME_USER_PREFIX,
+    hash_username,
+    package_version,
+)
 from src.core.user_context import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -44,59 +50,32 @@ _user_client_cache_lock = threading.Lock()
 _user_client_key_locks: dict[str, threading.Lock] = {}
 
 # =============================================================================
-# Product Tracking Constants
+# Product Tracking
 # =============================================================================
-
-PRODUCT_NAME_SYSTEM = "tellr-app-system"
-PRODUCT_NAME_USER_PREFIX = "tellr-app-"
+# The product names, the version and the username hash live in
+# ``src.core.attribution``; PRODUCT_NAME_SYSTEM and PRODUCT_NAME_USER_PREFIX are
+# imported from there above.
 
 
 def _get_package_version() -> str:
     """
     Get the package version for product tracking.
 
-    Tries setuptools_scm generated _version.py first, falls back to __init__.py.
-
-    Returns:
-        Version string (e.g., "0.1.0" or "0.1.0.dev0")
+    The installed ``databricks-tellr-app`` wheel's version, else the source
+    tree's: ``attribution.package_version``, the one cached lookup the Gateway
+    User-Agent also reports.
     """
-    try:
-        # Try setuptools_scm generated version first (available after build)
-        from src._version import version
-
-        return version
-    except ImportError:
-        pass
-
-    try:
-        # Fall back to __init__.py version
-        from src import __version__
-
-        return __version__
-    except ImportError:
-        pass
-
-    # Ultimate fallback
-    return "unknown"
+    return package_version()
 
 
 def _hash_username(username: str) -> str:
     """
     Create a short hash of the username for product tracking.
 
-    Extracts the local part from email addresses (before @) before hashing.
-    Uses first 12 characters of SHA-256 hash for a balance of
-    uniqueness and readability in logs/metrics.
-
-    Args:
-        username: User's email (e.g., "john.doe@company.com") or plain username
-
-    Returns:
-        12-character hex hash string
+    ``attribution.hash_username``: the first 12 hex of the SHA-256 of the
+    email's local part (the whole name when there is no ``@``).
     """
-    # Extract local part from email address
-    local_part = username.split("@")[0] if "@" in username else username
-    return hashlib.sha256(local_part.encode()).hexdigest()[:12]
+    return hash_username(username)
 
 
 # =============================================================================

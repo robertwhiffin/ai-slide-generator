@@ -11,7 +11,6 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from src.core.databricks_client import _get_package_version
-from src.services import gateway_clients
 from src.services.gateway_clients import (
     REQUEST_TAGS_HEADER,
     gateway_chat_model,
@@ -31,11 +30,23 @@ SDK_UA = f"DatabricksOpenAI/Python {openai.__version__}"
 EXPECTED_UA = f"tellr/{_get_package_version()} {SDK_UA}"
 
 
+def _source_tree_version() -> str:
+    """What the source tree says: its generated ``_version.py`` if built, else ``__init__``'s."""
+    try:
+        from src._version import version
+    except ImportError:
+        from src import __version__ as version
+    return version
+
+
 @pytest.fixture(autouse=True)
 def _fresh_version_cache():
-    gateway_clients._tellr_version.cache_clear()
+    """``attribution.package_version`` is cached per process; each test starts and ends clean."""
+    from src.core import attribution
+
+    attribution.package_version.cache_clear()
     yield
-    gateway_clients._tellr_version.cache_clear()
+    attribution.package_version.cache_clear()
 
 
 def test_request_tags_header_is_the_source_tellr_json_object():
@@ -50,24 +61,40 @@ def test_user_agent_leads_with_tellr_and_keeps_the_sdk_user_agent():
 def test_user_agent_reports_the_installed_wheel_version(monkeypatch):
     """A deployed app runs from the ``databricks-tellr-app`` wheel, whose source
     tree carries no generated ``_version.py``: the wheel's metadata is the truth."""
+    from src.core import attribution
 
     def _version(name):
         if name == "databricks-tellr-app":
             return "9.9.9"
         raise metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr(gateway_clients.metadata, "version", _version)
+    monkeypatch.setattr(attribution.metadata, "version", _version)
 
     assert gateway_request_headers()["User-Agent"] == f"tellr/9.9.9 {SDK_UA}"
 
 
 def test_user_agent_falls_back_to_the_source_version_outside_a_wheel(monkeypatch):
+    from src.core import attribution
+
     def _not_installed(name):
         raise metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr(gateway_clients.metadata, "version", _not_installed)
+    monkeypatch.setattr(attribution.metadata, "version", _not_installed)
 
-    assert gateway_request_headers()["User-Agent"] == f"tellr/{_get_package_version()} {SDK_UA}"
+    assert gateway_request_headers()["User-Agent"] == f"tellr/{_source_tree_version()} {SDK_UA}"
+
+
+def test_user_agent_reads_the_one_shared_version_lookup(monkeypatch):
+    """``attribution.metadata`` is ``importlib.metadata`` itself, so a copy of the lookup in
+    ``gateway_clients`` would pass the two tests above. Only attribution's own cache still
+    answers 7.0.0 once the installed metadata says 8.0.0."""
+    from src.core import attribution
+
+    monkeypatch.setattr(attribution.metadata, "version", lambda name: "7.0.0")
+    assert attribution.package_version() == "7.0.0"
+    monkeypatch.setattr(attribution.metadata, "version", lambda name: "8.0.0")
+
+    assert gateway_request_headers()["User-Agent"] == f"tellr/7.0.0 {SDK_UA}"
 
 
 def test_only_the_tag_and_user_agent_are_set():

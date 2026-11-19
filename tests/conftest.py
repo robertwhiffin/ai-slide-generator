@@ -135,6 +135,22 @@ def reset_model_call_stop_checks():
     reset_stop_checks()
 
 
+@pytest.fixture(autouse=True)
+def clear_package_version_cache():
+    """Forget the cached app version before and after each test.
+
+    ``attribution.package_version`` looks the version up once per process, and
+    tests fake an installed wheel by patching ``importlib.metadata.version``
+    process-wide.  A version cached under one test's patch would otherwise label
+    every SDK client and Gateway request in the tests after it, in that worker.
+    """
+    from src.core.attribution import package_version
+
+    package_version.cache_clear()
+    yield
+    package_version.cache_clear()
+
+
 @pytest.fixture
 def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).

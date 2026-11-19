@@ -23,29 +23,17 @@ Gateway client is built anywhere else.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
-from importlib import metadata
 from typing import Any, Final
 
 REQUEST_TAGS_HEADER: Final[str] = "Databricks-Ai-Gateway-Request-Tags"
 _REQUEST_TAGS: Final[str] = json.dumps({"source": "tellr"})
-#: The wheel a deployed app installs (``packages/databricks-tellr-app``).
-_APP_PACKAGE: Final[str] = "databricks-tellr-app"
 
 
-@lru_cache(maxsize=1)
 def _tellr_version() -> str:
-    """The deployed release: the installed wheel's metadata, else the source tree's.
+    """The deployed release (``attribution.package_version``)."""
+    from src.core.attribution import package_version
 
-    The wheel's copied ``src/`` has no generated ``_version.py``, so
-    ``_get_package_version`` alone reports ``src/__init__``'s placeholder there.
-    """
-    try:
-        return metadata.version(_APP_PACKAGE)
-    except metadata.PackageNotFoundError:
-        from src.core.databricks_client import _get_package_version
-
-        return _get_package_version()
+    return package_version()
 
 
 def gateway_request_headers() -> dict[str, str]:
