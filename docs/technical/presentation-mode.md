@@ -256,7 +256,7 @@ Navigation is handled by a single keydown function stored in a ref so it can be 
 The handler is reached from **two** sources:
 
 1. `window` and `document` of the parent page (capture phase) — catches keys when focus is on the body or any non-iframe element.
-2. The `tellr:slide-key` `postMessage` bridge from the iframe. The iframe is sandboxed without `allow-same-origin`, so the parent cannot reach its `contentDocument`. Instead, `KEY_BRIDGE_SCRIPT` (`frontend/src/services/slideDocument.ts:31`) runs inside the slide document and posts each keydown to the parent. A `message` listener in `PresentationMode.tsx` (`:274`) accepts only messages whose `source` is the iframe's `contentWindow`, then passes the key to the same handler. This covers focus that lands inside the iframe (after a tab switch back, after re-entering fullscreen, or after clicking on slide content).
+2. The `tellr:slide-key` `postMessage` bridge from the iframe. The iframe is sandboxed without `allow-same-origin`, so the parent cannot reach its `contentDocument`. Instead, `KEY_BRIDGE_SCRIPT` (`frontend/src/services/slideDocument.ts:31`) runs inside the slide document and posts each keydown to the parent. The `tellr:slide-key` `message` listener in `PresentationMode.tsx` accepts only messages whose `source` is the iframe's `contentWindow`, then passes the key to the same handler. This covers focus that lands inside the iframe (after a tab switch back, after re-entering fullscreen, or after clicking on slide content).
 
 A `visibilitychange` listener also refocuses the container when the tab becomes visible again, so the parent-level listener has a chance to receive keys cleanly.
 
