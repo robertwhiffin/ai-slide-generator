@@ -2523,11 +2523,12 @@ async function snapshotPage(config, pseudoData) {
   closeSubtrees(0, seq);
   // Text after a child the walk never reached (it was cut short) still paints, last.
   for (let index = 0; index < waitingInOrder.length; index++) releaseText(waitingInOrder[index], seq);
-  // Every turn root's text is gathered by now.
+  // Every turn root's text is gathered by now; its blocks are placed as they
+  // are made (snapshot_text.mjs turnedBlocks, and turnedMarkerBlock during
+  // the walk), from probes of their faces made on the way.
   pushTurnedTexts();
-  // Line spacing, optical-size tracking and where turned text sits, from
-  // offscreen probes read once the walk has read every rect
-  // (snapshot_text.mjs applyMetrics).
+  // Line spacing and optical-size tracking, from offscreen probes read once
+  // the walk has read every rect (snapshot_text.mjs applyMetrics).
   textLayout.applyMetrics();
   const fonts = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;

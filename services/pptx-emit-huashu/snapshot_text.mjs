@@ -440,9 +440,11 @@ function createTextLayout(env) {
   // Whether an inline element's edges move the text around it: PowerPoint and
   // Google Slides lay a paragraph's runs out with no room for them, so the text
   // inside a chip would start at its left edge and the text after it slide left
-  // into it.
+  // into it. Its edges are on its line's own sides, which a vertical writing
+  // mode turns onto its top and bottom (TURNED_SIDES).
   function hasInlineEdges(cs) {
-    return Math.abs(inlineEdge(cs, 'Left')) > INLINE_EDGE_PX || Math.abs(inlineEdge(cs, 'Right')) > INLINE_EDGE_PX;
+    const sides = TURNED_SIDES[writingTurn(cs).angle];
+    return Math.abs(inlineEdge(cs, sides.left)) > INLINE_EDGE_PX || Math.abs(inlineEdge(cs, sides.right)) > INLINE_EDGE_PX;
   }
 
   // The context inside an inline child element. Its own opacity, background,
@@ -1456,9 +1458,14 @@ function createTextLayout(env) {
   // (the browser paints none there); preserved spaces are kept as written.
   // Null for a line that held only collapsible spaces: it shows nothing, so it
   // is no blank line (only breaks make those).
-  // `extents[i]` is runs[i]'s probe face and the left and right of its tokens'
-  // rects, the width the browser drew it at, and `advance`, false when a token
-  // of it was drawn as a shape (a symbol marker), whose rect is no advance.
+  // `extents[i]` is runs[i]'s probe face and the bounds of its tokens' rects,
+  // {left, top, right, bottom} (left to right, the width the browser drew it
+  // at), and `advance`, false when a token of it was drawn as a shape (a
+  // symbol marker), whose rect is no advance.
+  // `rect` bounds every token; `body` the tokens set on the line's own
+  // baseline, every run but a superscript or subscript, whose raise or drop
+  // moves its rect off the line (null for a line of script runs alone): the
+  // line is placed by its body, the script run carrying its shift itself.
   function assembleLine(line, lineHeight) {
     const tokens = line.tokens;
     let first = 0;
@@ -1468,6 +1475,7 @@ function createTextLayout(env) {
     const runs = [];
     const extents = [];
     let rect = null;
+    let body = null;
     let column = 0;
     let previousCollapsible = false;
     for (let index = first; index <= last; index++) {
@@ -1482,7 +1490,9 @@ function createTextLayout(env) {
         run.text += text;
         const extent = extents[extents.length - 1];
         extent.left = Math.min(extent.left, bounds.left);
+        extent.top = Math.min(extent.top, bounds.top);
         extent.right = Math.max(extent.right, bounds.right);
+        extent.bottom = Math.max(extent.bottom, bounds.bottom);
         extent.advance = extent.advance && !token.shape;
       } else {
         const created = { text };
@@ -1491,19 +1501,31 @@ function createTextLayout(env) {
         }
         created.opticalTrackingPx = 0;
         runs.push(created);
-        extents.push({ face: token.face, left: bounds.left, right: bounds.right, advance: !token.shape });
+        extents.push({
+          face: token.face,
+          left: bounds.left,
+          top: bounds.top,
+          right: bounds.right,
+          bottom: bounds.bottom,
+          advance: !token.shape,
+        });
       }
-      if (!rect) {
-        rect = { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom };
-      } else {
-        rect.left = Math.min(rect.left, bounds.left);
-        rect.top = Math.min(rect.top, bounds.top);
-        rect.right = Math.max(rect.right, bounds.right);
-        rect.bottom = Math.max(rect.bottom, bounds.bottom);
-      }
+      rect = unionBounds(rect, bounds);
+      if (!token.style.baseline) body = unionBounds(body, bounds);
     }
     if (tokens.length && !runs.length) return null;
-    return { runs, extents, rect, lineHeight };
+    return { runs, extents, rect, body, lineHeight };
+  }
+
+  // The union of bounds {left, top, right, bottom} `union` (or null) and `bounds`, as new bounds.
+  function unionBounds(union, bounds) {
+    if (!union) return { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom };
+    return {
+      left: Math.min(union.left, bounds.left),
+      top: Math.min(union.top, bounds.top),
+      right: Math.max(union.right, bounds.right),
+      bottom: Math.max(union.bottom, bounds.bottom),
+    };
   }
 
   // Whether a token is room in its line that holds no text: an atomic inline,
@@ -1912,8 +1934,9 @@ function createTextLayout(env) {
   // * Slack (6% + 4 px) widens the box on the side its alignment grows: right
   //   for left-aligned text, both sides for centred, left for right-aligned.
   // * Vertically it spans its lines: from the first line's top to the last
-  //   line's bottom in normal flow. Taken as the union, so lines that run
-  //   another way (text under a rotation runs bottom to top) still get a box.
+  //   line's bottom in normal flow, each line's text on its own baseline
+  //   (assembleLine body), so a superscript does not lift its line. Taken as
+  //   the union, so the box holds every line whatever order they come in.
   //   Its top is the first line's glyph top; the emitter (emit_text.cjs)
   //   raises the box by the first-line offset calibrated against PowerPoint
   //   and Google Slides.
@@ -1930,10 +1953,13 @@ function createTextLayout(env) {
     for (let index = 0; index < lines.length; index++) {
       const rect = lines[index].rect;
       if (!rect) continue;
+      // Across, a line is where its own baseline's text is: a superscript
+      // stands above it and a subscript below it, carrying its shift itself.
+      const body = lines[index].body || rect;
       left = Math.min(left, rect.left);
       right = Math.max(right, rect.right);
-      top = Math.min(top, rect.top);
-      bottom = Math.max(bottom, rect.bottom);
+      top = Math.min(top, body.top);
+      bottom = Math.max(bottom, body.bottom);
     }
     if (!(bottom > top) || !(right >= left)) return null;
     const align = alignmentOf(s, layout.rtl);
@@ -2367,9 +2393,10 @@ function createTextLayout(env) {
   // nothing) or an inline element's edges cut it (isCut), is a cut line,
   // {segments}, as layoutInlineRun gives one (segmentsOf); turnedBlocks
   // places each segment where its text lies. A line of collapsed white space
-  // is no line; a blank line between two breaks is one, and blank lines at
-  // either end of the run paint nothing and are dropped, as layoutInlineRun
-  // drops them. [] when none of its text paints.
+  // is no line. A blank line is one, at the run's start too: it takes its room
+  // in the turned box's stack, as a leading <br>'s empty line does on screen.
+  // Only the empty line after the run's final <br> is none: the browser lays
+  // none out there. [] when none of its text paints.
   function layoutTurnedRun(nodes, s, scale, turned) {
     const range = document.createRange();
     const tokens = readRunTokens(nodes, scale, range);
@@ -2384,6 +2411,7 @@ function createTextLayout(env) {
         explicit.push(token);
         continue;
       }
+      if (!token && !explicit.length && tokens.length && tokens[tokens.length - 1].kind === 'break') break;
       const wrapped = softWrapped(explicit, turned, rtl);
       for (let line = 0; line < wrapped.length; line++) {
         const read = { tokens: wrapped[line] };
@@ -2400,12 +2428,7 @@ function createTextLayout(env) {
       }
       explicit = [];
     }
-    if (!painted) return [];
-    let first = 0;
-    let last = lines.length - 1;
-    while (first <= last && isBlank(lines[first])) first++;
-    while (last >= first && isBlank(lines[last])) last--;
-    return lines.slice(first, last + 1);
+    return painted ? lines : [];
   }
 
   // How tall the content area of a run set in probe face `face` is (its
@@ -2435,28 +2458,47 @@ function createTextLayout(env) {
     };
   }
 
-  // Where a turned line lies in the frame of text turned by `angle` about
-  // `centre` (turnedPoint): {left, right, top, bottom}, along and across it;
-  // null for a line with no runs. Its rect, the bounds of its turned glyph
-  // runs, shares their centre. Turned by the angle, a run `along` long and
-  // `across` high is bounded by a box along|cos| + across|sin| wide and
-  // along|sin| + across|cos| tall, and `across` is the content area of the
-  // line's largest face (contentHeightOf), so its length is read from the
-  // side nearer the run's own: the width when the turn is nearer upright,
-  // the height when it is nearer a quarter.
-  function turnedLineExtent(line, centre, angle) {
-    const rect = line.rect;
-    const largest = largestRunOf(line);
-    if (!rect || largest < 0) return null;
-    const across = contentHeightOf(line.extents[largest].face, line.runs[largest].sizePx);
+  // Where one turned run lies in the frame of text turned by `angle` about
+  // `centre` (turnedPoint), from `bounds`, the bounds of its turned glyph run
+  // ({left, top, right, bottom}, which share its centre), and `across`, how
+  // tall it is across its line, the content area of its face: {left, right,
+  // top, bottom}. Turned by the angle, a run `along` long is bounded by a box
+  // along|cos| + across|sin| wide and along|sin| + across|cos| tall, so its
+  // length is read from the side nearer the run's own: the width when the
+  // turn is nearer upright, the height when it is nearer a quarter.
+  function turnedRunExtent(bounds, across, centre, angle) {
     const radians = angle * Math.PI / 180;
     const cosine = Math.abs(Math.cos(radians));
     const sine = Math.abs(Math.sin(radians));
     const along = Math.max(0, cosine >= sine
-      ? (rect.right - rect.left - across * sine) / cosine
-      : (rect.bottom - rect.top - across * cosine) / sine);
-    const middle = turnedPoint(centre, angle, (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+      ? (bounds.right - bounds.left - across * sine) / cosine
+      : (bounds.bottom - bounds.top - across * cosine) / sine);
+    const middle = turnedPoint(centre, angle, (bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2);
     return { left: middle.u - along / 2, right: middle.u + along / 2, top: middle.v - across / 2, bottom: middle.v + across / 2 };
+  }
+
+  // Where a turned line lies in the frame of text turned by `angle` about
+  // `centre`: {left, right, top, bottom}, along and across it; null for a line
+  // with no runs. Each run is placed on its own (turnedRunExtent), as tall as
+  // its own face's content area (contentHeightOf): off a quarter turn, a line
+  // of runs of different sizes is no one rectangle. Along, the line runs from
+  // its first run's start to its last's end; across, it is where its largest
+  // run is, on the line's own baseline, so a superscript or a smaller run does
+  // not move it.
+  function turnedLineExtent(line, centre, angle) {
+    const largest = largestRunOf(line);
+    if (!line.rect || largest < 0) return null;
+    let left = Infinity;
+    let right = -Infinity;
+    let across = null;
+    for (let run = 0; run < line.runs.length; run++) {
+      const extent = line.extents[run];
+      const placed = turnedRunExtent(extent, contentHeightOf(extent.face, line.runs[run].sizePx), centre, angle);
+      left = Math.min(left, placed.left);
+      right = Math.max(right, placed.right);
+      if (run === largest) across = placed;
+    }
+    return { left, right, top: across.top, bottom: across.bottom };
   }
 
   // The insets of a turned box's content box in its own frame, px: {inset,

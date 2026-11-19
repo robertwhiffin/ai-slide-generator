@@ -80,6 +80,7 @@ from tests.fixtures.export_snapshot_support import (
     BrowserEllipsis,
     Run,
     Shape,
+    browser_ascent,
     browser_each_layout_box,
     browser_each_rect,
     browser_ellipsis,
@@ -93,6 +94,7 @@ from tests.fixtures.export_snapshot_support import (
     export_documents,
     export_slides,
     requires_huashu_sidecar,
+    single_line_box_top,
     slide_document,
     slide_shape_elements,
     slide_shapes,
@@ -103,6 +105,7 @@ from tests.unit.test_export_collection_iteration_hostile_realm import (
     HOSTILE_EXPORT_TIMEOUT_SECONDS,
 )
 from tests.unit.test_export_slide_root_background import FIXTURE_DIR
+from tests.unit.test_export_snapshot_line_spacing import _assert_script_run_size
 from tests.unit.test_export_svg_raster import structural_manifest
 
 ENGINE = "snapshot"
@@ -229,6 +232,50 @@ SOFT_WRAP_TEXT = "Quarterly revenue by region and product line"
 TURNED_TABLE_CELLS = ("North", "42", "South", "17")
 
 
+# Fix round 2: a turned label (#t) beside its unturned twin (#w), the same
+# content; a transform moves no layout, so the twin is the turned label's oracle.
+TWIN_ANGLES = {"12": "12deg", "40": "40deg"}
+TWIN_ANGLE_DEGREES = {"12": 12.0, "40": 40.0}
+TWIN_CHIP = '<span style="display:inline-block; padding:0 10px; background:#DDDDDD">LIVE</span>'
+MIXED_SEGMENT_LINE = (
+    f'Status {TWIN_CHIP} <span style="font-size:12px">since</span> '
+    '<span style="font-size:28px">May</span>'
+)
+MIXED_SEGMENT = "since May"
+TWIN_LIST_ITEMS = "<li>First step</li><li>Second step</li>"
+TWIN_LIST_MARKERS = ("1.", "2.")
+SUPERSCRIPT_LINE = '<span id="{prefix}lead">Revenue</span><sup>1</sup> grew'
+SUPERSCRIPT_SIZE_PX = 20.0
+
+
+def _twin_pair(
+    angle_css: str, inner: str, *, font_size: int = 16, tag: str = "div", extra: str = ""
+) -> str:
+    """A slide holding ``inner`` turned by ``angle_css`` as #t, and unturned as #w.
+
+    ``{prefix}`` in ``inner`` names its ids apart: "t-" in the turned label,
+    "w-" in its twin.
+    """
+    base = f"position:absolute; white-space:nowrap; font-size:{font_size}px; {extra}"
+    turned = inner.replace("{prefix}", "t-")
+    twin = inner.replace("{prefix}", "w-")
+    return (
+        f'<div class="slide"><{tag} id="t" style="{base} left:640px; top:250px; '
+        f'transform:rotate({angle_css});">{turned}</{tag}>'
+        f'<{tag} id="w" style="{base} left:60px; top:560px;">{twin}</{tag}></div>'
+    )
+
+
+def _twin_list(angle_css: str) -> str:
+    """A 24 px ordered list turned by ``angle_css`` as #t, beside its unturned twin #w."""
+    base = "position:absolute; white-space:nowrap; font-size:24px; margin:0; padding-left:34px;"
+    return (
+        f'<div class="slide"><ol id="t" style="{base} left:640px; top:250px; '
+        f'transform:rotate({angle_css});">{TWIN_LIST_ITEMS}</ol>'
+        f'<ol id="w" style="{base} left:60px; top:540px;">{TWIN_LIST_ITEMS}</ol></div>'
+    )
+
+
 def _card(title: str, title_class: str) -> str:
     return (
         '<div class="slide"><div class="card">'
@@ -351,6 +398,37 @@ SLIDES: dict[str, str] = {
         f'width:150px;">{SOFT_WRAP_TEXT}</div>'
         '<div id="twin" style="position:absolute; left:100px; top:500px; font-size:16px; '
         f'width:150px;">{SOFT_WRAP_TEXT}</div></div>'
+    ),
+    # Fix round 2. A blank line a <br> opens inside a turned root.
+    "leading-br": _twin_pair(
+        "-90deg",
+        '<div><span id="{prefix}a">Alpha</span></div>'
+        '<div><br><span id="{prefix}b">Beta</span></div>',
+    ),
+    "double-br": _twin_pair(
+        "-90deg",
+        '<div><span id="{prefix}a">Alpha</span><br><br></div>'
+        '<div><span id="{prefix}b">Beta</span></div>',
+    ),
+    # A vertical-rl inline padded along its inline axis (its top and bottom).
+    "vertical-pad": (
+        '<div class="slide"><div id="target" style="position:absolute; left:640px; top:150px; '
+        'font-size:16px; white-space:nowrap; writing-mode:vertical-rl;">'
+        '<span id="status">Status</span> <span style="padding-top:24px; padding-bottom:24px;">'
+        '<span id="mid">mid</span></span> <span id="end">end</span></div></div>'
+    ),
+    # A segment mixing 12 px and 28 px text, and a 24 px ordered list, each
+    # turned 12 and 40 degrees beside an unturned twin.
+    **{f"mixed-{name}": _twin_pair(css, MIXED_SEGMENT_LINE) for name, css in TWIN_ANGLES.items()},
+    **{f"ol-{name}": _twin_list(css) for name, css in TWIN_ANGLES.items()},
+    # A 20 px paragraph holding a superscript, unturned, and turned beside its twin.
+    "superscript": (
+        '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
+        f'margin:0; font-size:20px; white-space:nowrap;">'
+        f"{SUPERSCRIPT_LINE.replace('{prefix}', '')}</p></div>"
+    ),
+    "superscript-turned": _twin_pair(
+        "-90deg", SUPERSCRIPT_LINE, font_size=20, tag="p", extra="margin:0;"
     ),
 }
 
@@ -607,12 +685,67 @@ def _box_start_along(item: Shape) -> float:
     return _along(_centre(item), item.rotation) - item.w / 2
 
 
-def _left_inset_px(pptx: bytes, name: str, position: int) -> float:
-    """The bodyPr lIns of slide ``name``'s spTree element at ``position``, in CSS px."""
+def _inset_px(pptx: bytes, name: str, position: int, attribute: str) -> float:
+    """The bodyPr ``attribute`` (lIns, tIns...) of spTree element ``position`` of ``name``, px."""
     element = slide_shape_elements(pptx, _slide_index(name))[position]
     body = element.find("p:txBody/a:bodyPr", NAMESPACES)
     assert body is not None, f"spTree element {position} of {name} has no bodyPr"
-    return int(body.get("lIns", 0)) / EMU_PER_PX
+    return int(body.get(attribute, 0)) / EMU_PER_PX
+
+
+def _turned_local(centre: tuple[float, float], angle: float, point: tuple[float, float]) -> tuple:
+    """(along, across) of a slide point in the frame turned by ``angle`` about ``centre``."""
+    radians = math.radians(angle)
+    dx, dy = point[0] - centre[0], point[1] - centre[1]
+    return (
+        dx * math.cos(radians) + dy * math.sin(radians),
+        -dx * math.sin(radians) + dy * math.cos(radians),
+    )
+
+
+def _items_reading(shapes: list[Shape], text: str, angle: float) -> list[tuple[int, Shape]]:
+    """(spTree index, shape) of each text item turned by ``angle`` reading exactly ``text``."""
+    return [
+        (position, shape)
+        for position, shape in enumerate(shapes)
+        if shape.kind == "text"
+        and _normalised(shape.text) == text
+        and _angle_off(shape.rotation, angle) <= ANGLE_TOLERANCE_DEGREES
+    ]
+
+
+def _assert_matches_twin(
+    shapes: list[Shape], document: str, angle: float, text: str, what: str
+) -> None:
+    """The turned item reading ``text`` sits in #t's frame where #w's unturned one sits in #w's.
+
+    A transform moves no layout, so the turned label #t and its unturned twin
+    #w lay their text out alike, each about its own bounds' centre. The turned
+    item, turned back by ``angle`` about #t's centre, must start along its line,
+    start across it and run as long as the twin's unturned item does about
+    #w's centre, each within 1 px. Both boxes are the emitter's, the first-line
+    raise included, so the twin also checks the raise of a turned box along its
+    own up.
+    """
+    turned = _items_reading(shapes, text, angle)
+    twin = _items_reading(shapes, text, 0.0)
+    assert len(turned) == 1 and len(twin) == 1, (
+        f"{what}: expected one item reading {text!r} turned {angle:g} degrees and one unturned, "
+        f"got {len(turned)} and {len(twin)}:\n{_describe(shapes)}"
+    )
+    item = turned[0][1]
+    unturned = twin[0][1]
+    turned_centre = _centre(_layout(document, "#t"))
+    twin_centre = _centre(_layout(document, "#w"))
+    along, across = _turned_local(turned_centre, angle, _centre(item))
+    emitted = (along - item.w / 2, across - item.h / 2, item.w)
+    expected = (unturned.x - twin_centre[0], unturned.y - twin_centre[1], unturned.w)
+    off = tuple(round(value - oracle, 3) for value, oracle in zip(emitted, expected))
+    assert all(abs(delta) <= GEOMETRY_TOLERANCE_PX for delta in off), (
+        f"{what}: in its label's frame the turned item starts at {emitted[:2]} and is "
+        f"{emitted[2]:.2f} long; its unturned twin at {expected[:2]}, {expected[2]:.2f} long "
+        f"(along, across, length off by {off}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+    )
 
 
 def _assert_starts_at(item: Shape, rect: dict, what: str, inset: float = 0.0) -> None:
@@ -1309,7 +1442,7 @@ class TestTurnedListMarkers:
         assert [_normalised(line) for line in _lines(text)] == ["Alpha item", "Beta item"], (
             f"the list's text reads {_lines(text)}"
         )
-        inset = _left_inset_px(rotation_pptx, "rotated-list", position)
+        inset = _inset_px(rotation_pptx, "rotated-list", position, "lIns")
 
         _assert_starts_at(text, _layout(document, "#alpha"), "the list's text", inset)
         starts = _box_start_along(text) + inset
@@ -1384,6 +1517,149 @@ class TestTurnedLines:
             f"the turned paragraph's lines are {_lines(turned[0])}, the browser's {expected}"
         )
         _assert_turned_box(turned[0], _layout(document, "#target"), 270.0, "the turned paragraph")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTurnedBlankLines:
+    @pytest.mark.parametrize("name", ["leading-br", "double-br"])
+    def test_a_blank_line_a_br_opens_keeps_its_place(self, rotation_pptx: bytes, name: str) -> None:
+        """Round 2, item 1: only the empty line after a run's FINAL <br> paints nothing.
+
+        * "leading-br": ``<div>Alpha</div><div><br>Beta</div>``: the second
+          block's leading <br> opens an empty line, so Beta is a line further on;
+        * "double-br": ``<div>Alpha<br><br></div><div>Beta</div>``: the second
+          <br> opens an empty line, and the final one opens none.
+
+        The unturned twin shows each: Beta starts two lines after Alpha. The
+        turned item reads Alpha, a blank line, then Beta, on its layout box.
+        """
+        document = _document(name)
+        alpha = browser_each_rect(document, "#w-a")[0]
+        beta = browser_each_rect(document, "#w-b")[0]
+        assert round((beta["y"] - alpha["y"]) / alpha["h"]) == 2, (
+            f"fixture drift: the twin's Beta starts {beta['y'] - alpha['y']:.2f} px after Alpha "
+            f"({alpha['h']:.2f} px lines), not two lines on"
+        )
+        shapes = _shapes(rotation_pptx, name)
+        turned = [shape for shape in shapes if "Alpha" in shape.text and shape.rotation]
+        assert len(turned) == 1, f"expected one turned item:\n{_describe(shapes)}"
+
+        assert [_normalised(line) for line in _lines(turned[0])] == ["Alpha", "", "Beta"], (
+            f"the turned item's lines are {_lines(turned[0])}: two lines apart, Alpha and Beta "
+            "need the blank line between them"
+        )
+        _assert_turned_box(turned[0], _layout(document, "#t"), 270.0, f"the {name} item")
+
+    def test_a_vertical_inline_padded_along_its_line_cuts_it(self, rotation_pptx: bytes) -> None:
+        """Round 2, item 2: under vertical-rl an inline's inline sides are its top and bottom.
+
+        "Status [mid, 24 px padding top and bottom] end" in a vertical-rl label:
+        the padding takes room along the line, so the line is cut there, and
+        "Status", "mid" and "end" are turned items of their own, each starting
+        along the line where the browser draws it. Read from the physical left
+        and right, the padding would cut nothing and "end" would start about
+        47 px early.
+        """
+        document = _document("vertical-pad")
+        shapes = _shapes(rotation_pptx, "vertical-pad")
+        for text in ("Status", "mid", "end"):
+            _, item = _text_item(shapes, text, f"the {text!r} segment")
+            _assert_one_line(item, text, f"the {text!r} segment")
+            _assert_angle(item, 90.0, f"the {text!r} segment")
+            _assert_starts_at(item, _layout(document, f"#{text.lower()}"), f"{text!r}")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTurnedPiecesMatchTheirTwins:
+    @pytest.mark.parametrize("angle", list(TWIN_ANGLES))
+    def test_a_mixed_size_segment_matches_its_twin(self, rotation_pptx: bytes, angle: str) -> None:
+        """Round 2, items 3 and 4: a cut segment of 12 px and 28 px text, turned 12 and 40 degrees.
+
+        Off a quarter turn, a line of runs of different sizes is no one
+        rectangle as tall as its largest face. Each run is placed by its own
+        face's height: so in its label's frame the segment "since May" starts
+        along its line, starts across it and runs as long as its unturned
+        twin's, within 1 px. Across, the twin also checks the first-line raise
+        of a turned box, along its own up.
+        """
+        name = f"mixed-{angle}"
+        shapes = _shapes(rotation_pptx, name)
+        degrees = TWIN_ANGLE_DEGREES[angle]
+
+        _assert_matches_twin(shapes, _document(name), degrees, MIXED_SEGMENT, "the mixed segment")
+        _assert_matches_twin(shapes, _document(name), degrees, "Status", "the 'Status' segment")
+
+    @pytest.mark.parametrize("angle", list(TWIN_ANGLES))
+    def test_turned_list_markers_match_their_twins(self, rotation_pptx: bytes, angle: str) -> None:
+        """Round 2, item 4: a 24 px ordered list's markers, turned 12 and 40 degrees.
+
+        Each "1." and "2." is a turned item of its own that, in its list's frame,
+        starts along and across its line and runs as long as its unturned
+        twin's marker, within 1 px: placed at its box from the DevTools
+        protocol and raised by the first-line offset along its own up.
+        """
+        name = f"ol-{angle}"
+        shapes = _shapes(rotation_pptx, name)
+        for marker in TWIN_LIST_MARKERS:
+            _assert_matches_twin(
+                shapes, _document(name), TWIN_ANGLE_DEGREES[angle], marker, f"the {marker} marker"
+            )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSuperscriptLines:
+    def test_a_superscript_line_is_placed_from_its_baseline(self, rotation_pptx: bytes) -> None:
+        """Round 2, item 5: "Revenue<sup>1</sup> grew" in 20 px, unturned.
+
+        The raised "1" stands above the line, but the line is where its own
+        20 px text is: the box's top is the calibrated first-line offset above
+        "Revenue"'s glyph top (``single_line_box_top``), within 1 px. Placed by
+        the superscript's top, the whole line would draw about 3.3 px high. The
+        "1" keeps its baseline shift and is sized for the renderers' shrink.
+        """
+        document = _document("superscript")
+        lead = _layout(document, "#lead")
+        style = browser_style(document, "#target")
+        family = style["fontFamily"].split(",")[0].strip().strip("\"'")
+        ascent = browser_ascent(document, family, int(style["fontWeight"]), SUPERSCRIPT_SIZE_PX)
+        expected = single_line_box_top(lead["y"], SUPERSCRIPT_SIZE_PX, ascent)
+        _, item = _text_item(_shapes(rotation_pptx, "superscript"), "Revenue", "the paragraph")
+
+        assert abs(item.y - expected) <= GEOMETRY_TOLERANCE_PX, (
+            f"the paragraph's box top is {item.y:.2f}; placed from its own 20 px text it is "
+            f"{expected:.2f} (off by {item.y - expected:.2f}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+        )
+        script = next(run for paragraph in item.paras for run in paragraph.runs if run.text == "1")
+        sup_px = _px(browser_style(document, "#target sup")["fontSize"])
+        _assert_script_run_size(item, script, "super", sup_px, SUPERSCRIPT_SIZE_PX)
+
+    def test_a_turned_superscript_line_sits_where_its_twin_does(self, rotation_pptx: bytes) -> None:
+        """Round 2, item 5, turned 270 degrees: the line is placed across by its own text.
+
+        In its label's frame, the turned paragraph's text starts across its line
+        (its box's top plus its top inset) where its unturned twin's box starts,
+        within 1 px (the reviewer allowed half the superscript's 3.3 px
+        overhang; the placement does better).
+        """
+        document = _document("superscript-turned")
+        shapes = _shapes(rotation_pptx, "superscript-turned")
+        turned = _items_reading(shapes, "Revenue1 grew", 270.0)
+        twin = _items_reading(shapes, "Revenue1 grew", 0.0)
+        assert len(turned) == 1 and len(twin) == 1, (
+            f"expected a turned item and its twin:\n{_describe(shapes)}"
+        )
+        position, item = turned[0]
+        _, across = _turned_local(_centre(_layout(document, "#t")), 270.0, _centre(item))
+        top = across - item.h / 2 + _inset_px(rotation_pptx, "superscript-turned", position, "tIns")
+        expected = twin[0][1].y - _centre(_layout(document, "#w"))[1]
+
+        assert abs(top - expected) <= GEOMETRY_TOLERANCE_PX, (
+            f"the turned paragraph's text starts {top:.2f} px across its frame, its twin's at "
+            f"{expected:.2f} (off by {top - expected:.2f}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+        )
 
 
 def _with_rotated_label(fixture: str) -> str:
