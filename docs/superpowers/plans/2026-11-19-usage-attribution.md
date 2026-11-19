@@ -23,7 +23,6 @@ Execution: single-session
 - The app resource is named `app_database` (the name provisioned installs already use) and is attached only **after** `_ensure_sp_autoscaling_role` has run. Never pass it to `apps.create`.
 - Python env is the per-worktree uv `.venv` (`uv sync --extra dev`); run everything with `uv run`. No new dependencies.
 - Baseline before Task 1: `uv run pytest tests/unit/test_gateway_clients.py tests/unit/test_client.py tests/unit/test_genie_agent_client.py tests/unit/test_genie_one_client.py tests/unit/test_model_endpoint_catalog.py tests/unit/test_deploy_app_scopes.py tests/unit/test_deploy_autoscaling.py tests/unit/test_session_naming.py tests/unit/test_agent_runtime.py -q`. Record the result; compare later failures by cause, not count.
-- Commits end with `Co-authored-by: Isaac <no-reply@databricks.com>`.
 - `origin/feat/mcp-agent-mode` is in flight and rewrites parts of `src/api/mcp_server.py`. Task 4 touches that file in one line only; rebase onto `origin/main` before the PR and re-run Task 4's tests if it has merged.
 
 ## Review Focus
@@ -1307,5 +1306,5 @@ GROUP BY ALL
 ```
 
 Expected: rows for `generation`, `title`, `export` and `image`, `entrypoint` `app` on the UI deck and `mcp` on the MCP deck's title, `user_agent` starting `tellr/<the dev version>`. Then confirm from the workspace's request records that the Genie conversation requests carry `tellr-app-<hash>/<the dev version>`, that the Genie One requests carry `tellr/<the dev version> python-httpx/…`, and that no request from the app carries `unknown/0.0.0` or version `0.1.0`. No rows after 3 h, or any `/ai-gateway/` 4xx in the app log, is a stop.
-- [ ] **Step 8: PR.** Rebase on `origin/main`. Body per `.github/pull_request_template.md`; `## What's new` is `None` (a Tellr user would not notice the change). Include the Step 7 result and the note that the installer change takes effect on the next `tellr.create` / `tellr.update`. End the body with `This pull request and its description were written by Isaac.`
+- [ ] **Step 8: PR.** Rebase on `origin/main`. Body per `.github/pull_request_template.md`; `## What's new` is `None` (a Tellr user would not notice the change). Include the Step 7 result and the note that the installer change takes effect on the next `tellr.create` / `tellr.update`.
 - [ ] **Step 9: Clean up.** Delete the test apps and Lakebase projects created in Steps 4-5.
