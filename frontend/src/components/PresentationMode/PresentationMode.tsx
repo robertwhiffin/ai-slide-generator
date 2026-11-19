@@ -256,6 +256,8 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
       case 'P': {
         // window.open runs right here, inside the key (or forwarded message)
         // handler, so the browser still sees the user's activation.
+        // Cmd+P / Ctrl+P is the browser's print: leave any modified P alone.
+        if (e.metaKey || e.ctrlKey || e.altKey) break;
         const id = sessionIdRef.current;
         if (!id) break;
         e.preventDefault();

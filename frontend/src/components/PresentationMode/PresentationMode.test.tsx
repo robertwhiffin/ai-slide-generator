@@ -375,6 +375,28 @@ describe('PresentationMode presenter view', () => {
     expect(openSpy).toHaveBeenCalledWith(PRESENT_URL, PRESENT_NAME, PRESENT_FEATURES);
   });
 
+  // Whole-branch review: Cmd+P / Ctrl+P is the browser's print. Sabotage target: drop the modifier
+  // check on the P case, so a held Cmd, Ctrl or Alt still opens the window and swallows the print.
+  it.each([
+    ['metaKey', 'p'],
+    ['metaKey', 'P'],
+    ['ctrlKey', 'p'],
+    ['altKey', 'p'],
+  ] as const)('P with %s held leaves the key to the browser (%s)', (modifier, key) => {
+    renderWithSession();
+
+    const event = new KeyboardEvent('keydown', { key, [modifier]: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+
+    const frame = slideFrameWindow();
+    window.dispatchEvent(
+      new MessageEvent('message', { data: { type: 'tellr:slide-key', key, [modifier]: true }, source: frame }),
+    );
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
   it('a p message from another source does not open the presenter window', () => {
     renderWithSession();
 

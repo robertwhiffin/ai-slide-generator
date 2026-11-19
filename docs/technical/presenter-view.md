@@ -8,7 +8,7 @@ The presenter view is a second, private window that shows what to say and what c
 
 | Capability | Entry point | What happens |
 | --- | --- | --- |
-| Open the presenter view | P in presentation mode, or the "Presenter view" toolbar button | A pop-up window opens at `/sessions/<id>/present`, or the open one comes to the front |
+| Open the presenter view | P in presentation mode (a P with Cmd, Ctrl or Alt held is left to the browser, so Cmd+P still prints), or the "Presenter view" toolbar button | A pop-up window opens at `/sessions/<id>/present`, or the open one comes to the front |
 | Follow the slides | Automatic | The presenter shows the slide presentation mode reports, within one second |
 | Step from the presenter | Next and Back buttons, Right and Left, Space and Backspace, Page Down and Page Up (what most presentation clickers send) | The presenter asks presentation mode to move; both windows then show the new slide |
 | Read the notes | N or the Notes button in the presenter | A drawer with the slide's notes opens; Esc closes it |
