@@ -13,13 +13,24 @@ covers. ``is_available()`` returns False outside the local-dev gate.
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
-apart, and only those are written differently: today a superscript or
-subscript run's size. PowerPoint shrinks a script run and places its line by
-its other runs, so the run is written enlarged and PowerPoint draws it at the
-browser's size; Google Slides sizes the whole line by that enlarged size and
-draws it low, so for it the run is capped at its line's size (task-11 ruling
-R11g, measured in both apps). A deck for ``"pptx"`` is byte-identical to one
-exported before targets existed.
+apart, and only those are written differently, all around superscript and
+subscript lines (task-11 rulings R11g and R11i and findings r4, measured in
+both apps; ``scripts/export_fidelity/CALIBRATION.md`` A2, A4 and A5):
+
+* a script run's size. PowerPoint shrinks a script run and places its line by
+  its other runs, so the run is written enlarged and PowerPoint draws it at the
+  browser's size; Google Slides sizes the whole line by that enlarged size and
+  draws it low, so for it the run is capped at its line's size (its glyph then
+  drawn at 0.8 of the browser's, the trade-off R11i accepts);
+* for PowerPoint alone, a word joiner after a script run that ends its line,
+  which PowerPoint would otherwise size the line by, and the space before a
+  later line the browser set further down than its spacing (a raised script
+  run's line box grows its line), which PowerPoint spaces by its paragraph
+  alone; for Google Slides a script line's growth comes from the script run's
+  written size instead.
+
+A deck with no script run and no line the browser grew is the same for both
+targets.
 """
 
 from __future__ import annotations

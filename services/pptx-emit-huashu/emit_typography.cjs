@@ -32,7 +32,9 @@
 // already reduced it to (font-size: smaller). So the run is written at the
 // browser's size over that fraction, and the renderer's shrink brings it back
 // to the size the browser drew. That is the deck for PowerPoint (target
-// 'pptx'), which places the run's line by its other runs. Google Slides
+// 'pptx'), which places the run's line by its other runs as long as one
+// follows it (emit_text.cjs writes a word joiner after a run that ends its
+// line, lineEndOptions). Google Slides
 // (target 'gslides') sizes the LINE by the run's written size, so a larger
 // written size pushes the whole line down (about 0.28 em): written for it, a
 // script run is capped at the size its line should be sized by (sizing.capPx,

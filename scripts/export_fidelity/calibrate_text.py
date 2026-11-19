@@ -12,10 +12,13 @@ Google Slides actually draw that, against the browser:
 1. exports the probe deck ``tests/fixtures/export_snapshot/text_calibration.html``
    through the snapshot engine, with the corpus ``deck.css`` (DM Sans with its
    ``opsz`` axis, and DM Mono, from Google Fonts);
-2. screenshots the browser truth at device scale 2, renders the .pptx in
-   PowerPoint (``run.render_with_powerpoint``; its PDF is re-rasterised at 4x)
-   and in Google Slides (``run.render_with_google_slides``, 1600 px
-   thumbnails);
+2. screenshots the browser truth at device scale 2, renders the deck written
+   for PowerPoint (``target="pptx"``) in PowerPoint
+   (``run.render_with_powerpoint``; its PDF is re-rasterised at 4x), and
+   converts the deck written for Google Slides (``target="gslides"``, as the
+   Google Slides export writes it) in Google Slides
+   (``run.render_with_google_slides``, 1600 px thumbnails); each renderer's
+   probes are read against its own deck's text boxes;
 3. finds each probe's lines in all three images by pixel analysis: inside the
    probe's cell, the rows whose darkest pixel passes half the cell's peak ink
    are a line's ink band, from cap top to baseline, its edges interpolated to
@@ -960,8 +963,13 @@ def main() -> int:
     deck["external_scripts"] = []
     documents = harness.build_documents(deck, probe_deck.slides, out_dir)
     render_truth(documents, out_dir)
-    pptx_path = harness.export_pptx(deck, documents, out_dir, engine="snapshot")
+    # Each app gets the deck written for it, as the two exports write them.
+    pptx_path = harness.export_pptx(deck, documents, out_dir, engine="snapshot", target="pptx")
+    gslides_path = harness.export_pptx(
+        deck, documents, out_dir, engine="snapshot", target="gslides"
+    )
     boxes = exported_text_boxes(pptx_path)
+    renderer_boxes = {"powerpoint": boxes, "gslides": exported_text_boxes(gslides_path)}
     constants = current_constants()
 
     renderers: dict[str, Path] = {}
@@ -969,6 +977,7 @@ def main() -> int:
         "date": datetime.date.today().isoformat(),
         "constants": constants,
         "pptx": str(pptx_path),
+        "gslidesPptx": str(gslides_path),
         "lineSpacingInPoints": any(box.line_points for slide in boxes for box in slide),
         "identicalPprs": all(box.identical_pprs for slide in boxes for box in slide),
         "maxPprPerParagraph": max(
@@ -983,7 +992,7 @@ def main() -> int:
         if report["powerpoint"]["opened"]:
             renderers["powerpoint"] = out_dir / "powerpoint_x4"
     if not args.no_gslides:
-        report["gslidesUrl"] = render_google_slides(harness, pptx_path, names, out_dir)
+        report["gslidesUrl"] = render_google_slides(harness, gslides_path, names, out_dir)
         print("Google Slides:", report["gslidesUrl"])
         renderers["gslides"] = out_dir / "gslides"
 
@@ -1001,10 +1010,10 @@ def main() -> int:
     for cell_index, cell in enumerate(probe_deck.cells):
         slide_images = images[names[cell.slide]]
         window = window_of(cell)
-        box = box_in_cell(boxes[cell.slide], cell)
         if cell.kind in ("spacing", "width", "justify"):
             truth = slide_images["truth"].bands(window)
             for renderer in renderers:
+                box = box_in_cell(renderer_boxes[renderer][cell.slide], cell)
                 render = slide_images[renderer].bands(window)
                 if cell.kind == "spacing":
                     spacing[renderer].append(

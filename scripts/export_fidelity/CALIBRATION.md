@@ -3,8 +3,11 @@
 Recorded 2026-11-17. Measured with `scripts/export_fidelity/calibrate_text.py` on the probe deck
 `tests/fixtures/export_snapshot/text_calibration.html`, exported through the snapshot engine and
 rendered in Microsoft PowerPoint for Mac (PDF, re-rasterised at 4x) and Google Slides (Drive
-conversion, 1600 px thumbnails), against the browser at device scale 2. All values are CSS px at
-1280 px width, renderer minus browser (+ is lower or wider in the renderer).
+conversion, 1600 px thumbnails), against the browser at device scale 2. PowerPoint opens the deck
+written for it (`build_pptx_huashu(..., target="pptx")`), Google Slides the one written for it
+(`target="gslides"`), as the two exports do. All values are CSS px at 1280 px width, renderer
+minus browser (+ is lower or wider in the renderer). A4 and A5 are measured from the text of each
+app's PDF with `scripts/export_fidelity/measure_script_lines.py`.
 
 The tests read the constants from this file: each sits on a line of its own, once, and
 `services/pptx-emit-huashu/emit_text.cjs` and `emit_typography.cjs` define the same values
@@ -16,9 +19,10 @@ The tests read the constants from this file: each sits on a line of its own, onc
     FIRST_LINE_B = 1.4338
     FIRST_LINE_C = -1.5
     SUPERSCRIPT_SIZE_FACTOR = 0.646
+    GOOGLE_LINE_GROWTH_PER_PX = 0.96
 
 There is no subscript factor: both renderers shrink a subscript run exactly as they shrink a
-superscript one (A2 below).
+superscript one (A2 below). `GOOGLE_LINE_GROWTH_PER_PX` is A4's.
 
 ## The rules these constants serve
 
@@ -296,6 +300,16 @@ at the browser's size over it. With it applied, the rendered size over the brows
 |---|---|---|---|---|
 | super and sub | 1.025 | 1.029 | 1.000 | 1.016 |
 
+**The Google column is the deck written for Google Slides** (`target="gslides"`, which
+`calibrate_text.py` converts, as the Google Slides export does). Each probe here is a line of
+script runs alone (`<sup>HH</sup>`), which that target does not cap, so the column is Google's own
+shrink, the same in either deck. On a line with other text the target caps a script run at its
+line's size, plus the browser's growth of the line over `GOOGLE_LINE_GROWTH_PER_PX` (A4; task-11
+ruling R11g), because Google sizes the whole line by the run's written size. Google then sets
+the line on the browser's baseline (+0.52 px at 20 px, +1.05 px at 40 px) and draws the script
+glyph at **0.800** of the browser's size on a line the browser did not grow. Placement wins over
+glyph size there: an accepted Google Slides trade-off (ruling R11i).
+
 ## A3: render checks
 
 - **Repair prompt: none.** PowerPoint opened, saved as PDF and closed every calibration deck with
@@ -312,6 +326,71 @@ at the browser's size over it. With it applied, the rendered size over the brows
   natural lines end (ragged right): 6.6 to 37.0 px short of the justified edge, and the last line
   within 1.7 px.
 
+## A4: Google Slides' line growth per px of script excess
+
+Google Slides sizes a line by every run on it. A script run written larger than the line's other
+runs lowers the whole line, by `GOOGLE_LINE_GROWTH_PER_PX` px per px of the excess. The deck
+written for Google caps a script run at its line's size plus the browser's own growth of that
+line over this constant, so Google grows the line as the browser did
+(`services/pptx-emit-huashu/emit_text.cjs` `scriptCapPx`).
+
+**Method** (`measure_script_lines.py --gslides`, recorded 2026-11-19). "Revenue<sup>1</sup> grew"
+on one line in DM Sans at 20 px and at 40 px is exported for both targets and converted through
+Drive. The baselines are read from the text origins in Drive's PDF of each conversion. The deck
+for PowerPoint writes the "1" at the browser's size over `SUPERSCRIPT_SIZE_FACTOR`, the deck for
+Google at the line's size. So the excess is the difference of the two written sizes, and the
+line's drop is the difference of the two baselines:
+
+| line | excess written (px) | Google lowers the line (px) | per px |
+|---|---|---|---|
+| 20 px | 5.80 | 5.57 | 0.960 |
+| 40 px | 11.60 | 11.14 | 0.960 |
+
+R11g's first measurement, on 2026-11-18, read 5.57 and 11.13 px. The value is DM Sans's: another
+face's ascent ratio moves it by a few percent, a fraction of a px per line. With it, the deck for
+Google places a superscript's later line −0.56 px from the browser's (20 px, line-height 29 px).
+
+## A5: script lines in PowerPoint
+
+PowerPoint places a line holding a script run by its other runs, with two exceptions (task-11
+findings r4, Important 2):
+
+- it grows the line by the script run's enlarged size (the browser's over
+  `SUPERSCRIPT_SIZE_FACTOR`) when that run ends the line, and only then. So the deck for
+  PowerPoint writes a run after it in the line's own size and style holding a word joiner
+  (U+2060). A space works as well vertically, but PowerPoint counts a trailing space in a
+  right-aligned or centred line, which moved it left by the space's advance (5.33 px and 2.66 px
+  at 20 px); the word joiner has none;
+- it spaces a later line by its paragraph's spacing alone. So a later line whose box the browser
+  grew (a superscript with a line height of its own raises it) opens a paragraph of its own, its
+  growth added to its space before.
+
+Baseline offsets in PowerPoint of the deck for PowerPoint (`measure_script_lines.py
+--powerpoint`, 2026-11-19), against the engine before these two rules. The first nine are the
+re-review's cases; all are DM Sans at 20 px unless named:
+
+| case | before: line 1 | before: line 2 | now: line 1 | now: line 2 |
+|---|---|---|---|---|
+| one line, superscript inside it (R11g's case) | +0.06 | - | +0.06 | - |
+| one line, superscript at its end | +5.18 | - | +0.06 | - |
+| one line at 40 px, superscript at its end | +10.67 | - | +0.11 | - |
+| one line, subscript at its end | +5.36 | - | -0.08 | - |
+| line-height 29 px, superscript ends line 1 | +5.38 | +7.10 | -0.06 | +0.38 |
+| line-height 22 px, superscript ends line 1 | +4.22 | +6.22 | -0.90 | -0.50 |
+| line-height 22 px, superscript ends line 2 | -0.96 | -1.78 | -0.96 | -0.50 |
+| line-height 29 px, superscript ends line 2 | -0.12 | -0.90 | -0.12 | +0.38 |
+| line-height 29 px, superscript inside line 2 | -0.12 | -6.34 | -0.12 | +0.38 |
+| line-height 22 px, superscript inside line 2 | -0.96 | -6.90 | -0.96 | -0.50 |
+| line-height 29 px, 24 px "Gamma" and a superscript on line 2 | -0.12 | -6.34 | -0.12 | -2.18 |
+| the same without the superscript | -0.12 | -1.68 | -0.12 | -1.68 |
+| line-height 29 px, plain (control) | -0.12 | +0.32 | -0.12 | +0.32 |
+
+The tight first line's −0.9 px is the first-line offset's residual at 22 / 24 = 91.7% spacing.
+A paragraph's first line in a 24 px run sits 1.68 px high whether or not the line holds a
+superscript: that is PowerPoint's spacing between paragraphs of different sizes, which these
+rules do not change. A right-aligned and a centred line ending in a superscript keep their
+place (−2.85 px and −1.42 px, as before).
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |
@@ -321,6 +400,10 @@ at the browser's size over it. With it applied, the rendered size over the brows
 | 3 | option C, constants 0, factor 0.646 (the fit) | https://docs.google.com/presentation/d/12miGQiWr6npw4PFPbGnoLrb876WTyDIZz9MAryOjpG0/edit |
 | 4 | option C, the constants above (verification) | https://docs.google.com/presentation/d/1XS2dxYxfkzb0C9hEzaWOho8dwzPO4SZ1MJF1Pk6aGYw/edit |
 
+A4 and A5 (2026-11-19) were measured on presentations the script deletes by id once read.
+
 To re-run (PowerPoint will briefly open a window):
 
     uv run --with pymupdf --with pillow python scripts/export_fidelity/calibrate_text.py --out /tmp/calib
+    uv run --with pymupdf python scripts/export_fidelity/measure_script_lines.py \
+        --out /tmp/script-lines --powerpoint --gslides

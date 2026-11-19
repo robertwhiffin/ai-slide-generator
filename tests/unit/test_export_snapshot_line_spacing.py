@@ -65,6 +65,7 @@ once::
     FIRST_LINE_C = <number>
     SUPERSCRIPT_SIZE_FACTOR = <number>
     SUBSCRIPT_SIZE_FACTOR = <number>      (only when subscript needs its own)
+    GOOGLE_LINE_GROWTH_PER_PX = <number>
 
 ``SUPERSCRIPT_SIZE_FACTOR`` is the fraction of a superscript run's emitted size
 that the renderers draw it at (0 < factor <= 1), so rendered = emitted x
@@ -73,7 +74,10 @@ one, and ``SUPERSCRIPT_SIZE_FACTOR`` otherwise. The emitter defines each
 constant as ``const NAME = <number>;``: the three ``FIRST_LINE_*`` in
 ``emit_text.cjs``, each script factor once in ``emit_text.cjs`` or
 ``emit_typography.cjs`` (``SUBSCRIPT_SIZE_FACTOR`` exactly when the record
-holds it). The pins fail when the code and the record disagree. The placement
+holds it). ``GOOGLE_LINE_GROWTH_PER_PX`` is how far Google Slides lowers a
+line per px its largest written run exceeds the line's other runs (task-11
+ruling R11g), defined once in ``emit_text.cjs``. The pins fail when the code
+and the record disagree. The placement
 and script-size tests read the record too, so the constants must also be the
 ones the export applies.
 
@@ -135,6 +139,7 @@ FIRST_LINE_CONSTANTS = ("FIRST_LINE_A", "FIRST_LINE_B", "FIRST_LINE_C")
 SUPERSCRIPT_FACTOR = "SUPERSCRIPT_SIZE_FACTOR"
 # Recorded only when the renders show subscript needs a factor of its own.
 SUBSCRIPT_FACTOR = "SUBSCRIPT_SIZE_FACTOR"
+GOOGLE_LINE_GROWTH = "GOOGLE_LINE_GROWTH_PER_PX"
 # A decimal literal as Markdown or JavaScript writes it.
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
@@ -497,6 +502,26 @@ class TestCalibratedConstants:
         )
         assert 0 < recorded <= 1, (
             f"{SUPERSCRIPT_FACTOR} = {recorded:g} is not a shrink: it must lie in (0, 1]"
+        )
+
+    def test_google_line_growth_per_px_is_the_recorded_calibration(self) -> None:
+        """R11g: ``GOOGLE_LINE_GROWTH_PER_PX`` in ``emit_text.cjs`` equals ``CALIBRATION.md``.
+
+        The deck written for Google Slides caps a script run at its line's
+        size plus the browser's growth of the line over this constant: the px
+        Google lowers a line per px its largest written run exceeds the line's
+        other runs, measured at 20 and 40 px. It is a fraction of a px per px.
+        """
+        recorded = _recorded_value(GOOGLE_LINE_GROWTH)
+        emitted = _emitter_constant(GOOGLE_LINE_GROWTH, (EMIT_TEXT_MODULE,))
+
+        assert emitted == recorded, (
+            f"emit_text.cjs has {GOOGLE_LINE_GROWTH} = {emitted:g}; CALIBRATION.md records "
+            f"{recorded:g}"
+        )
+        assert 0 < recorded <= 1, (
+            f"{GOOGLE_LINE_GROWTH} = {recorded:g} must lie in (0, 1]: a line is lowered by "
+            "no more than the excess that lowers it"
         )
 
     def test_subscript_size_factor_is_the_recorded_calibration_or_absent(self) -> None:

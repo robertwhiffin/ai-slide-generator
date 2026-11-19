@@ -66,13 +66,16 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import math
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
@@ -282,6 +285,109 @@ LATER_SCRIPT_LINES = {
 LATER_LINE_HEIGHT_PX = 29.0
 # A line the browser set this much past its line height grew (snapshot_text.mjs).
 LINE_GROWTH_MIN_PX = 0.5
+# R11h: inline elements a relative position moves off their line. Each: its
+# paragraph's class, its line (the moved element is #moved), the text of the
+# run it writes, and that run's baseline shift (None: a plain run).
+RELATIVE_LINES = {
+    "nudge": (
+        "",
+        '<span id="lead">Revenue</span> '
+        '<span id="moved" style="position:relative; top:-3px">&#9650;</span> 12% up',
+        "▲",
+        None,
+    ),
+    "smaller-span": (
+        "",
+        '<span id="lead">Revenue</span><span id="moved" '
+        'style="font-size:75%; position:relative; top:-0.5em">1</span> grew',
+        "1",
+        "super",
+    ),
+    "preflight-sup": (
+        "preflight",
+        '<span id="lead">Revenue</span><sup id="moved">1</sup> grew',
+        "1",
+        "super",
+    ),
+    "same-size-sup": (
+        "",
+        '<span id="lead">Revenue</span><sup id="moved" style="font-size:100%; '
+        'vertical-align:baseline; position:relative; top:-0.5em">1</sup> grew',
+        "1",
+        "super",
+    ),
+}
+# Important 2 (round 4): script runs at the end of their line, and later lines
+# the browser grew, in a 20 px paragraph (40 px where named) at the left of the
+# slide. Each case: its font size, its line height (None: normal) and its
+# lines. Line 1 leads with #first, line 2 with #second.
+FIRST_WORD = '<span id="first">Alpha</span>'
+SECOND_WORD = '<span id="second">Gamma</span>'
+SCRIPT_LINES = {
+    "sup-mid": (20, None, '<span id="first">Revenue</span><sup>1</sup> grew'),
+    "sup-end": (20, None, '<span id="first">Revenue</span> grew 12%<sup>1</sup>'),
+    "sup-end-40": (40, None, '<span id="first">Revenue</span> grew 12%<sup>1</sup>'),
+    "sub-end": (20, None, '<span id="first">Emissions</span> of CO<sub>2</sub>'),
+    "sup-ends-line-1": (
+        20, "29px", f"{FIRST_WORD} revenue grew<sup>1</sup><br>{SECOND_WORD} margin held"
+    ),
+    "tight-sup-ends-line-1": (
+        20, "22px", f"{FIRST_WORD} revenue grew<sup>1</sup><br>{SECOND_WORD} margin held"
+    ),
+    "tight-sup-ends-line-2": (
+        20, "22px", f"{FIRST_WORD} revenue grew<br>{SECOND_WORD} margin held<sup>1</sup>"
+    ),
+    "sup-ends-line-2": (
+        20, "29px", f"{FIRST_WORD} revenue grew<br>{SECOND_WORD} margin held<sup>1</sup>"
+    ),
+    "sup-mid-line-2": (
+        20, "29px", f"{FIRST_WORD} revenue grew<br>{SECOND_WORD} margin<sup>1</sup> held"
+    ),
+    "tight-sup-mid-line-2": (
+        20, "22px", f"{FIRST_WORD} revenue grew<br>{SECOND_WORD} margin<sup>1</sup> held"
+    ),
+    # Line 2 holds a 24 px run, so it starts a paragraph of its own in the slide
+    # model; the twin without the superscript is where it would be ungrown.
+    "later-paragraph-sup": (
+        20,
+        "29px",
+        f'{FIRST_WORD} revenue grew<br><span id="second" style="font-size:24px">Gamma</span> '
+        "margin<sup>1</sup> held",
+    ),
+    "later-paragraph-plain": (
+        20,
+        "29px",
+        f'{FIRST_WORD} revenue grew<br><span id="second" style="font-size:24px">Gamma</span> '
+        "margin held",
+    ),
+}
+# The cases whose script run ends a line, and those whose second line the browser grew.
+LINE_END_CASES = (
+    "sup-end",
+    "sup-end-40",
+    "sub-end",
+    "sup-ends-line-1",
+    "tight-sup-ends-line-1",
+    "tight-sup-ends-line-2",
+    "sup-ends-line-2",
+)
+MID_LINE_CASES = ("sup-mid", "sup-mid-line-2", "tight-sup-mid-line-2", "later-paragraph-sup")
+GROWN_LINE_CASES = (
+    "tight-sup-ends-line-2",
+    "sup-ends-line-2",
+    "sup-mid-line-2",
+    "tight-sup-mid-line-2",
+)
+# The renderers' single spacing, as a multiple of the font size (emit_text.cjs).
+SINGLE_SPACING_EM = 1.2
+# What the deck for PowerPoint writes after a script run that ends its line:
+# zero-width, so a right-aligned or centred line keeps its place (emit_text.cjs).
+WORD_JOINER = "\u2060"
+# spcBef is hundredths of a point; one unit is the rounding pptxgenjs does.
+SPACE_BEFORE_TOLERANCE_PT = 0.01
+# A later paragraph's growth, read by the snapshot against Chrome's own leading
+# rule, and by this suite from the twin without the superscript.
+TWIN_GROWTH_TOLERANCE_PX = 0.25
 # A script run's written size, in pt, within this of the rule's.
 SCRIPT_SIZE_TOLERANCE_PT = 0.05
 # a:rPr baseline is in 1000ths of a percent of the run's size.
@@ -496,6 +602,15 @@ SLIDES: dict[str, str] = {
             f"{line}</p></div>"
         )
         for script, line in PREFLIGHT_LINES.items()
+    },
+    # Fix round 4. R11h: an inline a relative position moves off its line.
+    **{
+        f"relative-{name}": (
+            f'<div class="slide"><p id="target" class="{css_class}" style="position:absolute; '
+            'left:100px; top:150px; margin:0; font-size:20px; white-space:nowrap;">'
+            f"{line}</p></div>"
+        )
+        for name, (css_class, line, _, _) in RELATIVE_LINES.items()
     },
 }
 
@@ -1892,66 +2007,141 @@ class TestScriptRunsPerRenderer:
             f"written at {expected:.2f} pt for Google; it is {_describe_run(run)}"
         )
 
-    def test_the_pptx_target_writes_what_the_default_does(
+    def test_a_deck_with_no_script_runs_is_the_same_for_both_targets(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``target='pptx'`` is the default, byte for byte; 'gslides' changes script sizes alone.
+        """With no script run, the decks written for PowerPoint and for Google Slides are one.
 
-        For a deck with no script run and one with them, the export with no
-        target and with ``target='pptx'`` are the same artifact (every part
-        identical, ``docProps/core.xml`` canonicalised: ``structural_manifest``).
-        Written for Google, the deck with no script run is the same artifact
-        too, and the one with them differs only in its script runs' sizes.
+        Every part identical, ``docProps/core.xml`` canonicalised
+        (``structural_manifest``): a turned label, a turned label of two lines,
+        and a paragraph whose second line opens a paragraph of its own in the
+        slide model (its 24 px run), which the browser set where its spacing
+        puts it, so it carries no growth.
         """
-        css = DECK_CSS + ROTATION_CSS
-        decks = {
-            "no scripts": [SLIDES["tag"], SLIDES["br-lines"]],
-            "scripts": [SLIDES["superscript"], SLIDES["preflight-sub"]],
-        }
-        for deck, bodies in decks.items():
-            exports = {}
-            for target in (None, "pptx", "gslides"):
-                exports[target], failures = export_slides(
-                    bodies, css=css, monkeypatch=monkeypatch, target=target
-                )
-                assert failures == [], failures
-            assert structural_manifest(exports[None]) == structural_manifest(exports["pptx"]), (
-                f"{deck}: target='pptx' does not export what the default does"
+        bodies = [SLIDES["tag"], SLIDES["br-lines"], _script_line_body("later-paragraph-plain")]
+        exports = {}
+        for target in ("pptx", "gslides"):
+            exports[target], failures = export_slides(
+                bodies, css=DECK_CSS + ROTATION_CSS, monkeypatch=monkeypatch, target=target
             )
-            if deck == "no scripts":
-                assert structural_manifest(exports["gslides"]) == structural_manifest(
-                    exports["pptx"]
-                ), "with no script run, the Google deck must equal the PowerPoint deck"
-                continue
-            for index in range(len(bodies)):
-                pptx_shapes = slide_shapes(exports["pptx"], index)
-                google_shapes = slide_shapes(exports["gslides"], index)
-                assert _without_script_sizes(google_shapes) == _without_script_sizes(pptx_shapes), (
-                    f"{deck}, slide {index}: the Google deck differs beyond its script runs' sizes"
-                )
-                assert google_shapes != pptx_shapes, (
-                    f"{deck}, slide {index}: no script run was resized"
-                )
+            assert failures == [], failures
 
-
-def _without_script_sizes(shapes: list[Shape]) -> list[Shape]:
-    """``shapes`` with every script run's size taken out, the one thing the targets differ in."""
-    return [
-        dataclasses.replace(
-            shape,
-            paras=[
-                dataclasses.replace(
-                    paragraph,
-                    runs=[
-                        dataclasses.replace(run, size_pt=None) if run.baseline else run
-                        for run in paragraph.runs
-                    ],
-                )
-                for paragraph in shape.paras
-            ],
+        assert structural_manifest(exports["gslides"]) == structural_manifest(exports["pptx"]), (
+            "with no script run, the Google deck must be the PowerPoint deck, byte for byte"
         )
-        for shape in shapes
-    ]
+
+    def test_a_deck_with_script_runs_differs_only_where_the_targets_write_apart(
+        self, script_line_decks: dict[str, bytes]
+    ) -> None:
+        """With script runs, the two decks differ in exactly what the targets write apart.
+
+        Every part but the slides is identical. Each slide holds the same
+        shapes, at the same places, with the same lines and runs, once these
+        are taken out:
+        * every script run's size (R11g: capped at its line's for Google);
+        * in the PowerPoint deck, the word joiner after a script run that ends
+          its line (Important 2);
+        * a later line the browser grew: in the PowerPoint deck it opens a
+          paragraph with its spacing plus its growth (``_second_line_growth``)
+          as space before, where the Google deck places it by its spacing alone
+          (Important 2).
+        Each case holds a script run, so the decks do differ.
+        """
+        decks = script_line_decks
+        manifests = {target: structural_manifest(deck) for target, deck in decks.items()}
+        slide_part = re.compile(r"ppt/slides/slide\d+\.xml")
+        assert manifests["pptx"]["entries"] == manifests["gslides"]["entries"]
+        differing = [
+            name
+            for name in manifests["pptx"]["entries"]
+            if manifests["pptx"]["sha256"][name] != manifests["gslides"]["sha256"][name]
+        ]
+        assert differing and all(slide_part.fullmatch(name) for name in differing), (
+            f"the decks must differ in their slides alone; they differ in {differing}"
+        )
+        for index, name in enumerate(SCRIPT_LINES):
+            pptx_shapes = slide_shapes(decks["pptx"], index)
+            google_shapes = slide_shapes(decks["gslides"], index)
+            assert len(pptx_shapes) == len(google_shapes), f"{name}: the decks' shapes differ"
+            for pptx_shape, google_shape in zip(pptx_shapes, google_shapes):
+                lines = {"pptx": _written_lines(pptx_shape, "pptx")}
+                lines["gslides"] = _written_lines(google_shape, "gslides")
+                if "Gamma" in pptx_shape.text and (
+                    name in GROWN_LINE_CASES or name == "later-paragraph-sup"
+                ):
+                    _take_out_the_growth(lines, name)
+                assert lines["pptx"] == lines["gslides"], (
+                    f"{name}: the decks differ beyond what the targets write apart:\n"
+                    f"pptx {lines['pptx']}\ngslides {lines['gslides']}"
+                )
+                assert dataclasses.replace(pptx_shape, paras=[], text="") == dataclasses.replace(
+                    google_shape, paras=[], text=""
+                ), f"{name}: the decks' shapes differ: {pptx_shape} / {google_shape}"
+
+
+def _written_lines(shape: Shape, target: str) -> list[dict]:
+    """``shape``'s lines with what the two targets write apart taken out.
+
+    Each line is ``{opens, before, align, pct, rtl, runs}``: whether it opens
+    a paragraph, that paragraph's space before (None for a line a soft break
+    starts), its paragraph's properties and its runs. A script run's size is
+    taken out, and so, in the deck for PowerPoint, is the run holding a word
+    joiner that follows a script run at the end of its line.
+    """
+    lines: list[dict] = []
+    for paragraph in shape.paras:
+        for index, run in enumerate(paragraph.runs):
+            if index == 0 or run.soft_break_before:
+                lines.append(
+                    {
+                        "opens": index == 0,
+                        "before": paragraph.space_before_pt if index == 0 else None,
+                        "align": paragraph.align,
+                        "pct": paragraph.line_spacing_pct,
+                        "rtl": paragraph.rtl,
+                        "runs": [],
+                    }
+                )
+            runs = lines[-1]["runs"]
+            last = index == len(paragraph.runs) - 1
+            ends_line = last or paragraph.runs[index + 1].soft_break_before
+            joiner = run.text == WORD_JOINER and ends_line and runs and runs[-1].baseline
+            if target == "pptx" and joiner:
+                continue
+            runs.append(
+                dataclasses.replace(
+                    run, size_pt=None if run.baseline else run.size_pt, soft_break_before=False
+                )
+            )
+    return lines
+
+
+def _take_out_the_growth(lines: dict[str, list[dict]], name: str) -> None:
+    """Checks, then takes out, how the PowerPoint deck places the case's grown second line.
+
+    It opens a paragraph whose space before is the Google deck's spacing (its
+    space before, or none where a soft break starts the line) plus the
+    browser's growth of the line, in points.
+    """
+    pptx_line, google_line = lines["pptx"][1], lines["gslides"][1]
+    spacing = google_line["before"] if google_line["opens"] and google_line["before"] else 0.0
+    growth = _second_line_growth(name)
+    tolerance = (
+        TWIN_GROWTH_TOLERANCE_PX * PT_PER_PX
+        if name == "later-paragraph-sup"
+        else SPACE_BEFORE_TOLERANCE_PT
+    )
+    assert (
+        pptx_line["opens"]
+        and pptx_line["before"] is not None
+        and abs(pptx_line["before"] - spacing - growth * PT_PER_PX) <= tolerance
+    ), (
+        f"{name}: the PowerPoint deck's grown line is {pptx_line}; expected a paragraph with "
+        f"spcBef {spacing + growth * PT_PER_PX:.3f} pt (the Google deck's {spacing:g} plus the "
+        f"browser's {growth:.2f} px growth)"
+    )
+    for line in (pptx_line, google_line):
+        line["opens"] = line["before"] = "grown"
 
 
 @pytest.mark.slow
@@ -2077,6 +2267,454 @@ class TestScriptLinesPlacedByBaseline:
             f"the Preflight sup is shifted {shifts[0]:.2f} px, its vertical-align twin "
             f"{shifts[1]:.2f} px"
         )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestRelativeInlines:
+    @pytest.mark.parametrize("name", list(RELATIVE_LINES))
+    def test_a_relative_inline_is_a_script_only_when_smaller_or_a_script_element(
+        self, rotation_pptx: bytes, name: str
+    ) -> None:
+        """R11h: an inline ``position: relative`` moves is a script only when it is one.
+
+        It is a superscript (or subscript) when its move is at least 0.1 em and
+        it is a ``<sub>`` or ``<sup>`` or set smaller than its parent:
+        * a same-size ▲ moved up 3 px (0.15 em, Tailwind's ``relative
+          -top-0.5`` beside a KPI) is a nudge: a plain run with no baseline
+          shift, at its browser size (20 px, 15 pt);
+        * a 75% span moved up 0.5 em is a superscript;
+        * Tailwind Preflight's ``<sup>`` is a superscript;
+        * a same-size ``<sup>`` moved up 0.5 em (``vertical-align: baseline``)
+          is a superscript, by its tag.
+        A script run is written at its browser size over the renderers' shrink
+        (calibration A2).
+        """
+        slide = f"relative-{name}"
+        document = _document(slide)
+        _, _, text, baseline = RELATIVE_LINES[name]
+        _, item = _text_item(_shapes(rotation_pptx, slide), "Revenue", slide)
+        runs = [run for paragraph in item.paras for run in paragraph.runs]
+        run = _run_holding(runs, text, slide)
+        moved_px = _px(browser_style(document, "#moved")["fontSize"])
+
+        if baseline is not None:
+            _assert_script_run_size(item, run, baseline, moved_px, SUPERSCRIPT_SIZE_PX)
+            return
+        assert run.baseline is None and run.baseline_offset == 0, (
+            f"{slide}: the nudged {text!r} is written as a script: {_describe_run(run)} "
+            f"baseline={run.baseline_offset}"
+        )
+        assert abs((run.size_pt or 0.0) - moved_px * PT_PER_PX) <= SCRIPT_SIZE_TOLERANCE_PT, (
+            f"{slide}: the nudged {text!r} is {_describe_run(run)}, expected its browser size "
+            f"{moved_px:g} px ({moved_px * PT_PER_PX:g} pt)"
+        )
+
+    def test_a_nudged_line_is_placed_from_its_own_text(self, rotation_pptx: bytes) -> None:
+        """R11h: the nudged ▲ is drawn on its line's baseline, so it does not lift its line.
+
+        "Revenue ▲ 12% up" with the ▲ moved up 3 px: the export cannot move one
+        run of a line, so the ▲ stands on the baseline, and the line is placed
+        from its text where the browser has it: the box top is the first-line
+        offset above "Revenue"'s glyph top, within 1 px. Placed by the moved
+        ▲'s top, the whole line would draw 3 px high.
+        """
+        _, item = _text_item(_shapes(rotation_pptx, "relative-nudge"), "Revenue", "the line")
+
+        _assert_placed_from_its_text(item, _document("relative-nudge"), "the nudged line")
+
+
+def _script_line_body(name: str) -> str:
+    """The slide body of ``SCRIPT_LINES[name]``: one paragraph at (100, 150), no wrap."""
+    size, line_height, lines = SCRIPT_LINES[name]
+    spacing = f" line-height:{line_height};" if line_height else ""
+    return (
+        '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
+        f'margin:0; font-size:{size}px;{spacing} white-space:nowrap;">{lines}</p></div>'
+    )
+
+
+SCRIPT_LINE_BODIES = [_script_line_body(name) for name in SCRIPT_LINES]
+
+
+@pytest.fixture(scope="module")
+def script_line_decks() -> Iterator[dict[str, bytes]]:
+    """``SCRIPT_LINES``, exported once written for each renderer target."""
+    decks = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            decks[target], failures = export_slides(
+                SCRIPT_LINE_BODIES,
+                css=DECK_CSS + ROTATION_CSS,
+                monkeypatch=monkeypatch,
+                target=target,
+            )
+            assert failures == [], f"the {target} export rejected a slide: {failures}"
+    yield decks
+
+
+def _script_line_document(name: str) -> str:
+    """The document the decks of ``script_line_decks`` exported as ``name``."""
+    index = list(SCRIPT_LINES).index(name)
+    return slide_document(
+        SCRIPT_LINE_BODIES[index], css=DECK_CSS + ROTATION_CSS, slide_id=f"snapshot-{index + 1}"
+    )
+
+
+def _script_line_shapes(decks: dict[str, bytes], target: str, name: str) -> list[Shape]:
+    return slide_shapes(decks[target], list(SCRIPT_LINES).index(name))
+
+
+def _script_line_item(decks: dict[str, bytes], target: str, name: str) -> Shape:
+    """The case's one text item, in the deck written for ``target``."""
+    lead = re.search(r'<span id="first">(\w+)</span>', SCRIPT_LINES[name][2]).group(1)
+    _, item = _text_item(_script_line_shapes(decks, target, name), lead, f"{target} {name}")
+    return item
+
+
+def _runs_and_line_ends(item: Shape) -> list[tuple[Run, bool]]:
+    """Every run of ``item`` in order, and whether its line ends after it.
+
+    A line ends after a paragraph's last run and before a run that starts a
+    line (``<a:br/>``).
+    """
+    runs = []
+    for paragraph in item.paras:
+        for index, run in enumerate(paragraph.runs):
+            last = index == len(paragraph.runs) - 1
+            runs.append((run, last or paragraph.runs[index + 1].soft_break_before))
+    return runs
+
+
+def _paragraph_opening_with(item: Shape, word: str, what: str):
+    """The ONE paragraph of ``item`` whose first run starts with ``word``."""
+    found = [
+        paragraph
+        for paragraph in item.paras
+        if paragraph.runs and paragraph.runs[0].text.startswith(word)
+    ]
+    assert len(found) == 1, (
+        f"{what}: {word!r} must open a paragraph of its own; the item's paragraphs are "
+        f"{[[run.text for run in paragraph.runs] for paragraph in item.paras]}"
+    )
+    return found[0]
+
+
+def _second_line_growth(name: str) -> float:
+    """How much further down than its spacing the browser set the case's second line, in px.
+
+    Within one paragraph of the slide model, "Gamma"'s top less "Alpha"'s and
+    the line height. For the later paragraph, "Gamma"'s top less its plain
+    twin's, which is where the spacing alone puts it.
+    """
+    document = _script_line_document(name)
+    second = _layout(document, "#second")["y"]
+    if name == "later-paragraph-sup":
+        return second - _layout(_script_line_document("later-paragraph-plain"), "#second")["y"]
+    return second - _layout(document, "#first")["y"] - _px(SCRIPT_LINES[name][1])
+
+
+def _gap_px(size_px: float, line_height_px: float) -> float:
+    """The leading beyond the renderers' single spacing (emit_text.cjs spacingOf); 0 for none."""
+    return max(0.0, line_height_px - SINGLE_SPACING_EM * size_px)
+
+
+def _line_spacing_pct(size_px: float, line_height_px: float) -> float:
+    """A multi-line paragraph's ``spcPct`` (emit_text.cjs spacingOf): 100 from single up."""
+    return min(100.0, round(1000 * line_height_px / (SINGLE_SPACING_EM * size_px)) / 10)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestScriptLinesInPowerPoint:
+    """Important 2 (round 4): written for PowerPoint, script lines sit where the browser has them.
+
+    PowerPoint places a line by its runs, two ways the browser does not:
+    * it grows a line by a script run's enlarged size (the browser's over the
+      0.646 shrink, calibration A2) only when that run ENDS the line, so a
+      footnote marker at the end of a line drew its line 5 to 11 px low;
+    * it spaces a later line by its paragraph's spacing alone, so a later
+      line whose box the browser grew (a raised superscript with a line height
+      of its own) drew 6 px high.
+    So a script run that ends its line is followed by a run in the line's own
+    size holding a word joiner (U+2060: a space did as much, but PowerPoint
+    counts its advance in a right-aligned or centred line), and a later line
+    the browser grew is a paragraph of its own with its growth as space
+    before. Neither applies to Google Slides, which sizes a line by its script
+    runs' written size (R11g).
+    """
+
+    @pytest.mark.parametrize("name", LINE_END_CASES)
+    def test_a_script_run_that_ends_its_line_is_followed_by_a_word_joiner(
+        self, script_line_decks: dict[str, bytes], name: str
+    ) -> None:
+        """The run after a line-ending script run holds a word joiner, in its line's own size.
+
+        It is the size of the line's text that no baseline shift moves (20 px,
+        15 pt; 40 px, 30 pt), plain (no baseline shift, underline or
+        strike-through), and it ends the line itself: at the end of a line, of
+        a paragraph, or before a soft break.
+        """
+        item = _script_line_item(script_line_decks, "pptx", name)
+        runs = _runs_and_line_ends(item)
+        scripts = [index for index, (run, _) in enumerate(runs) if run.baseline]
+        assert len(scripts) == 1, f"{name}: expected one script run: {item.paras}"
+        position = scripts[0]
+        assert position + 1 < len(runs), (
+            f"{name}: the script run is the item's last run, so PowerPoint sizes its line by its "
+            f"enlarged size: {[_describe_run(run) for run, _ in runs]}"
+        )
+        trailing, ends = runs[position + 1]
+        line_pt = SCRIPT_LINES[name][0] * PT_PER_PX
+
+        assert trailing.text == WORD_JOINER and not trailing.soft_break_before and ends, (
+            f"{name}: the script run must be followed by a run holding a word joiner that ends "
+            f"its line: {[(run.text, ended) for run, ended in runs]}"
+        )
+        assert (
+            trailing.baseline is None
+            and not trailing.underline
+            and not trailing.strike
+            and abs((trailing.size_pt or 0.0) - line_pt) <= SCRIPT_SIZE_TOLERANCE_PT
+        ), (
+            f"{name}: the run after the script run is {_describe_run(trailing)}; expected a "
+            f"plain run at its line's {line_pt:g} pt"
+        )
+
+    @pytest.mark.parametrize("name", MID_LINE_CASES)
+    def test_a_script_run_inside_its_line_has_no_run_added_after_it(
+        self, script_line_decks: dict[str, bytes], name: str
+    ) -> None:
+        """A script run the line's own text follows needs nothing after it.
+
+        The item reads as the browser's text, with no word joiner in it.
+        """
+        item = _script_line_item(script_line_decks, "pptx", name)
+        texts = [run.text for paragraph in item.paras for run in paragraph.runs]
+        shown = browser_text(_script_line_document(name), "#target")
+
+        assert WORD_JOINER not in item.text and _normalised(item.text) == _normalised(shown), (
+            f"{name}: the item's runs are {texts}; the browser shows {shown!r}"
+        )
+
+    @pytest.mark.parametrize("name", GROWN_LINE_CASES)
+    def test_a_later_line_the_browser_grew_has_its_growth_before_it(
+        self, script_line_decks: dict[str, bytes], name: str
+    ) -> None:
+        """A later line the browser grew is a paragraph of its own, its growth as space before.
+
+        "Alpha revenue grew<br>Gamma …" at 20 px, a superscript on the second
+        line and line-height 29 px or 22 px: the superscript's own line box
+        grows the second line, so "Gamma" starts that much further down than
+        the line height puts it. Its paragraph carries the leading beyond
+        single (29 - 24 px, none at 22 px) plus that growth as spcBef, and the
+        block's line spacing (100%; 22 / 24 = 91.7%, whose other lines stay
+        soft breaks of one paragraph). Without it, PowerPoint drew a mid-line
+        superscript's line 6.3 px high.
+        """
+        size, line_height, _ = SCRIPT_LINES[name]
+        pitch = _px(line_height)
+        growth = _second_line_growth(name)
+        assert growth >= LINE_GROWTH_MIN_PX, f"fixture drift: {name}'s second line grew {growth}"
+        item = _script_line_item(script_line_decks, "pptx", name)
+        paragraph = _paragraph_opening_with(item, "Gamma", name)
+        expected = (_gap_px(size, pitch) + growth) * PT_PER_PX
+
+        assert (
+            paragraph.space_before_pt is not None
+            and abs(paragraph.space_before_pt - expected) <= SPACE_BEFORE_TOLERANCE_PT
+        ), (
+            f"{name}: the browser grew the second line {growth:.2f} px, so its paragraph needs "
+            f"spcBef {expected:.3f} pt; it has {paragraph.space_before_pt}"
+        )
+        assert paragraph.line_spacing_pct == _line_spacing_pct(size, pitch), (
+            f"{name}: the grown line's paragraph has spcPct {paragraph.line_spacing_pct}, the "
+            f"block's is {_line_spacing_pct(size, pitch)}"
+        )
+
+    def test_the_first_line_of_a_later_paragraph_has_its_growth_before_it(
+        self, script_line_decks: dict[str, bytes]
+    ) -> None:
+        """The first line of a later paragraph of the slide model takes its growth too.
+
+        "Gamma" in 24 px on the second line starts a paragraph of its own (its
+        largest run is larger than line 1's). The plain twin's paragraph has
+        half its own leading and half the paragraph before's as space before:
+        (29 - 1.2 x 20 + 29 - 1.2 x 24) / 2 = 2.6 px. With a superscript on
+        the line, the browser sets "Gamma" lower by that line's growth (the
+        twins' "Gamma" tops apart), which its paragraph carries on top.
+        """
+        plain = _paragraph_opening_with(
+            _script_line_item(script_line_decks, "pptx", "later-paragraph-plain"), "Gamma", "plain"
+        )
+        grown = _paragraph_opening_with(
+            _script_line_item(script_line_decks, "pptx", "later-paragraph-sup"), "Gamma", "sup"
+        )
+        growth = _second_line_growth("later-paragraph-sup")
+        assert growth >= LINE_GROWTH_MIN_PX, f"fixture drift: the superscript grew {growth} px"
+        spacing = (_gap_px(20, 29) + _gap_px(24, 29)) / 2 * PT_PER_PX
+
+        assert (
+            plain.space_before_pt is not None
+            and abs(plain.space_before_pt - spacing) <= SPACE_BEFORE_TOLERANCE_PT
+        ), f"the plain twin's paragraph has spcBef {plain.space_before_pt}, expected {spacing:.3f}"
+        assert (
+            grown.space_before_pt is not None
+            and abs(grown.space_before_pt - spacing - growth * PT_PER_PX)
+            <= TWIN_GROWTH_TOLERANCE_PX * PT_PER_PX
+        ), (
+            f"the browser grew the later paragraph's line {growth:.2f} px, so it needs spcBef "
+            f"{spacing + growth * PT_PER_PX:.3f} pt; it has {grown.space_before_pt}"
+        )
+
+    def test_the_google_slides_deck_places_its_lines_by_their_spacing_alone(
+        self, script_line_decks: dict[str, bytes]
+    ) -> None:
+        """Written for Google Slides, the deck keeps neither.
+
+        Under ``target='gslides'`` no word joiner follows a script run, and every
+        later line is placed by its paragraph's spacing alone: a loose one
+        (29 px) is a paragraph with the leading beyond single before it (half
+        each paragraph's for a later paragraph), a tight one (22 px) a soft
+        break. The later paragraph's superscript is capped at its line's 24 px
+        (18 pt): Google grows a line by what its runs hold (R11g).
+        """
+        for name, (size, line_height, _) in SCRIPT_LINES.items():
+            item = _script_line_item(script_line_decks, "gslides", name)
+            texts = [run.text for paragraph in item.paras for run in paragraph.runs]
+            assert WORD_JOINER not in item.text, f"{name}: the Google deck adds a run: {texts}"
+            if line_height is None:
+                continue
+            pitch = _px(line_height)
+            if pitch < SINGLE_SPACING_EM * size:
+                assert len(item.paras) == 1 and any(
+                    run.soft_break_before and run.text.startswith("Gamma")
+                    for run in item.paras[0].runs
+                ), f"{name}: the tight paragraph's lines must stay soft breaks: {item.paras}"
+                continue
+            paragraph = _paragraph_opening_with(item, "Gamma", f"gslides {name}")
+            spacing = _gap_px(size, pitch)
+            if name.startswith("later-paragraph"):
+                spacing = (spacing + _gap_px(24, pitch)) / 2
+            assert (
+                paragraph.space_before_pt is not None
+                and abs(paragraph.space_before_pt - spacing * PT_PER_PX)
+                <= SPACE_BEFORE_TOLERANCE_PT
+            ), (
+                f"{name}: the Google deck's second line has spcBef {paragraph.space_before_pt}, "
+                f"its spacing's is {spacing * PT_PER_PX:.3f} pt"
+            )
+        later = _script_line_item(script_line_decks, "gslides", "later-paragraph-sup")
+        script = _script_run(later, "1")
+        assert abs((script.size_pt or 0.0) - 24 * PT_PER_PX) <= SCRIPT_SIZE_TOLERANCE_PT, (
+            f"the later paragraph's superscript is {_describe_run(script)} in the Google deck, "
+            f"expected its line's {24 * PT_PER_PX:g} pt"
+        )
+
+
+class TestRenderTargetPaths:
+    """The renderer target's guards: refused in Python, fallen back from in the sidecar.
+
+    The two routes choose the target: the Google Slides one passes
+    ``'gslides'`` (tests/unit/test_google_slides_routes.py), the .pptx download
+    keeps the default.
+    """
+
+    def test_an_unknown_target_is_refused_before_the_sidecar_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_pptx_huashu(..., target='keynote')`` raises ``ValueError`` naming it.
+
+        Even with the pipeline available, no sidecar is started for it.
+        """
+        def no_sidecar(*args, **kwargs):
+            raise AssertionError(f"a sidecar was started for an unknown target: {args}")
+
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu.subprocess, "run", no_sidecar)
+
+        with pytest.raises(ValueError, match="keynote"):
+            pptx_from_html_huashu.build_pptx_huashu(
+                "deck", [{"html": "<p>x</p>"}], target="keynote"
+            )
+
+    @pytest.mark.slow
+    @requires_huashu_sidecar
+    def test_the_sidecar_writes_for_powerpoint_when_its_target_is_unknown(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A payload target the sidecar does not know is warned about, and written for pptx.
+
+        Python lets "keynote" through here (it joins ``RENDER_TARGETS``), so the
+        sidecar receives it: it says so on stderr and writes the deck the pptx
+        target writes, byte for byte, for slides whose two targets differ.
+        """
+        bodies = [_script_line_body("sup-end"), _script_line_body("sup-mid-line-2")]
+        css = DECK_CSS + ROTATION_CSS
+        decks = {}
+        for target in ("pptx", "gslides"):
+            decks[target], failures = export_slides(
+                bodies, css=css, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [], failures
+        assert structural_manifest(decks["pptx"]) != structural_manifest(decks["gslides"]), (
+            "fixture drift: the slides' two targets write the same deck"
+        )
+        known = pptx_from_html_huashu.RENDER_TARGETS
+        monkeypatch.setattr(pptx_from_html_huashu, "RENDER_TARGETS", (*known, "keynote"))
+        capsys.readouterr()
+        unknown, failures = export_slides(
+            bodies, css=css, monkeypatch=monkeypatch, target="keynote"
+        )
+        assert failures == [], failures
+        stderr = capsys.readouterr().err
+
+        assert '[huashu] unknown target "keynote"; writing for pptx' in stderr, (
+            f"the sidecar did not warn about the unknown target:\n{stderr}"
+        )
+        assert structural_manifest(unknown) == structural_manifest(decks["pptx"]), (
+            "the deck for an unknown target is not the pptx target's"
+        )
+
+    def test_the_pptx_download_route_writes_for_powerpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``/api/export/pptx/editable/huashu/from-html`` exports with ``target='pptx'``.
+
+        The call it makes is bound to ``build_pptx_huashu``'s own signature, its
+        defaults applied, so the target is the one the export runs with. Every
+        other collaborator of the route is stubbed, and the stubbed pipeline
+        returns no deck, so the route stops there (422).
+        """
+        signature = inspect.signature(pptx_from_html_huashu.build_pptx_huashu)
+        calls = []
+
+        def fake_build(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            calls.append(bound.arguments)
+            return b"", [{"slide_index": 0, "error": "stubbed pipeline"}]
+
+        chat = MagicMock()
+        chat.get_slides.return_value = {"title": "Deck", "slides": [{"html": "<p>x</p>"}]}
+        monkeypatch.setattr(
+            "src.api.routes.export._check_deck_permission_for_session", lambda *a, **k: None
+        )
+        monkeypatch.setattr("src.api.routes.export.get_chat_service", lambda: chat)
+        monkeypatch.setattr(
+            "src.api.routes.export.build_slide_html", lambda slide, deck: "<html></html>"
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "build_pptx_huashu", fake_build)
+        from src.api.main import app
+
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/api/export/pptx/editable/huashu/from-html", json={"session_id": "s-pptx"}
+        )
+
+        assert response.status_code == 422, response.text
+        assert len(calls) == 1, f"build_pptx_huashu was called {len(calls)} times"
+        assert calls[0]["target"] == "pptx" and calls[0]["bypass_validation"] is True, calls[0]
 
 
 def _with_rotated_label(fixture: str) -> str:

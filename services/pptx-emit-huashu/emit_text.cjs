@@ -46,6 +46,24 @@
 // <a:pPr> from each of its runs' own options, so every run of a paragraph
 // carries the same spacing.
 //
+// Script lines in PowerPoint (target 'pptx'; task-11 findings r4, measured in
+// PowerPoint). PowerPoint places a line by what it holds, two ways the
+// browser does not:
+// * it spaces a later line by its paragraph's spacing alone, so a line whose
+//   box the browser grew (a raised superscript with a line height of its own,
+//   the snapshot's growthPx) opens a paragraph of its own, its growth added
+//   to its space before, in a tight block too;
+// * it grows a line by a script run's enlarged size (emit_typography.cjs) when
+//   that run ends the line, and only then, so a script run that ends its line
+//   is followed by a run in the line's own size and style (lineEndOptions)
+//   holding a word joiner (U+2060), and the line is its text's size again. A
+//   space would do as much, but PowerPoint counts a trailing space in a
+//   right-aligned or centred line, which it moved left by the space's advance
+//   (5.3 px at 20 px); the word joiner has none, and breaks nothing.
+// Neither goes into the deck for Google Slides (target 'gslides'), which
+// sizes a line by every run on it: there a script run is capped so that it
+// grows its line as the browser did (scriptCapPx).
+//
 // Placement. The snapshot's y is the top of the first line's glyphs. The
 // renderers set a single-spaced first line by its font size where the browser
 // sets it by the font's ascent, and spacing below 100% raises it, so the box is
@@ -67,6 +85,7 @@ const { runOptions, xmlText } = require('./emit_typography.cjs');
 const PX_PER_IN = 96;
 const PT_PER_PX = 0.75;
 const NBSP = '\u00a0';
+const WORD_JOINER = '\u2060';
 // PowerPoint's and Google Slides' single spacing, as a multiple of the font size.
 const RENDERER_SINGLE_SPACING_EM = 1.2;
 const SINGLE_SPACING_PCT = 100;
@@ -124,20 +143,29 @@ function itemRunOptions(run, item, fonts, sizing) {
   return options;
 }
 
+// The largest run of `line` that no baseline shift moves, or null for a line
+// of script runs alone.
+function largestUnshiftedRun(line) {
+  let largest = null;
+  for (const run of line.runs || []) {
+    if (run.baseline) continue;
+    if (!largest || (Number(run.sizePx) || 0) > (Number(largest.sizePx) || 0)) largest = run;
+  }
+  return largest;
+}
+
 // The size (px) a renderer that sizes a line by every run on it (Google
 // Slides) should size `line` by, so it sets the line where the browser did:
-// the largest size of its runs that no baseline shift moves, plus what grows
-// the line in the browser (its growthPx: a raised script run's line box), in
+// the largest size of its runs that no baseline shift moves, plus `growthPx`,
+// what grows the line in the browser (a raised script run's line box), in
 // the size that grows a renderer's line as much (GOOGLE_LINE_GROWTH_PER_PX).
 // A script run is written no larger (emit_typography.cjs fontSizePt). 0 for a
 // line of script runs alone, which nothing caps.
-function scriptCapPx(line) {
-  let largest = 0;
-  for (const run of line.runs || []) {
-    if (!run.baseline) largest = Math.max(largest, Number(run.sizePx) || 0);
-  }
-  if (!(largest > 0)) return 0;
-  return largest + (Number(line.growthPx) || 0) / GOOGLE_LINE_GROWTH_PER_PX;
+function scriptCapPx(line, growthPx) {
+  const largest = largestUnshiftedRun(line);
+  const size = largest ? Number(largest.sizePx) || 0 : 0;
+  if (!(size > 0)) return 0;
+  return size + (Number(growthPx) || 0) / GOOGLE_LINE_GROWTH_PER_PX;
 }
 
 // A blank line's NBSP run: the previous run's face and size without its glyph
@@ -148,11 +176,32 @@ function blankLineOptions(run, item, fonts) {
   return itemRunOptions(plain, item, fonts);
 }
 
+// The options of the run that follows a script run at the end of `line`,
+// for PowerPoint: the style and size of the line's largest run that no
+// baseline shift moves (on a line of script runs alone, the script run's own,
+// unshifted), with none of what a run could paint past its text (underline,
+// strike-through) and no tracking.
+function lineEndOptions(line, item, fonts) {
+  const runs = line.runs;
+  const source = largestUnshiftedRun(line) || runs[runs.length - 1];
+  const plain = {
+    ...source,
+    underline: false,
+    strike: false,
+    baseline: null,
+    letterSpacingPx: 0,
+    opticalTrackingPx: 0,
+  };
+  return itemRunOptions(plain, item, fonts);
+}
+
 // The item's written paragraphs, in order: {objects, pct, beforePx}, one per
-// paragraph of the model, or one per line of a loosely spaced one. `renderer`
-// is {target}: the renderer the deck is written for (emitText).
+// paragraph of the model, or one per line of a loosely spaced one, and for
+// PowerPoint one more at each later line the browser grew. `renderer` is
+// {target}: the renderer the deck is written for (emitText).
 function writtenParagraphs(item, fonts, renderer) {
   const target = renderer && renderer.target;
+  const forPowerPoint = target !== 'gslides';
   const paragraphs = item.paragraphs || [];
   const multiLine = lineCount(paragraphs) > 1;
   const written = [];
@@ -165,14 +214,16 @@ function writtenParagraphs(item, fonts, renderer) {
     const lines = paragraph.lines || [];
     let current = null;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      if (!current || spacing.gapPx > 0) {
+      const line = lines[lineIndex];
+      const grownPx = forPowerPoint ? Number(line.growthPx) || 0 : 0;
+      if (!current || spacing.gapPx > 0 || grownPx > 0) {
         let beforePx = spacing.gapPx;
         if (lineIndex === 0) beforePx = paragraphIndex > 0 ? (previousGapPx + spacing.gapPx) / 2 : 0;
-        current = { objects: [], pct: spacing.pct, beforePx };
+        current = { objects: [], pct: spacing.pct, beforePx: beforePx + grownPx };
         written.push(current);
       }
       const opensParagraph = current.objects.length === 0;
-      const runs = lines[lineIndex].runs || [];
+      const runs = line.runs || [];
       if (!runs.length) {
         // A blank line never opens its block, so a run precedes it.
         const options = previousRun ? blankLineOptions(previousRun, item, fonts) : {};
@@ -180,12 +231,17 @@ function writtenParagraphs(item, fonts, renderer) {
         current.objects.push({ text: NBSP, options });
         continue;
       }
-      const sizing = { target, capPx: scriptCapPx(lines[lineIndex]) };
+      // Google's cap takes the growth of a line within its paragraph, where
+      // R11g measured it; a paragraph's first line keeps its own size there.
+      const sizing = { target, capPx: scriptCapPx(line, lineIndex > 0 ? line.growthPx : 0) };
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
         const options = itemRunOptions(runs[runIndex], item, fonts, sizing);
         if (runIndex === 0 && !opensParagraph) options.softBreakBefore = true;
         current.objects.push({ text: xmlText(runs[runIndex].text), options });
         previousRun = runs[runIndex];
+      }
+      if (forPowerPoint && runs[runs.length - 1].baseline) {
+        current.objects.push({ text: WORD_JOINER, options: lineEndOptions(line, item, fonts) });
       }
     }
     previousGapPx = spacing.gapPx;
@@ -249,8 +305,10 @@ function placementOf(item) {
 // emitText(slide, item, fonts, renderer): one text item as one text box.
 //   fonts     model.fonts, the webfont weights the page loaded per family;
 //   renderer  {target: 'pptx' | 'gslides'}: the renderer the deck is written
-//             for (emit_deck.mjs payload.target), 'pptx' when absent. Only a
-//             script run's written size depends on it (emit_typography.cjs).
+//             for (emit_deck.mjs payload.target), 'pptx' when absent. A script
+//             run's written size depends on it (emit_typography.cjs), and so,
+//             for PowerPoint alone, do the lines the browser grew and the
+//             run after a script run that ends its line (writtenParagraphs).
 function emitText(slide, item, fonts, renderer) {
   const objects = textObjects(item, fonts, renderer);
   if (!objects.length) return;

@@ -10,7 +10,8 @@ into text blocks and emits each block as one text box (spec §3 Text):
   and is never dropped (upstream issue #56);
 * text inside an ``<svg>`` is part of the drawing, never slide text (RC3);
 * the line breaks are the browser's: a title that wraps on screen is one
-  paragraph whose second line starts with a soft break, and a one-line label
+  paragraph whose second line starts with a soft break (a paragraph of its
+  own where the browser grew it, written for PowerPoint), and a one-line label
   is unwrapped;
 * a box's geometry comes from its text's own rects, not the element box, plus
   6 % + 4 px of width slack on the side its alignment lets the text grow;
@@ -42,6 +43,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_line_boxes,
     browser_lines,
     browser_rect,
+    browser_style,
     corpus_document,
     export_corpus,
     export_slides,
@@ -53,6 +55,13 @@ from tests.fixtures.export_snapshot_support import (
 )
 
 NBSP = "\u00a0"
+# What the deck for PowerPoint writes after a script run that ends its line (emit_text.cjs).
+WORD_JOINER = "\u2060"
+PT_PER_PX = 0.75
+# A line the browser set this much past its line height grew (snapshot_text.mjs).
+LINE_GROWTH_MIN_PX = 0.5
+# spcBef is hundredths of a point; one unit is the rounding pptxgenjs does.
+SPACE_BEFORE_TOLERANCE_PT = 0.01
 
 # Spec §3 Text, Wrapping: every text box gets 6 % plus 4 px of width slack.
 SLACK_FRACTION = 0.06
@@ -424,15 +433,21 @@ class TestSnapshotTextBlocks:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestSnapshotTextLines:
-    def test_wrapped_title_is_one_paragraph_broken_where_the_browser_breaks(
+    def test_wrapped_title_is_one_box_broken_where_the_browser_breaks(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A 900 px-wide corpus title (42 px, line-height 1.08) that wraps to two lines on
         screen and ends in a footnote marker.
 
-        It is one text box with one paragraph. Its second line starts with a soft
-        break (``<a:br/>``), its lines read exactly as the browser's, and it wraps
-        (``wrap="square"``).
+        It is one text box whose lines read exactly as the browser's, and it
+        wraps (``wrap="square"``). Its lines are one paragraph, the second
+        starting with a soft break (``<a:br/>``), but where the browser grew
+        the second line: the footnote marker, raised with a line height of its
+        own, sets it lower than the line height puts it. There, written for
+        PowerPoint, the second line opens a paragraph of its own with that
+        growth as space before, at the title's 90% spacing, and the marker that
+        ends it is followed by a zero-width word joiner (task-11 findings r4,
+        Important 2), which the lines are read without.
 
         Two layouts here defeat a line clustering that is not by vertical overlap:
 
@@ -445,24 +460,42 @@ class TestSnapshotTextLines:
         body = (
             '<div class="slide">'
             '<h2 id="title" class="dk-title" style="width: 900px; max-width: 900px;">'
-            "FY2024 delivered the largest margin step-up in five years<sup>1</sup></h2>"
+            '<span id="first">FY2024</span> delivered the largest margin step-up in '
+            '<span id="second">five</span> years<sup>1</sup></h2>'
             "</div>"
         )
-        lines = browser_lines(_document(body), "#title")
-        assert len(lines) == 2, f"fixture drift: the title renders {len(lines)} lines: {lines}"
+        document = _document(body)
+        lines = browser_lines(document, "#title")
+        assert len(lines) == 2 and lines[1].startswith("five"), (
+            f"fixture drift: the title renders {len(lines)} lines: {lines}"
+        )
+        pitch = float(browser_style(document, "#title")["lineHeight"].removesuffix("px"))
+        growth = browser_rect(document, "#second")["y"] - browser_rect(document, "#first")["y"]
+        growth -= pitch
+        assert growth >= LINE_GROWTH_MIN_PX, (
+            f"fixture drift: the footnote marker no longer grows the second line ({growth:.2f} px)"
+        )
         shapes = slide_shapes(_export_one(body, monkeypatch))
 
         _, title = _text_box_containing(shapes, "FY2024")
-        assert len(title.paras) == 1, (
-            f"the title's lines of one size are {len(title.paras)} paragraphs, not one "
-            f"paragraph with soft breaks: {title.text!r}"
+        written = [line.removesuffix(WORD_JOINER) for line in title.text.split("\n")]
+        assert written == lines, f"the title's lines are {written}; the browser's are {lines}"
+        assert len(title.paras) == 2 and not any(
+            run.soft_break_before for paragraph in title.paras for run in paragraph.runs
+        ), (
+            f"the grown second line must open a paragraph of its own: "
+            f"{[[run.text for run in paragraph.runs] for paragraph in title.paras]}"
         )
-        soft_breaks = [run.text for run in title.paras[0].runs if run.soft_break_before]
-        assert len(soft_breaks) == 1, (
-            f"expected one <a:br/> before the second line, got {len(soft_breaks)}: {soft_breaks}"
+        second = title.paras[1]
+        assert (
+            second.space_before_pt is not None
+            and abs(second.space_before_pt - growth * PT_PER_PX) <= SPACE_BEFORE_TOLERANCE_PT
+        ), (
+            f"the browser grew the second line {growth:.2f} px, so its paragraph needs spcBef "
+            f"{growth * PT_PER_PX:.3f} pt; it has {second.space_before_pt}"
         )
-        assert title.text.split("\n") == lines, (
-            f"the title's lines are {title.text.split(chr(10))}; the browser's are {lines}"
+        assert [paragraph.line_spacing_pct for paragraph in title.paras] == [90.0, 90.0], (
+            f"both paragraphs keep the title's 90% spacing: {title.paras}"
         )
         assert title.wrap == "square", f"a two-line title must wrap, got wrap={title.wrap!r}"
 

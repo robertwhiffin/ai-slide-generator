@@ -1232,6 +1232,7 @@ class Para:
     align: str  # 'left' (the OOXML default) | 'center' | 'right' | 'justify' | 'distributed'
     line_spacing_pct: float | None  # a:lnSpc/a:spcPct as a percentage (100.0 is single)
     rtl: bool
+    space_before_pt: float | None = None  # a:spcBef/a:spcPts in points; None without one
 
 
 @dataclass
@@ -1437,6 +1438,7 @@ def _paragraph(paragraph: etree._Element) -> tuple[Para, str]:
     properties = paragraph.find("a:pPr", NAMESPACES)
     attributes = {} if properties is None else properties.attrib
     spacing = None if properties is None else properties.find("a:lnSpc/a:spcPct", NAMESPACES)
+    before = None if properties is None else properties.find("a:spcBef/a:spcPts", NAMESPACES)
     runs: list[Run] = []
     text_parts: list[str] = []
     pending_break = False
@@ -1457,6 +1459,7 @@ def _paragraph(paragraph: etree._Element) -> tuple[Para, str]:
             None if spacing is None else int(spacing.get("val")) * 100 / PERCENT_UNITS
         ),
         rtl=attributes.get("rtl") in ("1", "true"),
+        space_before_pt=None if before is None else int(before.get("val")) / HUNDREDTHS,
     )
     return para, "".join(text_parts)
 

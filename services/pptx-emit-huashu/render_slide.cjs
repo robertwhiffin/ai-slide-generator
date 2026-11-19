@@ -21,7 +21,7 @@
 // preProcessSource defaults to BG_TRANSFER_SOURCE; null runs no preprocess.
 // target is the renderer the deck is written for, 'pptx' (the default) or
 // 'gslides': emit_model.cjs writes the few constructs the two place apart
-// for it (emit_typography.cjs fontSizePt).
+// for it (emit_text.cjs writtenParagraphs, emit_typography.cjs fontSizePt).
 // The `slide` matches what html2pptx.js returns, so emit_deck.mjs attaches
 // speaker notes to it the same way for both engines.
 

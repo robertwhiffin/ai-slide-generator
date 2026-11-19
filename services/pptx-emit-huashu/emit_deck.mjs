@@ -17,8 +17,9 @@
 //
 // target is the renderer the deck is written for: 'pptx' (the default) for
 // PowerPoint, 'gslides' for the Google Slides conversion. The snapshot engine
-// writes the few constructs the two apps place apart for it (a script run's
-// size); the legacy converter writes one deck for both.
+// writes the few constructs the two apps place apart for it (around script
+// runs: their size, and for PowerPoint the lines they end or grow;
+// emit_text.cjs); the legacy converter writes one deck for both.
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
