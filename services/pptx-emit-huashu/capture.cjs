@@ -45,6 +45,8 @@
 // in the picture. The settle (render_slide.cjs) has already finished the
 // slide's own animations, so this changes nothing else.
 
+const { oneLine } = require('./log_line.cjs');
+
 // The attribute the snapshot names a target with, and the one it puts on
 // each descendant of a subtree target that the slide does not show.
 const CAPTURE_ATTRIBUTE = 'data-tellr-capture';
@@ -228,7 +230,7 @@ async function captureAll(page, captures) {
       pictures.set(capture.id, await captureOne(page, capture, viewport));
     } catch (error) {
       if (error && error.name === 'TimeoutError') timedOut = true;
-      const message = String((error && error.message) || error).split('\n')[0];
+      const message = oneLine(String((error && error.message) || error).split('\n')[0]);
       console.error(`[html2pptx] capture failed: ${capture.id} ${message}`);
     }
   }

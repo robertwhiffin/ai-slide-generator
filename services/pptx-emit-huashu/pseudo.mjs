@@ -65,6 +65,7 @@
 //  */
 
 import { COLLECTION_ITEM_LIMIT, WALK_STEP_LIMIT } from './dom_access.mjs';
+import { oneLine } from './log_line.cjs';
 
 export const PSEUDO_HOST_ATTRIBUTE = 'data-tellr-pseudo-host';
 
@@ -363,7 +364,7 @@ export async function readPseudoElements(page) {
     session = await page.context().newCDPSession(page);
     return await readThrough(session);
   } catch (error) {
-    const message = String((error && error.message) || error).split('\n')[0];
+    const message = oneLine(String((error && error.message) || error).split('\n')[0]);
     console.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before, ::after and list markers`);
     return NO_PSEUDO_ELEMENTS;
   } finally {

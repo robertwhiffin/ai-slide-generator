@@ -862,9 +862,12 @@ async function measureStyle(page, selector, index) {
 // applies text-transform and the rendered line breaks. Every <svg> and <canvas>
 // in the document is hidden first, exactly as the export fidelity harness's
 // text-loss reference is taken (scripts/export_fidelity/render_truth.cjs): their
-// text travels inside a picture, never as slide text. Hiding them changes the
-// layout, so this mode reads nothing else, and with the selector "body" it is
-// that reference.
+// text travels inside a picture, never as slide text. Each is hidden by an
+// !important inline display, which beats every author rule, and a transition
+// that starts (a display that transitions discretely stays shown until it
+// ends) is finished, as the sidecar's own reference is read. Hiding them
+// changes the layout, so this mode reads nothing else, and with the selector
+// "body" it is that reference.
 async function measureText(page, selector, index) {
   return page.evaluate(({ selector, index }) => {
     const matches = document.querySelectorAll(selector);
@@ -873,7 +876,19 @@ async function measureText(page, selector, index) {
     }
     const graphics = document.querySelectorAll('svg, canvas');
     for (let graphicIndex = 0; graphicIndex < graphics.length; graphicIndex++) {
-      graphics[graphicIndex].style.display = 'none';
+      graphics[graphicIndex].setAttribute('style', 'display: none !important');
+    }
+    const animations = document.getAnimations();
+    for (let animationIndex = 0; animationIndex < animations.length; animationIndex++) {
+      try {
+        animations[animationIndex].finish();
+      } catch (error) {
+        try {
+          animations[animationIndex].cancel();
+        } catch (cancelError) {
+          // Neither finished nor cancelled: the text is read as it stands.
+        }
+      }
     }
     return { text: matches[index].innerText };
   }, { selector, index });

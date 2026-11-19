@@ -94,8 +94,9 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
 
 # build_pptx_huashu echoes every sidecar stderr line behind this prefix. The
 # snapshot engine logs one summary line per slide it writes (render_slide.cjs);
-# a line the slide's own script logs reaches stderr as "Browser console: …"
-# instead, so slide script cannot pass for one.
+# a message the slide's own script logs reaches stderr as "Browser console: …",
+# all of it on that one line whatever line breaks it holds (log_line.cjs), so
+# slide script cannot pass for one.
 SIDECAR_ECHO_PREFIX = "[huashu-emit] "
 SLIDE_SUMMARY_LINE = SIDECAR_ECHO_PREFIX + "[html2pptx] slide summary "
 

@@ -265,9 +265,11 @@ def build_pptx_huashu(
             if line.strip() and not line.startswith("__HUASHU_RESULT__"):
                 print(f"[huashu-emit] {line}", file=sys.stderr, flush=True)
 
-        # Parse the sentinel line for structured failure data.
+        # Parse the sentinel line for structured failure data. emit_deck.mjs
+        # prints it last, once every slide is done, so the last one is its own:
+        # anything a slide's page made the sidecar print comes before it.
         failures: list[dict[str, Any]] = []
-        for line in stderr.splitlines():
+        for line in reversed(stderr.splitlines()):
             if line.startswith("__HUASHU_RESULT__"):
                 try:
                     parsed = json.loads(line.removeprefix("__HUASHU_RESULT__").strip())

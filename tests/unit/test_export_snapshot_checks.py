@@ -36,6 +36,15 @@ harness (spec §6):
   of a slide the ``.pptx`` lacks (upstream PR #59), wherever the gap falls.
   Its normalisation removes default-ignorable code points too: the PowerPoint
   deck writes a word joiner (U+2060) after a line-ending script run.
+* Every line the sidecar prints is ONE line as Python's ``str.splitlines()``
+  reads it (``services/pptx-emit-huashu/log_line.cjs``: ``logJson`` and
+  ``oneLine``), so a slide's console text holding a line break cannot print a
+  line of the sidecar's own: a slide summary, a text-loss line or the
+  ``__HUASHU_RESULT__`` failure list ``build_pptx_huashu`` returns. Node and
+  Python normalise with the same sets, pinned by enumerating every code point,
+  and every text reference (the sidecar's, ``render_truth.cjs``'s and
+  ``measure.cjs``'s) hides the graphics the same way, against a deck's
+  ``!important`` display rule and a display transition alike.
 
 The hidden words are pinned per case (task-12 addendum): opacity 0 inline,
 block and inline-block, nested, a word split over two text nodes, a table
@@ -58,6 +67,7 @@ import functools
 import io
 import json
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -272,11 +282,17 @@ COUNTS = (
 MAX_DETERMINISM_EXPORTS = 3
 
 # A <select> shows its selected option, which innerText reads, but the export
-# draws the control's box only: real, visible text loss.
+# draws the control's box only: real, visible text loss. The slide also holds
+# an <svg>, captured as a picture with its label inside it, so the reference
+# read once the captures are taken is shown to read the slide's text, and to
+# leave the picture's text out.
 SELECT_WORD = "Liquidityoption"
+SELECT_SVG_LABEL = "Svglabel"
 SELECT_DOCUMENT = _case_document(
     f'<div class="slide">{LEAD}<select style="font-size: 20px;">'
-    f"<option>{SELECT_WORD}</option></select></div>"
+    f"<option>{SELECT_WORD}</option></select>"
+    '<svg width="200" height="60"><rect width="200" height="60" fill="#00A972"/>'
+    f'<text x="10" y="40" font-size="20">{SELECT_SVG_LABEL}</text></svg></div>'
 )
 
 # Unspaced (CJK) text whose first line ends with a superscript: the PowerPoint
@@ -903,7 +919,15 @@ class TestTextLossIsLogged:
             yield export_logged([SELECT_DOCUMENT], monkeypatch=monkeypatch)
 
     def test_a_slide_that_loses_visible_text_names_it(self, select_export: LoggedExport) -> None:
-        _only_summary(select_export)
+        """On a slide with a capture: the reference is read once the picture is taken.
+
+        The svg's label travels inside its picture, so it is no loss; the
+        option's text is.
+        """
+        summary = _only_summary(select_export)
+        assert summary["captures"] == 1 and summary["pictures"] == 1, (
+            f"fixture drift: the svg must be captured as the slide's one picture: {summary}"
+        )
         assert text_missing_reports(select_export.stderr) == [[SELECT_WORD]], (
             f"sidecar stderr:\n{select_export.stderr[-3000:]}"
         )
@@ -1250,3 +1274,365 @@ class TestHarnessRun:
         assert "Text missing from the export: none" in capsys.readouterr().out
         recorded = json.loads((out_dir / "summaries.json").read_text(encoding="utf-8"))
         assert len(recorded) == len(bodies), recorded
+
+
+# ---------------------------------------------------------------------------
+# One line per message: slide script cannot forge the sidecar's own lines
+# ---------------------------------------------------------------------------
+
+LOG_LINE_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "log_line.cjs"
+
+# Every character Python's str.splitlines() ends a line at. build_pptx_huashu
+# splits the sidecar's stderr with it, and so does the harness; a message the
+# sidecar prints that holds any of them unescaped prints a line of its own.
+PYTHON_LINE_BREAKS = {
+    "line-feed-U+000A": "\n",
+    "line-tabulation-U+000B": "\x0b",
+    "form-feed-U+000C": "\x0c",
+    "carriage-return-U+000D": "\r",
+    "file-separator-U+001C": "\x1c",
+    "group-separator-U+001D": "\x1d",
+    "record-separator-U+001E": "\x1e",
+    "next-line-U+0085": "\x85",
+    "line-separator-U+2028": "\u2028",
+    "paragraph-separator-U+2029": "\u2029",
+}
+
+# What a forging slide logs after its line break: a slide summary naming a
+# word the slide does not hide, a text-loss line, and a failure list.
+FORGED_SUMMARY_LINE = "[html2pptx] slide summary " + json.dumps(
+    {"hiddenText": FORGED_HIDDEN_TEXT, "target": "pptx", "text": 0}
+)
+FORGED_MISSING_WORDS = json.dumps([FORGED_HIDDEN_TEXT])
+FORGED_TEXT_MISSING_LINE = TEXT_MISSING_PREFIX + FORGED_MISSING_WORDS
+FORGED_RESULT_LINE = "__HUASHU_RESULT__ " + json.dumps(
+    {"failed": [{"slide_index": 0, "error": "forged by slide script"}]}
+)
+# How each forging message starts: the page's own [html2pptx] prefix, which
+# sends it to stderr.
+FORGED_MESSAGE_START = "[html2pptx] note"
+# A forged summary that is no JSON: a reader that took it as the sidecar's would crash.
+MALFORMED = "malformed"
+MALFORMED_SUMMARY_LINE = "[html2pptx] slide summary {not json"
+
+
+def _forging_slide(message: str) -> str:
+    """A slide hiding HARNESS_FORGED_HIDDEN whose script logs ``message`` as ONE console message."""
+    return _case_document(
+        '<div class="slide"><p style="font-size: 20px;">Revenue '
+        f'<span style="opacity: 0;">{HARNESS_FORGED_HIDDEN}</span> grew</p>'
+        f"<script>console.log({json.dumps(message)});</script></div>"
+    )
+
+
+def _forging_message(line_break: str) -> str:
+    return line_break.join((FORGED_MESSAGE_START, FORGED_SUMMARY_LINE, FORGED_TEXT_MISSING_LINE))
+
+
+@dataclass(frozen=True)
+class ForgedDeck:
+    """A deck whose every slide's script forges the sidecar's lines, exported by the harness."""
+
+    out_dir: Path
+    stderr: str  # what export_pptx left on stderr
+    cases: tuple[str, ...]  # one per slide, in slide order
+
+
+@pytest.fixture(scope="module")
+def forged_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ForgedDeck]:
+    """One slide per line break, and one forging a summary that is no JSON."""
+    harness = fidelity_harness()
+    out_dir = tmp_path_factory.mktemp("forged-deck")
+    documents_dir = out_dir / "documents"
+    documents_dir.mkdir()
+    messages = {case: _forging_message(character) for case, character in PYTHON_LINE_BREAKS.items()}
+    messages[MALFORMED] = FORGED_MESSAGE_START + "\n" + MALFORMED_SUMMARY_LINE
+    paths = []
+    for position, (case, message) in enumerate(messages.items(), start=1):
+        path = documents_dir / f"{position:02d}-{case}.html"
+        path.write_text(_forging_slide(message), encoding="utf-8")
+        paths.append(path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        # export_pptx sets both in os.environ; the context restores them.
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
+        with teed_stderr() as buffer:
+            harness.export_pptx({"title": "forged deck"}, paths, out_dir, engine="snapshot")
+    yield ForgedDeck(out_dir=out_dir, stderr=buffer.getvalue(), cases=tuple(messages))
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestForgedLines:
+    """A console message is one stderr line, whatever line break the slide's script puts in it."""
+
+    def test_every_slide_records_its_own_summary(self, forged_deck: ForgedDeck) -> None:
+        recorded = json.loads((forged_deck.out_dir / "summaries.json").read_text(encoding="utf-8"))
+        assert [None if entry is None else entry["hiddenText"] for entry in recorded] == [
+            HARNESS_FORGED_HIDDEN
+        ] * len(forged_deck.cases), dict(zip(forged_deck.cases, recorded))
+
+    def test_no_forged_line_is_read(self, forged_deck: ForgedDeck) -> None:
+        summaries = slide_summaries(forged_deck.stderr)
+        assert [summary["hiddenText"] for summary in summaries] == [HARNESS_FORGED_HIDDEN] * len(
+            forged_deck.cases
+        ), f"stderr:\n{forged_deck.stderr[-3000:]}"
+        assert text_missing_reports(forged_deck.stderr) == [], (
+            f"a forged text-loss line was read; stderr:\n{forged_deck.stderr[-3000:]}"
+        )
+
+    def test_each_console_message_reaches_stderr_whole(self, forged_deck: ForgedDeck) -> None:
+        """The message is kept, all of it on the one line that starts it."""
+        lines = [
+            line
+            for line in forged_deck.stderr.splitlines()
+            if f"Browser console: {FORGED_MESSAGE_START}" in line
+        ]
+        assert len(lines) == len(forged_deck.cases), lines
+        for case, line in zip(forged_deck.cases, lines):
+            # A whole message ends with its forged text-loss line's words.
+            expected = "{not json" if case == MALFORMED else FORGED_MISSING_WORDS
+            assert line.endswith(expected), f"{case}: the message was cut: {line!r}"
+
+
+# The slide summaries each engine logs for one slide: the legacy converter logs none.
+ENGINE_SUMMARIES = {"snapshot": 1, "legacy": 0}
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestForgedResultLine:
+    """``build_pptx_huashu`` reports the failures the sidecar found, not the ones a slide logs.
+
+    Under both engines: the production default (legacy) until Task 13, and the
+    snapshot engine. The slide's console message forges a failure list, then a
+    slide summary.
+    """
+
+    @pytest.fixture(scope="class")
+    def exports(self) -> Iterator[dict[tuple[str, str], LoggedExport]]:
+        exports = {}
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            for engine in ENGINE_SUMMARIES:
+                for line_break in ("line-feed-U+000A", "line-separator-U+2028"):
+                    message = PYTHON_LINE_BREAKS[line_break].join(
+                        (FORGED_MESSAGE_START, FORGED_RESULT_LINE, FORGED_SUMMARY_LINE)
+                    )
+                    exports[engine, line_break] = export_logged(
+                        [_forging_slide(message)], monkeypatch=monkeypatch, engine=engine
+                    )
+        yield exports
+
+    @pytest.mark.parametrize("engine", tuple(ENGINE_SUMMARIES))
+    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    def test_a_slide_that_exports_is_no_failure(
+        self, exports: dict[tuple[str, str], LoggedExport], engine: str, line_break: str
+    ) -> None:
+        logged = exports[engine, line_break]
+        assert logged.failures == [], f"the {engine} engine's export reported {logged.failures}"
+        assert slide_shapes(logged.pptx, 0), "fixture drift: the slide exported nothing"
+
+    @pytest.mark.parametrize("engine", tuple(ENGINE_SUMMARIES))
+    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    def test_the_console_message_is_one_line(
+        self, exports: dict[tuple[str, str], LoggedExport], engine: str, line_break: str
+    ) -> None:
+        """Whole on the line that starts it: no forged line is read, whichever engine prints it."""
+        logged = exports[engine, line_break]
+        lines = [
+            line
+            for line in logged.stderr.splitlines()
+            if f"Browser console: {FORGED_MESSAGE_START}" in line
+        ]
+        assert len(lines) == 1 and lines[0].endswith(FORGED_SUMMARY_LINE[-20:]), lines
+        summaries = slide_summaries(logged.stderr)
+        assert len(summaries) == ENGINE_SUMMARIES[engine], summaries
+        assert all(summary["hiddenText"] == HARNESS_FORGED_HIDDEN for summary in summaries), (
+            summaries
+        )
+
+
+class TestResultLineIsTheLast:
+    """The wrapper reads the result line emit_deck.mjs prints last, after every slide."""
+
+    def test_a_result_line_before_the_last_is_not_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = {"totalSlides": 1, "succeeded": 1, "failed": []}
+        stderr = "\n".join(
+            ("[huashu] [1/1] OK", FORGED_RESULT_LINE, "__HUASHU_RESULT__ " + json.dumps(real))
+        )
+
+        def sidecar(command: list[str], **_: object) -> subprocess.CompletedProcess:
+            Path(command[2]).write_bytes(b"pptx")
+            return subprocess.CompletedProcess(command, 0, b"", stderr.encode("utf-8"))
+
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu.subprocess, "run", sidecar)
+        pptx, failures = pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
+        assert (pptx, failures) == (b"pptx", [])
+
+
+@requires_node
+class TestLogLine:
+    """``log_line.cjs``: each message the sidecar prints is one line to ``str.splitlines()``."""
+
+    def test_the_line_breaks_are_every_one_python_ends_a_line_at(self) -> None:
+        """GUARD: PYTHON_LINE_BREAKS is exactly the set str.splitlines() splits at."""
+        splitting = {
+            chr(code_point)
+            for code_point in range(sys.maxunicode + 1)
+            if len(f"a{chr(code_point)}b".splitlines()) == 2
+        }
+        assert splitting == set(PYTHON_LINE_BREAKS.values())
+
+    def test_log_json_writes_one_line_that_round_trips(self) -> None:
+        value = {"hiddenText": "a\x85b c d", "every": "|".join(PYTHON_LINE_BREAKS.values())}
+        line = node_json(
+            f"const {{ logJson }} = require({json.dumps(str(LOG_LINE_MODULE))});"
+            f"process.stdout.write(JSON.stringify(logJson({json.dumps(value)})));"
+        )
+        assert isinstance(line, str) and len(line.splitlines()) == 1, repr(line)
+        assert json.loads(line) == value
+
+    @pytest.mark.parametrize("line_break", tuple(PYTHON_LINE_BREAKS))
+    def test_one_line_keeps_all_of_a_message_on_one_line(self, line_break: str) -> None:
+        message = f"before{PYTHON_LINE_BREAKS[line_break]}after"
+        line = node_json(
+            f"const {{ oneLine }} = require({json.dumps(str(LOG_LINE_MODULE))});"
+            f"process.stdout.write(JSON.stringify(oneLine({json.dumps(message)})));"
+        )
+        assert isinstance(line, str) and len(line.splitlines()) == 1, repr(line)
+        assert line.startswith("before") and line.endswith("after"), repr(line)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestHiddenTextOnOneLine:
+    def test_hidden_text_holding_a_next_line_is_one_summary(self) -> None:
+        """U+0085, which JSON.stringify leaves as it is, splits no summary line."""
+        document = _case_document(
+            '<div class="slide"><p style="font-size: 20px;">Revenue '
+            '<span style="opacity: 0;">alpha\x85beta</span> grew</p></div>'
+        )
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([document], monkeypatch=monkeypatch)
+        summary = _only_summary(logged)
+        assert summary["hiddenText"] == "alpha\x85beta", summary
+        assert text_missing_reports(logged.stderr) == [], logged.stderr[-3000:]
+
+
+# ---------------------------------------------------------------------------
+# Every text reference hides the graphics the same way
+# ---------------------------------------------------------------------------
+
+GRAPHIC_LABEL = "Chartlabel"
+GRAPHIC_BODY = (
+    '<div class="slide"><p style="font-size: 20px;">Revenue grew</p>'
+    '<svg width="300" height="60"><rect width="300" height="60" fill="#00A972"/>'
+    f'<text x="10" y="40" font-size="20">{GRAPHIC_LABEL}</text></svg></div>'
+)
+# Deck CSS that keeps a graphic shown against an inline display: none, each
+# its own way: an !important rule, and a display that transitions discretely
+# (it stays shown until the transition ends).
+GRAPHIC_KEEPERS = {
+    "important-display-rule": "svg { display: block !important; }",
+    "display-transition": "svg { transition: display 60s allow-discrete; }",
+}
+
+
+def _graphic_document(case: str) -> str:
+    return slide_document(
+        GRAPHIC_BODY, css=DECK_CSS + "\n" + GRAPHIC_KEEPERS[case] + "\n", slide_id="snapshot-1"
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestGraphicsHiddenAlike:
+    """The sidecar's, the harness's and the tests' references all leave a graphic's text out."""
+
+    @pytest.fixture(scope="class")
+    def exports(self) -> Iterator[dict[str, LoggedExport]]:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            yield {
+                case: export_logged([_graphic_document(case)], monkeypatch=monkeypatch)
+                for case in GRAPHIC_KEEPERS
+            }
+
+    @pytest.mark.parametrize("case", tuple(GRAPHIC_KEEPERS))
+    def test_the_sidecar_reports_no_loss(self, exports: dict[str, LoggedExport], case: str) -> None:
+        summary = _only_summary(exports[case])
+        assert summary["pictures"] == 1, f"fixture drift: the svg must be captured: {summary}"
+        assert text_missing_reports(exports[case].stderr) == [], exports[case].stderr[-3000:]
+
+    @pytest.mark.parametrize("case", tuple(GRAPHIC_KEEPERS))
+    def test_the_test_reference_leaves_the_label_out(self, case: str) -> None:
+        """``browser_text`` (measure.cjs), which ``text_loss`` compares with."""
+        assert GRAPHIC_LABEL not in browser_text(_graphic_document(case)).split()
+
+    @pytest.mark.parametrize("case", tuple(GRAPHIC_KEEPERS))
+    def test_the_harness_reports_no_loss(
+        self, exports: dict[str, LoggedExport], case: str, tmp_path: Path
+    ) -> None:
+        """``render_truth.cjs``'s reference, compared by ``check_text_loss``."""
+        harness = fidelity_harness()
+        path = tmp_path / "01-graphic.html"
+        path.write_text(_graphic_document(case), encoding="utf-8")
+        harness.render_truth([path], tmp_path)
+        reference = (tmp_path / "truth" / "01-graphic.txt").read_text(encoding="utf-8")
+        assert GRAPHIC_LABEL not in reference.split(), reference
+        (tmp_path / "export.pptx").write_bytes(exports[case].pptx)
+        assert harness.check_text_loss(tmp_path / "export.pptx", ["01-graphic"], tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# Node and Python normalise with the same sets, over every code point
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def _node_character_sets() -> dict[str, list[int]]:
+    """The code points text_check.cjs takes as white space, and as default-ignorable."""
+    script = (
+        f"const textCheck = require({json.dumps(str(TEXT_CHECK_MODULE))});"
+        "const sets = { whiteSpace: [], defaultIgnorable: [] };"
+        "for (let code = 0; code <= 0x10ffff; code++) {"
+        "  if (code >= 0xd800 && code <= 0xdfff) continue;"
+        "  const character = String.fromCodePoint(code);"
+        "  if (textCheck.isWhiteSpace(character)) sets.whiteSpace.push(code);"
+        "  if (textCheck.isDefaultIgnorable(character)) sets.defaultIgnorable.push(code);"
+        "}"
+        "process.stdout.write(JSON.stringify(sets));"
+    )
+    return node_json(script)
+
+
+def _python_code_points() -> range:
+    return range(sys.maxunicode + 1)
+
+
+def _is_surrogate(code_point: int) -> bool:
+    return 0xD800 <= code_point <= 0xDFFF
+
+
+@requires_node
+class TestNormalisationSets:
+    """``missingWords`` and the harness's ``_normalise_text`` see through the same characters."""
+
+    def test_both_split_words_at_the_same_white_space(self) -> None:
+        python = {
+            code_point
+            for code_point in _python_code_points()
+            if not _is_surrogate(code_point) and chr(code_point).isspace()
+        }
+        assert set(_node_character_sets()["whiteSpace"]) == python
+
+    def test_both_remove_the_same_default_ignorable_code_points(self) -> None:
+        harness = fidelity_harness()
+        python = {
+            code_point
+            for start, end in harness._DEFAULT_IGNORABLE_RANGES
+            for code_point in range(start, end + 1)
+        }
+        assert set(_node_character_sets()["defaultIgnorable"]) == python

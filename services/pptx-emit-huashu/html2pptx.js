@@ -27,6 +27,11 @@
 
 const { chromium } = require('playwright');
 const path = require('path');
+// Tellr addition: every message printed with text the sidecar did not write
+// (a page's console text, an error it threw, a slide's own text in a
+// validation message) is one line, so none can start a line of the
+// sidecar's own, such as the __HUASHU_RESULT__ failure list.
+const { oneLine } = require('./log_line.cjs');
 
 const PT_PER_PX = 0.75;
 const PX_PER_IN = 96;
@@ -1130,7 +1135,7 @@ async function html2pptx(htmlFile, pres, options = {}) {
     try {
       const page = await browser.newPage();
       page.on('console', (msg) => {
-        const text = msg.text();
+        const text = oneLine(msg.text());
         // Tellr addition: our own [preprocess] and [html2pptx] diagnostics go to
         // STDERR. The Python wrapper (pptx_from_html_huashu.py) echoes only stderr
         // into the app log, so a stdout-only diagnostic is invisible to whoever has
@@ -1315,7 +1320,7 @@ async function html2pptx(htmlFile, pres, options = {}) {
             }
           }
         } catch (e) {
-          console.error(`[preprocess] failed: ${e.message} — continuing without`);
+          console.error(`[preprocess] failed: ${oneLine(e.message)} — continuing without`);
         }
       }
 
@@ -1357,9 +1362,10 @@ async function html2pptx(htmlFile, pres, options = {}) {
     // silent data loss. The modal huashu path keeps the strict throw to
     // surface design issues during local dev.)
     if (validationErrors.length > 0) {
-      const errorMessage = validationErrors.length === 1
-        ? validationErrors[0]
-        : `Multiple validation errors found:\n${validationErrors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`;
+      const errors = validationErrors.map(oneLine);
+      const errorMessage = errors.length === 1
+        ? errors[0]
+        : `Multiple validation errors found:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`;
       if (options && options.bypassValidation) {
         console.warn('[html2pptx] validation errors bypassed (slide will still emit):\n' + errorMessage);
       } else {

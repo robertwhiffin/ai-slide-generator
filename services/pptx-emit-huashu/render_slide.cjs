@@ -40,7 +40,8 @@ const path = require('path');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
-const { logJson, textLossLine } = require('./text_check.cjs');
+const { logJson, oneLine } = require('./log_line.cjs');
+const { textLossLine } = require('./text_check.cjs');
 
 const PT_PER_PX = 0.75;
 const PX_PER_IN = 96;
@@ -206,10 +207,13 @@ function launchOptions(tmpDir) {
 
 // [preprocess] and [html2pptx] lines report content leaving the deck, so they go
 // to stderr, the only stream pptx_from_html_huashu.py echoes into the app log.
-// Page chatter stays on stdout.
+// Page chatter stays on stdout. Slide script can log anything, so each message
+// is written on one line (log_line.cjs oneLine), behind "Browser console:": no
+// line break in it can start a line of the sidecar's own (a slide summary, the
+// __HUASHU_RESULT__ failure list).
 function forwardConsole(page) {
   page.on('console', (msg) => {
-    const text = msg.text();
+    const text = oneLine(msg.text());
     if (text.startsWith('[preprocess]') || text.startsWith('[html2pptx]')) {
       console.error(`Browser console: ${text}`);
       return;
@@ -229,7 +233,7 @@ async function waitForFonts(page) {
       new Promise((resolve) => { timer = setTimeout(resolve, FONTS_READY_TIMEOUT_MS); }),
     ]);
   } catch (e) {
-    console.error(`[html2pptx] document.fonts.ready failed: ${e.message} — continuing`);
+    console.error(`[html2pptx] document.fonts.ready failed: ${oneLine(e.message)} — continuing`);
   } finally {
     clearTimeout(timer);
   }
@@ -248,7 +252,7 @@ async function finishAnimations(page, sources) {
   try {
     return await page.evaluate(sources.finishAnimations);
   } catch (e) {
-    console.error(`[html2pptx] finishing animations failed: ${e.message} — continuing`);
+    console.error(`[html2pptx] finishing animations failed: ${oneLine(e.message)} — continuing`);
     return { finished: 0, cancelled: 0, unfinished: 0 };
   }
 }
@@ -283,7 +287,7 @@ async function runPreprocess(page, preProcessSource) {
     }
     return result;
   } catch (e) {
-    console.error(`[preprocess] failed: ${e.message} — continuing without`);
+    console.error(`[preprocess] failed: ${oneLine(e.message)} — continuing without`);
     return null;
   }
 }
@@ -365,11 +369,14 @@ function validateTextBoxPosition(model, bodyDimensions) {
   return errors;
 }
 
+// An error can quote the slide's own text (a text box's first words), so each
+// is one line (log_line.cjs oneLine); the message's own line breaks part them.
 function reportValidation(validationErrors, bypassValidation) {
   if (!validationErrors.length) return;
-  const errorMessage = validationErrors.length === 1
-    ? validationErrors[0]
-    : `Multiple validation errors found:\n${validationErrors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`;
+  const errors = validationErrors.map(oneLine);
+  const errorMessage = errors.length === 1
+    ? errors[0]
+    : `Multiple validation errors found:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`;
   if (bypassValidation) {
     console.warn('[html2pptx] validation errors bypassed (slide will still emit):\n' + errorMessage);
   } else {
@@ -385,7 +392,7 @@ async function readRenderedText(page, sources) {
     const text = await page.evaluate(sources.renderedText);
     return typeof text === 'string' ? text : null;
   } catch (e) {
-    console.error(`[html2pptx] reading the slide's rendered text failed: ${e.message} — its text is not checked for loss`);
+    console.error(`[html2pptx] reading the slide's rendered text failed: ${oneLine(e.message)} — its text is not checked for loss`);
     return null;
   }
 }

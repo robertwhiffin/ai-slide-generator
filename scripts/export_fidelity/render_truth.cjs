@@ -40,8 +40,25 @@ async function renderOne(browser, htmlPath, outDir, scale) {
   // The text-loss reference: what the browser itself renders as text. SVG and
   // canvas text travels inside a picture in the export, so it is excluded.
   // Hiding them happens after the screenshot, so it cannot affect the truth image.
+  // They are hidden as the sidecar hides them for its own reference
+  // (render_slide.cjs pageRenderedText): by an !important inline display, which
+  // beats every author rule, with any transition that starts (a display that
+  // transitions discretely stays shown until it ends) finished, in one read.
   const renderedText = await page.evaluate(() => {
-    for (const graphic of document.querySelectorAll('svg, canvas')) graphic.style.display = 'none';
+    for (const graphic of document.querySelectorAll('svg, canvas')) {
+      graphic.setAttribute('style', 'display: none !important');
+    }
+    for (const animation of document.getAnimations()) {
+      try {
+        animation.finish();
+      } catch (error) {
+        try {
+          animation.cancel();
+        } catch (cancelError) {
+          // Neither finished nor cancelled: the text is read as it stands.
+        }
+      }
+    }
     return document.body.innerText;
   });
   fs.writeFileSync(outPath.replace(/\.png$/, '.txt'), renderedText, 'utf-8');

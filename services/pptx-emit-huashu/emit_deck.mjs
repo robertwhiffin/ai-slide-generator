@@ -43,6 +43,9 @@ import { BG_TRANSFER_SOURCE, PREPROCESS_SOURCE } from './preprocess.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+// Every line printed here is one line as the Python wrapper reads it: a
+// failure's message can carry text the slide's page threw.
+const { logJson, oneLine } = require('./log_line.cjs');
 
 async function readStdin() {
   const chunks = [];
@@ -61,7 +64,7 @@ async function main() {
   try {
     payload = JSON.parse(await readStdin());
   } catch (e) {
-    console.error('[huashu] invalid JSON on stdin:', e.message);
+    console.error('[huashu] invalid JSON on stdin:', oneLine(e.message));
     process.exit(2);
   }
 
@@ -77,11 +80,11 @@ async function main() {
 
   const engine = payload.engine === 'snapshot' ? 'snapshot' : 'legacy';
   if (payload.engine !== undefined && payload.engine !== 'snapshot' && payload.engine !== 'legacy') {
-    console.error(`[huashu] unknown engine ${JSON.stringify(payload.engine)}; using legacy`);
+    console.error(`[huashu] unknown engine ${logJson(payload.engine)}; using legacy`);
   }
   const target = payload.target === 'gslides' ? 'gslides' : 'pptx';
   if (payload.target !== undefined && payload.target !== 'gslides' && payload.target !== 'pptx') {
-    console.error(`[huashu] unknown target ${JSON.stringify(payload.target)}; writing for pptx`);
+    console.error(`[huashu] unknown target ${logJson(payload.target)}; writing for pptx`);
   }
 
   // Lazily resolve the converter (CommonJS, sibling file). If playwright/
@@ -92,7 +95,7 @@ async function main() {
   try {
     converter = require(path.join(__dirname, converterFile));
   } catch (e) {
-    console.error(`[huashu] failed to load ${converterFile}:`, e.message);
+    console.error(`[huashu] failed to load ${converterFile}:`, oneLine(e.message));
     console.error('[huashu] hint: cd services/pptx-emit-huashu && npm install && npx playwright install chromium');
     process.exit(4);
   }
@@ -138,7 +141,7 @@ async function main() {
       // the tmp prefix so the user sees a clean message.
       const msg = String(e.message || e).replace(tmpHtml + ': ', '');
       failed.push({ slide_index: i, error: msg });
-      console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${msg.split('\n')[0]}`);
+      console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${oneLine(msg.split('\n')[0])}`);
     }
   }
 
@@ -146,7 +149,7 @@ async function main() {
   // slide fails. Wrapper deletes it on success.
   if (failed.length === slides.length) {
     console.error('[huashu] all slides failed; not writing pptx');
-    console.error('__HUASHU_RESULT__ ' + JSON.stringify({
+    console.error('__HUASHU_RESULT__ ' + logJson({
       totalSlides: slides.length, succeeded: 0, failed, tmpDir,
     }));
     // Set the code and return rather than process.exit(): stderr to a pipe is
@@ -159,14 +162,14 @@ async function main() {
 
   await pres.writeFile({ fileName: outArg });
   console.error(`[huashu] wrote ${outArg} (${succeeded}/${slides.length} slides)`);
-  console.error('__HUASHU_RESULT__ ' + JSON.stringify({
+  console.error('__HUASHU_RESULT__ ' + logJson({
     totalSlides: slides.length, succeeded, failed, tmpDir,
   }));
 }
 
 main().catch((e) => {
-  console.error('[huashu] fatal:', e && e.stack || e);
-  console.error('__HUASHU_RESULT__ ' + JSON.stringify({
+  console.error('[huashu] fatal:', oneLine(e && e.stack || e));
+  console.error('__HUASHU_RESULT__ ' + logJson({
     totalSlides: 0, succeeded: 0, failed: [{ slide_index: -1, error: String(e.message || e) }],
   }));
   // Same reason as the all-failed path above — let node exit naturally so the

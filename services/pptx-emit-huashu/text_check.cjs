@@ -28,19 +28,26 @@
 //     of its own; an inside one is a token of its line) and of every native
 //     table cell (a cell whose text is overlay items, paragraphs null, holds
 //     none of its own). No other item holds text.
-//   logJson(value) -> string
-//     JSON.stringify(value) on one line as Python's str.splitlines() reads
-//     it: the only line separators JSON.stringify leaves unescaped (U+0085,
-//     U+2028, U+2029) are written as \u escapes, so a line that holds them in
-//     a string is still one line in pptx_from_html_huashu.py's echo.
+//   isWhiteSpace(character) -> boolean
+//   isDefaultIgnorable(character) -> boolean
+//     Whether one character is white space (a word ends at it, and it is
+//     removed) or default-ignorable (it is removed): the two sets the
+//     comparison is made with, which the harness's _normalise_text matches.
 //
 // White space here is what Python's str.split() splits on, Unicode White_Space
-// and U+001C..U+001F, so the harness reads the same words.
+// and U+001C..U+001F, so the harness reads the same words. The text-loss line
+// is written on one line (log_line.cjs logJson).
+
+const { logJson } = require('./log_line.cjs');
 
 const TEXT_MISSING_PREFIX = '[html2pptx] text missing: ';
-const WHITE_SPACE = /[\p{White_Space}\u001c-\u001f]+/u;
-const IGNORED = /[\p{White_Space}\u001c-\u001f\p{Default_Ignorable_Code_Point}]/gu;
-const UNESCAPED_LINE_SEPARATORS = /[\u0085\u2028\u2029]/g;
+// The two sets, as regular-expression class bodies.
+const WHITE_SPACE_CLASS = '\\p{White_Space}\\x1c-\\x1f';
+const DEFAULT_IGNORABLE_CLASS = '\\p{Default_Ignorable_Code_Point}';
+const WORD_SEPARATOR = new RegExp(`[${WHITE_SPACE_CLASS}]+`, 'u');
+const IGNORED = new RegExp(`[${WHITE_SPACE_CLASS}${DEFAULT_IGNORABLE_CLASS}]`, 'gu');
+const WHITE_SPACE_CHARACTER = new RegExp(`^[${WHITE_SPACE_CLASS}]$`, 'u');
+const DEFAULT_IGNORABLE_CHARACTER = new RegExp(`^[${DEFAULT_IGNORABLE_CLASS}]$`, 'u');
 
 function textOf(value) {
   return typeof value === 'string' ? value : '';
@@ -51,7 +58,7 @@ function normalise(text) {
 }
 
 function wordsOf(text) {
-  return textOf(text).split(WHITE_SPACE).filter((word) => word.length > 0);
+  return textOf(text).split(WORD_SEPARATOR).filter((word) => word.length > 0);
 }
 
 function missingWords(reference, emitted, hidden) {
@@ -95,11 +102,12 @@ function textLossLine(reference, items, hidden) {
   return missing.length ? TEXT_MISSING_PREFIX + logJson(missing) : null;
 }
 
-function logJson(value) {
-  return JSON.stringify(value).replace(
-    UNESCAPED_LINE_SEPARATORS,
-    (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'),
-  );
+function isWhiteSpace(character) {
+  return WHITE_SPACE_CHARACTER.test(textOf(character));
 }
 
-module.exports = { missingWords, textLossLine, logJson };
+function isDefaultIgnorable(character) {
+  return DEFAULT_IGNORABLE_CHARACTER.test(textOf(character));
+}
+
+module.exports = { missingWords, textLossLine, isWhiteSpace, isDefaultIgnorable };
