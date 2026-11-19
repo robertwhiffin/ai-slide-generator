@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import types
+from collections import UserString
 from contextlib import contextmanager
 from importlib import metadata
 
@@ -297,24 +298,89 @@ def test_remembered_tokens_are_bounded_and_the_oldest_goes_first():
     assert attribution.user_product_kwargs("tok-49")["product"] == "tellr-app-unknown"
 
 
-def test_remembering_a_token_again_replaces_its_label_and_keeps_it():
+def test_remembering_a_token_again_replaces_its_label_and_makes_it_the_newest():
     """A user's client is rebuilt every cache TTL: remembering the token again replaces
     its label without a second entry, and makes it the newest, so an active user is not
-    the one dropped at the cap."""
+    the one dropped at the cap.  ``tok-active`` is remembered again below the cap, from
+    the middle of the map: only that refresh moves it behind ``tok-idle``."""
     cap = attribution._MAX_TOKEN_PRODUCTS
+    attribution.remember_user_product("tok-first", "tellr-app-111111111111")
     attribution.remember_user_product("tok-active", "tellr-app-ffffffffffff")
+    attribution.remember_user_product("tok-idle", "tellr-app-bbbbbbbbbbbb")
     attribution.remember_user_product("tok-active", "tellr-app-aaaaaaaaaaaa")
-    assert len(attribution._token_products) == 1
+
+    assert len(attribution._token_products) == 3
     assert attribution.user_product_kwargs("tok-active")["product"] == "tellr-app-aaaaaaaaaaaa"
 
-    for n in range(cap - 1):
+    for n in range(cap - 1):  # two past the cap: the two oldest are dropped
         attribution.remember_user_product(f"tok-{n}", "tellr-app-dddddddddddd")
-    attribution.remember_user_product("tok-active", "tellr-app-aaaaaaaaaaaa")
-    attribution.remember_user_product("tok-one-past-the-cap", "tellr-app-eeeeeeeeeeee")
 
     assert len(attribution._token_products) == cap
     assert attribution.user_product_kwargs("tok-active")["product"] == "tellr-app-aaaaaaaaaaaa"
-    assert attribution.user_product_kwargs("tok-0")["product"] == "tellr-app-unknown"
+    assert attribution.user_product_kwargs("tok-first")["product"] == "tellr-app-unknown"
+    assert attribution.user_product_kwargs("tok-idle")["product"] == "tellr-app-unknown"
+
+
+def test_remembering_a_token_again_at_the_cap_drops_no_other_token():
+    """At the cap, a token already remembered takes no new room: every other entry stays."""
+    cap = attribution._MAX_TOKEN_PRODUCTS
+    for n in range(cap):
+        attribution.remember_user_product(f"tok-{n}", "tellr-app-dddddddddddd")
+    attribution.remember_user_product("tok-5", "tellr-app-eeeeeeeeeeee")
+
+    assert len(attribution._token_products) == cap
+    assert attribution.user_product_kwargs("tok-5")["product"] == "tellr-app-eeeeeeeeeeee"
+    dropped = [
+        n
+        for n in range(cap)
+        if n != 5
+        and attribution.user_product_kwargs(f"tok-{n}")["product"] != "tellr-app-dddddddddddd"
+    ]
+    assert dropped == []
+
+
+def _while_the_lock_is_held(action, observe):
+    """Run ``action`` in a thread while this thread holds the map's lock.
+
+    Returns whether the thread was still waiting after 0.2 s, what ``observe()`` saw
+    while the lock was held, and the thread, finished once the lock is released.  With
+    the lock in place the thread cannot finish early, so this cannot fail falsely.
+    """
+    worker = threading.Thread(target=action)
+    with attribution._token_products_lock:
+        worker.start()
+        worker.join(timeout=0.2)
+        waiting = worker.is_alive()
+        observed = observe()
+    worker.join(timeout=5)
+    return waiting, observed, worker
+
+
+def test_remembering_a_token_waits_for_the_maps_lock():
+    waiting, map_while_held, worker = _while_the_lock_is_held(
+        lambda: attribution.remember_user_product("tok-L", "tellr-app-111111111111"),
+        observe=lambda: dict(attribution._token_products),
+    )
+
+    assert waiting, "remember_user_product wrote the map without its lock"
+    assert map_while_held == {}
+    assert not worker.is_alive()
+    assert attribution.user_product_kwargs("tok-L")["product"] == "tellr-app-111111111111"
+
+
+def test_looking_a_token_up_waits_for_the_maps_lock():
+    attribution.remember_user_product("tok-R", "tellr-app-222222222222")
+    answered = {}
+
+    waiting, answered_while_held, worker = _while_the_lock_is_held(
+        lambda: answered.update(attribution.user_product_kwargs("tok-R")),
+        observe=lambda: dict(answered),
+    )
+
+    assert waiting, "user_product_kwargs read the map without its lock"
+    assert answered_while_held == {}
+    assert not worker.is_alive()
+    assert answered["product"] == "tellr-app-222222222222"
 
 
 class _NetworkAttemptedError(Exception):
@@ -390,6 +456,35 @@ def test_user_product_kwargs_never_raises(monkeypatch):
         "product_version": "9.9.9",
     }
     assert attribution.user_product_kwargs(None)["product"] == "tellr-app-unknown"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [object(), b"tok", UserString("tok"), "", "tok-\ud800"],
+    ids=["object", "bytes", "str-like", "empty-str", "unencodable-str"],
+)
+def test_a_token_that_is_not_a_usable_string_is_no_token(monkeypatch, token):
+    """Neither function raises on such a token: nothing is remembered for it, and its
+    label falls back as for no token, to the request user and then ``tellr-app-unknown``.
+    Only a ``str`` counts, even one whose stand-in (``UserString``) would encode."""
+    monkeypatch.setattr(attribution.metadata, "version", _installed("9.9.9"))
+
+    attribution.remember_user_product(token, "tellr-app-ffffffffffff")
+
+    assert attribution._token_products == {}
+    assert attribution.user_product_kwargs(token) == {
+        "product": "tellr-app-unknown",
+        "product_version": "9.9.9",
+    }
+    with _request_user("john.doe@example.com"):
+        assert attribution.user_product_kwargs(token)["product"] == "tellr-app-30f69670bba2"
+
+
+def test_a_request_user_that_cannot_be_hashed_is_no_user():
+    """The request user is hashed under the same protection it is read under."""
+    with _request_user(object()):
+        assert attribution.user_product_kwargs(None)["product"] == "tellr-app-unknown"
+        assert attribution.user_product_kwargs("never-seen")["product"] == "tellr-app-unknown"
 
 
 def test_mcp_user_agent_leads_with_tellr(monkeypatch):

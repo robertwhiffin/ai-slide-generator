@@ -62,38 +62,96 @@ OTHER_REQUEST_USER_PRODUCT = "tellr-app-07460583da32"
 # ---------------------------------------------------------------------------
 
 
-def _sdk_calls(source: str, cls: str) -> list[ast.Call]:
-    """Calls that build the SDK's ``cls``: by its name, by an ``import ... as`` alias, or as
-    an attribute.  ``WorkspaceClient`` is the SDK's name alone, so every call by that name
-    counts (a lazy import inside a function binds it too); ``Config`` is a common name, so
-    only one imported from ``databricks.sdk`` counts."""
-    tree = ast.parse(source)
-    names = {cls} if cls == "WorkspaceClient" else set()
+#: The functions whose ``**`` spread labels a client: ``**user_product_kwargs(token)``.
+_LABEL_HELPERS = frozenset({"user_product_kwargs", "system_product_kwargs"})
+
+
+def _import_bindings(tree: ast.AST) -> dict[str, set[str]]:
+    """Each name the file's imports bind, in any scope -> the dotted paths it stands for.
+
+    ``import databricks.sdk.config as sdk_config`` binds ``sdk_config`` to
+    ``databricks.sdk.config``, ``from databricks.sdk import core`` binds ``core`` to
+    ``databricks.sdk.core``, and ``import databricks.sdk`` binds ``databricks`` to itself.
+    """
+    bindings: dict[str, set[str]] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("databricks.sdk"):
-            names.update(alias.asname or alias.name for alias in node.names if alias.name == cls)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                bindings.setdefault(name, set()).add(alias.name if alias.asname else name)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                bindings.setdefault(bound, set()).add(f"{node.module}.{alias.name}")
+    return bindings
+
+
+def _called_paths(func: ast.expr, bindings: dict[str, set[str]]) -> set[str]:
+    """The dotted paths a callee may stand for, through the file's imports:
+    ``sdk_config.Config`` -> ``{"databricks.sdk.config.Config"}``.  Empty unless the callee
+    is a name, or a chain of attributes on one."""
+    attributes = []
+    while isinstance(func, ast.Attribute):
+        attributes.append(func.attr)
+        func = func.value
+    if not isinstance(func, ast.Name):
+        return set()
+    tail = "".join(f".{attribute}" for attribute in reversed(attributes))
+    return {root + tail for root in bindings.get(func.id, set()) | {func.id}}
+
+
+def _callee_name(func: ast.expr) -> str | None:
+    """``f`` for a callee ``f`` or ``module.f``; ``None`` for any other callee."""
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else None
+
+
+def _sdk_calls(source: str, cls: str) -> list[ast.Call]:
+    """Calls that build the SDK's ``cls``: by its name, by an ``import ... as`` alias of it,
+    or as an attribute reached from the SDK (``databricks.sdk.config.Config``, or through a
+    module alias: ``sdk_config.Config``, ``core.Config``).  ``WorkspaceClient`` is the SDK's
+    name alone, so every call by that name counts (a lazy import inside a function binds it
+    too); ``Config`` is a common name, so only one reached from ``databricks.sdk`` counts."""
+    tree = ast.parse(source)
+    bindings = _import_bindings(tree)
     calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if isinstance(func, ast.Name) and func.id in names:
+        from_sdk = any(
+            path.startswith("databricks.sdk.") and path.endswith(f".{cls}")
+            for path in _called_paths(node.func, bindings)
+        )
+        by_name = cls == "WorkspaceClient" and _callee_name(node.func) == cls
+        if from_sdk or by_name:
             calls.append(node)
-        elif isinstance(func, ast.Attribute) and func.attr == cls:
-            if cls == "WorkspaceClient" or ast.unparse(func).startswith("databricks.sdk."):
-                calls.append(node)
     return sorted(calls, key=lambda call: call.lineno)
 
 
+def _blank_literal(node: ast.expr) -> bool:
+    """``None``, ``""`` or any other literal that is not a product name."""
+    return isinstance(node, ast.Constant) and not (isinstance(node.value, str) and node.value)
+
+
 def _labelled(call: ast.Call, *, config_counts: bool) -> bool:
-    """``product=``, a ``**mapping`` (``**user_product_kwargs(token)``) or, when
-    ``config_counts``, ``config=`` (that ``Config`` is held to the label itself)."""
-    keywords = {kw.arg for kw in call.keywords}
-    return "product" in keywords or None in keywords or (config_counts and "config" in keywords)
+    """A ``**`` spread of a call to ``user_product_kwargs`` or ``system_product_kwargs``, a
+    ``product=`` that is not a blank literal, or, when ``config_counts``, ``config=`` (that
+    ``Config`` is held to the label itself).  Any other spread (``**kwargs``) labels nothing."""
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            spread = keyword.value
+            if isinstance(spread, ast.Call) and _callee_name(spread.func) in _LABEL_HELPERS:
+                return True
+        elif keyword.arg == "product" and not _blank_literal(keyword.value):
+            return True
+        elif keyword.arg == "config" and config_counts:
+            return True
+    return False
 
 
 def _bare_workspace_clients(source: str) -> list[int]:
-    """Lines that build a ``WorkspaceClient`` with no ``product=``, ``config=`` or ``**`` spread."""
+    """Lines that build a ``WorkspaceClient`` with no label (see ``_labelled``)."""
     return [
         call.lineno
         for call in _sdk_calls(source, "WorkspaceClient")
@@ -102,7 +160,7 @@ def _bare_workspace_clients(source: str) -> list[int]:
 
 
 def _bare_sdk_configs(source: str) -> list[int]:
-    """Lines that build the SDK's ``Config`` with no ``product=`` or ``**`` spread."""
+    """Lines that build the SDK's ``Config`` with no label: ``config=`` does not count."""
     return [
         call.lineno
         for call in _sdk_calls(source, "Config")
@@ -132,8 +190,15 @@ def test_guard_flags_a_bare_client_and_accepts_the_labelled_forms():
         "h = SdkClient(host=h, token=t, **system_product_kwargs())\n"
         "i = WorkspaceClient()\n"
         "j = WorkspaceClient(host=h, product_version=v)\n"
+        "k = WorkspaceClient(host=h, **kwargs)\n"
+        "l = WorkspaceClient(host=h, **other_kwargs(t))\n"
+        "m = WorkspaceClient(host=h, **system_product_kwargs)\n"
+        "n = WorkspaceClient(host=h, product=None)\n"
+        "o = WorkspaceClient(host=h, product='')\n"
+        "p = WorkspaceClient(host=h, **attribution.user_product_kwargs(t))\n"
+        "q = WorkspaceClient(host=h, product=PRODUCT_NAME_SYSTEM)\n"
     )
-    assert _bare_workspace_clients(source) == [3, 8, 9, 11, 12]
+    assert _bare_workspace_clients(source) == [3, 8, 9, 11, 12, 13, 14, 15, 16, 17]
 
 
 def test_config_guard_flags_a_bare_sdk_config_and_only_the_sdks():
@@ -141,15 +206,27 @@ def test_config_guard_flags_a_bare_sdk_config_and_only_the_sdks():
         "from databricks.sdk.config import Config\n"
         "from databricks.sdk.core import Config as CoreConfig\n"
         "import databricks.sdk.config\n"
+        "import databricks.sdk.config as sdk_config\n"
+        "from databricks.sdk import core\n"
+        "from databricks.sdk import config as sdk_conf\n"
+        "import databricks.sdk as sdk\n"
         "a = Config(host=h, token=t)\n"
         "b = Config(host=h, token=t, **user_product_kwargs(t))\n"
         "c = Config(host=h, product='tellr-app-system', product_version=v)\n"
         "d = CoreConfig(host=h)\n"
         "e = databricks.sdk.config.Config(host=h)\n"
         "f = pydantic_settings.Config(x=1)\n"
+        "g = sdk_config.Config(host=h)\n"
+        "h = core.Config(host=h)\n"
+        "i = sdk_conf.Config(host=h)\n"
+        "j = sdk.config.Config(host=h)\n"
+        "k = sdk_config.Config(host=h, **user_product_kwargs(t))\n"
+        "l = Config(host=h, **kwargs)\n"
+        "m = Config(host=h, product=None)\n"
     )
-    assert _bare_sdk_configs(source) == [4, 7, 8]
+    assert _bare_sdk_configs(source) == [8, 11, 12, 14, 15, 16, 17, 19, 20]
     assert _bare_sdk_configs("from app.settings import Config\nc = Config(x=1)\n") == []
+    assert _bare_sdk_configs("from app import settings\nc = settings.Config(x=1)\n") == []
 
 
 def test_no_workspace_client_in_src_is_bare():

@@ -69,16 +69,25 @@ _token_products: dict[str, str] = {}
 _token_products_lock = threading.Lock()
 
 
-def _token_key(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+def _token_key(token: object) -> str | None:
+    """The SHA-256 of ``token``, or ``None`` (no token) unless it is a non-empty ``str``."""
+    if not isinstance(token, str) or not token:
+        return None
+    try:
+        return hashlib.sha256(token.encode()).hexdigest()
+    except Exception:  # noqa: BLE001 - a token that cannot be encoded is no token
+        return None
 
 
 def remember_user_product(token: str, product: str) -> None:
     """Record the product name of the user who owns ``token`` (oldest entry dropped at the cap).
 
     Remembering a token again replaces its product name and makes it the newest entry.
+    A token that is not a non-empty ``str`` is not recorded.
     """
     key = _token_key(token)
+    if key is None:
+        return
     with _token_products_lock:
         _token_products.pop(key, None)
         while len(_token_products) >= _MAX_TOKEN_PRODUCTS:
@@ -90,11 +99,13 @@ def user_product_kwargs(token: str | None = None) -> dict[str, str]:
     """``product=`` / ``product_version=`` for a client that runs as a user.
 
     The product remembered for ``token`` (works in any thread), else the hash of
-    the request's user, else ``tellr-app-unknown``.  Makes no network call.
+    the request's user, else ``tellr-app-unknown``.  Makes no network call, and
+    never raises: a token that is not a non-empty ``str`` counts as no token, and a
+    request user that cannot be read or hashed as no user.
     """
     product: str | None = None
-    if token:
-        key = _token_key(token)
+    key = _token_key(token)
+    if key is not None:
         with _token_products_lock:
             product = _token_products.get(key)
     if product is None:
@@ -102,13 +113,13 @@ def user_product_kwargs(token: str | None = None) -> dict[str, str]:
             from src.core.user_context import get_current_user
 
             username = get_current_user()
+            product = (
+                f"{PRODUCT_NAME_USER_PREFIX}{hash_username(username)}"
+                if username
+                else PRODUCT_NAME_UNKNOWN
+            )
         except Exception:  # noqa: BLE001 - a label never fails a request
-            username = None
-        product = (
-            f"{PRODUCT_NAME_USER_PREFIX}{hash_username(username)}"
-            if username
-            else PRODUCT_NAME_UNKNOWN
-        )
+            product = PRODUCT_NAME_UNKNOWN
     return {"product": product, "product_version": package_version()}
 
 

@@ -159,18 +159,13 @@ def forget_remembered_user_products():
     user's product name, filled whenever a user client is built.  Tests reuse
     fixed tokens for different users, and some fill the map to its cap, so a
     label remembered under one test would name the user in the tests after it,
-    in that worker.  ``getattr``: the map may not exist yet (the fixture
-    predates it), and the teardown reads it again in case a test replaced it.
+    in that worker.
     """
     from src.core import attribution
 
-    remembered = getattr(attribution, "_token_products", None)
-    if remembered is not None:
-        remembered.clear()
+    attribution._token_products.clear()
     yield
-    remembered = getattr(attribution, "_token_products", None)
-    if remembered is not None:
-        remembered.clear()
+    attribution._token_products.clear()
 
 
 @pytest.fixture
