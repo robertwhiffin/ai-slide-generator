@@ -671,6 +671,9 @@ def _run_migrations(engine, schema: str | None = None):
         _migrate_generation_snapshots(conn, schema)
         _migrate_generation_rollback_columns(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- session_slides: per-slide speaker notes and their source ---
+        _migrate_session_slide_speaker_notes(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -1566,6 +1569,35 @@ def _migrate_generation_rollback_columns(
         conn.execute(
             text(f"ALTER TABLE {_qual(table_name)} ADD COLUMN {col_name} {col_def}")
         )
+
+
+def _migrate_session_slide_speaker_notes(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add ``speaker_notes`` and ``speaker_notes_source`` to ``session_slides`` (idempotent).
+
+    ``create_all`` adds both on a fresh install from the ORM model but never ALTERs
+    an existing table.  Both are nullable with no default: a slide that predates
+    the columns reads NULL, which both read paths serve as empty notes.
+    """
+    from sqlalchemy import text
+
+    try:
+        cols = {c["name"] for c in inspector.get_columns("session_slides", schema=schema)}
+    except Exception:
+        return
+    if not cols:
+        return
+    qualified = _qual("session_slides")
+    for col_name, col_def in (
+        ("speaker_notes", "TEXT NULL"),
+        ("speaker_notes_source", "VARCHAR(16) NULL"),
+        ("talk_track", "TEXT NULL"),
+        ("talk_track_source", "VARCHAR(16) NULL"),
+    ):
+        if col_name not in cols:
+            logger.info("Migration: adding %s to session_slides", col_name)
+            conn.execute(text(f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"))
 
 
 #: The two retired per-profile prompt-override columns on ``config_prompts``.

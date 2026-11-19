@@ -78,6 +78,21 @@ INSTRUCTIONS: str = (
     "  - Do not fabricate or estimate numbers\n"
     "  - Never add a note or aside that says data was unavailable\n"
     "\n"
+    "PRESENTER TEXT (every slide):\n"
+    "  - End the slide's root element with two hidden asides, talk track first:\n"
+    '    <aside data-presenter="talk-track" hidden><p>First beat.</p><p>Second '
+    'beat.</p></aside>\n'
+    '    <aside data-presenter="speaker-notes" hidden><p>Source: ...</p><p>Likely '
+    'question: ...</p></aside>\n'
+    "  - talk-track is what the presenter says: two to four short spoken beats, one "
+    "<p> each, using the slide's own figures and names; lead into hands_off, and end "
+    "on the question the slide answers when it poses one\n"
+    '  - Never write "click", "tap" or "on the slide" in the talk track\n'
+    "  - speaker-notes is what the presenter needs to know: the source of each figure "
+    "from data_references, the likely question with a short answer, and what to "
+    "stress\n"
+    "  - Neither aside says that data was unavailable\n"
+    "\n"
     "BOUND TEMPLATE SECTION (when section_html is non-empty):\n"
     "  - Fill that structure: replace its placeholder copy with the brief and keep "
     "everything else\n"

@@ -159,6 +159,18 @@ Design system names are unique among active systems.
 - Put brand imagery under **`assets/`** and webfonts under **`fonts/`**. Other folder names contribute no assets.
 - Give each template folder a preview — either `.thumbnail` (no extension) or `preview.<ext>`.
 - Keep **`README.md`** substantive: its first heading can name the design system, and its content reaches the model as brand context.
+- **Ask for speaker notes as an aside inside the slide.** A design system README may ask the model to end each `.slide` element with an `<aside class="speaker-notes">`. Tellr moves the text into the slide's speaker notes and removes the aside from the slide HTML. The notes then show in the viewer's Notes tab, in presentation mode, and in every live export. Notes are plain text, one paragraph per `<p>` or `<li>`. The aside may also sit beside the slide, if both are the only children of one wrapping `<section>` or `<article>`.
+
+  ```html
+  <section class="slide" data-label="Title">
+    <h1>Q3 results</h1>
+    <aside class="speaker-notes" hidden><p>Open with the revenue number.</p></aside>
+  </section>
+  ```
+
+  Chat cannot edit notes directly, because notes are never sent to the model. When an answer has no aside, the slide keeps the notes it already had. A duplicated Agent-mode deck carries notes written by the Agent-mode graph only after a later HTML or notes save refreshed the deck blob, so duplicate after a save if notes must travel.
+
+  Typed notes are protected: notes the presenter saves in the Notes tab are kept when the slide is rebuilt. New model notes replace earlier model notes, and typed notes stay until the presenter changes them. A whole-deck regenerate in Legacy mode makes new slides, so it starts with new notes.
 - **Read the import response's warnings.** They name entries the importer ignored and why, which is the fastest way to find a mis-shaped bundle.
 
 ---

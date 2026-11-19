@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -12,6 +12,9 @@ from bs4.element import Tag
 # around a slide body. Only these are promoted to slide root — see
 # find_slide_roots for why a <div> wrapper is deliberately excluded.
 SLIDE_WRAPPER_TAGS = frozenset({"section", "article"})
+
+# Class token marking a slide's presenter notes (``<aside class="speaker-notes">``).
+SPEAKER_NOTES_CLASS = "speaker-notes"
 
 CANVAS_ID_PATTERN = re.compile(r"getElementById\s*\(\s*['\"]([\w\-.:]+)['\"]\s*\)")
 QUERY_SELECTOR_PATTERN = re.compile(r"querySelector\s*\(\s*['\"]#([\w\-.:]+)['\"]\s*\)")
@@ -93,6 +96,179 @@ def _promote_through_slide_wrapper(root: Tag) -> Tag:
         if len(element_children) != 1 or element_children[0] is not root:
             return root
         root = parent
+
+
+PRESENTER_ATTR = "data-presenter"
+TALK_TRACK_CLASS = "talk-track"
+_PRESENTER_MARKERS = (SPEAKER_NOTES_CLASS, TALK_TRACK_CLASS)
+_PRESENTER_FIELDS = (
+    ("speaker_notes", SPEAKER_NOTES_CLASS),
+    ("talk_track", TALK_TRACK_CLASS),
+)
+
+
+def _aside_has_marker(aside: Tag, marker: str) -> bool:
+    """True when the aside's data-presenter value or a class equals ``marker`` (exact)."""
+    if aside.get(PRESENTER_ATTR) == marker:
+        return True
+    return marker in (aside.get("class") or [])
+
+
+def _is_presenter_aside(tag: Tag) -> bool:
+    return tag.name == "aside" and any(
+        _aside_has_marker(tag, marker) for marker in _PRESENTER_MARKERS
+    )
+
+
+def _owned_asides(
+    soup: BeautifulSoup, marker: str, fragment_root: Optional[Tag] = None
+) -> List[Tuple[Tag, Tag]]:
+    """Return ``(aside, owner_slide)`` pairs for every owned aside with ``marker``.
+
+    An aside is owned when it sits inside a ``.slide`` element (owner: the
+    nearest such ancestor), or is a direct child of a ``section``/``article``
+    whose only other element child is the ``.slide`` (owner: that child). Other
+    presenter asides (either marker) are ignored when counting those children.
+    With ``fragment_root`` (the sole top-level element of a one-slide fragment
+    that has no ``.slide``), every aside, all of which sit inside it, is owned by it.
+    """
+    owned: List[Tuple[Tag, Tag]] = []
+    for aside in soup.find_all("aside"):
+        if not _aside_has_marker(aside, marker):
+            continue
+        owner = aside.find_parent(class_="slide")
+        if owner is None:
+            parent = aside.parent
+            if parent is not None and parent.name in SLIDE_WRAPPER_TAGS:
+                others = [
+                    c
+                    for c in parent.find_all(recursive=False)
+                    if c is not aside and not _is_presenter_aside(c)
+                ]
+                if len(others) == 1 and "slide" in (others[0].get("class") or []):
+                    owner = others[0]
+        if owner is None and fragment_root is not None:
+            owner = fragment_root
+        if owner is not None:
+            owned.append((aside, owner))
+    return owned
+
+
+def _notes_text(aside: Tag) -> str:
+    """Return an aside's notes: outermost p/li texts joined by blank lines.
+
+    Falls back to the aside's whole text when it has no ``p``/``li``. Script,
+    style, and template content is ignored. Works on a copy.
+    """
+    clone = BeautifulSoup(str(aside), "html.parser")
+    for junk in clone.find_all(["script", "style", "template"]):
+        junk.decompose()
+    blocks = [
+        block
+        for block in clone.find_all(["p", "li"])
+        if block.find_parent(["p", "li"]) is None
+    ]
+    if not blocks:
+        return " ".join(clone.get_text().split())
+    texts = (" ".join(block.get_text().split()) for block in blocks)
+    return "\n\n".join(text for text in texts if text)
+
+
+def _sole_root_without_slide(soup: BeautifulSoup) -> Optional[Tag]:
+    """The fragment's only top-level element, when the fragment has no ``.slide``.
+
+    A plain Agent-mode deck paints its ground with the deck style's ground piece,
+    so the builder's root is, for example, ``div.dk-slide`` with no ``slide``
+    token. Such a one-slide fragment still owns the asides inside its root. A
+    presenter aside is never that root: it is not inside a slide.
+    """
+    if soup.find(class_="slide") is not None:
+        return None
+    tops = soup.find_all(recursive=False)
+    if len(tops) != 1 or _is_presenter_aside(tops[0]):
+        return None
+    return tops[0]
+
+
+def pop_presenter_asides(
+    soup: BeautifulSoup, fragment_root: Optional[Tag] = None
+) -> Dict[str, List[Tuple[Tag, str]]]:
+    """Remove owned talk-track and speaker-notes asides in place.
+
+    If one aside carries both markers, speaker-notes wins (notes only).
+    ``fragment_root`` is for a one-slide fragment (see ``_owned_asides``).
+
+    Returns ``{"speaker_notes": [(owner, text)], "talk_track": [(owner, text)]}``.
+    Run before ``find_slide_roots`` so a wrapper that held only the slide and
+    its asides can still be promoted to the slide root.
+    """
+    owned_by_field = {
+        field: _owned_asides(soup, marker, fragment_root) for field, marker in _PRESENTER_FIELDS
+    }
+    # An aside carrying both markers belongs to speaker-notes only: its text
+    # goes to the notes, never to both fields.
+    notes_ids = {id(aside) for aside, _ in owned_by_field["speaker_notes"]}
+    owned_by_field["talk_track"] = [
+        (aside, owner)
+        for aside, owner in owned_by_field["talk_track"]
+        if id(aside) not in notes_ids
+    ]
+    popped = {
+        field: [(owner, _notes_text(aside)) for aside, owner in owned]
+        for field, owned in owned_by_field.items()
+    }
+    for owned in owned_by_field.values():
+        for aside, _ in owned:
+            aside.decompose()
+    return popped
+
+
+def pop_speaker_notes(soup: BeautifulSoup) -> List[Tuple[Tag, str]]:
+    """Back-compatible: pop both asides, return only the notes pairs."""
+    return pop_presenter_asides(soup)["speaker_notes"]
+
+
+def text_for_root(root: Tag, popped: Sequence[Tuple[Tag, str]]) -> Optional[str]:
+    """Return the joined text for ``root``, ``None`` if none, ``""`` if all empty."""
+    # Identity, not equality: see find_slide_roots.
+    texts = [
+        text
+        for owner, text in popped
+        if owner is root or any(parent is root for parent in owner.parents)
+    ]
+    if not texts:
+        return None
+    return "\n\n".join(text for text in texts if text)
+
+
+notes_for_root = text_for_root
+
+
+def extract_presenter_text(html: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """Split one slide fragment into ``(html_without_asides, notes, talk_track)``.
+
+    Each text is ``None`` when its aside is absent and ``""`` when empty. The
+    input string is returned unchanged (same object) when no aside is owned.
+    """
+    if not html or not any(marker in html for marker in _PRESENTER_MARKERS):
+        return html, None, None
+    soup = BeautifulSoup(html, "html.parser")
+    popped = pop_presenter_asides(soup, _sole_root_without_slide(soup))
+    if not popped["speaker_notes"] and not popped["talk_track"]:
+        return html, None, None
+
+    def joined(pairs: List[Tuple[Tag, str]]) -> Optional[str]:
+        if not pairs:
+            return None
+        return "\n\n".join(text for _, text in pairs if text)
+
+    return str(soup), joined(popped["speaker_notes"]), joined(popped["talk_track"])
+
+
+def extract_speaker_notes(html: str) -> Tuple[str, Optional[str]]:
+    """Split one slide fragment into ``(html_without_both_asides, notes)``."""
+    stripped, notes, _talk = extract_presenter_text(html)
+    return stripped, notes
 
 
 def extract_canvas_ids_from_html(html_content: str) -> List[str]:

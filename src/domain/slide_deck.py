@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from src.utils.css_utils import merge_css
-from src.utils.html_utils import find_slide_roots, split_script_by_canvas
+from src.utils.html_utils import (
+    find_slide_roots,
+    pop_presenter_asides,
+    text_for_root,
+    split_script_by_canvas,
+)
 
 from .slide import Slide
 
@@ -34,6 +39,16 @@ logger = logging.getLogger(__name__)
 # its value.
 _STYLE_CLOSER_RE = re.compile(r"</(?=\s*style(?:[\s/>]|\Z))", re.IGNORECASE)
 _STYLE_CLOSER_ESCAPED = "<\\/"
+
+_NOTES_SOURCES = ("model", "user")
+
+
+def _stored_notes_source(slide_data: Dict[str, Any], field: str = "speaker_notes") -> Optional[str]:
+    """Return the stored source only when it is a known value and the text is non-empty."""
+    if not slide_data.get(field):
+        return None
+    source = slide_data.get(f"{field}_source")
+    return source if source in _NOTES_SOURCES else None
 
 
 class SlideDeck:
@@ -136,6 +151,10 @@ class SlideDeck:
                     created_at=slide_data.get("created_at"),
                     modified_by=slide_data.get("modified_by"),
                     modified_at=slide_data.get("modified_at"),
+                    speaker_notes=slide_data.get("speaker_notes") or "",
+                    speaker_notes_source=_stored_notes_source(slide_data),
+                    talk_track=slide_data.get("talk_track") or "",
+                    talk_track_source=_stored_notes_source(slide_data, "talk_track"),
                 )
             )
 
@@ -212,13 +231,23 @@ class SlideDeck:
             external_scripts.append(script_tag['src'])
 
         # Phase 2: Parse slides and build canvas-to-slide index
+        popped = pop_presenter_asides(soup)
         slide_elements = find_slide_roots(soup)
         slides: List[Slide] = []
         canvas_to_slide: Dict[str, int] = {}  # canvas_id -> slide_index
 
         for idx, slide_element in enumerate(slide_elements):
             slide_html = str(slide_element)
-            slide = Slide(html=slide_html, slide_id=f"slide_{idx}")
+            notes = text_for_root(slide_element, popped["speaker_notes"])
+            talk = text_for_root(slide_element, popped["talk_track"])
+            slide = Slide(
+                html=slide_html,
+                slide_id=f"slide_{idx}",
+                speaker_notes=notes,
+                speaker_notes_source="model" if notes else None,
+                talk_track=talk,
+                talk_track_source="model" if talk else None,
+            )
             slides.append(slide)
             # Index canvases in this slide
             for canvas in slide_element.find_all('canvas'):
@@ -524,6 +553,10 @@ class SlideDeck:
                 'html': slide.to_html(),
                 'slide_id': slide.slide_id,
                 'scripts': slide.scripts,
+                'speaker_notes': slide.speaker_notes or '',
+                'speaker_notes_source': slide.speaker_notes_source if slide.speaker_notes else None,
+                'talk_track': slide.talk_track or '',
+                'talk_track_source': slide.talk_track_source if slide.talk_track else None,
             }
             if slide.created_by:
                 slide_dict['created_by'] = slide.created_by

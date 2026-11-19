@@ -4033,3 +4033,50 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
+
+
+@pytest.mark.asyncio
+async def test_get_deck_carries_speaker_notes(fake_request, identity):
+    """The MCP deck payload carries each slide's speaker notes, and the HTML never does.
+
+    Sabotage target: SlideDeck.to_dict dropping the ``speaker_notes`` key.
+    """
+    from src.api import mcp_server
+
+    fake_session = {"session_id": "sess-1", "title": "Existing Deck"}
+    fake_deck = {
+        "title": "Existing Deck",
+        "slides": [
+            {
+                "html": "<div class='slide'>1</div>",
+                "scripts": "",
+                "speaker_notes": "Open with the question.",
+                "speaker_notes_source": "model",
+            },
+            {"html": "<div class='slide'>2</div>", "scripts": ""},
+        ],
+        "css": "",
+        "external_scripts": [],
+        "head_meta": {},
+    }
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_session.return_value = fake_session
+        sm.get_slide_deck.return_value = fake_deck
+        get_sm.return_value = sm
+
+        result = await mcp_server._get_deck_impl(request=fake_request, session_id="sess-1")
+
+    slides = result["deck"]["slides"]
+    assert [s["speaker_notes"] for s in slides] == ["Open with the question.", ""]
+    assert [s["speaker_notes_source"] for s in slides] == ["model", None]
+    assert "Open with the question." not in result["html_document"]

@@ -934,6 +934,24 @@ async def export_pptx_editable_from_records(request: ExportPPTXFromRecordsReques
     )
 
 
+def slide_notes_text(slide: dict) -> str:
+    """Notes pane text: the talk track, then "Notes:", then the notes.
+
+    ``speaker_notes`` wins whenever it is a str, even "" (a cleared note never
+    comes back from a stale ``notes`` key). ``notes`` is read only when
+    ``speaker_notes`` is absent or not a str. A non-str talk track counts as "".
+    Each field is stripped. With one field empty, only the other is returned.
+    """
+    sn = slide.get("speaker_notes")
+    notes = sn if isinstance(sn, str) else (slide.get("notes") or "")
+    talk = slide.get("talk_track")
+    talk = talk if isinstance(talk, str) else ""
+    talk, notes = talk.strip(), notes.strip()
+    if talk and notes:
+        return f"{talk}\n\nNotes:\n{notes}"
+    return talk or notes
+
+
 class ExportPPTXFromImagesRequest(BaseModel):
     """Screenshot-mode export. Client captures each slide via html2canvas
     and POSTs PNG data URLs; we build a .pptx with one picture per slide.
@@ -944,6 +962,7 @@ class ExportPPTXFromImagesRequest(BaseModel):
     images: list[str]  # per-slide data URLs (data:image/png;base64,...)
     width_px: int = 1280
     height_px: int = 720
+    notes: Optional[list[str]] = None  # speaker notes, aligned with images
 
 
 @router.post("/pptx/editable/from-images")
@@ -966,8 +985,10 @@ async def export_pptx_screenshot_from_images(request: ExportPPTXFromImagesReques
     prs.slide_height = Emu(request.height_px * PX_TO_EMU)
     blank = prs.slide_layouts[6]
 
-    for src in request.images:
+    for i, src in enumerate(request.images):
         slide = prs.slides.add_slide(blank)
+        if request.notes and i < len(request.notes) and request.notes[i]:
+            slide.notes_slide.notes_text_frame.text = request.notes[i]
         m = re.match(r"data:image/[^;]+;base64,(.+)", src or "")
         if not m:
             continue
@@ -1242,7 +1263,7 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         complete_html = build_slide_html(slide, slide_deck)
         slides_with_html.append({
             "html": complete_html,
-            "notes": slide.get("speaker_notes") or slide.get("notes") or "",
+            "notes": slide_notes_text(slide),
         })
 
     title = slide_deck.get("title") or "slides"

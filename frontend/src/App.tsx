@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, matchPath, useLocation } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
 import { AdminPage } from './components/Admin/AdminPage';
 import { ReviewAndPublishPage } from './components/Admin/GraphRelease';
+import { PresenterPage } from './components/Presenter';
 import { useCurrentUser } from './hooks/useCurrentUser';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
@@ -35,6 +36,31 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** The presenter window's route. It is a private second window, not the editor. */
+const PRESENTER_ROUTE = '/sessions/:sessionId/present';
+
+/** True on the presenter window, where the editor's onboarding overlays must not appear. */
+function isPresenterPath(pathname: string): boolean {
+  return matchPath(PRESENTER_ROUTE, pathname) !== null;
+}
+
+/**
+ * The tour, welcome and "What's new" overlays belong to the editor. The
+ * presenter window is a small pop-up the presenter reads from mid-talk, so
+ * none of them may mount over it.
+ */
+function EditorOverlays() {
+  const { pathname } = useLocation();
+  if (isPresenterPath(pathname)) return null;
+  return (
+    <>
+      <AppTour />
+      <WelcomeModal />
+      <WhatsNewModal />
+    </>
+  );
+}
+
 function AppRoutes() {
   // Single stable key so AppLayout (and sidebar / Recent Decks) stays mounted when
   // switching between help, profiles, deck-prompts, sessions/… — only the main
@@ -59,6 +85,8 @@ function AppRoutes() {
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
+      {/* The presenter window: its own page, outside the editor chrome. */}
+      <Route path={PRESENTER_ROUTE} element={<PresenterPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
@@ -126,9 +154,7 @@ function App() {
               <TourProvider>
                 <WhatsNewProvider>
                   <AppRoutes />
-                  <AppTour />
-                  <WelcomeModal />
-                  <WhatsNewModal />
+                  <EditorOverlays />
                 </WhatsNewProvider>
               </TourProvider>
             </AgentConfigProvider>

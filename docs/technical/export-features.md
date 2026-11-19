@@ -319,6 +319,26 @@ PDF and PPTX filenames are timestamped; the deck spec's is not:
 
 If the slide deck has no title, "slides" is used as the default for PDF and PPTX; see *Deck spec as Markdown* below for the spec's naming.
 
+## Speaker Notes
+
+Each slide's notes pane holds its talk track (`talk_track`), then a line `Notes:`, then the notes (`speaker_notes`). The pane goes into the PowerPoint notes pane on every live route. Notes are plain text.
+
+With one field empty, only the other is written, with no `Notes:` line. Surrounding whitespace on each field is trimmed before the two are joined. This trim is a small deliberate change from the earlier export, which wrote the notes exactly as stored.
+
+| Route | Where the notes come from |
+|---|---|
+| `POST /api/export/pptx/editable/huashu/from-html` | `slide_notes_text(slide)` in `src/api/routes/export.py` |
+| `POST /api/export/google-slides/from-huashu` | The same `slide_notes_text(slide)` helper, imported from `export.py` |
+| `POST /api/export/pptx/editable/from-records` | The records fallback. `buildCompositeHtml` (`frontend/src/services/domWalker.ts`) embeds the notes in a `<script id="speaker-notes" type="application/json">` element, and the export frame runtime reads it (`frontend/src/services/exportFrameRuntime.ts:497`). Every `<` in that JSON is escaped as `\u003c`, so a literal `</script>` in a note cannot close the element |
+| `POST /api/export/google-slides/from-records` | The `notes` in the records the client sends, from the same composite document |
+| `POST /api/export/pptx/editable/from-images` | The optional `notes` request list, one string per image. An entry is written to the slide only when it is not empty. The route is still unreachable from the UI (see the route table above), though the client call in `frontend/src/services/api.ts` now sends the list |
+
+`slide_notes_text` (and the client's `presenterPaneText`, `frontend/src/services/presenterText.ts`) returns the talk track and notes as described above. `speaker_notes` wins whenever it is a string, even an empty one. The older `notes` key is read only when `speaker_notes` is absent or `None`. A cleared note therefore stays cleared.
+
+The LLM code-generation converters (`/pptx`, `/pptx/async`, `/google-slides`) carry no notes. The synchronous `POST /api/export/pptx/editable` has no caller, and it carries none either.
+
+---
+
 ## Deck spec as Markdown (client-side)
 
 **Where.** The Spec view header, **Export spec** button (accessible name "Export spec as Markdown"); shown only when the deck has a spec.

@@ -256,6 +256,11 @@ def _real_row(marker: str, position: int, day: int) -> Dict[str, Any]:
         "modified_at": datetime(2024, 2, day, 17, 30, 0),
         "verification_record": _two_hash_record(marker, html, position),
         "deck_spec_slide": _fragment(marker, position),
+        # Sabotage target: _snapshot_row dropping speaker_notes(_source) strands notes on a moved row.
+        "speaker_notes": f"notes for {marker}",
+        "speaker_notes_source": "user",
+        "talk_track": f"talk for {marker}",
+        "talk_track_source": "user",
     }
 
 
@@ -763,6 +768,11 @@ def _assert_new_row(row: Dict[str, Any], *, html: str = BLANK_HTML) -> None:
         "modified_at": NEW_STAMP_DT,
         "verification_record": None,
         "deck_spec_slide": None,
+        # A blank manual insert brings no notes (speaker notes, 2026-11-06).
+        "speaker_notes": None,
+        "speaker_notes_source": None,
+        "talk_track": None,
+        "talk_track_source": None,
     }, f"the inserted row is not exactly the given slide with no record or fragment: {row}"
 
 
@@ -1767,6 +1777,10 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
             "modified_at": datetime(2024, 4, 2, 11, 0, 0),
             "verification_record": None,
             "deck_spec_slide": None,
+            "speaker_notes": None,
+            "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
         "MK-LEGACYTWO": {
             "session_id": owner_pk,
@@ -1781,6 +1795,10 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
                 compute_slide_hash(two): _legacy_verdict("MK-LEGACYTWO", two, 1)
             },
             "deck_spec_slide": None,
+            "speaker_notes": None,
+            "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
         "MK-LEGACYTHREE": {
             "session_id": owner_pk,
@@ -1795,6 +1813,10 @@ def _expected_legacy_rows(owner_pk: int) -> Dict[str, Dict[str, Any]]:
                 compute_slide_hash(three): _legacy_verdict("MK-LEGACYTHREE", three, 2)
             },
             "deck_spec_slide": None,
+            "speaker_notes": None,
+            "speaker_notes_source": None,
+            "talk_track": None,
+            "talk_track_source": None,
         },
     }
 

@@ -1,0 +1,6 @@
+# Builder v1 prompt plus a PRESENTER TEXT block: each slide ends with a hidden talk-track aside
+# and a hidden speaker-notes aside, which Tellr moves into the slide's fields on arrival.
+agent_key: builder
+name: builder-presenter-text
+base: v1
+prompt_file: presenter-text.md

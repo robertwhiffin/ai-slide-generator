@@ -716,6 +716,7 @@ jobs:
               - design-system-brand-text-uncapped
               - graph-release-admin-journey
               - graph-release-review
+              - presenter-view
               - slide-style-preview
               - svg-raster-export
               - template-viewer

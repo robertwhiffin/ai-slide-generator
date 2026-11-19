@@ -6,21 +6,31 @@ import {
   slideHostFrameStyle,
   SLIDE_ROOT_RESET_STYLE,
 } from '../../services/slideDocument';
+import {
+  joinPresenterChannel,
+  openPresenterWindow,
+  STATE_HEARTBEAT_MS,
+  type PresenterMessage,
+} from '../../services/presenterChannel';
 
 interface PresentationModeProps {
   slideDeck: SlideDeck;
   onExit: () => void;
   startIndex?: number;
+  /** Enables the presenter window (P and the toolbar button). Without it both are off. */
+  sessionId?: string;
 }
 
 export const PresentationMode: React.FC<PresentationModeProps> = ({
   slideDeck,
   onExit,
   startIndex = 0,
+  sessionId,
 }) => {
   const [currentSlideIndex, setCurrentSlideIndex] = useState(startIndex);
   const [scale, setScale] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [notesVisible, setNotesVisible] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -34,6 +44,15 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
   const deckSnapshotRef = useRef(slideDeck);
   const deck = deckSnapshotRef.current;
   const slideCount = deck.slides.length;
+  // The version the presenter window compares with its own fetch, so both
+  // windows show the same deck. Taken from the snapshot, never the live prop.
+  const deckVersion = deck.version ?? null;
+
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const indexRef = useRef(currentSlideIndex);
+  indexRef.current = currentSlideIndex;
+  const channelRef = useRef<ReturnType<typeof joinPresenterChannel> | null>(null);
 
   // Generate HTML for current slide (no reveal.js)
   const currentSlideHTML = useMemo(() => {
@@ -225,6 +244,27 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         e.stopPropagation();
         toggleFullscreenRef.current();
         break;
+      case 'n':
+      case 'N':
+        // stopPropagation is required: both capture listeners (window and
+        // document) would otherwise toggle twice.
+        e.preventDefault();
+        e.stopPropagation();
+        setNotesVisible((v) => !v);
+        break;
+      case 'p':
+      case 'P': {
+        // window.open runs right here, inside the key (or forwarded message)
+        // handler, so the browser still sees the user's activation.
+        // Cmd+P / Ctrl+P is the browser's print: leave any modified P alone.
+        if (e.metaKey || e.ctrlKey || e.altKey) break;
+        const id = sessionIdRef.current;
+        if (!id) break;
+        e.preventDefault();
+        e.stopPropagation();
+        openPresenterWindow(id);
+        break;
+      }
       case 'Escape':
         e.preventDefault();
         e.stopPropagation();
@@ -232,6 +272,52 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         break;
     }
   };
+
+  // Presenter window link. This window is the only source of truth: it posts
+  // its state on join, on every slide change (below) and every heartbeat, and
+  // moves only on its own keys or a presenter `cmd`.
+  useEffect(() => {
+    if (!sessionId) return;
+    const postState = () =>
+      channelRef.current?.post({
+        type: 'state',
+        index: indexRef.current,
+        total: slideCount,
+        deckVersion,
+      });
+    const onMessage = (m: PresenterMessage) => {
+      if (m.type !== 'cmd') return;
+      const last = slideCount - 1;
+      if (m.action === 'next') {
+        setCurrentSlideIndex((prev) => Math.min(prev + 1, last));
+      } else if (m.action === 'prev') {
+        setCurrentSlideIndex((prev) => Math.max(prev - 1, 0));
+      } else if (m.action === 'goto' && typeof m.index === 'number') {
+        setCurrentSlideIndex(Math.max(0, Math.min(m.index, last)));
+      }
+    };
+    channelRef.current = joinPresenterChannel(sessionId, onMessage);
+    postState();
+    const heartbeat = setInterval(postState, STATE_HEARTBEAT_MS);
+    return () => {
+      clearInterval(heartbeat);
+      channelRef.current?.close();
+      channelRef.current = null;
+    };
+    // slideCount and deckVersion come from the mount-time snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  useEffect(() => {
+    channelRef.current?.post({
+      type: 'state',
+      index: currentSlideIndex,
+      total: slideCount,
+      deckVersion,
+    });
+    // slideCount and deckVersion come from the mount-time snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSlideIndex]);
 
   // Re-grab focus when returning to the tab so the parent listener actually
   // sees keypresses. The iframe listener (attached in handleIframeLoad) covers
@@ -405,6 +491,43 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         {currentSlideIndex + 1} / {slideCount}
       </div>
 
+      {notesVisible && (() => {
+        // The one-screen option: the talk track first, then the notes.
+        const slide = deck.slides[currentSlideIndex];
+        const talkTrack = slide?.talk_track ?? '';
+        const notes = slide?.speaker_notes ?? '';
+        const notesText = talkTrack.trim() ? talkTrack : notes.trim() ? notes : '';
+        return (
+          <div
+            role="note"
+            data-testid="presentation-notes"
+            style={{
+              position: 'absolute',
+              bottom: '64px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              width: 'min(960px, 90vw)',
+              maxHeight: '30vh',
+              overflowY: 'auto',
+              backgroundColor: 'rgba(0, 0, 0, 0.85)',
+              color: '#ffffff',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              fontSize: '18px',
+              fontFamily: 'system-ui, sans-serif',
+              whiteSpace: 'pre-wrap',
+              zIndex: 10000,
+            }}
+          >
+            {notesText ? (
+              notesText
+            ) : (
+              <span data-testid="presentation-notes-empty">No speaker notes for this slide.</span>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Toolbar: fullscreen toggle + close button. Discoverable equivalents
           of the F and Esc keyboard shortcuts. Auto-hides in fullscreen. */}
       <div
@@ -422,6 +545,63 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
           transition: 'opacity 0.2s ease-out',
         }}
       >
+        {sessionId && (
+          <button
+            type="button"
+            onClick={() => openPresenterWindow(sessionId)}
+            aria-label="Open presenter view"
+            title="Presenter view (P)"
+            data-testid="presentation-presenter-open"
+            style={{
+              backgroundColor: 'rgba(0, 0, 0, 0.7)',
+              color: '#ffffff',
+              height: '36px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              padding: '0 12px',
+              fontSize: '13px',
+              fontFamily: 'system-ui, sans-serif',
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="2" y="4" width="14" height="10" rx="1" />
+              <path d="M19 8h3v12H8v-3" />
+            </svg>
+            Presenter view
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setNotesVisible((v) => !v)}
+          aria-label={notesVisible ? 'Hide speaker notes' : 'Show speaker notes'}
+          aria-pressed={notesVisible}
+          title="Notes (N)"
+          data-testid="presentation-notes-toggle"
+          style={{
+            backgroundColor: notesVisible ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.7)',
+            color: '#ffffff',
+            width: '36px',
+            height: '36px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <path d="M14 3v6h6" />
+            <path d="M8 13h8" />
+            <path d="M8 17h5" />
+          </svg>
+        </button>
         <button
           type="button"
           onClick={toggleFullscreen}
@@ -505,7 +685,9 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
           transition: 'opacity 0.4s ease-out',
         }}
       >
-        ← → Navigate · F Fullscreen · Esc Exit
+        {sessionId
+          ? '← → Navigate · N Notes · P Presenter view · F Fullscreen · Esc Exit'
+          : '← → Navigate · N Notes · F Fullscreen · Esc Exit'}
       </div>
 
       {/* Iframe wrapper that maintains 16:9 aspect ratio and scales to fit viewport */}

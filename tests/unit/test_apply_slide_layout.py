@@ -129,6 +129,9 @@ _SNAPSHOT_KEYS = (
     "created_at",
     "modified_by",
     "modified_at",
+    # Sabotage target: _snapshot_row dropping speaker_notes(_source).
+    "speaker_notes",
+    "speaker_notes_source",
 )
 
 _ALL_OPERATIONS: Tuple[str, ...] = typing.get_args(MutationOperation)

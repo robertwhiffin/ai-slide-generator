@@ -23,6 +23,7 @@ import {
   type ExtractRecordsResult,
 } from './sandboxedExportFrame';
 import { trustedExportRuntimeMarkup } from './exportFrameRuntime';
+import { presenterPaneText } from './presenterText';
 
 export { WALKER_SOURCE } from './exportWalkerSource';
 
@@ -120,12 +121,11 @@ export function buildCompositeHtml(deck: SlideDeck): string {
   }).join('\n');
 
   const ext = (deck.external_scripts || []).map(src => `<script src="${src}"></script>`).join('\n');
+  // Escape '<' so a literal "</script>" inside notes cannot close the JSON
+  // element; \u003c parses back to '<' via JSON.parse.
   const notes = JSON.stringify(
-    slides.map((s) => {
-      const extra = s as unknown as { speaker_notes?: string; notes?: string };
-      return extra.speaker_notes || extra.notes || '';
-    }),
-  );
+    slides.map((s) => presenterPaneText(s as unknown as { talk_track?: string; speaker_notes?: string; notes?: string })),
+  ).replace(/</g, '\\u003c');
 
   // F-CR-25: CSP stays first; the trusted runtime follows. Slide scripts still
   // run as inline <script> under 'unsafe-inline'. 'unsafe-eval' is withheld.

@@ -11,6 +11,7 @@ import type { SlideDeck, Slide, SlideContext, StageSlideContext, ReplacementInfo
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayItem, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
+import { presenterPaneText } from './presenterText';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -868,6 +869,36 @@ export const api = {
 
     if (!response.ok) {
       throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to update slide');
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Save a slide's talk track and/or speaker notes (never touches the slide HTML).
+   * Only the keys present in `fields` are sent; an empty string is a real save.
+   */
+  async updateSlideNotes(
+    index: number,
+    fields: { speaker_notes?: string; talk_track?: string },
+    sessionId: string,
+    slideId?: string,
+    expectedVersion?: number
+  ): Promise<{ index: number; slide_id: string; speaker_notes: string; talk_track: string; version: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}/notes`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        ...(fields.speaker_notes !== undefined ? { speaker_notes: fields.speaker_notes } : {}),
+        ...(fields.talk_track !== undefined ? { talk_track: fields.talk_track } : {}),
+        slide_id: slideId,
+        expected_version: expectedVersion,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to save speaker notes');
     }
 
     return response.json();
@@ -1814,6 +1845,7 @@ export const api = {
         session_id: sessionId || null,
         title: deck.title || 'slides',
         images,
+        notes: deck.slides.map((s) => presenterPaneText(s)),
         width_px: 1280,
         height_px: 720,
       }),

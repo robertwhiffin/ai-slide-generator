@@ -386,7 +386,7 @@ class _DeckWithThreeRows(_FixtureBase):
         Captures: position, html, slide_id (stable per-slide UUID),
         id (internal String(64) row identity — distinct from slide_id),
         scripts, created_by, modified_by, modified_at, verification_record,
-        deck_spec_slide.
+        deck_spec_slide, speaker_notes, speaker_notes_source.
 
         Note on identity: SessionSlide.id is a String(64) internal row
         identity; SessionSlide.slide_id is a String(255) stable per-slide UUID
@@ -414,6 +414,8 @@ class _DeckWithThreeRows(_FixtureBase):
                     "modified_at": r.modified_at,
                     "verification_record": r.verification_record,
                     "deck_spec_slide": r.deck_spec_slide,
+                    "speaker_notes": r.speaker_notes,
+                    "speaker_notes_source": r.speaker_notes_source,
                 }
                 for r in rows
             ]

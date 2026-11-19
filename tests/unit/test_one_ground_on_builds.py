@@ -8,14 +8,16 @@ turn the code drops it.
 
 The contract these tests hold (Ruling RA25):
 
-* **The branch key.**  ``build_branch_payload(state, position)`` adds exactly one key,
-  ``one_ground: True``, when the turn's ``architect_intent`` builds or rebuilds the deck
-  AND the committed spec carries a ``deck_style``.  The intent map, pinned below: only
+* **The branch key.**  ``build_branch_payload(state, position)`` adds ``one_ground: True``
+  when the turn's ``architect_intent`` builds or rebuilds the deck AND the committed spec
+  carries a ``deck_style``.  (Every build turn, styled or not, also carries the
+  speaker-notes key ``notes_reset: True``.)  The intent map, pinned below: only
   ``"build"`` counts — a build that rebuilds some positions (a deck-level re-review) or
   all of them included.  ``"edit"`` never counts, even when it rebuilds every position
   (a confirmed design-contract change on an edit), and nor do ``discuss``, ``ask_data``,
   ``confirm_design_contract`` or an absent intent.  Every other branch payload (an edit,
-  an old deck with no deck style) has exactly the base commit's keys.
+  an old deck with no deck style) has exactly the base commit's keys, plus ``notes_reset``
+  on a build turn.
 * **The seam.**  ``slide_pipeline_node`` drops ``white`` (``drop_white_ground``) when its
   payload carries the key and the slide is not the cover — spec position 0, the notion
   ``blank_slide_shell`` uses (``deck_spec_slides.py``: "never slide 0 (the cover)") — after
@@ -402,9 +404,15 @@ def test_the_branch_key_is_set_only_on_a_build_of_a_styled_deck(
         base = HEAD_BRANCH_KEYS | ({"deck_style"} if styled else set())
         if builds and styled:
             assert payload.get("one_ground") is True, position
-            assert set(payload) == base | {"one_ground"}, position
+            assert payload.get("notes_reset") is True, position
+            assert set(payload) == base | {"one_ground", "notes_reset"}, position
+        elif builds:
+            assert "one_ground" not in payload, position
+            assert payload.get("notes_reset") is True, position
+            assert set(payload) == base | {"notes_reset"}, position
         else:
             assert "one_ground" not in payload, position
+            assert "notes_reset" not in payload, position
             assert set(payload) == base, position
 
 

@@ -459,6 +459,27 @@ const ViewerBody = forwardRef<
     }
   };
 
+  // Notes-only save (D8): never touches the slide HTML. Mirrors handleUpdateSlide's
+  // refresh and conflict handling, and rethrows so the drawer shows its error.
+  const handleSaveNotes = async (index: number, slideId: string, fields: { speaker_notes?: string; talk_track?: string }) => {
+    if (!sessionId || !onSlideChange) return;
+    const editId = ++deckEditCounterRef.current;
+    try {
+      await api.updateSlideNotes(index, fields, sessionId, slideId);
+      const result = await api.getSlides(sessionId);
+      if (result.slide_deck && deckEditCounterRef.current === editId) {
+        onSlideChange(result.slide_deck);
+      }
+    } catch (error) {
+      console.error('Failed to save notes:', error);
+      if (isVersionConflict(error)) {
+        alert('This deck was modified by another user. Refreshing to latest version.');
+        await refreshDeck();
+      }
+      throw error;
+    }
+  };
+
   const handleVerify = async () => {
     // readOnly must gate this: the toolbar now renders for read-only viewers so
     // the badge stays visible, and VerificationBadge exposes a verify affordance
@@ -618,6 +639,7 @@ const ViewerBody = forwardRef<
           slideDeck={slideDeck}
           onExit={() => setIsPresentationMode(false)}
           startIndex={currentIndex}
+          sessionId={sessionId ?? undefined}
         />
       )}
 
@@ -764,6 +786,14 @@ const ViewerBody = forwardRef<
           hasUnseen={currentFindings.some(f => f.status !== 'fixed' && !seen.has(f.id))}
           callbacks={{ ...callbacks, onDismissFinding: handleDismiss }}
           actionsDisabled={insertDisabled}
+          speakerNotes={currentSlide?.speaker_notes ?? ''}
+          talkTrack={currentSlide?.talk_track ?? ''}
+          slideKey={currentSlide?.slide_id}
+          onSaveNotes={
+            readOnly || !sessionId || !onSlideChange || !currentSlide
+              ? undefined
+              : (fields) => handleSaveNotes(currentIndex, currentSlide.slide_id, fields)
+          }
         />
       </div>
     </div>

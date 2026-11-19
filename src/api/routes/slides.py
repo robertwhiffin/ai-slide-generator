@@ -26,7 +26,8 @@ references the name, and pins which routes do and do not trigger.  Read
 ``get_current_user()`` is read in the handler's own request context and the author
 passed explicitly into the worker thread — never re-read inside the thread.
 
-Deliberately NOT triggers: the two verification routes and the three version
+Deliberately NOT triggers: the notes-only save (``PATCH /{index}/notes``; speaker
+notes are not part of the spec), the two verification routes and the three version
 routes (a version save does not change the live deck; a restore cancels the
 pending review instead), and session-duplicate in ``sessions.py`` (a copied spec
 is already correct for the HTML it carries).
@@ -37,7 +38,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from src.api.routes._authz import (
@@ -77,6 +78,26 @@ class ReorderRequest(BaseModel):
     session_id: str
     new_order: List[int]
     expected_version: Optional[int] = None
+
+
+class UpdateSlideNotesRequest(BaseModel):
+    """Request to save a slide's speaker notes and/or talk track alone.
+
+    A field left out (or ``null``) is not touched; ``""`` clears it.  At least
+    one of the two must be given.
+    """
+
+    session_id: str
+    speaker_notes: Optional[str] = Field(default=None, max_length=20000)
+    talk_track: Optional[str] = Field(default=None, max_length=20000)
+    slide_id: Optional[str] = None
+    expected_version: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _require_a_field(self) -> "UpdateSlideNotesRequest":
+        if self.speaker_notes is None and self.talk_track is None:
+            raise ValueError("Give speaker_notes, talk_track, or both")
+        return self
 
 
 class UpdateSlideRequest(BaseModel):
@@ -386,6 +407,64 @@ async def update_slide(index: int, request: UpdateSlideRequest, db: Session = De
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to update slide: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        await asyncio.to_thread(
+            session_manager.release_session_lock,
+            request.session_id,
+        )
+
+
+@router.patch("/{index}/notes")
+async def update_slide_notes(index: int, request: UpdateSlideNotesRequest, db: Session = Depends(get_db)):
+    """Save a slide's speaker notes alone (no HTML change, no spec-dirty mark).
+
+    Requires CAN_EDIT permission. Uses session locking like ``update_slide``.
+    """
+    _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
+    session_manager = get_session_manager()
+
+    try:
+        await run_in_thread_with_context(session_manager.require_editing_lock, request.session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
+
+    locked = await asyncio.to_thread(
+        session_manager.acquire_session_lock,
+        request.session_id,
+    )
+    if not locked:
+        raise HTTPException(
+            status_code=409,
+            detail="Session is currently processing another request. Please wait.",
+        )
+
+    try:
+        chat_service = get_chat_service()
+        result = await asyncio.to_thread(
+            chat_service.update_slide_notes,
+            request.session_id,
+            index,
+            request.speaker_notes,
+            talk_track=request.talk_track,
+            slide_id=request.slide_id,
+            expected_version=request.expected_version,
+        )
+        logger.info(
+            "Updated slide notes",
+            extra={"index": index, "session_id": request.session_id},
+        )
+        return result
+
+    except VersionConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=423, detail=str(e))
+    except ValueError as e:
+        logger.warning(f"Validation error in update_slide_notes: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update slide notes: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         await asyncio.to_thread(

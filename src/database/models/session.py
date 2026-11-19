@@ -617,6 +617,12 @@ class SessionSlide(Base):
     html = Column(Text, nullable=False)  # Body HTML only, not full document
     slide_id = Column(String(255), nullable=True)  # Optional UUID
     scripts = Column(Text, nullable=True)  # Chart.js, etc. per-slide code
+    # Speaker notes: the text the presenter says for this slide.  `source` is
+    # "model" or "user" (a user edit is never replaced by a model write).
+    speaker_notes = Column(Text, nullable=True)
+    speaker_notes_source = Column(String(16), nullable=True)
+    talk_track = Column(Text, nullable=True)
+    talk_track_source = Column(String(16), nullable=True)
 
     # Authorship and timestamps
     created_by = Column(String(255), nullable=True)

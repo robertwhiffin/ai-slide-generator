@@ -191,6 +191,9 @@ def _real_row(marker: str, position: int, day: int) -> Dict[str, Any]:
         "modified_at": datetime(2024, 2, day, 17, 30, 0),
         "verification_record": _two_hash_record(marker, html, position),
         "deck_spec_slide": _fragment(marker, position),
+        # Sabotage target: _snapshot_row dropping speaker_notes(_source) strands notes on a moved row.
+        "speaker_notes": f"notes for {marker}",
+        "speaker_notes_source": "user",
     }
 
 

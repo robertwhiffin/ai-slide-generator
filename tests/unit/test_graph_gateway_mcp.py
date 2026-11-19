@@ -1978,6 +1978,8 @@ HEAD_BRANCH_KEYS = frozenset(
         "section_css",
         "resolved_style",
         "design_system_active",
+        # _branch_state below is a build turn (architect_intent="build", :2104)
+        "notes_reset",
     }
 )
 
