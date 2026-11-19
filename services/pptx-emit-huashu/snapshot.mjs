@@ -28,8 +28,9 @@
 //  *   fonts: {'<family>': number[]},        // the weights (100..900) of its faces in
 //  *                                         // document.fonts that loaded: the page's webfonts
 //  *   reference: {hiddenText: string},      // the words the page reads (its innerText)
-//  *                                         // that the slide does not show, single-spaced:
-//  *                                         // clipped, transparent and off-slide text
+//  *                                         // that the slide does not show whole, each
+//  *                                         // whole, single-spaced: clipped, transparent,
+//  *                                         // off-slide and ellipsis-cut text
 //  *   stats: {elements, pseudoElements, shapes, lines, images, texts, tables, truncated},
 //  * }
 //  *

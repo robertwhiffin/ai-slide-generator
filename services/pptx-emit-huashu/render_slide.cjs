@@ -14,10 +14,21 @@
 //                        step 4 read, which returns the slide model (snapshot.mjs);
 //   6. capture           capture.cjs: an element-isolated 2x screenshot of each
 //                        capture target the model names, from the same page;
-//   7. emit              emit_model.cjs writes the model to a pptxgenjs slide.
+//   7. reference         the page's rendered text, read once every capture is
+//                        taken, so it changes no picture (pageRenderedText);
+//   8. emit              emit_model.cjs writes the model to a pptxgenjs slide;
+//   9. checks            text_check.cjs: the text-loss line when the model
+//                        lacks a word of the reference, then the slide's
+//                        summary line, both on stderr (spec §6).
 //
 // renderSlide(htmlFile, pres, { bypassValidation, preProcessSource, target })
 //   -> { slide, summary }
+// Each slide that renders logs
+//   [html2pptx] text missing: <json array>   when a word is missing, then
+//   [html2pptx] slide summary <json>         always, the summary on one line,
+// which pptx_from_html_huashu.py echoes and the export fidelity harness reads
+// (scripts/export_fidelity/run.py export_pptx). A slide that fails logs
+// neither.
 // preProcessSource defaults to BG_TRANSFER_SOURCE; null runs no preprocess.
 // target is the renderer the deck is written for, 'pptx' (the default) or
 // 'gslides': emit_model.cjs writes the few constructs the two place apart
@@ -29,6 +40,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
+const { logJson, textLossLine } = require('./text_check.cjs');
 
 const PT_PER_PX = 0.75;
 const PX_PER_IN = 96;
@@ -113,6 +125,27 @@ function pageBodyDimensions() {
   };
 }
 
+// The text-loss reference (text_check.cjs): body's innerText once every <svg>
+// and <canvas> is hidden, whose text is in its picture, as the export fidelity
+// harness reads it (render_truth.cjs). It runs once the captures are taken, so
+// hiding them changes no picture. Each graphic is hidden by its style
+// attribute, set through the pristine setAttribute: once hidden its own style
+// no longer matters, and an !important inline display beats every author rule
+// and the slide's settled animations; a transition the change starts (a
+// display that transitions discretely) is finished straight away. One
+// synchronous read, so no slide script (a mutation observer) runs between the
+// hiding and the reading.
+function pageRenderedText() {
+  const dom = domAccess();
+  const graphics = queryAll('svg, canvas');
+  for (let index = 0; index < graphics.length; index++) {
+    dom.setAttribute(graphics[index], 'style', 'display: none !important');
+  }
+  pageFinishAnimations();
+  const body = queryOne('body');
+  return body ? String(dom.innerText(body)) : '';
+}
+
 // The ESM page sources, and the Node-side pseudo-element read, loaded once per process.
 let pageSourcesPromise = null;
 function loadPageSources() {
@@ -124,9 +157,11 @@ function loadPageSources() {
       import('./pseudo.mjs'),
     ])
       .then(([access, preprocess, snapshot, pseudo]) => {
-        const withDomAccess = (pageFunction) => `(() => {
+        // `helpers` are the page functions `pageFunction` calls by name.
+        const withDomAccess = (pageFunction, helpers = []) => `(() => {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${access.DOM_ACCESS_SOURCE}
+${helpers.map((helper) => helper.toString()).join('\n')}
   return (${pageFunction.toString()})();
 })()`;
         return {
@@ -134,6 +169,7 @@ ${access.DOM_ACCESS_SOURCE}
           canvasesReady: withDomAccess(pageCanvasesReady),
           finishAnimations: withDomAccess(pageFinishAnimations),
           bodyDimensions: withDomAccess(pageBodyDimensions),
+          renderedText: withDomAccess(pageRenderedText, [pageFinishAnimations]),
           bgTransfer: preprocess.BG_TRANSFER_SOURCE,
           // The snapshot page function applied to what pseudo.mjs read: JSON is
           // a JavaScript expression, so the data is the call's argument.
@@ -341,11 +377,36 @@ function reportValidation(validationErrors, bypassValidation) {
   }
 }
 
+// ─── checks ────────────────────────────────────────────────────────────
+// The page's rendered text (pageRenderedText), or null when it could not be
+// read: the slide still exports, unchecked, and the log says so.
+async function readRenderedText(page, sources) {
+  try {
+    const text = await page.evaluate(sources.renderedText);
+    return typeof text === 'string' ? text : null;
+  } catch (e) {
+    console.error(`[html2pptx] reading the slide's rendered text failed: ${e.message} — its text is not checked for loss`);
+    return null;
+  }
+}
+
+// The wall time, in ms to the microsecond, since `start` (performance.now()).
+function elapsedMs(start) {
+  return Math.round((performance.now() - start) * 1000) / 1000;
+}
+
 // ─── summary ───────────────────────────────────────────────────────────
 // `pseudoElements` is how many ::before, ::after and ::marker pseudo.mjs read,
 // and how many of them the snapshot walked or drew with its list item (a
 // pseudo-element inside a picture, an <svg>'s, is in that picture instead).
-function summarise(model, captures, preprocessResult, animations, pseudoData) {
+// `text`, `shapes`, `lines` and `tables` count the model's items of each kind,
+// as `kinds` does (`pictures` counts the images written, `skippedPictures`
+// those that had no picture). `captureMs` is the wall time of the slide's
+// captures, 0 when it has none: a clock reading, so it goes to the log alone,
+// never into the deck. `hiddenText` is the words the page reads that the
+// slide does not show (snapshot.mjs model.reference), which the text-loss
+// check leaves out, and `target` the renderer the deck is written for.
+function summarise(model, captures, preprocessResult, animations, pseudoData, captureMs, target) {
   const kinds = {};
   let pictures = 0;
   let skippedPictures = 0;
@@ -367,7 +428,24 @@ function summarise(model, captures, preprocessResult, animations, pseudoData) {
     skippedPictures,
     captures: model.captures.length,
     captureFailures: model.captures.filter((capture) => !captures.has(capture.id)).length,
+    text: kinds.text || 0,
+    shapes: kinds.shape || 0,
+    lines: kinds.line || 0,
+    tables: kinds.table || 0,
+    captureMs,
+    hiddenText: model.reference.hiddenText,
+    target,
   };
+}
+
+// The slide's check lines on stderr (spec §6): what of the page's rendered
+// text the model lacks, when anything (text_check.cjs), then its summary.
+function reportChecks(summary, model, renderedText) {
+  if (renderedText !== null) {
+    const missing = textLossLine(renderedText, model.items, summary.hiddenText);
+    if (missing) console.error(missing);
+  }
+  console.error('[html2pptx] slide summary ' + logJson(summary));
 }
 
 // ─── the slide ─────────────────────────────────────────────────────────
@@ -393,6 +471,8 @@ async function renderSlide(htmlFile, pres, options = {}) {
     let animations;
     let pseudoData;
     let captures;
+    let captureMs;
+    let renderedText;
     try {
       const page = await browser.newPage({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
       forwardConsole(page);
@@ -409,7 +489,11 @@ async function renderSlide(htmlFile, pres, options = {}) {
       // Capture id -> data: PNG for the targets the model names in model.captures,
       // taken from this page as the snapshot left it. A target without an entry
       // is a failed capture: its picture is skipped.
+      const captureStart = performance.now();
       captures = await captureAll(page, model.captures);
+      captureMs = model.captures.length ? elapsedMs(captureStart) : 0;
+      // Last, once every picture is taken: the read hides the graphics.
+      renderedText = await readRenderedText(page, sources);
     } finally {
       await browser.close();
     }
@@ -421,7 +505,9 @@ async function renderSlide(htmlFile, pres, options = {}) {
     ], bypassValidation);
 
     const slide = emitSlide(pres, model, captures, { target });
-    return { slide, summary: summarise(model, captures, preprocessResult, animations, pseudoData) };
+    const summary = summarise(model, captures, preprocessResult, animations, pseudoData, captureMs, target);
+    reportChecks(summary, model, renderedText);
+    return { slide, summary };
   } catch (error) {
     if (!error.message.startsWith(htmlFile)) {
       throw new Error(`${htmlFile}: ${error.message}`);

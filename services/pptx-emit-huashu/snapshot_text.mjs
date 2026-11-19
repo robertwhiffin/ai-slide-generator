@@ -61,7 +61,9 @@
 // line a box cuts off, the visually-hidden pattern, text off the slide) is
 // not slide text. The words a slide drops but the page still reads (its
 // innerText, which leaves out visibility: hidden) are its hidden text, which
-// the snapshot reports as model.reference.hiddenText.
+// the snapshot reports as model.reference.hiddenText. A word the slide shows
+// only part of is hidden text whole, as the page reads it (task-12 ruling
+// R12a): a fragment names no word of the page's text (recordHiddenWords).
 //
 // Ellipsis (R11e). A line of a block with text-overflow: ellipsis and an
 // overflow other than visible that runs past its content box's end edge (the
@@ -71,7 +73,7 @@
 // face, measured by probe; the cut word is measured character by character;
 // and the "…" is a run in the block's own style, which is what Chrome paints
 // it in even where the cut falls inside a differently styled inline
-// (truncateAtEllipsis). The cut word and all after it are hidden text.
+// (truncateAtEllipsis). The cut word, whole, and all after it are hidden text.
 //
 // Turned text. Under a rotation, and under a vertical writing mode, which sets
 // Latin glyphs sideways, a Range rect is the axis-aligned bounds of a turned
@@ -345,11 +347,11 @@ function createTextLayout(env) {
   // px (null when it could not be measured), measured once each
   // (contentHeightOf).
   const contentHeights = Object.create(null);
-  // The slide's hidden text (hiddenText), in the order it is read. `dropping`
-  // is true while the tokens read in a row are all dropped, so a word split
-  // over two text nodes ("Rev<b>enue</b>") is recorded whole.
+  // The slide's hidden text (hiddenText), in the order it is recorded: the
+  // rendered text of each subtree that shows nothing (recordHiddenText) and
+  // each word of laid-out text the slide does not show whole
+  // (recordHiddenWords).
   const hiddenParts = [];
-  let dropping = false;
 
   function spend(count) {
     if (budget <= 0 || count > budget) {
@@ -1024,19 +1026,20 @@ function createTextLayout(env) {
   // character is lost. Each code point is cased after the one before it, so a
   // word that wraps at its hyphen capitalises as it would on one line. A code
   // point the clip hides is dropped (dropToken), so a word cut off on its
-  // second line keeps its first.
+  // second line keeps its first, and is hidden text whole.
   //   source    one text node's {node, data, mode, style, tabSize, transform,
   //             segment, hidden, recordsHidden, clip} (readTokens);
-  //   previous  the character before the token (casedText).
-  function splitToken(source, start, end, space, previous, range, tokens) {
+  //   previous  the character before the token (casedText);
+  //   word      the word the token is part of (wordAt), or null.
+  function splitToken(source, start, end, space, previous, range, tokens, word) {
     const pieces = paintedCodePoints(source, start, end, space, previous, range);
     for (let piece = 0; piece < pieces.length; piece++) {
       const read = pieces[piece];
       if (anyShown(read.rects, source.clip)) {
         pushTextToken(source, read.text, read.rects[0], false, tokens,
-          space ? null : { source, start: read.start, end: read.end, previous: read.previous });
+          space ? null : { source, start: read.start, end: read.end, previous: read.previous }, word);
       } else {
-        dropToken(source, read.text, read.rects, tokens);
+        dropToken(source, read.text, read.rects, tokens, word);
       }
     }
     return pieces.length > 0;
@@ -1103,7 +1106,8 @@ function createTextLayout(env) {
 
   // The source of generated text's tokens (a pseudo-element's, a marker's):
   // what pushTextToken and dropToken read, plus the white-space `mode` its
-  // text is written in. Generated text is never hidden text.
+  // text is written in. Generated text is no part of the page's innerText, so
+  // its tokens are part of no word (wordAt) and never hidden text.
   function generatedSource(context, scale, segment) {
     const ps = context.style;
     const mode = whiteSpaceOf(ps);
@@ -1113,7 +1117,6 @@ function createTextLayout(env) {
       face: probeFaceOf(ps, style.family, scale),
       tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
       segment,
-      recordsHidden: false,
       clip: context.clip,
       nudge: context.nudgePx * scale,
       mode,
@@ -1126,29 +1129,36 @@ function createTextLayout(env) {
   // character before it (casedText). Null for generated text and for spaces.
   // `nudge` is how far down, in slide px, a relative position that is no
   // script moves the token off its line (context nudgePx).
-  function pushTextToken(source, text, rect, collapsible, tokens, origin) {
+  // `word` is the word of the page's text the token is part of (wordAt), or
+  // null for text the page does not read; the token's text is added to it, and
+  // the token carries it, so a cut that leaves the token out later
+  // (truncateAtEllipsis) can say the word is not shown whole.
+  function pushTextToken(source, text, rect, collapsible, tokens, origin, word) {
     tokens.push({
       kind: 'text', text, rect, style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
-      segment: source.segment, origin: origin || null, nudge: source.nudge,
+      segment: source.segment, origin: origin || null, nudge: source.nudge, word: word || null,
     });
-    dropping = false;
+    if (word) word.text += text;
   }
 
   // A token that paints nothing: hidden or transparent text, which keeps its
   // room in the line, or text its clip shows under 2 px of. Each of its rects
   // that takes width is a gap in its line, as an atomic inline is (isCut), so
-  // the text after it keeps its x. Its text is hidden text unless it is
-  // visibility: hidden, which the page's innerText leaves out too.
-  function dropToken(source, text, rects, tokens) {
+  // the text after it keeps its x. The word it is part of (`word`, as
+  // pushTextToken's) is not shown whole, so it is hidden text; there is none
+  // for visibility: hidden text, which the page's innerText leaves out too,
+  // nor for generated text.
+  function dropToken(source, text, rects, tokens, word) {
     for (let index = 0; index < rects.length; index++) {
       if (rects[index].right > rects[index].left) tokens.push({ kind: 'gap', rect: rects[index] });
     }
-    if (!source.recordsHidden) return;
-    hiddenParts.push(dropping ? text : ' ' + text);
-    dropping = true;
+    if (!word) return;
+    word.text += text;
+    word.hidden = true;
   }
 
-  function measureToken(source, start, end, space, previous, range, tokens) {
+  // `word` is the word a word token is part of (wordAt), null for a space.
+  function measureToken(source, start, end, space, previous, range, tokens, word) {
     range.setStart(source.node, start);
     range.setEnd(source.node, end);
     const rects = paintedRects(range, space);
@@ -1157,14 +1167,29 @@ function createTextLayout(env) {
     const raw = source.data.slice(start, end);
     const text = !space ? casedText(raw, source.transform, previous) : collapsible ? ' ' : preservedSpaces(raw);
     if (source.hidden || !anyShown(rects, source.clip)) {
-      dropToken(source, text, rects, tokens);
+      dropToken(source, text, rects, tokens, word);
       return;
     }
     if (rects.length > 1 && !collapsible &&
-        splitToken(source, start, end, space, previous, range, tokens)) {
+        splitToken(source, start, end, space, previous, range, tokens, word)) {
       return;
     }
-    pushTextToken(source, text, rects[0], collapsible, tokens, space ? null : { source, start, end, previous });
+    pushTextToken(source, text, rects[0], collapsible, tokens, space ? null : { source, start, end, previous }, word);
+  }
+
+  // The word of the page's text being read (words.current), begun when none
+  // is: a word as the page's innerText reads it, the characters between its
+  // white space, a break or an atomic inline, which runs on from one text node
+  // into the next ("Rev<b>enue</b>"). Word = {text, hidden}: the characters of
+  // it the page reads, as painted (text-transform applied), and whether the
+  // slide leaves any of them out. Each is listed in words.read, in the order
+  // the page reads them, for recordHiddenWords.
+  function wordAt(words) {
+    if (!words.current) {
+      words.current = { text: '', hidden: false };
+      words.read.push(words.current);
+    }
+    return words.current;
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
@@ -1172,7 +1197,9 @@ function createTextLayout(env) {
   // (casedText); it carries over from one text node to the next, hidden ones
   // included, because they are still in the text. `words.segment` counts the
   // inline edges crossed so far: every token carries it, and a line is cut
-  // where it changes (segmentsOf).
+  // where it changes (segmentsOf). `words.current` is the word of the page's
+  // text being read (wordAt): white space and a break the page reads end it;
+  // visibility: hidden text, which it does not read, neither ends nor joins it.
   function readTokens(piece, scale, range, tokens, words) {
     const ps = piece.context.style;
     // Hidden or transparent text keeps its place in the layout, line breaks
@@ -1204,13 +1231,16 @@ function createTextLayout(env) {
       if (kind === 'break') {
         tokens.push(BREAK);
         words.previous = '';
-        dropping = false;
+        if (source.recordsHidden) words.current = null;
         start = end;
         continue;
       }
       while (end < length && characterKind(data.charCodeAt(end), mode) === kind) end++;
-      measureToken(source, start, end, kind === 'space', words.previous, range, tokens);
-      words.previous = kind === 'space' ? ' ' : lastCodePoint(data, start, end);
+      const space = kind === 'space';
+      if (space && source.recordsHidden) words.current = null;
+      const word = !space && source.recordsHidden ? wordAt(words) : null;
+      measureToken(source, start, end, space, words.previous, range, tokens, word);
+      words.previous = space ? ' ' : lastCodePoint(data, start, end);
       start = end;
     }
   }
@@ -1788,8 +1818,9 @@ function createTextLayout(env) {
   // "…"; a "…" token in the block's own style follows them; and every token
   // after is gone. A line whose text ends within the edge is left as it is,
   // and so is one whose "…" could not be measured (its overflow clip still
-  // cuts it). The cut word and the words after it are hidden text: the page
-  // reads them, the slide does not show them.
+  // cuts it). The cut word, whole, and the words after it are hidden text: the
+  // page reads them, the slide does not show them whole (each token's word,
+  // recordHiddenWords).
   function truncateAtEllipsis(line, ellipsis, scale, range) {
     const rtl = ellipsis.rtl;
     const tokens = line.tokens;
@@ -1803,7 +1834,6 @@ function createTextLayout(env) {
     if (advance === null) return;
     const limit = rtl ? ellipsis.edge + advance : ellipsis.edge - advance;
     const kept = [];
-    const hidden = [];
     let cut = false;
     for (let index = 0; index < tokens.length; index++) {
       const token = tokens[index];
@@ -1826,10 +1856,8 @@ function createTextLayout(env) {
         if (text) kept.push({ ...token, text, rect, origin: null });
       }
       cut = true;
-      // A word read from a visible text node, and the spaces between such words.
-      if (token.kind === 'text' && (token.collapsible || (token.origin && token.origin.source.recordsHidden))) {
-        hidden.push(token.text);
-      }
+      // The word this token is part of is not shown whole, the cut one included.
+      if (token.word) token.word.hidden = true;
     }
     // The "…" starts where the last token kept ends, or where the line starts
     // when none fits; it joins the segment of the last word kept.
@@ -1872,22 +1900,21 @@ function createTextLayout(env) {
       segment,
       origin: null,
       nudge,
+      word: null,
     });
     line.tokens = kept;
-    const words = hidden.join('').trim();
-    if (words) hiddenParts.push(' ' + words);
-    dropping = false;
   }
 
   // The tokens of one run's pieces, in DOM order (readTokens and its kin):
   // words, spaces, breaks, gaps and atomic inlines, each inside marker joined
   // to its line where the text runs straight on from it (joinMarkers).
-  // `range` is the Range every token is measured with.
-  function readRunTokens(nodes, scale, range) {
+  // `range` is the Range every token is measured with. Every word of the
+  // page's text the run holds (wordAt) is added to `read`, in order; once the
+  // run is laid out, recordHiddenWords reads them.
+  function readRunTokens(nodes, scale, range, read) {
     const tokens = [];
-    const words = { previous: '', segment: 0 };
+    const words = { previous: '', segment: 0, current: null, read };
     const edges = { opening: false };
-    dropping = false;
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
       if (piece.kind === 'text' || piece.kind === 'generated' || piece.kind === 'marker') {
@@ -1915,7 +1942,7 @@ function createTextLayout(env) {
       }
       // A break or an atomic inline ends the word before it.
       words.previous = '';
-      dropping = false;
+      words.current = null;
     }
     joinMarkers(tokens);
     return tokens;
@@ -1936,15 +1963,18 @@ function createTextLayout(env) {
   // gaps alone, which has no segment. A line that runs past the block's
   // ellipsis edge ends where Chrome's does, in a "…" (truncateAtEllipsis).
   // Leading and trailing blank lines paint nothing and are dropped; null when
-  // no text in the run paints.
+  // no text in the run paints. The words it does not show whole, the ellipsis
+  // cut included, are hidden text (recordHiddenWords).
   function layoutInlineRun(nodes, s, scale, ellipsis) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
-    const tokens = readRunTokens(nodes, scale, range);
+    const read = [];
+    const tokens = readRunTokens(nodes, scale, range, read);
     const clustered = clusterLines(tokens, rtl);
     for (let index = 0; ellipsis && index < clustered.length; index++) {
       truncateAtEllipsis(clustered[index], ellipsis, scale, range);
     }
+    recordHiddenWords(read);
     const lineHeight = String(s.lineHeight);
     const lines = [];
     let painted = false;
@@ -2461,14 +2491,24 @@ function createTextLayout(env) {
   // walk skips because nothing in it shows (opacity 0, an empty clip). It is
   // still what a screen reader reads, so it is hidden text.
   function recordHiddenText(text) {
-    hiddenParts.push(' ' + text);
-    dropping = false;
+    hiddenParts.push(text);
   }
 
-  // hiddenText() -> model.reference.hiddenText: the words of every token
-  // dropped and every subtree recorded, in order, single-spaced.
+  // recordHiddenWords(read): each word of a laid-out run's text (wordAt,
+  // `read` in the order the page reads them) that the slide does not show
+  // whole, whole: a word a clip, a fade to nothing or an ellipsis leaves out
+  // in part is a word the page reads that the slide does not show, and a
+  // fragment of it ("erv" of "overview") is no word of the page's text.
+  function recordHiddenWords(read) {
+    for (let index = 0; index < read.length; index++) {
+      if (read[index].hidden && read[index].text) hiddenParts.push(read[index].text);
+    }
+  }
+
+  // hiddenText() -> model.reference.hiddenText: the words of every subtree
+  // and every word recorded, in order, single-spaced.
   function hiddenText() {
-    return hiddenParts.join('').replace(/\s+/g, ' ').trim();
+    return hiddenParts.join(' ').replace(/\s+/g, ' ').trim();
   }
 
   // The InlineGroup of one run of `el`'s inline content, from its decorations
@@ -2595,10 +2635,14 @@ function createTextLayout(env) {
   // is no line. A blank line is one, at the run's start too: it takes its room
   // in the turned box's stack, as a leading <br>'s empty line does on screen.
   // Only the empty line after the run's final <br> is none: the browser lays
-  // none out there. [] when none of its text paints.
+  // none out there. [] when none of its text paints. Turned text is cut by no
+  // ellipsis, so the words it does not show whole are known once it is read
+  // (recordHiddenWords).
   function layoutTurnedRun(nodes, s, scale, turned) {
     const range = document.createRange();
-    const tokens = readRunTokens(nodes, scale, range);
+    const read = [];
+    const tokens = readRunTokens(nodes, scale, range, read);
+    recordHiddenWords(read);
     const rtl = s.direction === 'rtl';
     const lineHeight = String(s.lineHeight);
     const lines = [];

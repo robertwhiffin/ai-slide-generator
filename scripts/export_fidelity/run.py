@@ -7,7 +7,11 @@ For a fixture deck (``deck.css`` + ``deck.json`` + ``slides/*.html``) this:
    routes feed the sidecar);
 2. renders the ground truth: a 1280x720 Chromium screenshot of that document;
 3. runs the production huashu export (``build_pptx_huashu``) to a .pptx,
-   written for PowerPoint (``target="pptx"``);
+   written for PowerPoint (``target="pptx"``), recording the snapshot
+   engine's per-slide summary lines in ``summaries.json``, and reports the
+   words the browser renders that the .pptx lacks (``text_loss.json``),
+   leaving out each slide's hidden text, the words the page reads but the
+   slide does not show;
 4. renders the .pptx with LibreOffice (``--lo``) and/or PowerPoint
    (``--powerpoint``), and/or converts a deck written for Google Slides
    (``target="gslides"``, ``export-gslides.pptx``) through Drive and downloads
@@ -33,15 +37,19 @@ and inspected; delete them by hand when finished.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -84,24 +92,112 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
     )
 
 
+# build_pptx_huashu echoes every sidecar stderr line behind this prefix. The
+# snapshot engine logs one summary line per slide it writes (render_slide.cjs);
+# a line the slide's own script logs reaches stderr as "Browser console: …"
+# instead, so slide script cannot pass for one.
+SIDECAR_ECHO_PREFIX = "[huashu-emit] "
+SLIDE_SUMMARY_LINE = SIDECAR_ECHO_PREFIX + "[html2pptx] slide summary "
+
+
+class _Tee(io.TextIOBase):
+    """A text stream that writes through to every stream it holds."""
+
+    def __init__(self, *streams: TextIO) -> None:
+        super().__init__()
+        self._streams = streams
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
+def _target_suffix(target: str) -> str:
+    """What the files written for ``target`` add to their names: "" for PowerPoint."""
+    return "" if target == "pptx" else f"-{target}"
+
+
+def slide_summaries(stderr: str) -> list[dict]:
+    """The JSON of each slide summary line the sidecar logged, in the order logged."""
+    return [
+        json.loads(line.removeprefix(SLIDE_SUMMARY_LINE))
+        for line in stderr.splitlines()
+        if line.startswith(SLIDE_SUMMARY_LINE)
+    ]
+
+
+def _summaries_by_document(
+    summaries: list[dict], failures: list[dict], count: int
+) -> list[dict | None]:
+    """One entry per document, in slide order: its summary, or None for one the export failed.
+
+    The sidecar writes the documents in order and logs a summary for each
+    slide it writes, so the summaries belong to the documents ``failures`` does
+    not name, in order. Summaries that do not match those documents one for
+    one (the legacy engine logs none) say nothing of any document.
+    """
+    failed = {failure.get("slide_index") for failure in failures}
+    written = [index for index in range(count) if index not in failed]
+    recorded: list[dict | None] = [None] * count
+    if len(summaries) != len(written):
+        if summaries:
+            print(
+                f"[export-fidelity] {len(summaries)} slide summaries for {len(written)} written "
+                "slides: none is recorded",
+                file=sys.stderr,
+            )
+        return recorded
+    for index, summary in zip(written, summaries):
+        recorded[index] = summary
+    return recorded
+
+
 def export_pptx(
     deck: dict, documents: list[Path], out_dir: Path, engine: str = "legacy", target: str = "pptx"
 ) -> Path:
     """The production export of ``documents``, written for ``target``: export.pptx for
-    PowerPoint, export-gslides.pptx for Google Slides (with failures.json or
-    failures-gslides.json beside it)."""
+    PowerPoint, export-gslides.pptx for Google Slides, with failures.json or
+    failures-gslides.json beside it.
+
+    The sidecar's stderr, which build_pptx_huashu echoes, is teed: it still
+    reaches the ``sys.stderr`` in effect when this is called, and its slide
+    summary lines are recorded in summaries.json or summaries-gslides.json
+    (PLAN-CORRECTIONS C8), one entry per document in slide order, null for a
+    slide the export failed. Each slide's speaker notes are its document's
+    name, which check_text_loss pairs its reference with.
+    """
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
     # build_pptx_huashu reads the engine from the environment and sends it to the sidecar.
     os.environ["TELLR_EXPORT_ENGINE"] = engine
     slides_payload = [{"html": path.read_text(encoding="utf-8"), "notes": path.stem} for path in documents]
-    pptx_bytes, failures = pptx_from_html_huashu.build_pptx_huashu(
-        deck.get("title", "slides"), slides_payload, bypass_validation=True, target=target
-    )
-    suffix = "" if target == "pptx" else f"-{target}"
+    echoed = io.StringIO()
+    with contextlib.redirect_stderr(_Tee(sys.stderr, echoed)):
+        pptx_bytes, failures = pptx_from_html_huashu.build_pptx_huashu(
+            deck.get("title", "slides"), slides_payload, bypass_validation=True, target=target
+        )
+    suffix = _target_suffix(target)
     (out_dir / f"failures{suffix}.json").write_text(json.dumps(failures, indent=2), encoding="utf-8")
+    summaries = _summaries_by_document(slide_summaries(echoed.getvalue()), failures, len(documents))
+    (out_dir / f"summaries{suffix}.json").write_text(
+        json.dumps(summaries, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     pptx_path = out_dir / f"export{suffix}.pptx"
     pptx_path.write_bytes(pptx_bytes)
     return pptx_path
+
+
+def recorded_summaries(out_dir: Path, target: str = "pptx") -> list[dict | None]:
+    """The slide summaries export_pptx recorded for ``target``, one per document."""
+    path = out_dir / f"summaries{_target_suffix(target)}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def render_with_libreoffice(pptx_path: Path, names: list[str], out_dir: Path) -> None:
@@ -233,33 +329,117 @@ end timeout
     return exported_pdf
 
 
+# Unicode's Default_Ignorable_Code_Point (DerivedCoreProperties.txt), as
+# inclusive ranges: characters that render as nothing, which the text-loss
+# comparison sees through. The PowerPoint deck writes U+2060 WORD JOINER after a
+# line-ending script run; authored text carries U+200B, U+00AD and their kin.
+# The set text_check.cjs reads as \p{Default_Ignorable_Code_Point}.
+_DEFAULT_IGNORABLE_RANGES = (
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+_DEFAULT_IGNORABLE = {
+    code_point: None
+    for start, end in _DEFAULT_IGNORABLE_RANGES
+    for code_point in range(start, end + 1)
+}
+
+
 def _normalise_text(text: str) -> str:
-    return "".join(text.split()).lower()
+    """``text`` as the text-loss check compares it, the way text_check.cjs normalises.
+
+    Compatibility forms are folded (NFKC: a literal "¹" is "1", a ligature its
+    letters, a fullwidth form its ASCII), then white space and default-ignorable
+    code points are removed, then the rest is lower-cased.
+    """
+    folded = unicodedata.normalize("NFKC", text).translate(_DEFAULT_IGNORABLE)
+    return "".join(folded.split()).lower()
 
 
-def check_text_loss(pptx_path: Path, names: list[str], out_dir: Path) -> dict[str, list[str]]:
+def _slide_text(slide) -> str:
+    """Every text frame's and table cell's text on ``slide``, run together."""
+    exported = ""
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            exported += shape.text_frame.text
+        if shape.has_table:
+            exported += "".join(cell.text for row in shape.table.rows for cell in row.cells)
+    return exported
+
+
+def _notes_text(slide) -> str | None:
+    """``slide``'s speaker notes, or None when it has none."""
+    if not slide.has_notes_slide:
+        return None
+    notes = slide.notes_slide.notes_text_frame
+    return None if notes is None else notes.text.strip()
+
+
+def _slides_by_name(slides: list, names: list[str]) -> dict:
+    """The slide each reference name was exported as; a name the deck has no slide for is absent.
+
+    export_pptx writes each document's name as its slide's speaker notes, so
+    when the notes name the slides, a slide the export failed leaves its name
+    without a slide wherever it falls in the deck (upstream PR #59), and the
+    slides after it keep their own references. A deck whose notes do not name
+    its slides (one export_pptx did not write) is paired by position.
+    """
+    notes = [_notes_text(slide) for slide in slides]
+    if notes and len(set(notes)) == len(notes) and set(notes) <= set(names):
+        return dict(zip(notes, slides))
+    return dict(zip(names, slides))
+
+
+def check_text_loss(
+    pptx_path: Path, names: list[str], out_dir: Path, hidden_text: list[str] | None = None
+) -> dict[str, list[str]]:
     """Words the browser renders that are absent from the exported slide.
 
     The reference is the browser's own rendered text (render_truth.cjs writes
     it), which no extraction code touches, so text the exporter drops shows up
-    here. SVG and canvas text is excluded: it travels inside the picture.
+    here. SVG and canvas text is excluded: it travels inside the picture. A
+    word is lost when its normalised form (_normalise_text) is no substring of
+    its slide's normalised text; a slide the deck lacks loses every word.
+
+    ``hidden_text[i]``, when given, is the hidden text of slide ``names[i]``
+    (its slide summary's ``hiddenText``, PLAN-CORRECTIONS C8): the words the
+    page reads but the slide does not show, each whole (opacity 0, a clip, off
+    the slide, cut by an ellipsis), which are no loss. A slide the deck lacks
+    shows none of its words, so nothing it hides excuses any.
     """
     from pptx import Presentation
 
+    if hidden_text is not None and len(hidden_text) != len(names):
+        raise ValueError(f"{len(hidden_text)} hidden texts for {len(names)} slides")
     presentation = Presentation(str(pptx_path))
-    slides = list(presentation.slides)
+    slides = _slides_by_name(list(presentation.slides), names)
     missing: dict[str, list[str]] = {}
     for index, name in enumerate(names):
         reference = (out_dir / "truth" / f"{name}.txt").read_text(encoding="utf-8")
-        exported = ""
-        if index < len(slides):
-            for shape in slides[index].shapes:
-                if shape.has_text_frame:
-                    exported += shape.text_frame.text
-                if shape.has_table:
-                    exported += "".join(cell.text for row in shape.table.rows for cell in row.cells)
-        exported_normalised = _normalise_text(exported)
-        lost = [word for word in reference.split() if _normalise_text(word) not in exported_normalised]
+        slide = slides.get(name)
+        exported_normalised = _normalise_text(_slide_text(slide)) if slide is not None else ""
+        hidden = hidden_text[index] if hidden_text is not None and slide is not None else ""
+        hidden_words = {_normalise_text(word) for word in hidden.split()}
+        lost = []
+        for word in reference.split():
+            normalised = _normalise_text(word)
+            if normalised not in exported_normalised and normalised not in hidden_words:
+                lost.append(word)
         if lost:
             missing[name] = lost
     (out_dir / "text_loss.json").write_text(json.dumps(missing, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -380,7 +560,9 @@ def main() -> int:
     documents = build_documents(deck, slides, args.out)
     render_truth(documents, args.out)
     pptx_path = export_pptx(deck, documents, args.out, engine=args.engine)
-    lost = check_text_loss(pptx_path, names, args.out)
+    # Each slide's hidden text, from its summary; none for a slide without one.
+    hidden_text = [(summary or {}).get("hiddenText", "") for summary in recorded_summaries(args.out)]
+    lost = check_text_loss(pptx_path, names, args.out, hidden_text=hidden_text)
     print("Text missing from the export:", json.dumps(lost, indent=2, ensure_ascii=False) if lost else "none")
     if args.powerpoint:
         render_with_powerpoint(pptx_path, names, args.out)
