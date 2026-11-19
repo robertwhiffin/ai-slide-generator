@@ -2,8 +2,9 @@
 
 A label is a product name, a version or one of a fixed list of feature names.
 Nothing here ever carries a prompt, deck content, user text or a customer name.
-Every function returns a fallback instead of raising: a label must never be the
-reason a request or a deploy fails.
+The version lookup (``package_version``, and so ``system_product_kwargs``) returns
+a fallback instead of raising: a label must never be the reason a request or a
+deploy fails.
 """
 
 from __future__ import annotations

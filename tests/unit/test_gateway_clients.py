@@ -10,6 +10,7 @@ import openai
 import pytest
 from langchain_core.messages import HumanMessage
 
+from src.core import attribution
 from src.core.databricks_client import _get_package_version
 from src.services.gateway_clients import (
     REQUEST_TAGS_HEADER,
@@ -42,8 +43,6 @@ def _source_tree_version() -> str:
 @pytest.fixture(autouse=True)
 def _fresh_version_cache():
     """``attribution.package_version`` is cached per process; each test starts and ends clean."""
-    from src.core import attribution
-
     attribution.package_version.cache_clear()
     yield
     attribution.package_version.cache_clear()
@@ -61,7 +60,6 @@ def test_user_agent_leads_with_tellr_and_keeps_the_sdk_user_agent():
 def test_user_agent_reports_the_installed_wheel_version(monkeypatch):
     """A deployed app runs from the ``databricks-tellr-app`` wheel, whose source
     tree carries no generated ``_version.py``: the wheel's metadata is the truth."""
-    from src.core import attribution
 
     def _version(name):
         if name == "databricks-tellr-app":
@@ -74,8 +72,6 @@ def test_user_agent_reports_the_installed_wheel_version(monkeypatch):
 
 
 def test_user_agent_falls_back_to_the_source_version_outside_a_wheel(monkeypatch):
-    from src.core import attribution
-
     def _not_installed(name):
         raise metadata.PackageNotFoundError(name)
 
@@ -88,8 +84,6 @@ def test_user_agent_reads_the_one_shared_version_lookup(monkeypatch):
     """``attribution.metadata`` is ``importlib.metadata`` itself, so a copy of the lookup in
     ``gateway_clients`` would pass the two tests above. Only attribution's own cache still
     answers 7.0.0 once the installed metadata says 8.0.0."""
-    from src.core import attribution
-
     monkeypatch.setattr(attribution.metadata, "version", lambda name: "7.0.0")
     assert attribution.package_version() == "7.0.0"
     monkeypatch.setattr(attribution.metadata, "version", lambda name: "8.0.0")

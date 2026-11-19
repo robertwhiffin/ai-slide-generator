@@ -2,6 +2,7 @@
 
 import re
 import sys
+import types
 from importlib import metadata
 
 import pytest
@@ -52,12 +53,38 @@ def test_version_falls_back_to_the_source_tree_outside_a_wheel(monkeypatch):
     assert attribution.package_version() == _source_tree_version()
 
 
+@pytest.mark.parametrize("reported", [None, ""])
+def test_a_wheel_that_reports_no_version_counts_as_not_installed(monkeypatch, reported):
+    """A dist-info with no ``Version`` field makes ``metadata.version`` answer ``None`` on
+    Python 3.11: a label must never read ``tellr/None``, nor a bare ``tellr/``."""
+    monkeypatch.setattr(attribution.metadata, "version", _installed(reported))
+    assert attribution.package_version() == _source_tree_version()
+
+
 def test_without_a_generated_version_file_the_init_version_is_reported(monkeypatch):
     """A wheel's copied ``src/`` has no ``_version.py``: next is ``src.__version__``."""
     import src
 
     monkeypatch.setattr(attribution.metadata, "version", _not_installed)
     monkeypatch.setitem(sys.modules, "src._version", None)  # ``import src._version`` now raises
+
+    assert attribution.package_version() == src.__version__
+
+
+def test_an_unreadable_version_file_falls_back_to_the_init_version(monkeypatch):
+    """A ``_version.py`` that fails with anything but ``ImportError`` must not raise into a
+    request either: the chain carries on to ``src.__version__``."""
+    import src
+
+    def _unreadable(name):
+        if name.startswith("__"):  # the import machinery's own probes (``__path__``)
+            raise AttributeError(name)
+        raise RuntimeError("unreadable _version.py")
+
+    broken = types.ModuleType("src._version")
+    broken.__getattr__ = _unreadable  # PEP 562: reading ``version`` now raises RuntimeError
+    monkeypatch.setattr(attribution.metadata, "version", _not_installed)
+    monkeypatch.setitem(sys.modules, "src._version", broken)
 
     assert attribution.package_version() == src.__version__
 
