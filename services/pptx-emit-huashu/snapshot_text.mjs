@@ -1521,14 +1521,17 @@ function createTextLayout(env) {
   // `rect` bounds every token; `body` the tokens set on the line's own
   // baseline, every run but a superscript or subscript, whose raise or drop
   // moves its rect off the line (null for a line of script runs alone), each
-  // where the baseline sets it (baselineBounds: a nudged token unmoved): the
-  // line is placed by its body, the script run carrying its shift itself.
+  // where the renderers draw it (bodyBounds: a nudged token on the baseline of
+  // the line's unmoved text, or, where all of it is moved, the whole line
+  // where it is moved): the line is placed by its body, the script run
+  // carrying its shift itself.
   function assembleLine(line, lineHeight) {
     const tokens = line.tokens;
     let first = 0;
     let last = tokens.length - 1;
     while (first <= last && tokens[first].collapsible) first++;
     while (last >= first && tokens[last].collapsible) last--;
+    const settles = holdsUnmovedText(tokens, first, last);
     const runs = [];
     const extents = [];
     let rect = null;
@@ -1568,18 +1571,33 @@ function createTextLayout(env) {
         });
       }
       rect = unionBounds(rect, bounds);
-      if (!token.style.baseline) body = unionBounds(body, baselineBounds(token));
+      if (!token.style.baseline) body = unionBounds(body, bodyBounds(token, settles));
     }
     if (tokens.length && !runs.length) return null;
     return { runs, extents, rect, body, lineHeight };
   }
 
-  // A text token's bounds where its line's baseline sets it: its rect, less
-  // the move of a relative position that nudges it (its nudge), which no run
-  // can carry, so the renderers draw it on the baseline.
-  function baselineBounds(token) {
+  // Whether tokens[first..last] hold text that no relative position nudges
+  // and no baseline shift moves: a word the line's baseline sets where the
+  // browser drew it (spaces paint nothing, so they do not count).
+  function holdsUnmovedText(tokens, first, last) {
+    for (let index = first; index <= last; index++) {
+      const token = tokens[index];
+      if (token.kind === 'text' && !token.style.baseline && !token.nudge && /\S/.test(token.text)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // A text token's bounds where the renderers draw it on its line, which
+  // carries no relative position: with the line's unmoved text (`settles`,
+  // holdsUnmovedText), on that text's baseline, its rect less its nudge;
+  // where every word of the line is moved, the whole line is drawn where it
+  // is moved, and the token at its rect.
+  function bodyBounds(token, settles) {
     const nudge = token.nudge || 0;
-    if (!nudge) return token.rect;
+    if (!nudge || !settles) return token.rect;
     const rect = token.rect;
     return { left: rect.left, top: rect.top - nudge, right: rect.right, bottom: rect.bottom - nudge };
   }
@@ -1807,9 +1825,10 @@ function createTextLayout(env) {
     // it spans the line's body, the text no super- or subscript moves
     // (assembleLine body), the whole line where all of it is moved.
     let body = null;
+    const settles = holdsUnmovedText(tokens, 0, tokens.length - 1);
     for (let index = 0; index < tokens.length; index++) {
       const token = tokens[index];
-      if (token.kind === 'text' && !token.style.baseline) body = unionBounds(body, baselineBounds(token));
+      if (token.kind === 'text' && !token.style.baseline) body = unionBounds(body, bodyBounds(token, settles));
     }
     const top = body ? body.top : line.top;
     const bottom = body ? body.bottom : line.bottom;

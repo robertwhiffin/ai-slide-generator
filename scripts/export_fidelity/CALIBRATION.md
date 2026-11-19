@@ -350,6 +350,36 @@ R11g's first measurement, on 2026-11-18, read 5.57 and 11.13 px. The value is DM
 face's ascent ratio moves it by a few percent, a fraction of a px per line. With it, the deck for
 Google places a superscript's later line −0.56 px from the browser's (20 px, line-height 29 px).
 
+**Space before, where the cap writes no growth (ruling R11j).** Google sets a paragraph's first
+line by the paragraph's spacing, and the cap keeps a script run on it at the line's own size, so
+its excess grows nothing there. A line with no script run has no cap at all. Both take the
+browser's growth of the line as space before instead, as the deck for PowerPoint does
+(`emit_text.cjs` `growthBeforePx`); only a line within its paragraph that holds a script run is
+grown by the cap. Space before moves the line one px per px, as measured (2026-11-19): a later
+paragraph's first line holding a superscript, its growth written at 1:1 and over the constant
+(an XML edit of the same deck):
+
+| later paragraph's first line (20 px block) | growth written | line's baseline |
+|---|---|---|
+| line-height 29 px, 24 px "Gamma" and a superscript | none (before) | −4.69 |
+| the same | 1:1 | **−0.04** |
+| the same | over 0.96 | +0.16 |
+| line-height 1.45, 24 px "Gamma" and a superscript | 1:1 / over 0.96 | **−0.04** / +0.07 |
+| line-height 29 px, 24 px line 1, then a superscript | 1:1 / over 0.96 | **+1.19** / +1.55 |
+
+And lines with no script run, written without their growth and with it (`measure_script_lines.py`
+probes `plain-*`, a 16 px paragraph; offsets of each line after the first):
+
+| paragraph | without | with |
+|---|---|---|
+| line-height 1.4, a 28 px run on line 2 | −11.60, −16.35 | −2.62, +0.43 |
+| line-height 1.6, a 20 px run on line 2 | −3.13, −5.97, −5.97 | +0.87, +0.43, +0.43 |
+| line-height 26 px, a 20 px run on line 2 | −0.14, −1.58, −1.58 | −0.14, +0.42, +0.42 |
+
+So a deck with no script run is the same for both apps. A 28 px line opening a paragraph whose
+spacing is tighter than single (66.7%) still sits 2.6 px high, in PowerPoint 3.6 px: that is
+the two apps' spacing between paragraphs of different sizes, which no growth changes.
+
 ## A5: script lines in PowerPoint
 
 PowerPoint places a line holding a script run by its other runs, with two exceptions (task-11
@@ -390,6 +420,28 @@ A paragraph's first line in a 24 px run sits 1.68 px high whether or not the lin
 superscript: that is PowerPoint's spacing between paragraphs of different sizes, which these
 rules do not change. A right-aligned and a centred line ending in a superscript keep their
 place (−2.85 px and −1.42 px, as before).
+
+The growth rule covers lines with no script run too: a larger run's own unitless line height,
+or the block's strut beside a larger line, puts a later line lower than its spacing. The
+re-review's probes (16 px paragraphs; each line after the first; before = the engine before the
+growth rule):
+
+| paragraph | before | now |
+|---|---|---|
+| line-height 1.4, a 28 px run on line 2 | −12.91, −17.98 | −3.63, −0.38 |
+| line-height 1.6, a 20 px run on line 2 | −4.35, −7.35, −6.07 | −0.19, −0.63, +0.65 |
+| line-height 26 px, a 20 px run on line 2 | −1.76, −3.76, −2.88 | −1.76, −0.88, −0.32 |
+
+**Nudges** (ruling R11h). A same-size `position: relative` move is no script: the run stays
+plain, and since no run carries a move, it stands on its line's baseline. Where the line also
+holds unmoved text, the line is placed from that text; where every word of it is moved, the
+whole line is placed where it is moved (20 px):
+
+| case | as a script (R11h's base) | every nudge put back on the baseline | now |
+|---|---|---|---|
+| "Revenue ▲ 12% up", the ▲ up 3 px | +0.12 | +0.12 | +0.12 |
+| the whole line up 3 px | +1.20 | +3.12 | −0.08 |
+| the whole line down 4 px | +21.20 | −4.08 | +0.08 |
 
 ## Runs behind this record
 

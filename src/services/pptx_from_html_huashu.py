@@ -13,9 +13,10 @@ covers. ``is_available()`` returns False outside the local-dev gate.
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
-apart, and only those are written differently, all around superscript and
-subscript lines (task-11 rulings R11g and R11i and findings r4, measured in
-both apps; ``scripts/export_fidelity/CALIBRATION.md`` A2, A4 and A5):
+apart, and only those are written differently, all on lines that hold a
+superscript or subscript run (task-11 rulings R11g, R11i and R11j and
+findings r4, measured in both apps; ``scripts/export_fidelity/CALIBRATION.md``
+A2, A4 and A5):
 
 * a script run's size. PowerPoint shrinks a script run and places its line by
   its other runs, so the run is written enlarged and PowerPoint draws it at the
@@ -23,14 +24,16 @@ both apps; ``scripts/export_fidelity/CALIBRATION.md`` A2, A4 and A5):
   draws it low, so for it the run is capped at its line's size (its glyph then
   drawn at 0.8 of the browser's, the trade-off R11i accepts);
 * for PowerPoint alone, a word joiner after a script run that ends its line,
-  which PowerPoint would otherwise size the line by, and the space before a
-  later line the browser set further down than its spacing (a raised script
-  run's line box grows its line), which PowerPoint spaces by its paragraph
-  alone; for Google Slides a script line's growth comes from the script run's
-  written size instead.
+  which PowerPoint would otherwise size the line by;
+* the growth of a later line the browser set further down than its spacing
+  (a raised script run's line box, a larger run's own line height, the
+  block's strut), which both apps space by its paragraph alone: written as
+  that line's space before, in both decks but for a line within its paragraph
+  that holds a script run, which Google Slides grows by the run's written
+  size instead (R11g; a later paragraph's first line holding one takes the
+  space before, R11j).
 
-A deck with no script run and no line the browser grew is the same for both
-targets.
+So a deck with no script run is the same for both targets.
 """
 
 from __future__ import annotations

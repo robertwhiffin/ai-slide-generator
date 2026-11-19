@@ -60,9 +60,14 @@
 //   space would do as much, but PowerPoint counts a trailing space in a
 //   right-aligned or centred line, which it moved left by the space's advance
 //   (5.3 px at 20 px); the word joiner has none, and breaks nothing.
-// Neither goes into the deck for Google Slides (target 'gslides'), which
-// sizes a line by every run on it: there a script run is capped so that it
-// grows its line as the browser did (scriptCapPx).
+// Google Slides (target 'gslides') sizes a line by every run on it, so its
+// deck has no word joiner, and within a paragraph a script run is capped so
+// that it grows its line as the browser did (scriptCapPx). Every other line
+// the browser grew takes its growth as space before there too: one with no
+// script run, and the first line of a later paragraph holding one, whose cap
+// keeps the line's own size because Google sets a paragraph's first line by
+// its spacing (task-11 ruling R11j, growthBeforePx; measured in Google,
+// scripts/export_fidelity/CALIBRATION.md A4).
 //
 // Placement. The snapshot's y is the top of the first line's glyphs. The
 // renderers set a single-spaced first line by its font size where the browser
@@ -168,6 +173,20 @@ function scriptCapPx(line, growthPx) {
   return size + (Number(growthPx) || 0) / GOOGLE_LINE_GROWTH_PER_PX;
 }
 
+// The growth (px) the deck writes as space before `line`, the line at
+// `lineIndex` of its paragraph: what the browser grew it by. For PowerPoint
+// (`forPowerPoint`), every line's. For Google Slides, every line's but that
+// of a line within its paragraph holding a script run, which Google grows by
+// the run's written size instead (scriptCapPx, R11g); so the first line of a
+// later paragraph holding one takes its growth here (R11j), and a deck with
+// no script run is the same for both apps.
+function growthBeforePx(line, lineIndex, forPowerPoint) {
+  const growth = Number(line.growthPx) || 0;
+  if (forPowerPoint) return growth;
+  const grownByItsCap = lineIndex > 0 && (line.runs || []).some((run) => run.baseline);
+  return grownByItsCap ? 0 : growth;
+}
+
 // A blank line's NBSP run: the previous run's face and size without its glyph
 // marks, so neither an underline nor a baseline shift, nor the size a script
 // run is enlarged to for the renderer's own shrink.
@@ -197,8 +216,8 @@ function lineEndOptions(line, item, fonts) {
 
 // The item's written paragraphs, in order: {objects, pct, beforePx}, one per
 // paragraph of the model, or one per line of a loosely spaced one, and for
-// PowerPoint one more at each later line the browser grew. `renderer` is
-// {target}: the renderer the deck is written for (emitText).
+// PowerPoint one more at each later line the browser grew (growthBeforePx).
+// `renderer` is {target}: the renderer the deck is written for (emitText).
 function writtenParagraphs(item, fonts, renderer) {
   const target = renderer && renderer.target;
   const forPowerPoint = target !== 'gslides';
@@ -215,7 +234,7 @@ function writtenParagraphs(item, fonts, renderer) {
     let current = null;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const line = lines[lineIndex];
-      const grownPx = forPowerPoint ? Number(line.growthPx) || 0 : 0;
+      const grownPx = growthBeforePx(line, lineIndex, forPowerPoint);
       if (!current || spacing.gapPx > 0 || grownPx > 0) {
         let beforePx = spacing.gapPx;
         if (lineIndex === 0) beforePx = paragraphIndex > 0 ? (previousGapPx + spacing.gapPx) / 2 : 0;
@@ -306,9 +325,9 @@ function placementOf(item) {
 //   fonts     model.fonts, the webfont weights the page loaded per family;
 //   renderer  {target: 'pptx' | 'gslides'}: the renderer the deck is written
 //             for (emit_deck.mjs payload.target), 'pptx' when absent. A script
-//             run's written size depends on it (emit_typography.cjs), and so,
-//             for PowerPoint alone, do the lines the browser grew and the
-//             run after a script run that ends its line (writtenParagraphs).
+//             run's written size depends on it (emit_typography.cjs), and so
+//             do the space before the lines the browser grew and the run
+//             after a script run that ends its line (writtenParagraphs).
 function emitText(slide, item, fonts, renderer) {
   const objects = textObjects(item, fonts, renderer);
   if (!objects.length) return;

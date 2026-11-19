@@ -316,7 +316,33 @@ RELATIVE_LINES = {
         "1",
         "super",
     ),
+    # A whole line moved: every word of it is in the one relatively positioned span.
+    "whole-line-up": (
+        "",
+        '<span id="moved" style="position:relative; top:-3px"><span id="lead">Revenue</span> '
+        "&#9650; 12% up</span>",
+        "Revenue",
+        None,
+    ),
+    "whole-line-down": (
+        "",
+        '<span id="moved" style="position:relative; top:4px"><span id="lead">Revenue</span> '
+        "grew 12%</span>",
+        "Revenue",
+        None,
+    ),
+    # Every word moved by spans of its own, the space between them unmoved.
+    "whole-line-two-spans": (
+        "",
+        '<span id="moved" style="position:relative; top:-3px"><span id="lead">Revenue</span>'
+        '</span> <span style="position:relative; top:-3px">grew</span>',
+        "Revenue",
+        None,
+    ),
 }
+# The nudged lines placed from their text: one ▲ moved among plain words, and
+# a whole line moved up and down, by one span or by one span per word.
+NUDGED_LINES = ("nudge", "whole-line-up", "whole-line-down", "whole-line-two-spans")
 # Important 2 (round 4): script runs at the end of their line, and later lines
 # the browser grew, in a 20 px paragraph (40 px where named) at the left of the
 # slide. Each case: its font size, its line height (None: normal) and its
@@ -378,6 +404,30 @@ GROWN_LINE_CASES = (
     "sup-mid-line-2",
     "tight-sup-mid-line-2",
 )
+# Minor 2 (round 5): paragraphs with no script run whose later lines the
+# browser grows, a larger run's own (unitless) line height or the block's
+# strut holding the line beside a larger one down. Each: the block's font size
+# and line height, and its lines (lead word, the lead's own font size or None
+# for the block's, the rest of the line); line n leads with #l<n>.
+PLAIN_GROWTH_WORDS = (
+    ("Alpha", None, " revenue grew"),
+    ("Gamma", 20, " margin held"),
+    ("Delta", None, " costs fell"),
+    ("Omega", None, " cash rose"),
+)
+PLAIN_GROWTH_LINES = {
+    "unitless-1.4-28px-line-2": (
+        16,
+        "1.4",
+        (
+            ("Alpha", None, " body text"),
+            ("Gamma", 28, " big figure"),
+            ("Delta", None, " body again"),
+        ),
+    ),
+    "unitless-1.6-20px-line-2": (16, "1.6", PLAIN_GROWTH_WORDS),
+    "26px-20px-line-2": (16, "26px", PLAIN_GROWTH_WORDS),
+}
 # The renderers' single spacing, as a multiple of the font size (emit_text.cjs).
 SINGLE_SPACING_EM = 1.2
 # What the deck for PowerPoint writes after a script run that ends its line:
@@ -2014,11 +2064,15 @@ class TestScriptRunsPerRenderer:
 
         Every part identical, ``docProps/core.xml`` canonicalised
         (``structural_manifest``): a turned label, a turned label of two lines,
-        and a paragraph whose second line opens a paragraph of its own in the
-        slide model (its 24 px run), which the browser set where its spacing
-        puts it, so it carries no growth.
+        a paragraph whose second line opens a paragraph of its own in the
+        slide model (its 24 px run) where its spacing puts it, and the three
+        paragraphs whose later lines the browser grew (``PLAIN_GROWTH_LINES``):
+        both decks write a line's growth as space before wherever no script
+        run's size writes it (Google: −11.6 px high without, +0.4 with;
+        CALIBRATION.md A4).
         """
         bodies = [SLIDES["tag"], SLIDES["br-lines"], _script_line_body("later-paragraph-plain")]
+        bodies += PLAIN_GROWTH_BODIES
         exports = {}
         for target in ("pptx", "gslides"):
             exports[target], failures = export_slides(
@@ -2041,11 +2095,13 @@ class TestScriptRunsPerRenderer:
         * every script run's size (R11g: capped at its line's for Google);
         * in the PowerPoint deck, the word joiner after a script run that ends
           its line (Important 2);
-        * a later line the browser grew: in the PowerPoint deck it opens a
-          paragraph with its spacing plus its growth (``_second_line_growth``)
-          as space before, where the Google deck places it by its spacing alone
-          (Important 2).
-        Each case holds a script run, so the decks do differ.
+        * a later line the browser grew within its paragraph: in the PowerPoint
+          deck it opens a paragraph with its spacing plus its growth
+          (``_second_line_growth``) as space before, where the Google deck
+          places it by its spacing alone (Important 2).
+        The first line of a later paragraph holding a script run carries its
+        growth in both decks (R11j), so it is alike in both but for the script
+        run's size. Each case holds a script run, so the decks do differ.
         """
         decks = script_line_decks
         manifests = {target: structural_manifest(deck) for target, deck in decks.items()}
@@ -2066,9 +2122,7 @@ class TestScriptRunsPerRenderer:
             for pptx_shape, google_shape in zip(pptx_shapes, google_shapes):
                 lines = {"pptx": _written_lines(pptx_shape, "pptx")}
                 lines["gslides"] = _written_lines(google_shape, "gslides")
-                if "Gamma" in pptx_shape.text and (
-                    name in GROWN_LINE_CASES or name == "later-paragraph-sup"
-                ):
+                if "Gamma" in pptx_shape.text and name in GROWN_LINE_CASES:
                     _take_out_the_growth(lines, name)
                 assert lines["pptx"] == lines["gslides"], (
                     f"{name}: the decks differ beyond what the targets write apart:\n"
@@ -2126,11 +2180,7 @@ def _take_out_the_growth(lines: dict[str, list[dict]], name: str) -> None:
     pptx_line, google_line = lines["pptx"][1], lines["gslides"][1]
     spacing = google_line["before"] if google_line["opens"] and google_line["before"] else 0.0
     growth = _second_line_growth(name)
-    tolerance = (
-        TWIN_GROWTH_TOLERANCE_PX * PT_PER_PX
-        if name == "later-paragraph-sup"
-        else SPACE_BEFORE_TOLERANCE_PT
-    )
+    tolerance = SPACE_BEFORE_TOLERANCE_PT
     assert (
         pptx_line["opens"]
         and pptx_line["before"] is not None
@@ -2163,20 +2213,31 @@ class TestScriptRunsInGoogleSlides:
           the browser's superscript, Preflight's, and a subscript. Capped at
           the line's size alone, the browser's superscript line is drawn 6 px
           high; written for PowerPoint, Preflight's 3.6 px and the subscript's
-          6 px low.
+          6 px low;
+        * "Gamma" in 24 px, opening a paragraph of its own on line 2 with a
+          superscript (R11j). Without its growth as space before, Google draws
+          it 4.69 px high;
+        * "Gamma" (20 px) and "Delta" (16 px), the lines a 16 px paragraph at
+          line-height 1.6 grows with no script run: without their growth as
+          space before, Google draws them 3.1 and 6.0 px high.
         The presentation is deleted afterwards.
         """
         fitz = pytest.importorskip("fitz", reason="reads Drive's PDF: run with --with pymupdf")
         later = [f"later-{name}" for name in LATER_SCRIPT_LINES]
         bodies = [SLIDES["superscript"], SLIDES["superscript"].replace("20px", "40px")]
         bodies += [SLIDES[name] for name in later]
+        bodies.append(_script_line_body("later-paragraph-sup"))
+        bodies += [_plain_growth_body("unitless-1.6-20px-line-2")] * 2
         # Each slide: the word whose baseline is read, its selector and its line's size.
         words = [("Revenue", "#lead", 20.0), ("Revenue", "#lead", 40.0)]
         words += [("Gamma", "#second", 20.0)] * len(later)
+        words.append(("Gamma", "#second", 24.0))
+        words += [("Gamma", "#l2", 20.0), ("Delta", "#l3", 16.0)]
         css = DECK_CSS + ROTATION_CSS
         pptx, failures = export_slides(bodies, css=css, monkeypatch=monkeypatch, target="gslides")
         assert failures == [], failures
-        conversion = google_slides_presentation(pptx, ["sup-20", "sup-40", *later])
+        names = ["sup-20", "sup-40", *later, "later-paragraph-sup", "plain-gamma", "plain-delta"]
+        conversion = google_slides_presentation(pptx, names)
         try:
             harness = fidelity_harness()
             pdf_bytes = harness._google_request(
@@ -2310,18 +2371,29 @@ class TestRelativeInlines:
             f"{moved_px:g} px ({moved_px * PT_PER_PX:g} pt)"
         )
 
-    def test_a_nudged_line_is_placed_from_its_own_text(self, rotation_pptx: bytes) -> None:
-        """R11h: the nudged ▲ is drawn on its line's baseline, so it does not lift its line.
+    @pytest.mark.parametrize("name", NUDGED_LINES)
+    def test_a_nudged_line_is_placed_from_its_own_text(
+        self, rotation_pptx: bytes, name: str
+    ) -> None:
+        """R11h: a nudged line is placed where the browser draws its text.
 
-        "Revenue ▲ 12% up" with the ▲ moved up 3 px: the export cannot move one
-        run of a line, so the ▲ stands on the baseline, and the line is placed
-        from its text where the browser has it: the box top is the first-line
-        offset above "Revenue"'s glyph top, within 1 px. Placed by the moved
-        ▲'s top, the whole line would draw 3 px high.
+        The export cannot move one run of a line, so a nudged run stands on the
+        line's baseline:
+        * "Revenue ▲ 12% up" with the ▲ moved up 3 px is placed from its
+          unmoved text: the box top is the first-line offset above "Revenue"'s
+          glyph top, within 1 px. Placed by the moved ▲'s top, the whole line
+          would draw 3 px high;
+        * a line all of whose text one span moves (up 3 px, down 4 px) moves as
+          a whole: it is placed from its moved text, the box top the offset
+          above the moved "Revenue"'s glyph top, within 1 px. Placed as if
+          unmoved, it would draw 3 px low and 4 px high. So does a line whose
+          words two spans move alike: the unmoved space between them paints
+          nothing.
         """
-        _, item = _text_item(_shapes(rotation_pptx, "relative-nudge"), "Revenue", "the line")
+        slide = f"relative-{name}"
+        _, item = _text_item(_shapes(rotation_pptx, slide), "Revenue", slide)
 
-        _assert_placed_from_its_text(item, _document("relative-nudge"), "the nudged line")
+        _assert_placed_from_its_text(item, _document(slide), f"the {name} line")
 
 
 def _script_line_body(name: str) -> str:
@@ -2440,8 +2512,10 @@ class TestScriptLinesInPowerPoint:
     size holding a word joiner (U+2060: a space did as much, but PowerPoint
     counts its advance in a right-aligned or centred line), and a later line
     the browser grew is a paragraph of its own with its growth as space
-    before. Neither applies to Google Slides, which sizes a line by its script
-    runs' written size (R11g).
+    before. Google Slides sizes a line by its script runs' written size, so
+    its deck has no word joiner, and within a paragraph a script line's
+    growth is its script run's (R11g); a later paragraph's first line holding
+    one takes its growth as space before there too (R11j).
     """
 
     @pytest.mark.parametrize("name", LINE_END_CASES)
@@ -2570,20 +2644,24 @@ class TestScriptLinesInPowerPoint:
     def test_the_google_slides_deck_places_its_lines_by_their_spacing_alone(
         self, script_line_decks: dict[str, bytes]
     ) -> None:
-        """Written for Google Slides, the deck keeps neither.
+        """Written for Google Slides, the deck keeps neither, within a paragraph.
 
         Under ``target='gslides'`` no word joiner follows a script run, and every
-        later line is placed by its paragraph's spacing alone: a loose one
-        (29 px) is a paragraph with the leading beyond single before it (half
-        each paragraph's for a later paragraph), a tight one (22 px) a soft
-        break. The later paragraph's superscript is capped at its line's 24 px
-        (18 pt): Google grows a line by what its runs hold (R11g).
+        later line within its paragraph is placed by its paragraph's spacing
+        alone: a loose one (29 px) is a paragraph with the leading beyond single
+        before it, a tight one (22 px) a soft break; Google grows a line by
+        what its runs hold (R11g). A later paragraph's first line, which holds
+        no script run here, has half each paragraph's leading before it (and
+        would carry its growth too, as a line with no script run does in both
+        decks: ``test_a_deck_with_no_script_runs_is_the_same_for_both_targets``).
+        A later paragraph's first line that holds one is R11j's
+        (``test_the_google_slides_deck_gives_a_later_paragraphs_script_line_its_growth``).
         """
         for name, (size, line_height, _) in SCRIPT_LINES.items():
             item = _script_line_item(script_line_decks, "gslides", name)
             texts = [run.text for paragraph in item.paras for run in paragraph.runs]
             assert WORD_JOINER not in item.text, f"{name}: the Google deck adds a run: {texts}"
-            if line_height is None:
+            if line_height is None or name == "later-paragraph-sup":
                 continue
             pitch = _px(line_height)
             if pitch < SINGLE_SPACING_EM * size:
@@ -2604,12 +2682,144 @@ class TestScriptLinesInPowerPoint:
                 f"{name}: the Google deck's second line has spcBef {paragraph.space_before_pt}, "
                 f"its spacing's is {spacing * PT_PER_PX:.3f} pt"
             )
-        later = _script_line_item(script_line_decks, "gslides", "later-paragraph-sup")
-        script = _script_run(later, "1")
+
+    def test_the_google_slides_deck_gives_a_later_paragraphs_script_line_its_growth(
+        self, script_line_decks: dict[str, bytes]
+    ) -> None:
+        """R11j: written for Google Slides, a later paragraph's first line holding a script run.
+
+        "Gamma" in 24 px with a superscript opens a paragraph of its own on
+        line 2. Google sets a paragraph's first line by the paragraph's
+        spacing, and the line's script run is capped at the line's own 24 px
+        (18 pt), so its excess grows nothing there. So the paragraph carries
+        the half-leading space before (2.6 px) plus the browser's growth of the
+        line (the twins' "Gamma" tops apart), as the deck for PowerPoint does:
+        Google then draws the line −0.04 px from the browser's, where it drew
+        it 4.69 px high without (CALIBRATION.md A4).
+        """
+        item = _script_line_item(script_line_decks, "gslides", "later-paragraph-sup")
+        paragraph = _paragraph_opening_with(item, "Gamma", "the Google deck")
+        growth = _second_line_growth("later-paragraph-sup")
+        assert growth >= LINE_GROWTH_MIN_PX, f"fixture drift: the superscript grew {growth} px"
+        spacing = (_gap_px(20, 29) + _gap_px(24, 29)) / 2 * PT_PER_PX
+
+        assert (
+            paragraph.space_before_pt is not None
+            and abs(paragraph.space_before_pt - spacing - growth * PT_PER_PX)
+            <= TWIN_GROWTH_TOLERANCE_PX * PT_PER_PX
+        ), (
+            f"the browser grew the later paragraph's line {growth:.2f} px, so the Google deck's "
+            f"paragraph needs spcBef {spacing + growth * PT_PER_PX:.3f} pt; it has "
+            f"{paragraph.space_before_pt}"
+        )
+        script = _script_run(item, "1")
         assert abs((script.size_pt or 0.0) - 24 * PT_PER_PX) <= SCRIPT_SIZE_TOLERANCE_PT, (
             f"the later paragraph's superscript is {_describe_run(script)} in the Google deck, "
             f"expected its line's {24 * PT_PER_PX:g} pt"
         )
+
+
+def _plain_growth_body(name: str) -> str:
+    """The slide body of ``PLAIN_GROWTH_LINES[name]``: one paragraph at (100, 150), no wrap."""
+    size, line_height, words = PLAIN_GROWTH_LINES[name]
+    lines = []
+    for number, (word, word_px, rest) in enumerate(words, start=1):
+        style = f' style="font-size:{word_px}px"' if word_px else ""
+        lines.append(f'<span id="l{number}"{style}>{word}</span>{rest}')
+    return (
+        '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
+        f'margin:0; font-size:{size}px; line-height:{line_height}; white-space:nowrap;">'
+        f'{"<br>".join(lines)}</p></div>'
+    )
+
+
+PLAIN_GROWTH_BODIES = [_plain_growth_body(name) for name in PLAIN_GROWTH_LINES]
+
+
+@pytest.fixture(scope="module")
+def plain_growth_pptx() -> Iterator[bytes]:
+    """``PLAIN_GROWTH_LINES``, exported once, written for PowerPoint."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_slides(
+            PLAIN_GROWTH_BODIES,
+            css=DECK_CSS + ROTATION_CSS,
+            monkeypatch=monkeypatch,
+            target="pptx",
+        )
+    assert failures == [], f"the export rejected a slide: {failures}"
+    yield pptx
+
+
+def _above_leading_px(line_height: float, content_height: float) -> float:
+    """The leading Chrome sets above a line's content: half the difference, floored to a px."""
+    return math.floor((line_height - content_height) / 2 + 1e-6)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestPlainLineGrowth:
+    @pytest.mark.parametrize("name", list(PLAIN_GROWTH_LINES))
+    def test_a_later_line_the_browser_grew_has_its_growth_before_it(
+        self, plain_growth_pptx: bytes, name: str
+    ) -> None:
+        """Round 5, Minor 2: a paragraph with no script run, whose later lines the browser grew.
+
+        Written for PowerPoint, every line of the 16 px paragraph opens a
+        paragraph of its own (its spacing is looser than single, or its larger
+        lead run starts a paragraph of the slide model). Each carries as space
+        before its spacing, the leading beyond single (half its own and half
+        the paragraph before's where it starts a paragraph of the model), plus
+        how much further down than that spacing the browser set it.
+
+        Where the spacing puts a line is read from the browser: one line height
+        below the line before within a paragraph of the model; across two
+        paragraphs of it, CSS sets each line's content in the block's line
+        height with the leading split about it, Chrome flooring the half above
+        to a whole px. So the later line's text starts the line height, less
+        the earlier line's leading above, plus its own, below the earlier one's.
+        A larger run's own unitless line height, or the block's strut beside a
+        larger line, puts the line lower than that: its growth. At least one
+        line of each paragraph grew.
+        """
+        size, line_height, words = PLAIN_GROWTH_LINES[name]
+        index = list(PLAIN_GROWTH_LINES).index(name)
+        document = slide_document(
+            PLAIN_GROWTH_BODIES[index],
+            css=DECK_CSS + ROTATION_CSS,
+            slide_id=f"snapshot-{index + 1}",
+        )
+        pitch = _px(browser_style(document, "#target")["lineHeight"])
+        rects = browser_each_rect(document, "#target > span")
+        assert len(rects) == len(words), f"fixture drift: {len(rects)} lead words"
+        _, item = _text_item(slide_shapes(plain_growth_pptx, index), "Alpha", name)
+        grown = []
+        for number in range(1, len(words)):
+            earlier, later = rects[number - 1], rects[number]
+            earlier_px = words[number - 1][1] or size
+            later_px = words[number][1] or size
+            opens = later_px != earlier_px
+            spaced = pitch
+            if opens:
+                spaced -= _above_leading_px(pitch, earlier["h"])
+                spaced += _above_leading_px(pitch, later["h"])
+            growth = later["y"] - earlier["y"] - spaced
+            growth = growth if growth >= LINE_GROWTH_MIN_PX else 0.0
+            spacing = _gap_px(later_px, pitch)
+            if opens:
+                spacing = (_gap_px(earlier_px, pitch) + spacing) / 2
+            expected = (spacing + growth) * PT_PER_PX
+            paragraph = _paragraph_opening_with(item, words[number][0], name)
+            assert (
+                paragraph.space_before_pt is not None
+                and abs(paragraph.space_before_pt - expected) <= SPACE_BEFORE_TOLERANCE_PT
+            ), (
+                f"{name}: {words[number][0]!r} is set {growth:.2f} px past its spacing in the "
+                f"browser, so its paragraph needs spcBef {expected:.3f} pt (spacing "
+                f"{spacing:.2f} px); it has {paragraph.space_before_pt}"
+            )
+            if growth:
+                grown.append(words[number][0])
+        assert grown, f"fixture drift: no line of {name} grew in the browser"
 
 
 class TestRenderTargetPaths:

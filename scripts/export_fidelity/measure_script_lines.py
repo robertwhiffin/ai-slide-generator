@@ -20,8 +20,8 @@ what each app makes of each deck, against the browser:
    (``run.render_with_google_slides``), exports each conversion as PDF and
    reads it the same way, then deletes the presentation by its id;
 5. prints, per deck, app and slide, each line's baseline offset (app minus
-   browser; + is lower), the lead word's left-edge offset (+ is right) and the
-   script glyph's drawn size over the browser's;
+   browser; + is lower), line by line, the first lead word's left-edge offset
+   (+ is right) and the script glyph's drawn size over the browser's;
 6. with ``--gslides``, ``GOOGLE_LINE_GROWTH_PER_PX``'s points (A4): for each
    one-line superscript slide, how far Google lowers the line written for
    PowerPoint (its script run at the browser's size over
@@ -119,6 +119,28 @@ def _two_lines(line_height: str, lines: str, second_px: float = 20, script=("1",
 
 SUP = ("1", "sup")
 SUB = ("2", "sub")
+PLAIN_PX = 16
+PLAIN_WORDS = (
+    ("Alpha", None, " revenue grew"),
+    ("Gamma", 20, " margin held"),
+    ("Delta", None, " costs fell"),
+    ("Omega", None, " cash rose"),
+)
+
+
+def _plain(line_height: str, words: tuple[tuple[str, int | None, str], ...]) -> ProbeSlide:
+    """A 16 px paragraph whose line n leads with #l<n>, at its own size where one is given."""
+    lines = []
+    for number, (word, size_px, rest) in enumerate(words, start=1):
+        style = f' style="font-size:{size_px}px"' if size_px else ""
+        lines.append(f'<span id="l{number}"{style}>{word}</span>{rest}')
+    return ProbeSlide(
+        _paragraph(PLAIN_PX, line_height, "<br>".join(lines)),
+        tuple(
+            (word, f"#l{number}", size_px or PLAIN_PX)
+            for number, (word, size_px, _) in enumerate(words, start=1)
+        ),
+    )
 ENDS_LINE_1 = f"{FIRST} revenue grew<sup>1</sup><br>{SECOND} margin held"
 ENDS_LINE_2 = f"{FIRST} revenue grew<br>{SECOND} margin held<sup>1</sup>"
 MID_LINE_2 = f"{FIRST} revenue grew<br>{SECOND} margin<sup>1</sup> held"
@@ -176,6 +198,38 @@ SLIDES: dict[str, ProbeSlide] = {
     # A line-ending superscript in a right-aligned and a centred line.
     "sup-end-right": _one_line(20, REVENUE_UP, "Revenue", SUP, ALIGNED + " text-align:right;"),
     "sup-end-center": _one_line(20, REVENUE_UP, "Revenue", SUP, ALIGNED + " text-align:center;"),
+    # A later paragraph's first line holding a superscript (ruling R11j).
+    "1.45-24px-run-and-sup-on-line-2": _two_lines(
+        "1.45", f"{FIRST} revenue grew<br>{SECOND_24} margin<sup>1</sup> held", 24
+    ),
+    "29px-24px-line-1-sup-on-line-2": ProbeSlide(
+        _paragraph(
+            20, "29px", '<span id="first" style="font-size:24px">Alpha</span> revenue grew<br>'
+            f"{SECOND} margin<sup>1</sup> held"
+        ),
+        (("Alpha", "#first", 24), ("Gamma", "#second", 20)),
+        SUP,
+    ),
+    # Same-size relative nudges (ruling R11h): one word among plain ones, a
+    # whole line moved up, and one moved down.
+    "nudge-one-word": _one_line(
+        20, f'{REVENUE} <span style="position:relative; top:-3px">&#9650;</span> 12% up',
+        "Revenue", None,
+    ),
+    "nudge-whole-line-up": _one_line(
+        20, f'<span style="position:relative; top:-3px">{REVENUE} &#9650; 12% up</span>',
+        "Revenue", None,
+    ),
+    "nudge-whole-line-down": _one_line(
+        20, f'<span style="position:relative; top:4px">{REVENUE} grew 12%</span>', "Revenue", None
+    ),
+    # Paragraphs with no script run whose later lines the browser grows.
+    "plain-1.4-28px-line-2": _plain(
+        "1.4", (("Alpha", None, " body text"), ("Gamma", 28, " big figure"),
+                ("Delta", None, " body again")),
+    ),
+    "plain-1.6-20px-line-2": _plain("1.6", PLAIN_WORDS),
+    "plain-26px-20px-line-2": _plain("26px", PLAIN_WORDS),
 }
 ONE_LINE_SUPERSCRIPTS = ("sup-mid-20", "sup-mid-40")
 
@@ -349,16 +403,16 @@ def main() -> int:
                         else None
                     )
                     rows.append(
-                        f"| {label} | {target} | {app} | {name} | {_cell(offsets[0])} | "
-                        f"{_cell(offsets[1]) if len(offsets) > 1 else '-'} | "
+                        f"| {label} | {target} | {app} | {name} | "
+                        f"{' / '.join(_cell(offset) for offset in offsets)} | "
                         f"{_cell(_offset(drawn, truth[name], words[0], 'left'))} | "
                         f"{_cell(script_ratio, 3, signed=False)} |"
                     )
 
     lines = [
-        "| engine | target | app | slide | line 1 baseline | line 2 baseline | lead word left | "
+        "| engine | target | app | slide | baseline per line | lead word left | "
         "script glyph / browser |",
-        "|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|",
         *rows,
     ]
     if args.gslides:
