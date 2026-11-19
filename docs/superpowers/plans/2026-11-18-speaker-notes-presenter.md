@@ -478,19 +478,19 @@ base: v1
 prompt_file: presenter-text.md
 ```
 
-- [ ] **Step 3: Baseline and candidate on train.** Profile `fevm-novartis-br-qa` (the author's choice; it serves `databricks-claude-sonnet-5-5` and the judge `databricks-claude-sonnet-5`).
+- [ ] **Step 3: Baseline and candidate on train.** Profile `<profile>`, a workspace profile the author chooses, which must serve `databricks-claude-sonnet-5-5` and the judge `databricks-claude-sonnet-5`).
 
 ```bash
-uv run python -m evals.run_eval --agent builder --config v1-baseline --repeats 3 --profile fevm-novartis-br-qa
-uv run python -m evals.run_eval --agent builder --config evals/configs/builder/presenter-text.yaml --repeats 3 --profile fevm-novartis-br-qa
+uv run python -m evals.run_eval --agent builder --config v1-baseline --repeats 3 --profile <profile>
+uv run python -m evals.run_eval --agent builder --config evals/configs/builder/presenter-text.yaml --repeats 3 --profile <profile>
 ```
 
 Acceptance: no train case drops by more than one repeat against the baseline, and at least 90% of candidate rows carry both asides on every slide root. Count this from the run's MLflow traces (`mlflow.db` at the repo root, experiment `tellr-agent-eval`, filtered by run id) with a throwaway script outside the repo; never add it to `evals/`. Locally the renderer must attach to the shared browser on port 9555, so run the harness through a wrapper outside the repo that points Playwright's `chromium.launch` at `connect_over_cdp`; a run whose rows show `render-failure` is void. Spend cap USD 15 for the pass. If a scorer fails rows because of the asides, stop and report. Never edit the scorer.
 - [ ] **Step 4: Held-out once on the finalist.**
 
 ```bash
-uv run python -m evals.run_eval --agent builder --calibrate --split heldout --profile fevm-novartis-br-qa
-uv run python -m evals.run_eval --agent builder --config evals/configs/builder/presenter-text.yaml --repeats 3 --split heldout --profile fevm-novartis-br-qa
+uv run python -m evals.run_eval --agent builder --calibrate --split heldout --profile <profile>
+uv run python -m evals.run_eval --agent builder --config evals/configs/builder/presenter-text.yaml --repeats 3 --split heldout --profile <profile>
 ```
 
 Report only the aggregate line. The bar is the current v1 prompt on the same model, judge and day: run `--config v1-baseline --split heldout --repeats 3` once as well, and a candidate below it by more than one row means stop and report.
