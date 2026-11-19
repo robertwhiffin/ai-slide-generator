@@ -1,0 +1,10 @@
+{
+  "version": "0.5.8",
+  "date": "2026-11-19",
+  "items": [
+    { "title": "Requests start straight away", "body": "Your message starts generating as soon as you press Enter, even when many people are using Tellr." },
+    { "title": "Type while Tellr works", "body": "On Agent decks you can write your next message while a reply is generating, then press Enter once it finishes." },
+    { "title": "Fewer failed decks at busy times", "body": "When the AI model is busy, Tellr now waits and tries again instead of stopping your request." },
+    { "title": "MCP-created decks use Agent mode", "body": "Decks created over MCP, for example from Genie One, are now Agent decks you can edit over MCP, with an instant link and preview." }
+  ]
+}
