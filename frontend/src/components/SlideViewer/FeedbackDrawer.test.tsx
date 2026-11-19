@@ -358,7 +358,7 @@ describe('FeedbackDrawer — while a turn is running', () => {
   });
 });
 
-// ── Talk track and notes (presenter plan Task 4): two boxes, each saved on its own ──
+// ── Talk track and notes (presenter plan Task 4): two tabs, one box each, each saved on its own ──
 
 const NOTES_HINT = 'Chat rewrites the talk track only when it rebuilds the slide.';
 const VIEW_STATE_KEY = 'tellr-viewer-view-state';
@@ -387,18 +387,41 @@ function renderNotesDrawer(props: NotesDrawerProps = {}) {
   return render(notesTree(props));
 }
 
+const openTalkTab = () => fireEvent.click(screen.getByTestId('drawer-tab-talk'));
 const openNotesTab = () => fireEvent.click(screen.getByTestId('drawer-tab-notes'));
-const talkInput = () => screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
-const talkSave = () => screen.getByTestId('drawer-talk-save');
-const notesInput = () => screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
-const notesSave = () => screen.getByTestId('drawer-notes-save');
+const openFeedbackTab = () => fireEvent.click(screen.getByTestId('drawer-tab-feedback'));
+// Each getter first selects the box's own tab: a box exists only on its tab.
+const talkInput = () => {
+  openTalkTab();
+  return screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
+};
+const talkSave = () => {
+  openTalkTab();
+  return screen.getByTestId('drawer-talk-save');
+};
+const notesInput = () => {
+  openNotesTab();
+  return screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+};
+const notesSave = () => {
+  openNotesTab();
+  return screen.getByTestId('drawer-notes-save');
+};
 
 /** The single argument of the n-th onSaveNotes call. */
 function savedFields(fn: { mock: { calls: unknown[][] } }, call = 0): PresenterFields {
   return fn.mock.calls[call][0] as PresenterFields;
 }
 
-describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () => {
+const TAB_IDS = ['drawer-tab-feedback', 'drawer-tab-talk', 'drawer-tab-notes'] as const;
+
+function expectActiveTab(active: (typeof TAB_IDS)[number]) {
+  for (const id of TAB_IDS) {
+    expect(screen.getByTestId(id)).toHaveAttribute('data-active', id === active ? 'true' : 'false');
+  }
+}
+
+describe('FeedbackDrawer: Talk track and Notes tabs, one box each', () => {
   beforeEach(() => {
     localStorage.clear();
   });
@@ -406,23 +429,59 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     localStorage.clear();
   });
 
+  // ── The three tabs ──────────────────────────────────────────────────────────
+
+  it('renders three tabs in order: AI feedback, Talk track, Notes', () => {
+    // Sabotage target: drop the Talk track tab button, or put it after Notes.
+    renderNotesDrawer({ talkTrack: 't', speakerNotes: 'n', slideKey: 's1' });
+    const [feedback, talk, notes] = TAB_IDS.map(id => screen.getByTestId(id));
+    expect(feedback).toHaveTextContent(/^AI feedback$/);
+    expect(talk).toHaveTextContent(/^Talk track$/);
+    expect(notes).toHaveTextContent(/^Notes$/);
+    expect(feedback.compareDocumentPosition(talk) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(talk.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expectActiveTab('drawer-tab-feedback');
+
+    openTalkTab();
+    expectActiveTab('drawer-tab-talk');
+    openNotesTab();
+    expectActiveTab('drawer-tab-notes');
+  });
+
   // ── Read-only ───────────────────────────────────────────────────────────────
 
-  it('read-only: shows the talk track and the notes as plain text, with no textareas', () => {
-    // Sabotage target: render either field with dangerouslySetInnerHTML, or show only one of them.
+  it('read-only: the Talk track tab shows only the talk track, as plain text, with no editors', () => {
+    // Sabotage target: render the talk track with dangerouslySetInnerHTML, or show the notes on the Talk track tab.
     const talk = '<i>Say</i> this.\n\nThen ask the question.';
     const notes = '<b>bold</b>\n\nSecond';
     renderNotesDrawer({ talkTrack: talk, speakerNotes: notes, slideKey: 's1' });
-    openNotesTab();
+    openTalkTab();
 
     const talkBody = screen.getByTestId('drawer-talk');
     expect(talkBody.textContent).toBe(talk);
     expect(talkBody.querySelector('i')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes')).toBeNull();
+    expect(screen.queryByText(/Second/)).toBeNull();
+    expect(document.querySelector('textarea')).toBeNull();
+    for (const id of ['drawer-talk-input', 'drawer-talk-save', 'drawer-notes-input', 'drawer-notes-save', 'drawer-notes-hint']) {
+      expect(screen.queryByTestId(id)).toBeNull();
+    }
+    expect(screen.queryByTestId('drawer-talk-empty')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
+  });
+
+  it('read-only: the Notes tab shows only the notes, as plain text, with no editors', () => {
+    // Sabotage target: render the notes with dangerouslySetInnerHTML, or show the talk track on the Notes tab.
+    const talk = 'Then ask the question.';
+    const notes = '<b>bold</b>\n\nSecond';
+    renderNotesDrawer({ talkTrack: talk, speakerNotes: notes, slideKey: 's1' });
+    openNotesTab();
+
     const notesBody = screen.getByTestId('drawer-notes');
     expect(notesBody.textContent).toBe(notes);
     expect(notesBody.querySelector('b')).toBeNull();
-
-    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk')).toBeNull();
+    expect(screen.queryByText(/ask the question/)).toBeNull();
     expect(document.querySelector('textarea')).toBeNull();
     for (const id of ['drawer-talk-input', 'drawer-talk-save', 'drawer-notes-input', 'drawer-notes-save']) {
       expect(screen.queryByTestId(id)).toBeNull();
@@ -434,41 +493,77 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     ['empty', '', ''],
     ['whitespace-only', '  \n\t ', ' \n '],
     ['missing', undefined, undefined],
-  ])('read-only: shows the empty state when both fields are %s', (_label, talkTrack, speakerNotes) => {
-    // Sabotage target: drop the trim guard, or check only one field before showing the empty state.
+  ])('read-only: each tab shows its own empty line when both fields are %s', (_label, talkTrack, speakerNotes) => {
+    // Sabotage target: drop the trim guard on either tab.
     renderNotesDrawer({ talkTrack, speakerNotes, slideKey: 's1' });
-    openNotesTab();
 
-    expect(screen.getByTestId('drawer-notes-empty')).toHaveTextContent('No speaker notes for this slide.');
+    openTalkTab();
+    expect(screen.getByTestId('drawer-talk-empty')).toHaveTextContent('No talk track for this slide.');
     expect(screen.queryByTestId('drawer-talk')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
+
+    openNotesTab();
+    expect(screen.getByTestId('drawer-notes-empty')).toHaveTextContent('No speaker notes for this slide.');
     expect(screen.queryByTestId('drawer-notes')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk-empty')).toBeNull();
     expect(document.querySelector('textarea')).toBeNull();
   });
 
-  it('read-only: a talk track with empty notes shows the talk track and no empty state', () => {
-    // Sabotage target: base the empty state on the notes alone.
+  it('read-only: a talk track with empty notes fills the Talk track tab and leaves Notes empty', () => {
+    // Sabotage target: base the Notes tab's empty line on both fields (talk OR notes).
     renderNotesDrawer({ talkTrack: 'Lead with the result.', speakerNotes: '', slideKey: 's1' });
-    openNotesTab();
-
+    openTalkTab();
     expect(screen.getByTestId('drawer-talk')).toHaveTextContent('Lead with the result.');
+    expect(screen.queryByTestId('drawer-talk-empty')).toBeNull();
+
+    openNotesTab();
+    expect(screen.getByTestId('drawer-notes-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('drawer-notes')).toBeNull();
-    expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk')).toBeNull();
   });
 
-  it('read-only: notes with an empty talk track show the notes and no empty state', () => {
-    // Sabotage target: base the empty state on the talk track alone.
+  it('read-only: notes with an empty talk track fill the Notes tab and leave Talk track empty', () => {
+    // Sabotage target: base the Talk track tab's empty line on both fields.
     renderNotesDrawer({ talkTrack: '', speakerNotes: 'Source: the 2025 survey.', slideKey: 's1' });
     openNotesTab();
-
     expect(screen.getByTestId('drawer-notes')).toHaveTextContent('Source: the 2025 survey.');
-    expect(screen.queryByTestId('drawer-talk')).toBeNull();
     expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
+
+    openTalkTab();
+    expect(screen.getByTestId('drawer-talk-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('drawer-talk')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes')).toBeNull();
   });
 
-  // ── Editable: layout and copy ───────────────────────────────────────────────
+  // ── Editable: each tab holds only its own box ───────────────────────────────
 
-  it('editable: two labeled boxes, talk track first, each holding its own field', () => {
-    // Sabotage target: swap the props between the boxes, drop a sublabel, or put Notes above Talk track.
+  it('editable: the Talk track tab holds only the talk box, its Save, and the rebuild hint', () => {
+    // Sabotage target: render the notes box on the Talk track tab too, swap the props, or drop the hint.
+    renderNotesDrawer({
+      talkTrack: 'Say the result first.',
+      speakerNotes: 'Figure from the Q3 report.',
+      slideKey: 's1',
+      onSaveNotes: vi.fn<SaveFn>(async () => {}),
+    });
+    openTalkTab();
+
+    const input = screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
+    expect(input.value).toBe('Say the result first.');
+    expect(screen.getByRole('textbox', { name: /^Talk track/ })).toBe(input);
+    expect(screen.getByText('What you say.')).toBeInTheDocument();
+    expect(screen.getByTestId('drawer-talk-save')).toHaveTextContent(/^Save talk track$/);
+    expect(screen.getByTestId('drawer-notes-hint').textContent).toBe(NOTES_HINT);
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-save')).toBeNull();
+    expect(screen.queryByText('What you need to know.')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk-empty')).toBeNull();
+  });
+
+  it('editable: the Notes tab holds only the notes box and its Save, with no hint', () => {
+    // Sabotage target: render the talk box (or the hint) on the Notes tab too, or swap the props.
     renderNotesDrawer({
       talkTrack: 'Say the result first.',
       speakerNotes: 'Figure from the Q3 report.',
@@ -477,31 +572,26 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     });
     openNotesTab();
 
-    expect(talkInput().value).toBe('Say the result first.');
-    expect(notesInput().value).toBe('Figure from the Q3 report.');
-    expect(screen.getByRole('textbox', { name: /^Talk track/ })).toBe(talkInput());
-    expect(screen.getByRole('textbox', { name: /^Notes/ })).toBe(notesInput());
-    expect(screen.getByText('What you say.')).toBeInTheDocument();
+    const input = screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+    expect(input.value).toBe('Figure from the Q3 report.');
+    expect(screen.getByRole('textbox', { name: /^Notes/ })).toBe(input);
     expect(screen.getByText('What you need to know.')).toBeInTheDocument();
+    expect(screen.getByTestId('drawer-notes-save')).toHaveTextContent(/^Save notes$/);
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
 
-    // Talk track sits above notes.
-    expect(
-      talkInput().compareDocumentPosition(notesInput()) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    // Editable view never shows the read-only text or empty state.
-    expect(screen.queryByTestId('drawer-talk')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk-input')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk-save')).toBeNull();
+    expect(screen.queryByText('What you say.')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-hint')).toBeNull();
     expect(screen.queryByTestId('drawer-notes')).toBeNull();
     expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
   });
 
-  it('editable: the hint reads exactly the talk-track rebuild rule', () => {
-    // Sabotage target: keep the superseded "Notes you save here are kept..." copy.
+  it('editable: an empty slide shows an empty editor on each tab, not the read-only empty line', () => {
+    // Sabotage target: test the field text before onSaveNotes, so an empty editable slide gets the empty line.
     renderNotesDrawer({ talkTrack: '', speakerNotes: '', slideKey: 's1', onSaveNotes: vi.fn<SaveFn>(async () => {}) });
-    openNotesTab();
-
-    expect(screen.getByTestId('drawer-notes-hint').textContent).toBe(NOTES_HINT);
-    // An editable, empty slide shows both editors, not the read-only empty state.
     expect(talkInput().value).toBe('');
+    expect(screen.queryByTestId('drawer-talk-empty')).toBeNull();
     expect(notesInput().value).toBe('');
     expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
   });
@@ -509,9 +599,30 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
   // Sabotage target: drop maxLength from either textarea (the route refuses over 20,000 characters).
   it('both editors stop at the 20,000-character route limit', () => {
     renderNotesDrawer({ talkTrack: 'x', speakerNotes: 'y', slideKey: 's1', onSaveNotes: vi.fn<SaveFn>(async () => {}) });
-    openNotesTab();
     expect(talkInput().maxLength).toBe(20000);
     expect(notesInput().maxLength).toBe(20000);
+  });
+
+  // ── Editable: drafts survive a tab switch ───────────────────────────────────
+
+  it('an unsaved draft on each tab survives switching tabs and back on the same slide', () => {
+    // Sabotage target: keep the draft inside the box (it unmounts with its tab), or reset it on a tab change.
+    renderNotesDrawer({ talkTrack: 'Saved talk.', speakerNotes: 'Saved notes.', slideKey: 's1', onSaveNotes: vi.fn<SaveFn>(async () => {}) });
+
+    fireEvent.change(talkInput(), { target: { value: 'Talk draft.' } });
+    fireEvent.change(notesInput(), { target: { value: 'Notes draft.' } });
+    expect(screen.queryByTestId('drawer-talk-input')).toBeNull();
+
+    // Away to AI feedback and back to each tab.
+    openFeedbackTab();
+    expect(screen.queryByTestId('drawer-talk-input')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+
+    expect(talkInput().value).toBe('Talk draft.');
+    expect(talkSave()).toBeEnabled();
+    expect(notesInput().value).toBe('Notes draft.');
+    expect(notesSave()).toBeEnabled();
+    expect(talkInput().value).toBe('Talk draft.');
   });
 
   // ── Editable: dirty state ───────────────────────────────────────────────────
@@ -519,7 +630,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
   it('each Save is disabled until its own box is dirty', () => {
     // Sabotage target: one shared dirty check (talk OR notes changed) for both buttons.
     renderNotesDrawer({ talkTrack: 'T', speakerNotes: 'N', slideKey: 's1', onSaveNotes: vi.fn<SaveFn>(async () => {}) });
-    openNotesTab();
     expect(talkSave()).toBeDisabled();
     expect(notesSave()).toBeDisabled();
 
@@ -542,7 +652,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: send both keys from the talk Save (the stale notes draft would overwrite a rebuild).
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     renderNotesDrawer({ talkTrack: 'Old talk.', speakerNotes: 'Old notes.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     // Both boxes are dirty; only the talk box is saved.
     fireEvent.change(notesInput(), { target: { value: 'Unsaved notes draft.' } });
@@ -560,7 +669,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: send both keys from the notes Save.
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     renderNotesDrawer({ talkTrack: 'Old talk.', speakerNotes: 'Old notes.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     fireEvent.change(talkInput(), { target: { value: 'Unsaved talk draft.' } });
     const draft = 'Old notes.\nLikely question: why now?';
@@ -578,7 +686,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: call onSaveNotes with the talkTrack / speakerNotes props instead of the drafts.
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     renderNotesDrawer({ talkTrack: 'A', speakerNotes: 'B', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     fireEvent.change(talkInput(), { target: { value: 'A2' } });
     fireEvent.click(talkSave());
@@ -593,25 +700,26 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
 
   // ── Editable: saving state ──────────────────────────────────────────────────
 
-  it('a talk-track save in flight disables only the talk Save', async () => {
-    // Sabotage target: share one `saving` flag across both boxes.
+  it('a talk-track save in flight disables only the talk Save, across a tab switch', async () => {
+    // Sabotage target: share one `saving` flag across both boxes, or lose it when the tab unmounts.
     let resolveSave: () => void = () => undefined;
     const onSaveNotes = vi.fn<SaveFn>(
       () => new Promise<void>((resolve) => { resolveSave = resolve; }),
     );
     renderNotesDrawer({ talkTrack: 'A', speakerNotes: 'N', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     fireEvent.change(talkInput(), { target: { value: 'A and B' } });
     fireEvent.click(talkSave());
     await waitFor(() => expect(talkSave()).toBeDisabled());
-    // A second click while in flight sends nothing more.
-    fireEvent.click(talkSave());
-    expect(onSaveNotes).toHaveBeenCalledTimes(1);
 
     // The notes box is independent: once dirty, it can save while the talk save runs.
     fireEvent.change(notesInput(), { target: { value: 'N, edited' } });
     expect(notesSave()).toBeEnabled();
+
+    // Back on Talk track the save is still in flight; a second click sends nothing more.
+    expect(talkSave()).toBeDisabled();
+    fireEvent.click(talkSave());
+    expect(onSaveNotes).toHaveBeenCalledTimes(1);
 
     await act(async () => { resolveSave(); });
   });
@@ -623,7 +731,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
       () => new Promise<void>((resolve) => { resolveSave = resolve; }),
     );
     renderNotesDrawer({ talkTrack: 'T', speakerNotes: 'A', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     fireEvent.change(notesInput(), { target: { value: 'A and B' } });
     fireEvent.click(notesSave());
@@ -645,22 +752,26 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
       throw new Error('boom');
     });
     renderNotesDrawer({ talkTrack: 'Before.', speakerNotes: 'Notes before.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
-    expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
-    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
 
     fireEvent.change(notesInput(), { target: { value: 'Notes draft, unsaved.' } });
+    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
     fireEvent.change(talkInput(), { target: { value: 'Before. After.' } });
+    expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
     fireEvent.click(talkSave());
 
-    expect(await screen.findByTestId('drawer-talk-error')).toBeInTheDocument();
-    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
-    // Both drafts survive the failure.
+    expect(await screen.findByTestId('drawer-talk-error')).toHaveTextContent('Could not save the talk track.');
     expect(talkInput().value).toBe('Before. After.');
-    expect(notesInput().value).toBe('Notes draft, unsaved.');
-    // Each box can still save: the talk box can retry, the notes box was never blocked.
     await waitFor(() => expect(talkSave()).toBeEnabled());
+
+    // The Notes tab shows no error, and its draft survived.
+    expect(notesInput().value).toBe('Notes draft, unsaved.');
+    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
+    expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
     expect(notesSave()).toBeEnabled();
+
+    // The talk error is still there on the way back.
+    openTalkTab();
+    expect(screen.getByTestId('drawer-talk-error')).toBeInTheDocument();
   });
 
   it('a failed notes save shows only the notes error and leaves the talk draft untouched', async () => {
@@ -669,17 +780,18 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
       throw new Error('boom');
     });
     renderNotesDrawer({ talkTrack: 'Talk before.', speakerNotes: 'Before.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
 
     fireEvent.change(talkInput(), { target: { value: 'Talk draft, unsaved.' } });
     fireEvent.change(notesInput(), { target: { value: 'Before. After.' } });
     fireEvent.click(notesSave());
 
     expect(await screen.findByTestId('drawer-notes-error')).toHaveTextContent('Could not save the notes.');
-    expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
     expect(notesInput().value).toBe('Before. After.');
-    expect(talkInput().value).toBe('Talk draft, unsaved.');
     await waitFor(() => expect(notesSave()).toBeEnabled());
+
+    expect(talkInput().value).toBe('Talk draft, unsaved.');
+    expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
   });
 
   // ── Editable: drafts reset with the slide ───────────────────────────────────
@@ -690,22 +802,20 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     const { rerender } = renderNotesDrawer({
       talkTrack: 'Slide one talk.', speakerNotes: 'Slide one notes.', slideKey: 's1', onSaveNotes,
     });
-    openNotesTab();
     fireEvent.change(talkInput(), { target: { value: 'Unsaved talk on slide one.' } });
     fireEvent.change(notesInput(), { target: { value: 'Unsaved notes on slide one.' } });
 
     rerender(notesTree({ talkTrack: 'Slide two talk.', speakerNotes: 'Slide two notes.', slideKey: 's2', onSaveNotes }));
-    expect(talkInput().value).toBe('Slide two talk.');
     expect(notesInput().value).toBe('Slide two notes.');
-    expect(talkSave()).toBeDisabled();
     expect(notesSave()).toBeDisabled();
+    expect(talkInput().value).toBe('Slide two talk.');
+    expect(talkSave()).toBeDisabled();
   });
 
   it('a slide switch resets both drafts even when both slides have the same text', () => {
     // Sabotage target: reset the drafts on the field values only, ignoring slideKey.
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     const { rerender } = renderNotesDrawer({ talkTrack: '', speakerNotes: '', slideKey: 's1', onSaveNotes });
-    openNotesTab();
     fireEvent.change(talkInput(), { target: { value: 'Typed talk on slide one.' } });
     fireEvent.change(notesInput(), { target: { value: 'Typed notes on slide one.' } });
 
@@ -720,7 +830,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
       throw new Error('boom');
     });
     const { rerender } = renderNotesDrawer({ talkTrack: 'T1', speakerNotes: 'N1', slideKey: 's1', onSaveNotes });
-    openNotesTab();
     fireEvent.change(talkInput(), { target: { value: 'T1, edited' } });
     fireEvent.click(talkSave());
     expect(await screen.findByTestId('drawer-talk-error')).toBeInTheDocument();
@@ -733,7 +842,7 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: reset the drafts on slideKey only, ignoring the field values.
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     const { rerender } = renderNotesDrawer({ talkTrack: 'Old talk.', speakerNotes: 'Old.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
+    openTalkTab();
 
     rerender(notesTree({ talkTrack: 'New talk from the server.', speakerNotes: 'Old.', slideKey: 's1', onSaveNotes }));
     expect(talkInput().value).toBe('New talk from the server.');
@@ -746,7 +855,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: one reset effect keyed on both fields (a notes refresh wipes the talk draft).
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     const { rerender } = renderNotesDrawer({ talkTrack: 'Talk.', speakerNotes: 'Old.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
     fireEvent.change(talkInput(), { target: { value: 'Talk, being edited.' } });
 
     rerender(notesTree({ talkTrack: 'Talk.', speakerNotes: 'Refreshed notes.', slideKey: 's1', onSaveNotes }));
@@ -759,7 +867,6 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     // Sabotage target: one reset effect keyed on both fields (a talk refresh wipes the notes draft).
     const onSaveNotes = vi.fn<SaveFn>(async () => {});
     const { rerender } = renderNotesDrawer({ talkTrack: 'Old talk.', speakerNotes: 'Notes.', slideKey: 's1', onSaveNotes });
-    openNotesTab();
     fireEvent.change(notesInput(), { target: { value: 'Notes, being edited.' } });
 
     rerender(notesTree({ talkTrack: 'Saved talk.', speakerNotes: 'Notes.', slideKey: 's1', onSaveNotes }));
@@ -768,7 +875,7 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     expect(notesSave()).toBeEnabled();
   });
 
-  // ── Tabs and persistence (unchanged behaviour, new ids) ─────────────────────
+  // ── Tabs and persistence ────────────────────────────────────────────────────
 
   it('switching back to AI feedback shows the findings again', () => {
     // Sabotage target: render the findings list regardless of activeTab.
@@ -779,40 +886,61 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
       slideKey: 's1',
       onSaveNotes: vi.fn<SaveFn>(async () => {}),
     });
-    expect(screen.getByTestId('drawer-tab-notes')).toHaveTextContent('Notes');
-    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'false');
+    expectActiveTab('drawer-tab-feedback');
     expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
 
-    openNotesTab();
-    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'true');
-    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'false');
-    expect(screen.queryByTestId('finding-f-open')).toBeNull();
-    expect(screen.queryByTestId('drawer-empty')).toBeNull();
-    for (const name of ['Apply', 'Dismiss', 'Discuss']) {
-      expect(screen.queryByRole('button', { name })).toBeNull();
+    for (const open of [openTalkTab, openNotesTab]) {
+      open();
+      expect(screen.queryByTestId('finding-f-open')).toBeNull();
+      expect(screen.queryByTestId('drawer-empty')).toBeNull();
+      for (const name of ['Apply', 'Dismiss', 'Discuss']) {
+        expect(screen.queryByRole('button', { name })).toBeNull();
+      }
     }
     expect(talkInput().value).toBe('Talk track.');
     expect(notesInput().value).toBe('Notes.');
 
-    fireEvent.click(screen.getByTestId('drawer-tab-feedback'));
-    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'true');
+    openFeedbackTab();
+    expectActiveTab('drawer-tab-feedback');
     expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
     expect(screen.queryByTestId('drawer-talk-input')).toBeNull();
     expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
   });
 
   it('the unread dot stays on the AI feedback tab', () => {
-    // Sabotage target: render the unseen dot inside (or move it to) the Notes tab button.
+    // Sabotage target: render the unseen dot inside (or move it to) the Talk track or Notes tab button.
     renderNotesDrawer({ findings: [openFinding], hasUnseen: true, talkTrack: 't', speakerNotes: 'x', slideKey: 's1' });
-    openNotesTab();
+    openTalkTab();
 
     const dot = screen.getByTestId('drawer-tab-unseen');
     expect(screen.getByTestId('drawer-tab-feedback')).toContainElement(dot);
+    expect(screen.getByTestId('drawer-tab-talk')).not.toContainElement(dot);
     expect(screen.getByTestId('drawer-tab-notes')).not.toContainElement(dot);
     expect(screen.getAllByTestId('drawer-tab-unseen')).toHaveLength(1);
   });
 
-  it('reopens on Notes when that tab was persisted', () => {
+  it('choosing Talk track persists it', () => {
+    // Sabotage target: map the Talk track click to setActiveTab('notes').
+    renderNotesDrawer({ talkTrack: 't', speakerNotes: 'x', slideKey: 's1' });
+    openTalkTab();
+    expect(JSON.parse(localStorage.getItem(VIEW_STATE_KEY) ?? '{}').activeTab).toBe('talk');
+  });
+
+  it('reopens on Talk track when that tab was persisted', () => {
+    // Sabotage target: readViewState rejects 'talk' (DRAWER_TABS missing it) or ignores the stored tab.
+    localStorage.setItem(
+      VIEW_STATE_KEY,
+      JSON.stringify({ drawerOpen: true, drawerHeight: 180, activeTab: 'talk' }),
+    );
+    renderNotesDrawer({ findings: [openFinding], talkTrack: 'Persisted talk.', speakerNotes: 'Persisted.', slideKey: 's1' });
+
+    expectActiveTab('drawer-tab-talk');
+    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('Persisted talk.');
+    expect(screen.queryByTestId('drawer-notes')).toBeNull();
+    expect(screen.queryByTestId('finding-apply-f-open')).toBeNull();
+  });
+
+  it('reopens on Notes when that tab was persisted (an older stored value)', () => {
     // Sabotage target: readViewState rejects 'notes' (DRAWER_TABS missing it) or ignores the stored tab.
     localStorage.setItem(
       VIEW_STATE_KEY,
@@ -820,9 +948,9 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     );
     renderNotesDrawer({ findings: [openFinding], talkTrack: 'Persisted talk.', speakerNotes: 'Persisted.', slideKey: 's1' });
 
-    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'true');
-    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('Persisted talk.');
+    expectActiveTab('drawer-tab-notes');
     expect(screen.getByTestId('drawer-notes')).toHaveTextContent('Persisted.');
+    expect(screen.queryByTestId('drawer-talk')).toBeNull();
     expect(screen.queryByTestId('finding-apply-f-open')).toBeNull();
   });
 
@@ -834,8 +962,7 @@ describe('FeedbackDrawer: Notes tab with a talk track box and a notes box', () =
     );
     renderNotesDrawer({ findings: [openFinding], speakerNotes: 'x', slideKey: 's1' });
 
-    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'true');
-    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'false');
+    expectActiveTab('drawer-tab-feedback');
     expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
   });
 });

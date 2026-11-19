@@ -237,15 +237,32 @@ function renderEditableViewer(deck: SlideDeck, { readOnly = false }: { readOnly?
 }
 
 const nextSlide = () => fireEvent.keyDown(window, { key: 'ArrowRight' });
-const talkEditor = () => screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
-const notesEditor = () => screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+// Each box lives on its own drawer tab, so each getter selects that tab first.
+const showTalkTab = () => fireEvent.click(screen.getByTestId('drawer-tab-talk'));
+const showNotesTab = () => fireEvent.click(screen.getByTestId('drawer-tab-notes'));
+const talkEditor = () => {
+  showTalkTab();
+  return screen.getByTestId('drawer-talk-input') as HTMLTextAreaElement;
+};
+const notesEditor = () => {
+  showNotesTab();
+  return screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+};
+const clickTalkSave = () => {
+  showTalkTab();
+  fireEvent.click(screen.getByTestId('drawer-talk-save'));
+};
+const clickNotesSave = () => {
+  showNotesTab();
+  fireEvent.click(screen.getByTestId('drawer-notes-save'));
+};
 
 /** The second argument of the first api.updateSlideNotes call: the fields object. */
 function sentFields(): Record<string, unknown> {
   return vi.mocked(api.updateSlideNotes).mock.calls[0][1] as unknown as Record<string, unknown>;
 }
 
-describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
+describe('SlideViewer: Talk track and Notes tabs (presenter Task 4)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: null } as never);
@@ -260,6 +277,20 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
     nextSlide();
     expect(talkEditor().value).toBe('T2');
     expect(notesEditor().value).toBe('N2');
+  });
+
+  it('a draft survives a tab switch on the same slide, and the next slide resets it', () => {
+    // Sabotage target: key the drawer (or its drafts) on the active tab, or stop passing slideKey.
+    renderEditableViewer(makeNotesDeck());
+    fireEvent.change(talkEditor(), { target: { value: 'T1, being edited.' } });
+    fireEvent.change(notesEditor(), { target: { value: 'N1, being edited.' } });
+    fireEvent.click(screen.getByTestId('drawer-tab-feedback'));
+    expect(talkEditor().value).toBe('T1, being edited.');
+    expect(notesEditor().value).toBe('N1, being edited.');
+
+    nextSlide();
+    expect(notesEditor().value).toBe('N2');
+    expect(talkEditor().value).toBe('T2');
   });
 
   it('a slide with no talk_track value shows an empty talk box', () => {
@@ -289,7 +320,7 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
     // A dirty notes draft must not ride along with the talk save.
     fireEvent.change(notesEditor(), { target: { value: 'N2, unsaved.' } });
     fireEvent.change(talkEditor(), { target: { value: 'T2, then the chart.' } });
-    fireEvent.click(screen.getByTestId('drawer-talk-save'));
+    clickTalkSave();
 
     await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(refreshed));
     const saveMock = vi.mocked(api.updateSlideNotes);
@@ -318,7 +349,7 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
 
     fireEvent.change(talkEditor(), { target: { value: 'T2, unsaved.' } });
     fireEvent.change(notesEditor(), { target: { value: 'N2, then the chart.' } });
-    fireEvent.click(screen.getByTestId('drawer-notes-save'));
+    clickNotesSave();
 
     await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(refreshed));
     const saveMock = vi.mocked(api.updateSlideNotes);
@@ -342,7 +373,7 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
     try {
       const { onSlideChange } = renderEditableViewer(makeNotesDeck());
       fireEvent.change(talkEditor(), { target: { value: 'T1, edited.' } });
-      fireEvent.click(screen.getByTestId('drawer-talk-save'));
+      clickTalkSave();
 
       expect(await screen.findByTestId('drawer-talk-error')).toBeInTheDocument();
       expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
@@ -366,7 +397,7 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
     try {
       const { onSlideChange } = renderEditableViewer(makeNotesDeck());
       fireEvent.change(notesEditor(), { target: { value: 'N1, edited.' } });
-      fireEvent.click(screen.getByTestId('drawer-notes-save'));
+      clickNotesSave();
 
       expect(await screen.findByTestId('drawer-notes-error')).toHaveTextContent('Could not save the notes.');
       expect(screen.queryByTestId('drawer-talk-error')).toBeNull();
@@ -383,15 +414,21 @@ describe('SlideViewer: Notes tab with two boxes (presenter Task 4)', () => {
     // Sabotage target: drop `readOnly ||` from the onSaveNotes gate, or stop passing talkTrack to the drawer.
     renderEditableViewer(makeNotesDeck(), { readOnly: true });
 
-    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T1');
-    expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N1');
-    expect(document.querySelector('textarea')).toBeNull();
-    for (const id of ['drawer-talk-input', 'drawer-talk-save', 'drawer-notes-input', 'drawer-notes-save']) {
-      expect(screen.queryByTestId(id)).toBeNull();
+    for (const show of [showTalkTab, showNotesTab]) {
+      show();
+      expect(document.querySelector('textarea')).toBeNull();
+      for (const id of ['drawer-talk-input', 'drawer-talk-save', 'drawer-notes-input', 'drawer-notes-save']) {
+        expect(screen.queryByTestId(id)).toBeNull();
+      }
     }
+    showTalkTab();
+    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T1');
+    showNotesTab();
+    expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N1');
 
     nextSlide();
-    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T2');
     expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N2');
+    showTalkTab();
+    expect(screen.getByTestId('drawer-talk')).toHaveTextContent('T2');
   });
 });

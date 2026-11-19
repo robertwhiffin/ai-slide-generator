@@ -1,10 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
-/** The drawer's tabs: AI feedback, and the editable speaker notes. */
-export type DrawerTab = 'feedback' | 'notes';
+/** The drawer's tabs: AI feedback, the talk track, and the speaker notes. */
+export type DrawerTab = 'feedback' | 'talk' | 'notes';
 
 // Module-private on purpose: exporting a non-component value breaks react-refresh.
-const DRAWER_TABS: readonly DrawerTab[] = ['feedback', 'notes'];
+const DRAWER_TABS: readonly DrawerTab[] = ['feedback', 'talk', 'notes'];
 
 const VIEW_STATE_KEY = 'tellr-viewer-view-state';
 const DEFAULT_HEIGHT = 180;

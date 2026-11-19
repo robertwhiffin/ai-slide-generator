@@ -19,23 +19,25 @@ interface FeedbackDrawerProps {
   onSaveNotes?: (fields: { speaker_notes?: string; talk_track?: string }) => Promise<void>;
 }
 
-interface PresenterTextBoxProps {
-  idPrefix: 'drawer-talk' | 'drawer-notes';
-  label: string;
-  sublabel: string;
-  placeholder: string;
-  saveLabel: string;
-  errorText: string;
-  value: string;
-  slideKey?: string;
-  onSave: (text: string) => Promise<void>;
+interface PresenterDraft {
+  draft: string;
+  setDraft: (text: string) => void;
+  saving: boolean;
+  failed: boolean;
+  save: () => Promise<void>;
 }
 
-const PresenterTextBox: React.FC<PresenterTextBoxProps> = ({
-  idPrefix, label, sublabel, placeholder, saveLabel, errorText, value, slideKey, onSave,
-}) => {
-  // The draft resets when this box's own field changes or the slide switches.
-  // An unsaved draft is discarded on a slide switch (accepted).
+/**
+ * One box's draft, saving and error state. It lives in the drawer, not in the box, so a
+ * draft survives switching to another tab and back: only the visible tab's box is mounted.
+ * The draft resets when this box's own field changes or the slide switches.
+ * An unsaved draft is discarded on a slide switch (accepted).
+ */
+function usePresenterDraft(
+  value: string,
+  slideKey: string | undefined,
+  onSave: (text: string) => Promise<void>,
+): PresenterDraft {
   const [draft, setDraft] = useState(value);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -57,6 +59,26 @@ const PresenterTextBox: React.FC<PresenterTextBoxProps> = ({
       setSaving(false);
     }
   }, [onSave, saving, draft]);
+  return { draft, setDraft, saving, failed, save };
+}
+
+interface PresenterTextBoxProps {
+  idPrefix: 'drawer-talk' | 'drawer-notes';
+  label: string;
+  sublabel: string;
+  placeholder: string;
+  saveLabel: string;
+  errorText: string;
+  value: string;
+  state: PresenterDraft;
+  /** A one-line hint beside the Save button, so the box fits the drawer without scrolling. */
+  hint?: React.ReactNode;
+}
+
+const PresenterTextBox: React.FC<PresenterTextBoxProps> = ({
+  idPrefix, label, sublabel, placeholder, saveLabel, errorText, value, state, hint,
+}) => {
+  const { draft, setDraft, saving, failed, save } = state;
   const labelId = `${idPrefix}-label`;
   const subId = `${idPrefix}-sublabel`;
   return (
@@ -91,10 +113,13 @@ const PresenterTextBox: React.FC<PresenterTextBoxProps> = ({
             {errorText}
           </span>
         )}
+        {hint}
       </div>
     </div>
   );
 };
+
+const TAB_CLASS = 'relative rounded-t px-3 py-1.5 text-xs font-medium';
 
 export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
   findings,
@@ -124,6 +149,9 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
 
   const saveTalk = useCallback((text: string) => onSaveNotes!({ talk_track: text }), [onSaveNotes]);
   const saveNotesField = useCallback((text: string) => onSaveNotes!({ speaker_notes: text }), [onSaveNotes]);
+  // Both drafts live here, so each survives a switch to the other tab and back.
+  const talkDraft = usePresenterDraft(talkTrack, slideKey, saveTalk);
+  const notesDraft = usePresenterDraft(speakerNotes, slideKey, saveNotesField);
 
   // Pointer down: record drag origin and capture the pointer so moves/up fire
   // even when the pointer moves fast and leaves the thin handle element.
@@ -175,14 +203,14 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
       )}
 
       <div className="flex items-center gap-1 px-2 py-1">
-        {/* Tabbed shell: AI feedback and Notes. The unread dot belongs to AI feedback. */}
+        {/* Tabbed shell: AI feedback, Talk track and Notes. The unread dot belongs to AI feedback. */}
         <button
           type="button"
           data-testid="drawer-tab-feedback"
           data-active={activeTab === 'feedback' ? 'true' : 'false'}
           onClick={() => setActiveTab('feedback')}
           className={[
-            'relative rounded-t px-3 py-1.5 text-xs font-medium',
+            TAB_CLASS,
             activeTab === 'feedback' ? 'bg-muted text-foreground' : 'text-muted-foreground',
           ].join(' ')}
         >
@@ -198,11 +226,23 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
         </button>
         <button
           type="button"
+          data-testid="drawer-tab-talk"
+          data-active={activeTab === 'talk' ? 'true' : 'false'}
+          onClick={() => setActiveTab('talk')}
+          className={[
+            TAB_CLASS,
+            activeTab === 'talk' ? 'bg-muted text-foreground' : 'text-muted-foreground',
+          ].join(' ')}
+        >
+          Talk track
+        </button>
+        <button
+          type="button"
           data-testid="drawer-tab-notes"
           data-active={activeTab === 'notes' ? 'true' : 'false'}
           onClick={() => setActiveTab('notes')}
           className={[
-            'relative rounded-t px-3 py-1.5 text-xs font-medium',
+            TAB_CLASS,
             activeTab === 'notes' ? 'bg-muted text-foreground' : 'text-muted-foreground',
           ].join(' ')}
         >
@@ -229,7 +269,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
         >
           {/* Stays-on-empty: when there are no findings, show the empty state —
               never auto-switch tabs (spec §5.3). */}
-          {activeTab === 'notes' ? (
+          {activeTab === 'talk' ? (
             onSaveNotes ? (
               <div className="flex flex-col gap-3 py-2">
                 <PresenterTextBox
@@ -240,9 +280,26 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
                   saveLabel="Save talk track"
                   errorText="Could not save the talk track."
                   value={talkTrack}
-                  slideKey={slideKey}
-                  onSave={saveTalk}
+                  state={talkDraft}
+                  hint={
+                    <p data-testid="drawer-notes-hint" className="text-[11px] text-muted-foreground">
+                      Chat rewrites the talk track only when it rebuilds the slide.
+                    </p>
+                  }
                 />
+              </div>
+            ) : talkTrack.trim() !== '' ? (
+              <p data-testid="drawer-talk" className="whitespace-pre-wrap break-words py-2 text-xs text-foreground">
+                {talkTrack}
+              </p>
+            ) : (
+              <p data-testid="drawer-talk-empty" className="py-4 text-xs text-muted-foreground">
+                No talk track for this slide.
+              </p>
+            )
+          ) : activeTab === 'notes' ? (
+            onSaveNotes ? (
+              <div className="flex flex-col gap-3 py-2">
                 <PresenterTextBox
                   idPrefix="drawer-notes"
                   label="Notes"
@@ -251,26 +308,13 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
                   saveLabel="Save notes"
                   errorText="Could not save the notes."
                   value={speakerNotes}
-                  slideKey={slideKey}
-                  onSave={saveNotesField}
+                  state={notesDraft}
                 />
-                <p data-testid="drawer-notes-hint" className="text-[11px] text-muted-foreground">
-                  Chat rewrites the talk track only when it rebuilds the slide.
-                </p>
               </div>
-            ) : talkTrack.trim() !== '' || speakerNotes.trim() !== '' ? (
-              <div className="flex flex-col gap-2 py-2">
-                {talkTrack.trim() !== '' && (
-                  <p data-testid="drawer-talk" className="whitespace-pre-wrap break-words text-xs text-foreground">
-                    {talkTrack}
-                  </p>
-                )}
-                {speakerNotes.trim() !== '' && (
-                  <p data-testid="drawer-notes" className="whitespace-pre-wrap break-words text-xs text-foreground">
-                    {speakerNotes}
-                  </p>
-                )}
-              </div>
+            ) : speakerNotes.trim() !== '' ? (
+              <p data-testid="drawer-notes" className="whitespace-pre-wrap break-words py-2 text-xs text-foreground">
+                {speakerNotes}
+              </p>
             ) : (
               <p data-testid="drawer-notes-empty" className="py-4 text-xs text-muted-foreground">
                 No speaker notes for this slide.
