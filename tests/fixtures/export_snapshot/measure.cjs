@@ -26,9 +26,12 @@
 //                every match of selector, in document order.
 //   --mode=each-layout-box prints, for every match of selector in document
 //                order, {"x","y","w","h","offsetWidth","offsetHeight",
-//                "writingMode","transform"}: its bounds, its untransformed
-//                layout size and its computed writing-mode and transform,
-//                from one page load. See measureEachLayoutBox.
+//                "writingMode","transform","padding","border","textAlign",
+//                "direction"}: its bounds, its untransformed layout size, its
+//                computed writing-mode and transform, its padding and border
+//                widths ({top, right, bottom, left} px each), and its computed
+//                text-align and direction, from one page load. See
+//                measureEachLayoutBox.
 //   --mode=ellipsis prints where a single-line text-overflow: ellipsis cut
 //                falls, read from the screen: {"clip","content","characters",
 //                "cut","inkEnd","glyphInkEnd","ellipsisInkStart",
@@ -287,6 +290,12 @@ async function measureEachLayoutBox(page, selector) {
       const element = matches[index];
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
+      const sides = (prefix, suffix) => ({
+        top: parseFloat(style[prefix + 'Top' + suffix]) || 0,
+        right: parseFloat(style[prefix + 'Right' + suffix]) || 0,
+        bottom: parseFloat(style[prefix + 'Bottom' + suffix]) || 0,
+        left: parseFloat(style[prefix + 'Left' + suffix]) || 0,
+      });
       boxes.push({
         x: rect.x,
         y: rect.y,
@@ -296,6 +305,10 @@ async function measureEachLayoutBox(page, selector) {
         offsetHeight: element.offsetHeight,
         writingMode: style.writingMode,
         transform: style.transform,
+        padding: sides('padding', ''),
+        border: sides('border', 'Width'),
+        textAlign: style.textAlign,
+        direction: style.direction,
       });
     }
     return { boxes };

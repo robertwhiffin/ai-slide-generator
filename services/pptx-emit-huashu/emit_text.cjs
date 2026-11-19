@@ -57,7 +57,10 @@
 // sits inside it by its insets, written as the box's own (bodyPr lIns, tIns,
 // rIns, bIns), none below 0, which Google Slides ignores: the top inset is
 // where its first line's glyphs start, less the same first-line offset, and
-// no less than 0.
+// no less than 0. A turned box with no insets (a piece of a turned root a gap
+// cuts, a turned list marker) has its first line's glyph top as its own top,
+// so it is raised by the offset along its own up, which a turn takes off the
+// slide's.
 
 const { runOptions, xmlText } = require('./emit_typography.cjs');
 
@@ -198,14 +201,21 @@ function firstLineOffsetOf(item) {
   return firstLineOffsetPx(pct, first.sizePx, first.ascentPx);
 }
 
-// The item's box top and its pptxgenjs margin ([left, right, bottom, top] in
-// points): a box raised by the first-line offset with no margin, or a turned
-// block's own box with its insets, the offset taken off the top one.
+// The item's box position and its pptxgenjs margin ([left, right, bottom,
+// top] in points): a box raised by the first-line offset with no margin, along
+// its own up when it is turned (rotate degrees clockwise: up is (sin, -cos) on
+// the slide); or a turned root's own box with its insets, the offset taken off
+// the top one.
 function placementOf(item) {
-  if (!item.inset) return { y: item.y - firstLineOffsetOf(item), margin: 0 };
+  const offset = firstLineOffsetOf(item);
+  if (!item.inset) {
+    const radians = (Number(item.rotate) || 0) * Math.PI / 180;
+    return { x: item.x + offset * Math.sin(radians), y: item.y - offset * Math.cos(radians), margin: 0 };
+  }
   const inset = item.inset;
-  const top = Math.max(0, (Number(inset.top) || 0) - firstLineOffsetOf(item));
+  const top = Math.max(0, (Number(inset.top) || 0) - offset);
   return {
+    x: item.x,
     y: item.y,
     margin: [inset.left, inset.right, inset.bottom, top].map((px) => (Number(px) || 0) * PT_PER_PX),
   };
@@ -218,7 +228,7 @@ function emitText(slide, item, fonts) {
   if (!objects.length) return;
   const placement = placementOf(item);
   const options = {
-    x: inches(item.x),
+    x: inches(placement.x),
     y: inches(placement.y),
     w: inches(item.w),
     h: inches(item.h),

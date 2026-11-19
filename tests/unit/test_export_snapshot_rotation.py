@@ -75,12 +75,15 @@ from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     ANGLE_UNITS_PER_DEGREE,
     DECK_CSS,
+    EMU_PER_PX,
+    NAMESPACES,
     BrowserEllipsis,
     Run,
     Shape,
     browser_each_layout_box,
     browser_each_rect,
     browser_ellipsis,
+    browser_lines,
     browser_probes,
     browser_style,
     browser_tables,
@@ -91,6 +94,7 @@ from tests.fixtures.export_snapshot_support import (
     export_slides,
     requires_huashu_sidecar,
     slide_document,
+    slide_shape_elements,
     slide_shapes,
     table_extent,
     table_frames,
@@ -117,6 +121,33 @@ SLACK_PX = 4.0
 # centre to its layout box's centre, in units of the slack: right of
 # left-aligned text, left of right-aligned text, half each side of centred.
 LAYOUT_SHIFT_PER_SLACK = {"left": -0.5, "right": 0.5, "center": 0.0}
+# The side of the turned box each of its local sides lies on in the page, per
+# writing mode: its left is the line-left side, its right the line-right side
+# (CSS Writing Modes 4). Horizontal text keeps its own.
+LINE_SIDES = {
+    "horizontal-tb": ("left", "right"),
+    "vertical-rl": ("top", "bottom"),
+    "vertical-lr": ("top", "bottom"),
+    "sideways-rl": ("top", "bottom"),
+    "sideways-lr": ("bottom", "top"),
+}
+# A computed text-align as the alignment a turned box's paragraphs are written
+# with, left to right ("start" and "end" follow the direction; justify is
+# written from its start side).
+TEXT_ALIGN_WRITTEN = {
+    ("start", "ltr"): "left",
+    ("start", "rtl"): "right",
+    ("end", "ltr"): "right",
+    ("end", "rtl"): "left",
+    ("left", "ltr"): "left",
+    ("left", "rtl"): "left",
+    ("right", "ltr"): "right",
+    ("right", "rtl"): "right",
+    ("center", "ltr"): "center",
+    ("center", "rtl"): "center",
+    ("justify", "ltr"): "left",
+    ("justify", "rtl"): "right",
+}
 # The middle of a "…" dot is fully covered, so the screen shows its colour
 # exactly; a few units allow for colour management and nothing more.
 SCREEN_CHANNEL_TOLERANCE = 8
@@ -192,6 +223,12 @@ CELL_WORDS = (
 )
 
 
+# Fix round 1's turned labels: absolutely placed and turned a quarter left.
+TURNED_LABEL = "position:absolute; transform:rotate(-90deg); font-size:16px;"
+SOFT_WRAP_TEXT = "Quarterly revenue by region and product line"
+TURNED_TABLE_CELLS = ("North", "42", "South", "17")
+
+
 def _card(title: str, title_class: str) -> str:
     return (
         '<div class="slide"><div class="card">'
@@ -259,6 +296,62 @@ SLIDES: dict[str, str] = {
         "ct ellipsis mixed",
     ),
     "ellipsis-cell": _grid(" ".join(CELL_WORDS), "cut ellipsis"),
+    # Fix round 1. The rotation is the parent's: its in-flow child joins its
+    # text, its positioned child is a turned item of its own.
+    "ancestor-block": (
+        f'<div class="slide"><div id="parent" style="{TURNED_LABEL} left:300px; top:300px; '
+        'white-space:nowrap;"><p id="child" style="margin:0">Child block text</p></div></div>'
+    ),
+    "ancestor-positioned": (
+        '<div class="slide"><div id="parent" style="position:absolute; left:600px; top:300px; '
+        'width:220px; height:40px; transform:rotate(-90deg); background:#EEEEEE;">'
+        '<div id="child" style="position:absolute; left:10px; top:8px; font-size:16px; '
+        'white-space:nowrap;">Positioned child</div></div></div>'
+    ),
+    # A turned line cut by an inline-block chip and by a hidden word.
+    "gap-chip": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:700px; top:300px; '
+        'white-space:nowrap;"><span id="before">Status</span> <span id="chip" '
+        'style="display:inline-block; padding:0 10px; background:#DDDDDD">LIVE</span> '
+        '<span id="after">since May</span></div></div>'
+    ),
+    "gap-hidden": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:700px; top:300px; '
+        'white-space:nowrap;"><span id="before">Before</span> '
+        '<span style="visibility:hidden">secret</span> <span id="after">after</span></div></div>'
+    ),
+    "rotated-table": (
+        '<div class="slide"><table id="target" style="position:absolute; left:400px; top:300px; '
+        'transform:rotate(-90deg); border-collapse:collapse; font-size:16px;">'
+        '<tr><td style="padding:4px 10px">North</td><td style="padding:4px 10px">42</td></tr>'
+        '<tr><td style="padding:4px 10px">South</td><td style="padding:4px 10px">17</td></tr>'
+        "</table></div>"
+    ),
+    "rotated-list": (
+        f'<div class="slide"><ul id="target" style="{TURNED_LABEL} left:900px; top:250px; '
+        'margin:0; padding-left:24px; white-space:nowrap;">'
+        '<li><span id="alpha">Alpha item</span></li><li><span id="beta">Beta item</span></li>'
+        "</ul></div>"
+    ),
+    "trailing-br": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:600px; top:300px; '
+        'white-space:nowrap;"><div>Line one<br></div><div>Line two</div></div></div>'
+    ),
+    "align-right": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:200px; top:300px; '
+        'width:240px; text-align:right;">Right aligned</div></div>'
+    ),
+    "align-center": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:500px; top:300px; '
+        'width:240px; text-align:center;">Centred label</div></div>'
+    ),
+    # The same 150 px paragraph turned and, as the browser's line oracle, not.
+    "soft-wrap": (
+        f'<div class="slide"><div id="target" style="{TURNED_LABEL} left:900px; top:300px; '
+        f'width:150px;">{SOFT_WRAP_TEXT}</div>'
+        '<div id="twin" style="position:absolute; left:100px; top:500px; font-size:16px; '
+        f'width:150px;">{SOFT_WRAP_TEXT}</div></div>'
+    ),
 }
 
 # R11a: each single-line vertical label, its text and the angle it is turned by.
@@ -408,13 +501,19 @@ def _assert_turned_box(
     vertical writing mode it is the inline length by the block length,
     ``offsetHeight`` x ``offsetWidth`` (R11a). R11f: the item's box is that
     box grown along its own inline axis by its slack, which lies on the side
-    its paragraphs' alignment grows (right of left-aligned text, left of
-    right-aligned, half each side of centred) and is between 0 and 6% + 4 px
-    of the inline length (plus 1 px). So the box LESS its slack is the layout
-    box, within 1 px, centred on the bounds' centre within 1 px: the layout box,
-    and the text's start with it, stays where the browser has it. A slack
-    grown on the other side, or a box grown about its own centre, moves the
-    layout part off the bounds' centre by half the slack.
+    its alignment grows (right of left-aligned text, left of right-aligned,
+    half each side of centred) and is between 0 and 6% + 4 px of the inline
+    length (plus 1 px). So the box LESS its slack is the layout box, within
+    1 px, centred on the bounds' centre within 1 px: the layout box, and the
+    text's start with it, stays where the browser has it. A slack grown on
+    the other side, or a box grown about its own centre, moves the layout part
+    off the bounds' centre by half the slack.
+
+    The alignment is the browser's: the element's computed text-align and
+    direction, which the item's paragraphs must be written with (Minor 7).
+    R11f′: the room on the growth side, its padding plus the box's growth
+    there, reaches the usual slack, 6% of the content's inline length + 4 px,
+    within 1 px; a box that drops the slack has none.
     """
     _assert_angle(item, angle, what)
     width, height = (
@@ -432,12 +531,37 @@ def _assert_turned_box(
         f"slack of 0 to {most:.2f} px along its width (it is {slack:.2f}), height within "
         f"{GEOMETRY_TOLERANCE_PX} px. The bounds are {layout['w']:.2f} x {layout['h']:.2f}."
     )
-    alignments = {paragraph.align for paragraph in item.paras}
-    assert len(alignments) == 1 and next(iter(alignments)) in LAYOUT_SHIFT_PER_SLACK, (
-        f"{what}: its paragraphs are aligned {alignments}, expected one of "
-        f"{sorted(LAYOUT_SHIFT_PER_SLACK)}"
+    key = (layout["text_align"], layout["direction"])
+    assert key in TEXT_ALIGN_WRITTEN and layout["writing_mode"] in LINE_SIDES, (
+        f"fixture drift: {what} computes text-align {key} in {layout['writing_mode']}"
     )
-    (align,) = alignments
+    align = TEXT_ALIGN_WRITTEN[key]
+    alignments = {paragraph.align for paragraph in item.paras}
+    assert alignments == {align}, (
+        f"{what}: its paragraphs are aligned {alignments}; the browser computes text-align "
+        f"{layout['text_align']} ({layout['direction']}), written {align!r}"
+    )
+    line_left, line_right = LINE_SIDES[layout["writing_mode"]]
+    padding = layout["padding"]
+    content = (
+        width
+        - padding[line_left]
+        - padding[line_right]
+        - layout["border"][line_left]
+        - layout["border"][line_right]
+    )
+    needed = content * SLACK_FRACTION + SLACK_PX - GEOMETRY_TOLERANCE_PX
+    padding_room = {
+        "left": padding[line_right],
+        "right": padding[line_left],
+        "center": padding[line_left] + padding[line_right],
+    }[align]
+    assert padding_room + slack >= needed, (
+        f"{what}: the room on its {align}-aligned growth side is {padding_room:g} px of padding "
+        f"plus {slack:.2f} px the box grew, under the {needed + GEOMETRY_TOLERANCE_PX:.2f} px "
+        f"slack its {content:.2f} px content needs (6% + {SLACK_PX:g} px, tolerance "
+        f"{GEOMETRY_TOLERANCE_PX} px): Google Slides would wrap its line"
+    )
     shift = LAYOUT_SHIFT_PER_SLACK[align] * slack
     radians = math.radians(item.rotation)
     centre = _centre(item)
@@ -457,6 +581,48 @@ def _assert_one_line(item: Shape, expected: str, what: str) -> None:
     )
     assert len(item.paras) == 1, f"{what}: {len(item.paras)} paragraphs, expected one"
     assert item.wrap == "none", f"{what}: bodyPr wrap is {item.wrap!r}, expected 'none'"
+
+
+def _along(point: tuple[float, float], rotation: float) -> float:
+    """Where a slide point lies along the line axis of a box turned by ``rotation`` degrees."""
+    radians = math.radians(rotation)
+    return point[0] * math.cos(radians) + point[1] * math.sin(radians)
+
+
+def _span_along(rect: dict, rotation: float) -> tuple[float, float]:
+    """(start, end) of a browser rect along the line axis of ``rotation``: its corners' extremes.
+
+    Under a quarter turn the rect of a turned run is the run's own box, so its
+    extent along the axis is exact.
+    """
+    corners = [
+        (rect["x"] + dx, rect["y"] + dy) for dx in (0.0, rect["w"]) for dy in (0.0, rect["h"])
+    ]
+    values = [_along(corner, rotation) for corner in corners]
+    return min(values), max(values)
+
+
+def _box_start_along(item: Shape) -> float:
+    """Where an item's box starts along its own line axis: its left side, turned with it."""
+    return _along(_centre(item), item.rotation) - item.w / 2
+
+
+def _left_inset_px(pptx: bytes, name: str, position: int) -> float:
+    """The bodyPr lIns of slide ``name``'s spTree element at ``position``, in CSS px."""
+    element = slide_shape_elements(pptx, _slide_index(name))[position]
+    body = element.find("p:txBody/a:bodyPr", NAMESPACES)
+    assert body is not None, f"spTree element {position} of {name} has no bodyPr"
+    return int(body.get("lIns", 0)) / EMU_PER_PX
+
+
+def _assert_starts_at(item: Shape, rect: dict, what: str, inset: float = 0.0) -> None:
+    """``item``'s text (its box start plus ``inset``) starts along its line where ``rect`` does."""
+    start = _box_start_along(item) + inset
+    expected, _ = _span_along(rect, item.rotation)
+    assert abs(start - expected) <= GEOMETRY_TOLERANCE_PX, (
+        f"{what}: its text starts {start:.2f} px along its line, the browser's at "
+        f"{expected:.2f} (off by {start - expected:.2f}, tolerance {GEOMETRY_TOLERANCE_PX} px)"
+    )
 
 
 def _stacking_order(rects: list[dict], angle: float) -> list[int]:
@@ -990,6 +1156,234 @@ class TestEllipsis:
             or any(word in text.split() for text in _cell_texts(shapes))
         ]
         assert not leaked, f"hidden words are on the slide: {leaked}"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestAncestorRotation:
+    def test_an_in_flow_child_of_a_rotated_parent_joins_its_turned_item(
+        self, rotation_pptx: bytes
+    ) -> None:
+        """The brief: the rotation may be an ancestor's. A turned parent's in-flow ``<p>``.
+
+        The ``<p>`` has no transform of its own; its parent is turned by
+        ``rotate(-90deg)``. Its text is the parent's ONE turned item: ``rot``
+        270 degrees, one line, on the parent's layout box (the parent holds
+        nothing else). Read from the child's own transform, the text would be
+        an unturned box clustered from turned rects.
+        """
+        document = _document("ancestor-block")
+        parent = _layout(document, "#parent")
+        child = _layout(document, "#child")
+        assert (
+            child["transform"] == "none" and parent["transform"] == "matrix(0, -1, 1, 0, 0, 0)"
+        ), (
+            f"fixture drift: the child computes {child['transform']}, "
+            f"the parent {parent['transform']}"
+        )
+        _, item = _text_item(_shapes(rotation_pptx, "ancestor-block"), "Child", "the in-flow child")
+
+        _assert_one_line(item, "Child block text", "the in-flow child")
+        _assert_turned_box(item, parent, 270.0, "the in-flow child")
+
+    def test_a_positioned_child_of_a_rotated_parent_is_its_own_turned_item(
+        self, rotation_pptx: bytes
+    ) -> None:
+        """The brief: an absolutely positioned child of a turned parent is turned with it.
+
+        It paints in a group of its own, so its text is a turned item of its
+        own: ``rot`` 270 degrees, one line, on ITS layout box, centred on its
+        own bounds, not on its parent's.
+        """
+        document = _document("ancestor-positioned")
+        child = _layout(document, "#child")
+        assert child["transform"] == "none", (
+            f"fixture drift: the child computes {child['transform']}"
+        )
+        _, item = _text_item(
+            _shapes(rotation_pptx, "ancestor-positioned"), "Positioned", "the positioned child"
+        )
+
+        _assert_one_line(item, "Positioned child", "the positioned child")
+        _assert_turned_box(item, child, 270.0, "the positioned child")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTurnedLineCuts:
+    def test_a_chip_cuts_a_turned_line_into_turned_segments(self, rotation_pptx: bytes) -> None:
+        """A turned "Status [LIVE] since May" is three turned items, each where the browser has it.
+
+        The inline-block chip leaves a gap in the line, as in unturned text
+        (RC13), so the text on each side of it is a segment of its own:
+        "Status", the chip's own text "LIVE" on its own box, then "since May".
+        Each is turned 270 degrees and one line; each segment starts along the
+        line where the browser draws its text, within 1 px, and the chip passes
+        the turned-box check. Joined over the gap, "since May" would start about
+        the chip's width early, over the chip.
+        """
+        document = _document("gap-chip")
+        shapes = _shapes(rotation_pptx, "gap-chip")
+        expected = {"before": "Status", "chip": "LIVE", "after": "since May"}
+        items = {}
+        for name, text in expected.items():
+            _, items[name] = _text_item(shapes, text.split()[0], f"the {text!r} segment")
+            _assert_angle(items[name], 270.0, f"the {text!r} segment")
+            _assert_one_line(items[name], text, f"the {text!r} segment")
+        _assert_starts_at(items["before"], _layout(document, "#before"), "'Status'")
+        _assert_starts_at(items["after"], _layout(document, "#after"), "'since May'")
+        _assert_turned_box(items["chip"], _layout(document, "#chip"), 270.0, "the chip's text")
+        starts = [_box_start_along(items[name]) for name in expected]
+        assert starts == sorted(starts), f"the segments are out of line order: {starts}"
+        chips = [shape for shape in shapes if shape.fill == "DDDDDD"]
+        assert (
+            len(chips) == 1 and _angle_off(chips[0].rotation, 270.0) <= ANGLE_TOLERANCE_DEGREES
+        ), f"expected the chip's turned background as one shape:\n{_describe(shapes)}"
+
+    def test_text_after_a_hidden_word_starts_where_the_browser_has_it(
+        self, rotation_pptx: bytes
+    ) -> None:
+        """A hidden word keeps its room in a turned line too (the Task 5 ruling).
+
+        "Before [secret, visibility: hidden] after" turned 270 degrees: "secret"
+        is on no shape, "Before" and "after" are separate turned items, and
+        "after" starts along the line where the browser draws it, within 1 px.
+        """
+        document = _document("gap-hidden")
+        shapes = _shapes(rotation_pptx, "gap-hidden")
+        assert not [shape for shape in shapes if "secret" in shape.text], (
+            f"the hidden word is on the slide:\n{_describe(shapes)}"
+        )
+        _, before = _text_item(shapes, "Before", "the text before the hidden word")
+        _, after = _text_item(shapes, "after", "the text after the hidden word")
+
+        assert before is not after, "the text either side of the hidden word must be two items"
+        _assert_one_line(after, "after", "the text after the hidden word")
+        _assert_angle(after, 270.0, "the text after the hidden word")
+        _assert_starts_at(before, _layout(document, "#before"), "'Before'")
+        _assert_starts_at(after, _layout(document, "#after"), "'after'")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestRotatedTable:
+    def test_each_cell_of_a_rotated_table_is_its_own_turned_item(
+        self, rotation_pptx: bytes
+    ) -> None:
+        """Minor 4: a ``rotate(-90deg)`` 2x2 table is positioned items, one turned item per cell.
+
+        No a:tbl turns, so the table is no native table. Each cell's text is a
+        turned item of its own, one line, on the cell's layout box, centred on
+        its bounds within 1 px. Joined into the table's text, the four cells
+        would stack as four lines of one item.
+        """
+        document = _document("rotated-table")
+        cells = browser_each_layout_box(document, "#target td")
+        assert len(cells) == len(TURNED_TABLE_CELLS), f"fixture drift: {len(cells)} cells"
+        shapes = _shapes(rotation_pptx, "rotated-table")
+        assert not table_frames(shapes), f"a turned table is no native table:\n{_describe(shapes)}"
+
+        for text, cell in zip(TURNED_TABLE_CELLS, cells):
+            _, item = _text_item(shapes, text, f"the cell {text!r}")
+            _assert_one_line(item, text, f"the cell {text!r}")
+            _assert_turned_box(item, cell, 270.0, f"the cell {text!r}")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTurnedListMarkers:
+    def test_a_rotated_lists_markers_are_items_of_their_own(self, rotation_pptx: bytes) -> None:
+        """Minor 5: a turned list's markers are turned items of their own, as outside markers are.
+
+        A ``rotate(-90deg)`` ``<ul>``: each "•" is a turned text item of its own,
+        lying before its text along the line; the list's text reads "Alpha
+        item" then "Beta item" with no marker in it, and starts along the line
+        where the browser draws "Alpha item", within 1 px. Led by its marker,
+        the text would start where the marker does.
+        """
+        document = _document("rotated-list")
+        shapes = _shapes(rotation_pptx, "rotated-list")
+        markers = [shape for shape in shapes if shape.kind == "text" and shape.text.strip() == "•"]
+        assert len(markers) == 2, f"expected two marker items:\n{_describe(shapes)}"
+        position, text = _text_item(shapes, "Alpha", "the list's text")
+        assert [_normalised(line) for line in _lines(text)] == ["Alpha item", "Beta item"], (
+            f"the list's text reads {_lines(text)}"
+        )
+        inset = _left_inset_px(rotation_pptx, "rotated-list", position)
+
+        _assert_starts_at(text, _layout(document, "#alpha"), "the list's text", inset)
+        starts = _box_start_along(text) + inset
+        for marker in markers:
+            _assert_angle(marker, 270.0, "a marker")
+            assert _box_start_along(marker) + marker.w <= starts + GEOMETRY_TOLERANCE_PX, (
+                f"a marker's box ends {_box_start_along(marker) + marker.w:.2f} px along the "
+                f"line, past where its text starts ({starts:.2f})"
+            )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTurnedLines:
+    def test_a_trailing_br_in_a_block_child_adds_no_line(self, rotation_pptx: bytes) -> None:
+        """Minor 6: "Line one<br>" then a block "Line two", turned, is two lines, no blank between.
+
+        A <br> that ends its block breaks no further line: the browser shows two
+        lines, so the item reads two.
+        """
+        _, item = _text_item(_shapes(rotation_pptx, "trailing-br"), "one", "the turned blocks")
+
+        assert [_normalised(line) for line in _lines(item)] == ["Line one", "Line two"], (
+            f"the turned blocks' lines are {_lines(item)}"
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "text", "text_align"),
+        [("align-right", "Right aligned", "right"), ("align-center", "Centred label", "center")],
+    )
+    def test_an_aligned_turned_label_keeps_its_alignment_and_layout_box(
+        self, rotation_pptx: bytes, name: str, text: str, text_align: str
+    ) -> None:
+        """Minor 7: right- and centre-aligned 240 px turned labels.
+
+        Each item is written with the browser's computed text-align, its slack
+        on that alignment's growth side (left for right-aligned text, half each
+        side when centred), and its layout box where the browser has it
+        (``_assert_turned_box``).
+        """
+        document = _document(name)
+        layout = _layout(document, "#target")
+        assert layout["text_align"] == text_align, (
+            f"fixture drift: {name} computes text-align {layout['text_align']}"
+        )
+        _, item = _text_item(_shapes(rotation_pptx, name), text.split()[0], f"the {name} label")
+
+        _assert_one_line(item, text, f"the {name} label")
+        _assert_turned_box(item, layout, 270.0, f"the {name} label")
+
+    def test_a_turned_paragraph_keeps_the_browsers_soft_wraps(self, rotation_pptx: bytes) -> None:
+        """Minor 8: a 150 px paragraph turned 270 degrees wraps where the browser wraps it.
+
+        The browser's lines are read from its unturned twin (a turn does not
+        change where a line breaks): three of them. The turned item holds those
+        three lines, on its layout box.
+        """
+        document = _document("soft-wrap")
+        expected = [_normalised(line) for line in browser_lines(document, "#twin")]
+        assert len(expected) == 3, f"fixture drift: the paragraph wraps to {expected}"
+        shapes = _shapes(rotation_pptx, "soft-wrap")
+        turned = [
+            shape
+            for shape in shapes
+            if shape.kind == "text"
+            and "Quarterly" in shape.text
+            and _angle_off(shape.rotation, 270.0) <= ANGLE_TOLERANCE_DEGREES
+        ]
+        assert len(turned) == 1, f"expected one turned paragraph:\n{_describe(shapes)}"
+
+        assert [_normalised(line) for line in _lines(turned[0])] == expected, (
+            f"the turned paragraph's lines are {_lines(turned[0])}, the browser's {expected}"
+        )
+        _assert_turned_box(turned[0], _layout(document, "#target"), 270.0, "the turned paragraph")
 
 
 def _with_rotated_label(fixture: str) -> str:

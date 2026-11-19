@@ -358,7 +358,8 @@ def browser_each_layout_box(document_html: str, selector: str) -> list[dict]:
     """The layout box of EVERY match of ``selector``, in document order: bounds and offset size.
 
     One ``{"x", "y", "w", "h", "offset_w", "offset_h", "writing_mode",
-    "transform"}`` per match, all read from one settled page:
+    "transform", "padding", "border", "text_align", "direction"}`` per match,
+    all read from one settled page:
 
     * ``x y w h`` is ``getBoundingClientRect()``, in CSS px: for a transformed
       element, the axis-aligned bounds of the turned box, not the box;
@@ -369,7 +370,12 @@ def browser_each_layout_box(document_html: str, selector: str) -> list[dict]:
     * ``writing_mode`` and ``transform`` are computed, as the browser
       serialises them (``"vertical-rl"``, ``"matrix(0, -1, 1, 0, 0, 0)"``,
       ``"none"``). Under a vertical writing mode the lines run down the page,
-      so the inline length is ``offset_h``.
+      so the inline length is ``offset_h``;
+    * ``padding`` and ``border`` are its computed padding and border widths,
+      ``{"top", "right", "bottom", "left"}`` in CSS px each, on its physical
+      sides;
+    * ``text_align`` and ``direction`` are computed (``"start"``,
+      ``"center"``, ``"ltr"``).
     """
     boxes = json.loads(_run_measure(document_html, selector, "--mode=each-layout-box"))
     return [
@@ -379,6 +385,10 @@ def browser_each_layout_box(document_html: str, selector: str) -> list[dict]:
             "offset_h": float(box["offsetHeight"]),
             "writing_mode": box["writingMode"],
             "transform": box["transform"],
+            "padding": {side: float(width) for side, width in box["padding"].items()},
+            "border": {side: float(width) for side, width in box["border"].items()},
+            "text_align": box["textAlign"],
+            "direction": box["direction"],
         }
         for box in boxes
     ]
