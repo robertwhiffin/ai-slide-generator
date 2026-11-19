@@ -639,6 +639,7 @@ const ViewerBody = forwardRef<
           slideDeck={slideDeck}
           onExit={() => setIsPresentationMode(false)}
           startIndex={currentIndex}
+          sessionId={sessionId ?? undefined}
         />
       )}
 

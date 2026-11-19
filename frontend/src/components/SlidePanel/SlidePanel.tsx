@@ -369,6 +369,7 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
           slideDeck={slideDeck}
           onExit={() => setIsPresentationMode(false)}
           startIndex={presentationStartIndex}
+          sessionId={sessionId ?? undefined}
         />
       )}
     </div>
