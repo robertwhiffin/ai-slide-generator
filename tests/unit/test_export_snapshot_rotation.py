@@ -9,7 +9,9 @@ item:
 
 * its box is the element's untransformed layout box, ``offsetWidth`` x
   ``offsetHeight`` (times any scale), centred where its bounding rect is
-  centred (a rotated rectangle's bounds share its centre);
+  centred (a rotated rectangle's bounds share its centre), grown along its
+  width by the usual slack on the side its alignment grows, with that layout
+  box kept in place (R11f: Google Slides wraps a line at its box's exact width);
 * its ``rot`` is the cumulative angle, normalised to 0-359 and written in
   60000ths of a degree: ``rotate(-90deg)`` is 270 degrees, 16200000;
 * its lines are the element's own, in DOM order, split by ``<br>`` and block
@@ -107,6 +109,14 @@ GEOMETRY_TOLERANCE_PX = 1.0
 # rot is written in 60000ths of a degree, so a right angle is exact and any
 # other angle is within a 60000th.
 ANGLE_TOLERANCE_DEGREES = 0.01
+# R11f: a turned box keeps the usual width slack (spec §3 Text, Wrapping), at
+# most this fraction of its inline length plus this many px.
+SLACK_FRACTION = 0.06
+SLACK_PX = 4.0
+# Where the slack lies along the box's inline axis, as the shift from the box's
+# centre to its layout box's centre, in units of the slack: right of
+# left-aligned text, left of right-aligned text, half each side of centred.
+LAYOUT_SHIFT_PER_SLACK = {"left": -0.5, "right": 0.5, "center": 0.0}
 # The middle of a "…" dot is fully covered, so the screen shows its colour
 # exactly; a few units allow for colour management and nothing more.
 SCREEN_CHANNEL_TOLERANCE = 8
@@ -392,11 +402,19 @@ def _assert_centred(item: Shape, layout: dict, what: str) -> None:
 def _assert_turned_box(
     item: Shape, layout: dict, angle: float, what: str, *, vertical: bool = False
 ) -> None:
-    """``item`` is its element's unrotated box, turned by ``angle`` about the bounds' centre.
+    """``item`` is its element's unrotated box plus its slack, turned by ``angle``.
 
-    The unrotated box is ``offsetWidth`` x ``offsetHeight``; under a vertical
-    writing mode it is the inline length by the block length, ``offsetHeight``
-    x ``offsetWidth`` (R11a).
+    The unrotated layout box is ``offsetWidth`` x ``offsetHeight``; under a
+    vertical writing mode it is the inline length by the block length,
+    ``offsetHeight`` x ``offsetWidth`` (R11a). R11f: the item's box is that
+    box grown along its own inline axis by its slack, which lies on the side
+    its paragraphs' alignment grows (right of left-aligned text, left of
+    right-aligned, half each side of centred) and is between 0 and 6% + 4 px
+    of the inline length (plus 1 px). So the box LESS its slack is the layout
+    box, within 1 px, centred on the bounds' centre within 1 px: the layout box,
+    and the text's start with it, stays where the browser has it. A slack
+    grown on the other side, or a box grown about its own centre, moves the
+    layout part off the bounds' centre by half the slack.
     """
     _assert_angle(item, angle, what)
     width, height = (
@@ -404,14 +422,33 @@ def _assert_turned_box(
         if vertical
         else (layout["offset_w"], layout["offset_h"])
     )
-    off = (round(item.w - width, 3), round(item.h - height, 3))
-    assert all(abs(delta) <= GEOMETRY_TOLERANCE_PX for delta in off), (
-        f"{what}: its unrotated box is {item.w:.2f} x {item.h:.2f}, expected {width:g} x "
-        f"{height:g} (the element's {'inline by block length' if vertical else 'offset size'}; "
-        f"off by {off}, tolerance {GEOMETRY_TOLERANCE_PX} px). The bounds are "
-        f"{layout['w']:.2f} x {layout['h']:.2f}."
+    slack = item.w - width
+    most = width * SLACK_FRACTION + SLACK_PX + GEOMETRY_TOLERANCE_PX
+    assert (
+        -GEOMETRY_TOLERANCE_PX <= slack <= most and abs(item.h - height) <= GEOMETRY_TOLERANCE_PX
+    ), (
+        f"{what}: its unrotated box is {item.w:.2f} x {item.h:.2f}; expected the "
+        f"{'inline by block length' if vertical else 'offset size'} {width:g} x {height:g} plus a "
+        f"slack of 0 to {most:.2f} px along its width (it is {slack:.2f}), height within "
+        f"{GEOMETRY_TOLERANCE_PX} px. The bounds are {layout['w']:.2f} x {layout['h']:.2f}."
     )
-    _assert_centred(item, layout, what)
+    alignments = {paragraph.align for paragraph in item.paras}
+    assert len(alignments) == 1 and next(iter(alignments)) in LAYOUT_SHIFT_PER_SLACK, (
+        f"{what}: its paragraphs are aligned {alignments}, expected one of "
+        f"{sorted(LAYOUT_SHIFT_PER_SLACK)}"
+    )
+    (align,) = alignments
+    shift = LAYOUT_SHIFT_PER_SLACK[align] * slack
+    radians = math.radians(item.rotation)
+    centre = _centre(item)
+    emitted = (centre[0] + shift * math.cos(radians), centre[1] + shift * math.sin(radians))
+    expected = _centre(layout)
+    off = (round(emitted[0] - expected[0], 3), round(emitted[1] - expected[1], 3))
+    assert all(abs(delta) <= GEOMETRY_TOLERANCE_PX for delta in off), (
+        f"{what}: its layout box (its box less the {slack:.2f} px slack on the {align}-aligned "
+        f"growth side) is centred at {emitted}, the browser bounds at {expected} (off by {off}, "
+        f"tolerance {GEOMETRY_TOLERANCE_PX} px)"
+    )
 
 
 def _assert_one_line(item: Shape, expected: str, what: str) -> None:

@@ -296,6 +296,15 @@ function textRuns(item) {
   return runs;
 }
 
+// The lowest point a text item covers on the slide, in px: its box's bottom,
+// or for a turned box (rotate set) the bottom of its turned extent.
+function textBottomPx(item) {
+  if (!item.rotate) return item.y + item.h;
+  const radians = item.rotate * Math.PI / 180;
+  const halfHeight = (Math.abs(item.w * Math.sin(radians)) + Math.abs(item.h * Math.cos(radians))) / 2;
+  return item.y + item.h / 2 + halfHeight;
+}
+
 function validateTextBoxPosition(model, bodyDimensions) {
   const errors = [];
   const slideHeightInches = bodyDimensions.height / PX_PER_IN;
@@ -303,7 +312,7 @@ function validateTextBoxPosition(model, bodyDimensions) {
     if (item.kind !== 'text') continue;
     const runs = textRuns(item);
     const fontSize = runs.reduce((largest, run) => Math.max(largest, (run.sizePx || 0) * PT_PER_PX), 0);
-    const bottomEdge = (item.y + item.h) / PX_PER_IN;
+    const bottomEdge = textBottomPx(item) / PX_PER_IN;
     const distanceFromBottom = slideHeightInches - bottomEdge;
     if (fontSize > 12 && distanceFromBottom < MIN_BOTTOM_MARGIN_IN) {
       const text = runs.map((run) => run.text || '').join('');

@@ -50,6 +50,14 @@
 // renderers set a single-spaced first line by its font size where the browser
 // sets it by the font's ascent, and spacing below 100% raises it, so the box is
 // raised by firstLineOffsetPx, fitted against both renderers.
+//
+// A turned block (snapshot_text.mjs turnedBlock: rotated text, or text a
+// vertical writing mode sets sideways) is its root's layout box, grown by its
+// slack and turned about its centre, so that box stays where it is. Its text
+// sits inside it by its insets, written as the box's own (bodyPr lIns, tIns,
+// rIns, bIns), none below 0, which Google Slides ignores: the top inset is
+// where its first line's glyphs start, less the same first-line offset, and
+// no less than 0.
 
 const { runOptions, xmlText } = require('./emit_typography.cjs');
 
@@ -178,16 +186,29 @@ function textObjects(item, fonts) {
   return objects;
 }
 
-// The top of the item's box: the first line's glyph top, raised by the
-// first-line offset of its first paragraph. Without the ascent (the probes
-// failed) the offset is unknown, and the box keeps the glyph top.
-function boxTopPx(item) {
+// How far above its first line's glyph top the renderers need the top of the
+// item's text: the first-line offset of its first paragraph, in px. Without
+// the ascent (the probes failed) the offset is unknown, and is 0.
+function firstLineOffsetOf(item) {
   const paragraphs = item.paragraphs || [];
   const first = paragraphs[0];
-  if (!first || !(Number(first.ascentPx) > 0)) return item.y;
+  if (!first || !(Number(first.ascentPx) > 0)) return 0;
   const spacing = spacingOf(first, lineCount(paragraphs) > 1);
   const pct = spacing.pct || SINGLE_SPACING_PCT;
-  return item.y - firstLineOffsetPx(pct, first.sizePx, first.ascentPx);
+  return firstLineOffsetPx(pct, first.sizePx, first.ascentPx);
+}
+
+// The item's box top and its pptxgenjs margin ([left, right, bottom, top] in
+// points): a box raised by the first-line offset with no margin, or a turned
+// block's own box with its insets, the offset taken off the top one.
+function placementOf(item) {
+  if (!item.inset) return { y: item.y - firstLineOffsetOf(item), margin: 0 };
+  const inset = item.inset;
+  const top = Math.max(0, (Number(inset.top) || 0) - firstLineOffsetOf(item));
+  return {
+    y: item.y,
+    margin: [inset.left, inset.right, inset.bottom, top].map((px) => (Number(px) || 0) * PT_PER_PX),
+  };
 }
 
 // emitText(slide, item, fonts): one text item as one text box.
@@ -195,14 +216,15 @@ function boxTopPx(item) {
 function emitText(slide, item, fonts) {
   const objects = textObjects(item, fonts);
   if (!objects.length) return;
+  const placement = placementOf(item);
   const options = {
     x: inches(item.x),
-    y: inches(boxTopPx(item)),
+    y: inches(placement.y),
     w: inches(item.w),
     h: inches(item.h),
     wrap: item.wrap,
     valign: 'top',
-    margin: 0,
+    margin: placement.margin,
     inset: 0,
     fit: 'none',
     align: item.align,

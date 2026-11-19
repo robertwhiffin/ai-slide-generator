@@ -63,6 +63,33 @@
 // innerText, which leaves out visibility: hidden) are its hidden text, which
 // the snapshot reports as model.reference.hiddenText.
 //
+// Ellipsis (R11e). A line of a block with text-overflow: ellipsis and an
+// overflow other than visible that runs past its content box's end edge (the
+// line box's, where Chrome ends the "…") shows the characters whose end lies
+// within that edge less the "…"'s advance, then the "…": no more, whatever
+// the overflow clip shows past it. The advance is the "…" in the block's own
+// face, measured by probe; the cut word is measured character by character;
+// and the "…" is a run in the block's own style, which is what Chrome paints
+// it in even where the cut falls inside a differently styled inline
+// (truncateAtEllipsis). The cut word and all after it are hidden text.
+//
+// Turned text. Under a rotation, and under a vertical writing mode, which sets
+// Latin glyphs sideways, a Range rect is the axis-aligned bounds of a turned
+// glyph run, so lines cannot be clustered from rects, and a renderer turns a
+// whole text box or nothing. So the text of a turn root (snapshot.mjs
+// TurnedText) is ONE text item (turnedBlock): the root's unrotated layout
+// box, turned by its text's angle about the centre it shares with the root's
+// bounds, its text set inside the content box by the box's insets, and the
+// box grown by the slack its padding cannot hold, the layout box held where
+// the browser has it (R11f). Its lines
+// are its text in DOM order, broken at each <br>, preserved newline and block
+// boundary (layoutTurnedRun), and where the browser wrapped a line: the
+// centre of a turned rect is the centre of the run it bounds at any angle, so
+// turned back about the root's centre it says where along the line, and on
+// which line, the run lies (softWrapped). A vertical-lr root stacks its lines
+// left to right, the other way from a box turned 90 degrees, so its lines are
+// written in reverse.
+//
 // Runs carry the browser's typography (spec §3 Runs, RC7). It is read from the
 // computed style of the text node's parent element. Three things CSS does not
 // inherit reach a run from further up:
@@ -89,9 +116,10 @@
 //  * Decoration = {element, style, opacity, boxes, clip}: an inline element, its computed
 //  *              style, its cumulative opacity, one box (snapshot.mjs boxGeometry) per
 //  *              fragment and the clip its boxes are cut to.
-//  * TextBlock = {x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
+//  * TextBlock = {x,y,w,h, rotate:number|null, wrap, align:'left'|'center'|'right', rtl,
 //  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
-//  *                           lines:[{runs:Run[]}]}]}
+//  *                           lines:[{runs:Run[]}]}],
+//  *              inset?: {left, top, right, bottom}}
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
 //  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx}
 //  *
@@ -99,6 +127,15 @@
 //  * is a blank line (two <br>s, an empty pre line). Sizes are CSS px on the slide.
 //  * y        the top of the first line's glyphs (its text's rects); the emitter
 //  *          places the box above it by the calibrated first-line offset;
+//  * rotate   degrees clockwise about the box's centre, 0..360: set on a turned
+//  *          block (turnedBlock) alone, whose box is its root's layout box
+//  *          grown by the part of its slack its padding does not hold;
+//  * inset    a turned block's alone: where its text sits inside its box, px in
+//  *          the box's own frame, each 0 or more. left and right are its
+//  *          content box's edges, less the slack its padding holds on the side
+//  *          its alignment grows; top is how far below the box's top its first
+//  *          line's glyphs start; bottom is 0. Its y is the box's top, and the
+//  *          emitter takes the first-line offset off the top inset instead;
 //  * align    a justified block is 'left' ('right' when right-to-left): see textBlock;
 //  * sizePx   the size of the paragraph's largest run;
 //  * lineHeightPx  the paragraph's CSS line height, the natural one for
@@ -223,6 +260,29 @@ function createTextLayout(env) {
   // letter after any other character.
   const INSIDE_A_WORD = /[\p{L}\p{N}\p{M}'’]/u;
   const LOWERCASE_LETTER = /^\p{Ll}$/u;
+  // What Chrome paints where text-overflow: ellipsis cuts a line.
+  const ELLIPSIS = '…';
+  // A line runs past its content box's end edge when its text ends beyond it
+  // by more than this: the layout unit (1/64 px), so a line that fits exactly
+  // is never cut.
+  const ELLIPSIS_OVERFLOW_PX = 1 / 64;
+  // How far a vertical writing mode turns its Latin glyphs, set sideways,
+  // clockwise from upright, and whether its lines stack the other way from the
+  // paragraphs of a box turned by that angle (CSS Writing Modes 4). A plain
+  // table, read with hasOwnProperty: page script can replace Map and Set.
+  const WRITING_MODE_TURNS = {
+    'vertical-rl': { angle: 90, reversed: false },
+    'vertical-lr': { angle: 90, reversed: true },
+    'sideways-rl': { angle: 90, reversed: false },
+    'sideways-lr': { angle: 270, reversed: false },
+  };
+  const UPRIGHT = { angle: 0, reversed: false };
+  // A word under a turn starts a line of its own where the browser wrapped
+  // before it: its centre lies more than this fraction of the larger font size
+  // across the line from the word before it, and back towards the line start.
+  // A wrap moves a word a whole line height; a baseline shift or a mixed size
+  // on one line moves it under half its size.
+  const SOFT_WRAP_FRACTION = 0.5;
 
   const dom = domAccess();
   // Text layout is bounded on its own: every child node listed and every rect
@@ -238,6 +298,12 @@ function createTextLayout(env) {
   //                whose drawn width includes the stretch)}
   const pendingParagraphs = [];
   const pendingRuns = [];
+  //   turned      {block, line, centre, angle}: a turned block, whose top inset
+  //               comes from where its first line lies (applyMetrics)
+  const pendingTurned = [];
+  // The advance of the "…" per probe face, in unscaled px (null when it could
+  // not be measured), measured once each (ellipsisAdvance).
+  const ellipsisAdvances = Object.create(null);
   // The slide's hidden text (hiddenText), in the order it is read. `dropping`
   // is true while the tokens read in a row are all dropped, so a word split
   // over two text nodes ("Rev<b>enue</b>") is recorded whole.
@@ -887,28 +953,52 @@ function createTextLayout(env) {
   function splitToken(source, start, end, space, previous, range, tokens) {
     const pieces = [];
     let pending = '';
+    let pendingStart = start;
+    let pendingBefore = previous;
     let before = previous;
     let index = start;
     while (index < end) {
       const length = codePointLength(source.data, index);
       const raw = source.data.slice(index, index + length);
       const text = space ? preservedSpaces(raw) : casedText(raw, source.transform, before);
+      const charBefore = before;
       before = raw;
       range.setStart(source.node, index);
       range.setEnd(source.node, index + length);
+      const charStart = index;
       index += length;
       const rects = paintedRects(range, space);
       if (!rects.length) {
-        if (pieces.length) pieces[pieces.length - 1].text += text;
-        else pending += text;
+        if (pieces.length) {
+          pieces[pieces.length - 1].text += text;
+          pieces[pieces.length - 1].end = index;
+        } else {
+          if (!pending) {
+            pendingStart = charStart;
+            pendingBefore = charBefore;
+          }
+          pending += text;
+        }
         continue;
       }
-      pieces.push({ text: pending + text, rects, shown: anyShown(rects, source.clip) });
+      pieces.push({
+        text: pending + text,
+        rects,
+        shown: anyShown(rects, source.clip),
+        start: pending ? pendingStart : charStart,
+        end: index,
+        previous: pending ? pendingBefore : charBefore,
+      });
       pending = '';
     }
     for (let piece = 0; piece < pieces.length; piece++) {
-      if (pieces[piece].shown) pushTextToken(source, pieces[piece].text, pieces[piece].rects[0], false, tokens);
-      else dropToken(source, pieces[piece].text, pieces[piece].rects, tokens);
+      const read = pieces[piece];
+      if (read.shown) {
+        pushTextToken(source, read.text, read.rects[0], false, tokens,
+          space ? null : { source, start: read.start, end: read.end, previous: read.previous });
+      } else {
+        dropToken(source, read.text, read.rects, tokens);
+      }
     }
     return pieces.length > 0;
   }
@@ -939,10 +1029,14 @@ function createTextLayout(env) {
     };
   }
 
-  function pushTextToken(source, text, rect, collapsible, tokens) {
+  // `origin` is where a word of a text node lies in it, so an ellipsis cut can
+  // measure it character by character (truncateAtEllipsis): {source, start,
+  // end, previous}, readTokens' source, the word's offsets in its data and the
+  // character before it (casedText). Null for generated text and for spaces.
+  function pushTextToken(source, text, rect, collapsible, tokens, origin) {
     tokens.push({
       kind: 'text', text, rect, style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
-      segment: source.segment,
+      segment: source.segment, origin: origin || null,
     });
     dropping = false;
   }
@@ -977,7 +1071,7 @@ function createTextLayout(env) {
         splitToken(source, start, end, space, previous, range, tokens)) {
       return;
     }
-    pushTextToken(source, text, rects[0], collapsible, tokens);
+    pushTextToken(source, text, rects[0], collapsible, tokens, space ? null : { source, start, end, previous });
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
@@ -1206,6 +1300,31 @@ function createTextLayout(env) {
   // it. `walk` is its item's inline context (snapshot.mjs visit). Null when it
   // paints nothing.
   function markerBlock(marker, walk) {
+    const read = markerGlyphLine(marker, walk, '');
+    if (!read) return null;
+    const line = read.line;
+    const parts = read.parts;
+    queueRuns([line], 'right', !walk.frame.angle);
+    const width = parts.glyphs.right - parts.glyphs.left;
+    const extra = width * SLACK_FRACTION + SLACK_PX;
+    return {
+      x: parts.rtl ? parts.glyphs.left : parts.glyphs.right - width - extra,
+      y: parts.glyphs.top,
+      w: width + extra,
+      h: parts.glyphs.bottom - parts.glyphs.top,
+      rotate: null,
+      wrap: false,
+      align: parts.rtl ? 'left' : 'right',
+      rtl: parts.rtl,
+      paragraphs: paragraphsOf([line]),
+    };
+  }
+
+  // markerGlyphLine(marker, walk, after) -> {line, parts} | null: an outside
+  // marker's glyphs as one assembled line in its own style, `after` (white
+  // space, or '') written after them, and where its text lies (markerParts).
+  // Null when it paints nothing: no glyphs, hidden, or clipped away.
+  function markerGlyphLine(marker, walk, after) {
     const ps = marker.style;
     const glyphs = marker.list.glyphs;
     if (!glyphs || ps.visibility !== 'visible' || !(walk.opacity > 0)) return null;
@@ -1222,24 +1341,22 @@ function createTextLayout(env) {
     };
     const source = generatedSource(context, scale, 0);
     const tokens = [];
-    pushTextToken(source, generatedText(glyphs, source.mode), parts.glyphs, false, tokens);
+    pushTextToken(source, generatedText(glyphs, source.mode) + after, parts.glyphs, false, tokens);
     tokens[0].shape = marker.list.symbol;
     const line = assembleLine({ tokens }, String(ps.lineHeight));
     if (!line || !line.runs.length) return null;
-    queueRuns([line], 'right', walk.frame);
-    const width = parts.glyphs.right - parts.glyphs.left;
-    const extra = width * SLACK_FRACTION + SLACK_PX;
-    return {
-      x: parts.rtl ? parts.glyphs.left : parts.glyphs.right - width - extra,
-      y: parts.glyphs.top,
-      w: width + extra,
-      h: parts.glyphs.bottom - parts.glyphs.top,
-      rotate: null,
-      wrap: false,
-      align: parts.rtl ? 'left' : 'right',
-      rtl: parts.rtl,
-      paragraphs: paragraphsOf([line]),
-    };
+    return { line, parts };
+  }
+
+  // markerLine(marker, walk) -> the line an outside marker leads its item's
+  // first line with in a turned block (snapshot.mjs TurnedText): its glyphs,
+  // then its trailing white space as one space the line keeps, for the room
+  // its box leaves before the text. Null when it paints nothing.
+  function markerLine(marker, walk) {
+    const read = markerGlyphLine(marker, walk, marker.list.trailing && whiteSpaceOf(marker.style).spaces
+      ? preservedSpaces(marker.list.trailing)
+      : ' ');
+    return read ? read.line : null;
   }
 
   // ─── lines ───────────────────────────────────────────────────────────
@@ -1438,22 +1555,180 @@ function createTextLayout(env) {
     return !line.segments && !line.runs.length;
   }
 
-  // layoutInlineRun(nodes, s, scale) -> {lines, rtl} | null
-  //   nodes  one run's pieces, as collectRuns gathers them;
-  //   s      the computed style of the block that holds the run;
-  //   scale  the block's cumulative transform scale (font sizes and tracking scale with it).
-  // Each line is {runs, extents, rect, lineHeight}, or {segments} for a cut
-  // line (isCut): its text between the gaps and inline edges on it, each
-  // segment a line of that first form. A gap (an atomic inline, or a word that
-  // paints nothing) is a token with the rect it fills in its line, so lines
-  // cluster around it as around a word; an inline edge moves no token, it only
-  // starts a new segment, and so does an inside marker the text does not run
-  // straight on from (joinMarkers). A line a clip cuts off is a cut line of
-  // gaps alone, which has no segment. Leading and trailing blank lines paint
-  // nothing and are dropped; null when no text in the run paints.
-  function layoutInlineRun(nodes, s, scale) {
+  // ─── ellipsis ────────────────────────────────────────────────────────
+  // R11e. A block container whose text-overflow is ellipsis and whose overflow
+  // is not visible ends each line that runs past its line box in a "…". The
+  // line box is its content box, where Chrome ends the "…", not the padding
+  // box its overflow clips to. Chrome keeps the characters whose advance ends
+  // within the end edge less the "…"'s own advance, paints the "…" straight
+  // after them in the block's own style, and nothing else of the line,
+  // whatever its overflow clip would show.
+  //   EllipsisCut = {edge, rtl, context}
+  //   edge     the content box's end edge, slide px: its right, or its left
+  //            right to left;
+  //   context  the block's own text context (collectRuns), which the "…" is
+  //            set in: its style, the backdrop and decorations of its content.
+
+  // ellipsisOf(el, s, walk) -> EllipsisCut | null for the block `el`
+  // (computed style `s`) the walk is laying out; null unless its lines end in a
+  // "…" where they overflow. Turned text is not cut: its rects do not say
+  // where along its line a character lies, and its overflow clip, the turned
+  // box's bounds, cuts it.
+  function ellipsisOf(el, s, walk) {
+    if (String(s.textOverflow) !== 'ellipsis' || s.overflowX === 'visible' || walk.frame.angle || walk.turned) {
+      return null;
+    }
+    const box = env.boxGeometry(el, env.rectOf(el), walk.frame);
+    const area = box ? env.contentBox(s, box) : null;
+    if (!area) return null;
     const rtl = s.direction === 'rtl';
-    const range = document.createRange();
+    return {
+      edge: rtl ? area.x : area.x + area.w,
+      rtl,
+      context: {
+        style: s,
+        opacity: walk.opacity,
+        backdrop: walk.backdrop,
+        decoration: walk.decoration,
+        baseline: null,
+        clip: walk.clip,
+      },
+    };
+  }
+
+  // The advance of the "…" in the face of the computed style `ps`, as the
+  // browser sets it, in slide px at `scale`; null when its probe could not be
+  // read. One probe per face, through the pristine probe measurer
+  // (measureProbes), made when a line first needs it: it is off the page again
+  // before the layout reads another rect.
+  function ellipsisAdvance(ps, scale) {
+    const css = browserCutCss(probeFaceOf(ps, familyOf(ps.fontFamily), 1));
+    if (ellipsisAdvances[css] === undefined) {
+      const sizes = measureProbes([{ css, text: ELLIPSIS, baseline: false }],
+        'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"');
+      const width = sizes ? Number(sizes[0].w) : NaN;
+      ellipsisAdvances[css] = Number.isFinite(width) && width >= 0 ? width : null;
+    }
+    const advance = ellipsisAdvances[css];
+    return advance === null ? null : advance * scale;
+  }
+
+  // The characters of a word token, {text, rect} each as painted: its text
+  // node read one code point at a time (its origin), cased as the word was. A
+  // code point that paints nothing (a joiner, a combining mark) travels with
+  // its neighbour, as in splitToken.
+  function characterPieces(token, range) {
+    const origin = token.origin;
+    const source = origin.source;
+    const pieces = [];
+    let pending = '';
+    let before = origin.previous;
+    let index = origin.start;
+    while (index < origin.end) {
+      const length = codePointLength(source.data, index);
+      const raw = source.data.slice(index, index + length);
+      const text = casedText(raw, source.transform, before);
+      before = raw;
+      range.setStart(source.node, index);
+      range.setEnd(source.node, index + length);
+      index += length;
+      const rects = paintedRects(range, false);
+      if (!rects.length) {
+        if (pieces.length) pieces[pieces.length - 1].text += text;
+        else pending += text;
+        continue;
+      }
+      pieces.push({ text: pending + text, rect: rects[0] });
+      pending = '';
+    }
+    return pieces;
+  }
+
+  // Cuts a clustered line (clusterLines) that runs past its block's ellipsis
+  // edge as Chrome cuts it. Every token whose rect ends within the edge less
+  // the "…"'s advance stays; the word that limit falls in keeps the characters
+  // that end within it, a character partly past it being hidden under the
+  // "…"; a "…" token in the block's own style follows them; and every token
+  // after is gone. A line whose text ends within the edge is left as it is,
+  // and so is one whose "…" could not be measured (its overflow clip still
+  // cuts it). The cut word and the words after it are hidden text: the page
+  // reads them, the slide does not show them.
+  function truncateAtEllipsis(line, ellipsis, scale, range) {
+    const rtl = ellipsis.rtl;
+    const tokens = line.tokens;
+    const beyond = (rect, edge) => (rtl ? rect.left < edge - ELLIPSIS_OVERFLOW_PX : rect.right > edge + ELLIPSIS_OVERFLOW_PX);
+    let overflows = false;
+    for (let index = 0; index < tokens.length && !overflows; index++) {
+      if (!tokens[index].collapsible && beyond(tokens[index].rect, ellipsis.edge)) overflows = true;
+    }
+    if (!overflows) return;
+    const advance = ellipsisAdvance(ellipsis.context.style, scale);
+    if (advance === null) return;
+    const limit = rtl ? ellipsis.edge + advance : ellipsis.edge - advance;
+    const kept = [];
+    const hidden = [];
+    let cut = false;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (!cut && !beyond(token.rect, limit)) {
+        kept.push(token);
+        continue;
+      }
+      if (!cut && token.kind === 'text' && token.origin) {
+        const characters = characterPieces(token, range);
+        let text = '';
+        let rect = null;
+        for (let character = 0; character < characters.length; character++) {
+          const piece = characters[character];
+          if (beyond(piece.rect, limit)) break;
+          text += piece.text;
+          rect = rect
+            ? { left: Math.min(rect.left, piece.rect.left), top: Math.min(rect.top, piece.rect.top), right: Math.max(rect.right, piece.rect.right), bottom: Math.max(rect.bottom, piece.rect.bottom) }
+            : piece.rect;
+        }
+        if (text) kept.push({ ...token, text, rect, origin: null });
+      }
+      cut = true;
+      // A word read from a visible text node, and the spaces between such words.
+      if (token.kind === 'text' && (token.collapsible || (token.origin && token.origin.source.recordsHidden))) {
+        hidden.push(token.text);
+      }
+    }
+    // The "…" starts where the last token kept ends, or where the line starts
+    // when none fits; it joins the segment of the last word kept.
+    const last = kept.length ? kept[kept.length - 1] : tokens[0];
+    const at = kept.length ? (rtl ? last.rect.left : last.rect.right) : (rtl ? last.rect.right : last.rect.left);
+    let segment = 0;
+    for (let index = kept.length - 1; index >= 0; index--) {
+      if (kept[index].kind !== 'text') continue;
+      segment = kept[index].segment;
+      break;
+    }
+    const style = runStyle(ellipsis.context, scale);
+    kept.push({
+      kind: 'text',
+      text: ELLIPSIS,
+      rect: rtl
+        ? { left: at - advance, top: line.top, right: at, bottom: line.bottom }
+        : { left: at, top: line.top, right: at + advance, bottom: line.bottom },
+      style,
+      face: probeFaceOf(ellipsis.context.style, style.family, scale),
+      collapsible: false,
+      tabSize: DEFAULT_TAB_SIZE,
+      segment,
+      origin: null,
+    });
+    line.tokens = kept;
+    const words = hidden.join('').trim();
+    if (words) hiddenParts.push(' ' + words);
+    dropping = false;
+  }
+
+  // The tokens of one run's pieces, in DOM order (readTokens and its kin):
+  // words, spaces, breaks, gaps and atomic inlines, each inside marker joined
+  // to its line where the text runs straight on from it (joinMarkers).
+  // `range` is the Range every token is measured with.
+  function readRunTokens(nodes, scale, range) {
     const tokens = [];
     const words = { previous: '', segment: 0 };
     const edges = { opening: false };
@@ -1488,7 +1763,33 @@ function createTextLayout(env) {
       dropping = false;
     }
     joinMarkers(tokens);
+    return tokens;
+  }
+
+  // layoutInlineRun(nodes, s, scale, ellipsis) -> {lines, rtl} | null
+  //   nodes     one run's pieces, as collectRuns gathers them;
+  //   s         the computed style of the block that holds the run;
+  //   scale     the block's cumulative transform scale (font sizes and tracking scale with it);
+  //   ellipsis  the block's EllipsisCut (ellipsisOf), or null.
+  // Each line is {runs, extents, rect, lineHeight}, or {segments} for a cut
+  // line (isCut): its text between the gaps and inline edges on it, each
+  // segment a line of that first form. A gap (an atomic inline, or a word that
+  // paints nothing) is a token with the rect it fills in its line, so lines
+  // cluster around it as around a word; an inline edge moves no token, it only
+  // starts a new segment, and so does an inside marker the text does not run
+  // straight on from (joinMarkers). A line a clip cuts off is a cut line of
+  // gaps alone, which has no segment. A line that runs past the block's
+  // ellipsis edge ends where Chrome's does, in a "…" (truncateAtEllipsis).
+  // Leading and trailing blank lines paint nothing and are dropped; null when
+  // no text in the run paints.
+  function layoutInlineRun(nodes, s, scale, ellipsis) {
+    const rtl = s.direction === 'rtl';
+    const range = document.createRange();
+    const tokens = readRunTokens(nodes, scale, range);
     const clustered = clusterLines(tokens, rtl);
+    for (let index = 0; ellipsis && index < clustered.length; index++) {
+      truncateAtEllipsis(clustered[index], ellipsis, scale, range);
+    }
     const lineHeight = String(s.lineHeight);
     const lines = [];
     let painted = false;
@@ -1520,6 +1821,22 @@ function createTextLayout(env) {
   // Spacing and the first-line offset use the paragraph's largest run (spec §3
   // Metrics), so each paragraph is queued for applyMetrics with that run's
   // face, the first run at that size.
+  // The index of a line's largest run, the first at that size; -1 for a line
+  // with no runs.
+  function largestRunOf(line) {
+    let largest = -1;
+    for (let run = 0; run < line.runs.length; run++) {
+      if (largest < 0 || line.runs[run].sizePx > line.runs[largest].sizePx) largest = run;
+    }
+    return largest;
+  }
+
+  // The probe face of a line's largest run, or null for a line with no runs.
+  function largestFaceOf(line) {
+    const largest = largestRunOf(line);
+    return largest < 0 ? null : line.extents[largest].face;
+  }
+
   function paragraphsOf(lines) {
     const paragraphs = [];
     let paragraph = null;
@@ -1527,14 +1844,9 @@ function createTextLayout(env) {
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
       if (line.runs.length) {
-        let largest = 0;
-        let face = null;
-        for (let run = 0; run < line.runs.length; run++) {
-          if (face === null || line.runs[run].sizePx > largest) {
-            largest = line.runs[run].sizePx;
-            face = line.extents[run].face;
-          }
-        }
+        const run = largestRunOf(line);
+        const largest = line.runs[run].sizePx;
+        const face = line.extents[run].face;
         const lineKey = largest + '|' + line.lineHeight;
         if (!paragraph || lineKey !== key) {
           paragraph = { sizePx: largest, lineHeightPx: null, ascentPx: null, lines: [] };
@@ -1548,13 +1860,13 @@ function createTextLayout(env) {
     return paragraphs;
   }
 
-  // Queues every run of the block for the optical-size comparison. Text under a
-  // rotation is skipped: its rects bound the turned glyphs, not their advance.
-  // A justified line is drawn stretched, and a symbol marker is drawn as a
-  // shape, so their natural width at the browser's own cut is probed instead
-  // (width null).
-  function queueRuns(lines, align, frame) {
-    if (frame && frame.angle) return;
+  // Queues every run of the block for the optical-size comparison.
+  // `advancesRead` is whether its tokens' rects measured their advances: not
+  // under a turn, where they bound the turned glyphs. A justified line is drawn
+  // stretched, a symbol marker is drawn as a shape, and turned text's rects are
+  // no widths, so their natural width at the browser's own cut is probed
+  // instead (width null).
+  function queueRuns(lines, align, advancesRead) {
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
       for (let run = 0; run < line.runs.length; run++) {
@@ -1562,7 +1874,7 @@ function createTextLayout(env) {
         pendingRuns.push({
           run: line.runs[run],
           face: extent.face,
-          width: align === 'justify' || !extent.advance ? null : extent.right - extent.left,
+          width: align === 'justify' || !extent.advance || !advancesRead ? null : extent.right - extent.left,
         });
       }
     }
@@ -1631,7 +1943,7 @@ function createTextLayout(env) {
     const written = placement === 'segment' || align === 'justify' ? start : align;
     const extra = w * SLACK_FRACTION + SLACK_PX;
     const shift = written === 'center' ? extra / 2 : written === 'right' ? extra : 0;
-    queueRuns(lines, align, frame);
+    queueRuns(lines, align, !frame.angle);
     return {
       x: x - shift,
       y: top,
@@ -1664,7 +1976,8 @@ function createTextLayout(env) {
   // layout serves every read, then each read and removed. A baseline probe
   // also holds, before its text, a zero-size inline-block on the baseline, and
   // reports `ascent`: from its text's top (the glyph top the walk reads with a
-  // Range) down to that baseline. Null when the page would not take them,
+  // Range) down to that baseline; and `content`, how tall its text's Range
+  // rect is, the face's content area. Null when the page would not take them,
   // which is announced with `loss`, what the slide then exports without. The
   // text goes in as a text node: page script can take away the textContent
   // setter (hostile_text_nodes). Every probe is made, put in and taken off
@@ -1699,8 +2012,9 @@ function createTextLayout(env) {
         if (parts[index].marker) {
           range.setStart(parts[index].text, 0);
           range.setEnd(parts[index].text, probes[index].text.length);
-          size.ascent = Number(parts[index].marker.getBoundingClientRect().top) -
-            Number(range.getBoundingClientRect().top);
+          const textRect = range.getBoundingClientRect();
+          size.ascent = Number(parts[index].marker.getBoundingClientRect().top) - Number(textRect.top);
+          size.content = Number(textRect.height);
         }
         sizes.push(size);
       }
@@ -1805,7 +2119,12 @@ function createTextLayout(env) {
   // * every run's opticalTrackingPx, where the export cut and the browser's
   //   width differ by more than OPTICAL_SIZE_THRESHOLD: the browser's width
   //   less the export cut's, per character. Both widths carry the run's CSS
-  //   tracking, which the emitter writes on top, so it is not counted twice.
+  //   tracking, which the emitter writes on top, so it is not counted twice;
+  // * every turned block's top inset (turnedBlock): where its first line's
+  //   glyphs start below its box's top. The centre of that line's rect,
+  //   turned back about the box's centre, is the line's centre in the box's
+  //   own frame at any angle, and its glyphs reach half the face's content
+  //   area above it (the largest run's face, whose line probe reads it).
   // Each distinct probe is measured once.
   function applyMetrics() {
     const list = probeList();
@@ -1815,6 +2134,11 @@ function createTextLayout(env) {
     for (let index = 0; index < pendingParagraphs.length; index++) {
       const face = pendingParagraphs[index].face;
       paragraphProbes.push(face ? probe(lineProbeCss(face), LINE_PROBE_TEXT, true) : -1);
+    }
+    const turnedProbes = [];
+    for (let index = 0; index < pendingTurned.length; index++) {
+      const face = largestFaceOf(pendingTurned[index].line);
+      turnedProbes.push(face && pendingTurned[index].line.rect ? probe(lineProbeCss(face), LINE_PROBE_TEXT, true) : -1);
     }
     const runProbes = [];
     for (let index = 0; index < pendingRuns.length; index++) {
@@ -1837,6 +2161,17 @@ function createTextLayout(env) {
       const lineHeight = /px$/.test(pending.lineHeight) ? parseFloat(pending.lineHeight) : line.h;
       if (lineHeight > 0) pending.paragraph.lineHeightPx = lineHeight * pending.face.scale;
       if (line.ascent > 0) pending.paragraph.ascentPx = line.ascent * pending.face.scale;
+    }
+
+    for (let index = 0; index < pendingTurned.length; index++) {
+      if (turnedProbes[index] < 0) continue;
+      const pending = pendingTurned[index];
+      const content = sizes[turnedProbes[index]].content * largestFaceOf(pending.line).scale;
+      if (!(content > 0)) continue;
+      const rect = pending.line.rect;
+      const middle = turnedPoint(pending.centre, pending.angle, (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+      const top = middle.v + pending.block.h / 2 - content / 2;
+      if (Number.isFinite(top)) pending.block.inset.top = top;
     }
 
     for (let index = 0; index < pendingRuns.length; index++) {
@@ -1936,16 +2271,19 @@ function createTextLayout(env) {
 
   // collectTextBlocks(el, s, walk) -> InlineGroup[]
   //   el, s   the element the snapshot walk is visiting and its computed style;
-  //   walk    {opacity, frame, backdrop, decoration, clip}: its cumulative
-  //           opacity, its transform frame, the backdrop of its content
-  //           (backdropInside), the decorations on its text (decorationOf) and
-  //           what clips its inline content (snapshot.mjs clipsOf).
+  //   walk    {opacity, frame, backdrop, decoration, clip, turned}: its
+  //           cumulative opacity, its transform frame, the backdrop of its
+  //           content (backdropInside), the decorations on its text
+  //           (decorationOf), what clips its inline content (snapshot.mjs
+  //           clipsOf), and the TurnedText its text joins, or null.
   // One group per run of its inline content that paints: the run's decorations
   // and its text blocks. The walk orders them: every decoration of the group
   // under every text block of it (snapshot.mjs pushGroup). A group that comes
   // after a block-level child also names that child in `follows`: in tree order
   // it paints after the child's whole subtree, which only the walk can place,
-  // so the walk re-sequences it there.
+  // so the walk re-sequences it there. Under a turn, a group holds the run's
+  // turned lines instead of blocks (layoutTurnedRun), which the walk adds to
+  // its TurnedText, in that same order.
   // The text of an inline element belongs to the block that contains it, so an
   // inline element, a replaced element or a box-less one holds no block of its own.
   function collectTextBlocks(el, s, walk) {
@@ -1957,14 +2295,221 @@ function createTextLayout(env) {
     }
     const itemsAreBlocks = /flex|grid/.test(display);
     const runs = collectRuns(el, s, walk, itemsAreBlocks);
+    // An anonymous flex or grid item's text-overflow is its initial clip: only
+    // the block's own lines end in a "…".
+    const ellipsis = runs.length && !itemsAreBlocks ? ellipsisOf(el, s, walk) : null;
     const groups = [];
     for (let index = 0; index < runs.length; index++) {
       const decorations = decorationsOf(runs[index].nodes, walk.frame);
-      const layout = layoutInlineRun(runs[index].nodes, s, walk.frame.scale);
+      if (walk.turned) {
+        const lines = layoutTurnedRun(runs[index].nodes, s, walk.frame.scale, walk.turned);
+        if (decorations.length || lines.length) {
+          groups.push({ follows: runs[index].follows, decorations, blocks: [], lines, turned: walk.turned });
+        }
+        continue;
+      }
+      const layout = layoutInlineRun(runs[index].nodes, s, walk.frame.scale, ellipsis);
       const group = groupOf(runs[index], decorations, layout, el, s, walk.frame, itemsAreBlocks ? 'text' : 'container');
       if (group) groups.push(group);
     }
     return groups;
+  }
+
+  // ─── turned text ─────────────────────────────────────────────────────
+  // The text of a turn root (snapshot.mjs TurnedText) is one block: each run
+  // the walk lays out under the root gives its lines (layoutTurnedRun), which
+  // the walk gathers in DOM order, and turnedBlock makes the block of them.
+
+  // writingTurn(s) -> {angle, reversed, writingMode}: how far the writing mode
+  // of computed style `s` turns its Latin glyphs, set sideways, clockwise from
+  // upright (0, 90 or 270), and whether its lines stack the other way from a
+  // box turned by that angle (vertical-lr). text-orientation: upright and the
+  // upright CJK it sets are not read: their glyphs turn with the rest.
+  function writingTurn(s) {
+    const writingMode = String(s.writingMode || 'horizontal-tb');
+    const turn = Object.prototype.hasOwnProperty.call(WRITING_MODE_TURNS, writingMode)
+      ? WRITING_MODE_TURNS[writingMode]
+      : UPRIGHT;
+    return { angle: turn.angle, reversed: turn.reversed, writingMode };
+  }
+
+  // Where the slide point (x, y) lies in the frame of text turned by `angle`
+  // degrees clockwise about `centre`: {u, v}, px along its lines and down
+  // across them, from the centre.
+  function turnedPoint(centre, angle, x, y) {
+    const radians = angle * Math.PI / 180;
+    const dx = x - centre.x;
+    const dy = y - centre.y;
+    return { u: dx * Math.cos(radians) + dy * Math.sin(radians), v: -dx * Math.sin(radians) + dy * Math.cos(radians) };
+  }
+
+  // The tokens of one line between breaks of a turned run, as the lines the
+  // browser wrapped it into. A word's rect is the bounds of its turned glyph
+  // run, which share that run's centre at any angle, so its centre turned back
+  // about the root's centre says where the word lies along its line and across
+  // it. A word starts a line when it lies across the line from the word before
+  // it by more than SOFT_WRAP_FRACTION of the larger size, and back towards
+  // the line's start: a wrap. The spaces travel with the words before them.
+  function softWrapped(tokens, turned, rtl) {
+    const lines = [[]];
+    let previous = null;
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (token.kind === 'text' && !token.collapsible) {
+        const rect = token.rect;
+        const at = turnedPoint(turned.centre, turned.angle, (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        if (previous) {
+          const across = Math.abs(at.v - previous.at.v);
+          const back = rtl ? at.u > previous.at.u : at.u < previous.at.u;
+          if (across > SOFT_WRAP_FRACTION * Math.max(token.style.sizePx, previous.sizePx) && back) lines.push([]);
+        }
+        previous = { at, sizePx: token.style.sizePx };
+      }
+      lines[lines.length - 1].push(token);
+    }
+    return lines;
+  }
+
+  // layoutTurnedRun(nodes, s, scale, turned) -> Line[]: the lines of one run
+  // of a turned root's text (collectRuns pieces; `s` the style of the block
+  // holding it, `scale` its transform scale), in DOM order: its text broken at
+  // each <br> and preserved newline, and where the browser wrapped it
+  // (softWrapped), each line assembled as assembleLine does. A turned rect
+  // places nothing along its line, so a gap (an atomic inline, which is its
+  // own item, or a word that paints nothing) and an inline edge cut nothing:
+  // the words around them join. A line of collapsed white space is no line; a
+  // blank line between two breaks is one. [] when none of its text paints.
+  function layoutTurnedRun(nodes, s, scale, turned) {
+    const range = document.createRange();
+    const tokens = readRunTokens(nodes, scale, range);
+    const rtl = s.direction === 'rtl';
+    const lineHeight = String(s.lineHeight);
+    const lines = [];
+    let painted = false;
+    let explicit = [];
+    for (let index = 0; index <= tokens.length; index++) {
+      const token = index < tokens.length ? tokens[index] : null;
+      if (token && token.kind !== 'break') {
+        if (!isGap(token)) explicit.push(token);
+        continue;
+      }
+      const wrapped = softWrapped(explicit, turned, rtl);
+      for (let line = 0; line < wrapped.length; line++) {
+        const assembled = assembleLine({ tokens: wrapped[line] }, lineHeight);
+        if (!assembled) continue;
+        if (assembled.runs.length) painted = true;
+        lines.push(assembled);
+      }
+      explicit = [];
+    }
+    return painted ? lines : [];
+  }
+
+  // The layout box of a turn root whose bounds have no area (a zero-width
+  // anchor its text overflows), which boxGeometry gives none: its offset size,
+  // times its frame's scale, about its bounds' centre, turned by its frame,
+  // as boxGeometry places every turned box.
+  function emptyLayoutBox(element, rect, frame) {
+    const generated = env.isPseudo(element);
+    const width = generated ? element.edges.width : Number(element.offsetWidth) * frame.scaleX;
+    const height = generated ? element.edges.height : Number(element.offsetHeight) * frame.scaleY;
+    const w = Number.isFinite(width) && width > 0 ? width : 0;
+    const h = Number.isFinite(height) && height > 0 ? height : 0;
+    const centreX = Number(rect.left) + Number(rect.width) / 2;
+    const centreY = Number(rect.top) + Number(rect.height) / 2;
+    return { x: centreX - w / 2, y: centreY - h / 2, w, h, scale: frame.scale, rotate: frame.angle || null };
+  }
+
+  // The insets of a turned block's content box in its own frame, px: the
+  // root's border and padding on each side, scaled, taken from the side the
+  // writing mode's turn brings there. Turned 90 degrees, its top is the
+  // root's right side; turned 270, its left.
+  function turnedInsets(s, frame, turn) {
+    const edge = (side, scale) => ((parseFloat(s['border' + side + 'Width']) || 0) + (parseFloat(s['padding' + side]) || 0)) * scale;
+    const top = edge('Top', frame.scaleY);
+    const right = edge('Right', frame.scaleX);
+    const bottom = edge('Bottom', frame.scaleY);
+    const left = edge('Left', frame.scaleX);
+    if (turn === 90) return { left: top, top: right, right: bottom, bottom: left };
+    if (turn === 270) return { left: bottom, top: left, right: top, bottom: right };
+    return { left, top, right, bottom };
+  }
+
+  // turnedBlock(turned) -> TextBlock | null: the one text block of a turn
+  // root's text (snapshot.mjs TurnedText), once the walk has gathered all its
+  // lines; null when none of them paints.
+  // * Its box is the root's unrotated layout box (boxGeometry), the inline
+  //   length by the block length under a vertical writing mode, centred where
+  //   the root's bounds are, turned by the text's angle, plus its slack.
+  // * Its lines are the gathered ones, in the order the turned box stacks
+  //   them (reversed for vertical-lr), less blank lines at either end; the
+  //   browser's, so it never wraps.
+  // * Its text sits in the root's content box by the box's insets
+  //   (turnedInsets). The usual slack (6% + 4 px of the content width) goes
+  //   on the side its alignment grows (half each side when centred), so
+  //   Google Slides, which ignores wrap="none" and every inset below 0, has
+  //   room for a slightly wider font (R11f): the padding on that side holds
+  //   what it can, and the rest grows the box there, its centre moved along
+  //   its own inline axis, so the layout box and the text's start stay where
+  //   the browser has them. Its top inset is the content box's top until
+  //   applyMetrics reads where its first line lies.
+  // Its runs are probed for optical-size tracking at the browser's own cut:
+  // their turned rects are no widths.
+  function turnedBlock(turned) {
+    if (turned.marker) {
+      turned.lines.push(turned.marker);
+      turned.marker = null;
+    }
+    const lines = turned.reversed ? turned.lines.slice().reverse() : turned.lines.slice();
+    let first = 0;
+    let last = lines.length - 1;
+    while (first <= last && !lines[first].runs.length) first++;
+    while (last >= first && !lines[last].runs.length) last--;
+    if (first > last) return null;
+    const kept = lines.slice(first, last + 1);
+    const s = turned.style;
+    const frame = turned.frame;
+    const rect = env.rectOf(turned.root);
+    const box = env.boxGeometry(turned.root, rect, frame) || emptyLayoutBox(turned.root, rect, frame);
+    const sideways = turned.turn === 90 || turned.turn === 270;
+    const w = sideways ? box.h : box.w;
+    const h = sideways ? box.w : box.h;
+    const centre = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+    const inset = turnedInsets(s, frame, turned.turn);
+    const rtl = s.direction === 'rtl';
+    const align = alignmentOf(s, rtl);
+    const written = align === 'justify' ? (rtl ? 'right' : 'left') : align;
+    const extra = Math.max(0, w - inset.left - inset.right) * SLACK_FRACTION + SLACK_PX;
+    // R11f: the inset on a growth side holds what it can of its share of the
+    // slack; the rest grows the box on that side.
+    const take = (side, share) => {
+      const held = Math.min(Math.max(inset[side], 0), share);
+      inset[side] -= held;
+      return share - held;
+    };
+    const growsLeft = written === 'center' ? take('left', extra / 2) : written === 'right' ? take('left', extra) : 0;
+    const growsRight = written === 'center' ? take('right', extra / 2) : written === 'left' ? take('right', extra) : 0;
+    // Grown along its own inline axis, the box's centre moves half the
+    // difference that way, so the layout box stays where the browser has it.
+    const radians = (turned.angle || 0) * Math.PI / 180;
+    const along = (growsRight - growsLeft) / 2;
+    const grownCentre = { x: centre.x + along * Math.cos(radians), y: centre.y + along * Math.sin(radians) };
+    const grownWidth = w + growsLeft + growsRight;
+    queueRuns(kept, align, false);
+    const block = {
+      x: grownCentre.x - grownWidth / 2,
+      y: grownCentre.y - h / 2,
+      w: grownWidth,
+      h,
+      rotate: turned.angle || null,
+      wrap: false,
+      align: written,
+      rtl,
+      paragraphs: paragraphsOf(kept),
+      inset: { left: inset.left, top: inset.top, right: inset.right, bottom: 0 },
+    };
+    pendingTurned.push({ block, line: kept[0], centre, angle: turned.angle });
+    return block;
   }
 
   // ─── table cells ─────────────────────────────────────────────────────
@@ -1978,7 +2523,10 @@ function createTextLayout(env) {
   // text, which a shape over the table cannot. Such a cell's text is overlay
   // text items instead, as anywhere else on the slide. So is all a cell holding
   // block layout holds (snapshot_table.mjs holdsInlineContent), which never
-  // comes here.
+  // comes here. A cell whose text-overflow: ellipsis cuts its line keeps
+  // nothing past the "…" (truncateAtEllipsis), so its line is no cut line and
+  // can stay its own; one its overflow clip alone cuts keeps the gaps of the
+  // words it drops, and is overlaid.
   //
   // layoutCell(el, s, walk) -> CellText, reading the cell's inline content
   // once (`walk` is collectTextBlocks'):
@@ -2003,11 +2551,12 @@ function createTextLayout(env) {
     // overlays it whole), so a cell's inline content is one run; more than one
     // is a layout no a:tc paragraph keeps, and is overlaid.
     const single = runs.length === 1 && !runs[0].follows;
+    const ellipsis = runs.length ? ellipsisOf(el, s, walk) : null;
     const decorations = [];
     const layouts = [];
     for (let index = 0; index < runs.length; index++) {
       decorations.push(decorationsOf(runs[index].nodes, walk.frame));
-      layouts.push(layoutInlineRun(runs[index].nodes, s, walk.frame.scale));
+      layouts.push(layoutInlineRun(runs[index].nodes, s, walk.frame.scale, ellipsis));
     }
     const layout = single ? layouts[0] : null;
     let cut = false;
@@ -2029,7 +2578,7 @@ function createTextLayout(env) {
       slack: extent ? (extent.right - extent.left) * SLACK_FRACTION + SLACK_PX : 0,
       paragraphs: () => {
         if (!layout) return [];
-        queueRuns(layout.lines, align, walk.frame);
+        queueRuns(layout.lines, align, !walk.frame.angle);
         return paragraphsOf(layout.lines);
       },
       groups: () => {
@@ -2067,8 +2616,11 @@ function createTextLayout(env) {
     layoutInlineRun,
     loadedFonts,
     markerBlock,
+    markerLine,
     measureMarkers,
     recordHiddenText,
+    turnedBlock,
+    writingTurn,
     truncated: () => truncated,
   };
 }

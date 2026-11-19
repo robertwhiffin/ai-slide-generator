@@ -47,10 +47,12 @@
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}   (one painted side of a
 //  *   border that differs between sides, along its centre line; see pushSideLines)
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
-//  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right',
+//  *  {kind:'text', x,y,w,h, rotate:number|null, wrap:boolean, align:'left'|'center'|'right',
 //  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
-//  *   lines:[{runs:Run[]}]}]}
-//  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
+//  *   lines:[{runs:Run[]}]}], inset?:{left, top, right, bottom}}
+//  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the
+//  *   geometry. A turned block, the text of a turn root (TurnedText), carries
+//  *   rotate and inset: its box is the root's layout box, its text inside it.)
 //  *  {kind:'table', x,y, colWidths, rowHeights, cells}
 //  *   (one native table; snapshot_table.mjs documents TableItem and TableCell)
 //  *
@@ -2000,6 +2002,109 @@ async function snapshotPage(config, pseudoData) {
     stats.texts++;
   }
 
+  // ─── turned text ─────────────────────────────────────────────────────
+  // Text under a rotation, or set sideways by a vertical writing mode, is
+  // turned: its Range rects bound turned glyphs, and a renderer turns a whole
+  // text box or nothing. So the text of each turn root is ONE text item
+  // (snapshot_text.mjs turnedBlock): the root's unrotated layout box from the
+  // walk's frame (boxGeometry), turned by the text's angle about the centre it
+  // shares with the root's bounds, holding the root's lines, and grown by the
+  // slack its padding cannot hold with that layout box kept in place (R11f).
+  // A turn root is an element whose text is turned (its frame's cumulative
+  // angle, plus the turn of its writing mode, writingTurn) and that does not
+  // paint with the turned text around it: it has a paint group of its own
+  // (placement: a transform, a positioned box, a flex or grid item, an atomic
+  // inline, a float) or a writing mode of its own, or no turned text is around
+  // it. An in-flow block inside a turn root paints in the root's inline content
+  // layer (CSS 2.1 Appendix E), so its text joins the root's item, in DOM
+  // order, as further lines. Anything with its own paint group is an item of
+  // its own over its own box, so its box never paints over text it holds.
+  //   TurnedText = {root, style, frame, angle, turn, reversed, writingMode,
+  //                 centre, paint, id, lines, marker, lastSeq}
+  //   root, style, frame  the root, its computed style and transform frame;
+  //   angle      the text's angle, degrees clockwise, 0..360: frame.angle + turn;
+  //   turn       its writing mode's turn (0, 90 or 270), which swaps its box's sides;
+  //   reversed   its lines stack the other way from the turned box's (vertical-lr);
+  //   centre     its bounds' centre, about which its box turns;
+  //   paint      its paint group, whose inline layer its item paints in;
+  //   id         the item's sequence number, taken at the root's visit (DOM pre-order);
+  //   lines      its lines so far, in DOM order (snapshot_text.mjs layoutTurnedRun);
+  //   marker     an outside list marker's line waiting for the line it leads, or null;
+  //   lastSeq    the sequence of the last group added: the item paints over
+  //              every decoration of its text (pushGroup).
+  const turnedTexts = [];
+
+  // The TurnedText the text of `element` joins, or null for text that is not
+  // turned. `state` is the walk's state for it, `place` its placement.
+  function turnedTextOf(element, name, s, frame, place, state, seq) {
+    // An inline box's text is its block's, laid out with it.
+    if (textLayout.isInlineBox(name, s)) return state.turned;
+    const turn = textLayout.writingTurn(s);
+    if (!frame.angle && !turn.angle) return null;
+    const outer = state.turned;
+    if (outer && place.paint === state.paint && outer.writingMode === turn.writingMode) return outer;
+    const rect = rectOf(element);
+    const turned = {
+      root: element,
+      style: s,
+      frame,
+      angle: normalisedAngle(frame.angle + turn.angle),
+      turn: turn.angle,
+      reversed: turn.reversed,
+      writingMode: turn.writingMode,
+      centre: { x: Number(rect.left) + Number(rect.width) / 2, y: Number(rect.top) + Number(rect.height) / 2 },
+      paint: place.paint,
+      id: nextItemId++,
+      lines: [],
+      marker: null,
+      lastSeq: seq,
+    };
+    turnedTexts.push(turned);
+    return turned;
+  }
+
+  // Adds a group's turned lines to its TurnedText, in the order the walk
+  // releases groups, which is DOM order. A waiting outside marker leads the
+  // first of them.
+  function addTurnedLines(turned, lines, blockSeq) {
+    turned.lastSeq = Math.max(turned.lastSeq, blockSeq);
+    for (let index = 0; index < lines.length; index++) {
+      let line = lines[index];
+      if (turned.marker && line.runs.length) {
+        const marker = turned.marker;
+        turned.marker = null;
+        line = {
+          runs: marker.runs.concat(line.runs),
+          extents: marker.extents.concat(line.extents),
+          rect: line.rect,
+          lineHeight: line.lineHeight,
+        };
+      }
+      turned.lines.push(line);
+    }
+  }
+
+  // An outside list marker under a turn leads its item's first line in the
+  // turned item; one still waiting when the next arrives is a line of its own.
+  function addTurnedMarker(turned, line, seq) {
+    if (turned.marker) turned.lines.push(turned.marker);
+    turned.marker = line;
+    turned.lastSeq = Math.max(turned.lastSeq, seq);
+  }
+
+  // Each turn root's item, once the walk has given it every line: at its own
+  // id, in its paint group's inline content layer, over every decoration of
+  // the text it holds. Nothing for a root whose text paints nothing.
+  function pushTurnedTexts() {
+    for (let index = 0; index < turnedTexts.length; index++) {
+      const turned = turnedTexts[index];
+      const block = textLayout.turnedBlock(turned);
+      if (!block) continue;
+      items.push({ kind: 'text', id: turned.id, order: turned.paint.concat([4, 0, turned.lastSeq, 1]), ...block });
+      stats.texts++;
+    }
+  }
+
   // One group at its block's place in the inline content layer (4) of `paint`:
   // each decoration at paint + [4, 0, blockSeq, 0, elSeq], every fragment of
   // it, then each text block at paint + [4, 0, blockSeq, 1]. So a block's
@@ -2011,6 +2116,8 @@ async function snapshotPage(config, pseudoData) {
   // slide compares with it. A decoration whose box needs a capture (a
   // highlight gradient, a filtered chip) is one box-only picture at that
   // place: its fragments' bounds, grown by its shadow and filter, so every fragment is in it.
+  // A turned group's lines go to its TurnedText instead of being blocks,
+  // whose item is pushed once the walk is done (pushTurnedTexts).
   function pushGroup(group, paint, blockSeq) {
     for (let index = 0; index < group.decorations.length; index++) {
       const decoration = group.decorations[index];
@@ -2035,6 +2142,10 @@ async function snapshotPage(config, pseudoData) {
           sliceOf(decoration, fragment));
       }
     }
+    if (group.turned) {
+      addTurnedLines(group.turned, group.lines, blockSeq);
+      return;
+    }
     for (let index = 0; index < group.blocks.length; index++) {
       pushText({ ...group.blocks[index], order: paint.concat([4, 0, blockSeq, 1]) });
     }
@@ -2055,7 +2166,9 @@ async function snapshotPage(config, pseudoData) {
   // background is never under it. `picture` is the item's own box-only
   // capture, or null.
   // * Outside its item, a marker with text is a single-line text item of its
-  //   own (snapshot_text.mjs markerBlock).
+  //   own (snapshot_text.mjs markerBlock). Under a turn it leads its item's
+  //   first line in the turned item instead (markerLine), whose box can hold
+  //   no item beside it.
   // * Inside, its text is a token of its item's first line, or a segment of
   //   it, which the text layout lays out with its item's text (collectRuns),
   //   over the item's background.
@@ -2076,6 +2189,11 @@ async function snapshotPage(config, pseudoData) {
       if (shown && !holds(picture, shown)) pushCapture(marker, marker.style, 'box', bounds, order, walk.clip);
     }
     if (marker.list.inside) return;
+    if (walk.turned) {
+      const line = textLayout.markerLine(marker, walk);
+      if (line) addTurnedMarker(walk.turned, line, seq);
+      return;
+    }
     const block = textLayout.markerBlock(marker, walk);
     if (block) pushText({ ...block, order });
   }
@@ -2130,7 +2248,9 @@ async function snapshotPage(config, pseudoData) {
   // by it, or null. `box` is its border box, `clips` its clipsOf, `walk`
   // {opacity, frame, backdrop}: its cumulative opacity, its frame and what it sits on.
   function nativeTable(element, name, s, box, clips, walk) {
-    if (name !== 'table' || walk.frame.angle || hasBoxEffect(s)) return null;
+    // A table whose own text is turned (a vertical writing mode) is set
+    // sideways throughout, which no a:tbl draws.
+    if (name !== 'table' || walk.frame.angle || textLayout.writingTurn(s).angle || hasBoxEffect(s)) return null;
     const shown = shownPart(boundsOf(box), clips.box);
     if (!shown || shown.cut) return null;
     const layout = tableLayout.collectTable(element, s, walk);
@@ -2151,10 +2271,11 @@ async function snapshotPage(config, pseudoData) {
   // fitCellText finds them room in the cell; else overlay text items, as any
   // other block's. A cell holding block layout (R10n) is overlaid whole,
   // whatever its first run holds: its own text is an anonymous block beside
-  // its block children, and the walk places each where the browser did.
+  // its block children, and the walk places each where the browser did. So is
+  // a cell whose text is turned (a vertical header): a turned item over it.
   // `cell` is its {model, grid, blocks}.
   function collectCellText(element, s, paint, seq, walk, cell) {
-    if (cell.blocks) {
+    if (cell.blocks || walk.turned) {
       collectText(element, s, paint, seq, walk);
       return;
     }
@@ -2315,7 +2436,8 @@ async function snapshotPage(config, pseudoData) {
     if (replaced) return;
     const backdrop = backdropInside(state.backdrop, s);
     const decoration = textLayout.decorationOf(state.decoration, element, s);
-    const inline = { opacity, frame, backdrop, decoration, clip: clips.content };
+    const turned = turnedTextOf(element, name, s, frame, place, state, seq);
+    const inline = { opacity, frame, backdrop, decoration, clip: clips.content, turned };
     // An outside marker is inside its item's opacity group but not on its
     // background (emitMarker): its backdrop is what the item sits on.
     emitMarker(element, place.paint, seq, { ...inline, backdrop: groupInside(state.backdrop, s) }, picture);
@@ -2331,6 +2453,7 @@ async function snapshotPage(config, pseudoData) {
       backdrop,
       decoration,
       clips: clips.children,
+      turned,
       depth: state.depth + 1,
     });
   }
@@ -2364,6 +2487,7 @@ async function snapshotPage(config, pseudoData) {
     backdrop: bodyBackdrop,
     decoration: bodyDecoration,
     clip: bodyClips.content,
+    turned: null,
   });
   pushChildren(body, {
     ctx: { prefix: [] },
@@ -2374,6 +2498,7 @@ async function snapshotPage(config, pseudoData) {
     backdrop: bodyBackdrop,
     decoration: bodyDecoration,
     clips: bodyClips.children,
+    turned: null,
     depth: 1,
   });
   let seq = 0;
@@ -2387,8 +2512,11 @@ async function snapshotPage(config, pseudoData) {
   closeSubtrees(0, seq);
   // Text after a child the walk never reached (it was cut short) still paints, last.
   for (let index = 0; index < waitingInOrder.length; index++) releaseText(waitingInOrder[index], seq);
-  // Line spacing and optical-size tracking, from offscreen probes read once the
-  // walk has read every rect (snapshot_text.mjs applyMetrics).
+  // Every turn root's text is gathered by now.
+  pushTurnedTexts();
+  // Line spacing, optical-size tracking and where turned text sits, from
+  // offscreen probes read once the walk has read every rect
+  // (snapshot_text.mjs applyMetrics).
   textLayout.applyMetrics();
   const fonts = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;
