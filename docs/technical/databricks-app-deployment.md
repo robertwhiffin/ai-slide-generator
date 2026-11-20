@@ -641,7 +641,7 @@ header. The header is a JSON object, and the Gateway records it with each reques
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `source` | `tellr` | Always present. |
-| `component` | `generation` | The agents that create and edit a deck, an admin's check of a model configured for them, and an admin's test run of an agent. The two admin calls carry no `entrypoint`, which tells them apart from a deck's turns. |
+| `component` | `generation` | The agents that create and edit a deck, an admin's check of a model configured for them, and an admin's test run of an agent. The two admin calls carry no `entrypoint`, and neither do the calls of the deck re-description Tellr runs in the background after an Agent deck's slides are edited by hand, or of a chat turn sent over `POST /api/chat/stream`, the streaming route Tellr's UI uses when it runs locally for development. |
 | `component` | `title` | Naming a session. |
 | `component` | `export` | PPTX and Google Slides export. |
 | `component` | `image` | Image generation. |
@@ -654,16 +654,18 @@ other value adds no key, so a tag never carries free text.
 
 Model calls Tellr makes as the app outside the AI Gateway carry no request tag: the Legacy
 engine's deck calls, the feedback chat and its report, the configuration check and slide
-verification. The Agent Bricks and model-endpoint tools call the customer's own endpoints
-as the signed-in user, also outside the AI Gateway, so their requests carry the user's SDK
-label (`tellr-app-<hash>`) and no request tag.
+verification. The Legacy engine's Agent Bricks and model-endpoint tools call the
+workspace's own serving endpoints as the signed-in user, also outside the AI Gateway, so
+their requests carry that user's SDK label (`tellr-app-<hash>`, or `tellr-app-unknown`) and
+no request tag.
 
 A chat turn sent through Tellr's MCP server runs in Agent mode: `create_deck` makes an
 Agent deck, and `edit_deck` edits only an Agent deck. The turn's agent calls carry
-`entrypoint` `mcp` beside `component` `generation`, and so does a new deck's session-title
-call, beside `title`. Only Tellr's own UI sends a turn to a Legacy-mode deck. The Legacy
-engine's deck calls carry no tag, so on a Legacy deck the session-title call is the one
-call that carries `entrypoint` `app`.
+`entrypoint` `mcp` beside `component` `generation`, and so does the session-title call of
+a deck's first turn, beside `title`. An Agent turn's image calls, made by the architect's
+`generate_image` tool, carry the turn's `entrypoint` beside `image`. Only Tellr's own UI
+sends a turn to a Legacy-mode deck. The Legacy engine's deck calls carry no tag, so on a
+Legacy deck the session-title call is the one call that carries `entrypoint` `app`.
 
 **MCP calls.** The MCP calls Tellr's Agent-mode tools make as the signed-in user (Genie One,
 other AI Gateway MCP services, and MCP servers reached through a Unity Catalog connection)

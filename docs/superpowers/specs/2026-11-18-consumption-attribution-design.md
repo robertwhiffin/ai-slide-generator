@@ -198,16 +198,16 @@ is dropped without raising, so a tag can never carry free text:
 
 | Value | Client |
 |---|---|
-| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`), the admin's model probe (`model_endpoint_probe.py`) and the admin's agent test runs (`agent_runtime.get_agent_test_runtime`), which build their models with the same factory; the probe and the test runs carry no `entrypoint` |
+| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`), the admin's model probe (`model_endpoint_probe.py`) and the admin's agent test runs (`agent_runtime.get_agent_test_runtime`), which build their models with the same factory; the probe and the test runs carry no `entrypoint`, and neither do the calls of the background re-description of an Agent deck after a hand edit (`spec_sync.run_arc_review`) or of a turn sent over the streaming route `POST /api/chat/stream`, which Tellr's UI uses when it runs locally for development |
 | `title` | session titles (`build_session_title_model`) |
 | `export` | PPTX and Google Slides export |
 | `image` | image generation |
 
 Model calls Tellr makes as the app outside the Gateway carry no tag at all: the Legacy
 engine's deck calls, the feedback chat and its report, the configuration check and slide
-verification (item 8 above). The Agent Bricks and model-endpoint tools call the customer's
-own endpoints as the signed-in user, also outside the Gateway, with the user's SDK label
-(`tellr-app-<hash>`) and no tag.
+verification (item 8 above). The Legacy engine's Agent Bricks and model-endpoint tools
+call the workspace's own serving endpoints as the signed-in user, also outside the Gateway,
+with that user's SDK label (`tellr-app-<hash>`, or `tellr-app-unknown`) and no tag.
 
 `gateway_request_headers`, `gateway_chat_model` and `gateway_openai_client` take an
 optional `component`. The existing tests pin the header to exactly
@@ -231,9 +231,11 @@ agents use through Tellr from what its own users use.
 
 MCP decks run in Agent mode: `create_deck` makes an Agent deck and `edit_deck` edits only
 an Agent deck. So an MCP turn's graph calls carry `entrypoint` `mcp` beside `component`
-`generation`, and so does a new deck's title call, beside `title`. Only the browser sends
-turns to Legacy-mode decks. Their deck calls do not go through the Gateway, so on a Legacy
-deck the title call is the one call that carries the entrypoint, `app`.
+`generation`, and so does the title call of a deck's first turn, beside `title`. An Agent
+turn's image calls, made by the architect's `generate_image` tool, carry the turn's
+entrypoint beside `image`. Only the browser sends turns to Legacy-mode decks. Their deck
+calls do not go through the Gateway, so on a Legacy deck the title call is the one call
+that carries the entrypoint, `app`.
 
 ## Considered and not included
 
@@ -282,11 +284,32 @@ on its allow-list is omitted. The installer change prints a warning and continue
   `httpx` scan's includes `from httpx import AsyncClient` and module aliases), and the
   `httpx` scan also fails if it finds no client to check.
 - **Live, on the dev workspace (devloop, never devtest).** The section 3 sequence again
-  with the new installer (create, update, second update), then one
-  deck in Agent mode with a Genie Agent and Genie One, a title and a PPTX export. Done when
-  the workspace's own system tables show: SDK requests with the deployed version;
-  Genie requests as `tellr-app-<hash>`; Genie One requests as `tellr/<version>`; Gateway
-  records with `component`; and the Lakebase branch declared as the app's resource.
+  with the new installer (create, update, second update). Then, on that app: the first
+  turn of a new Agent deck in the browser, with a Genie Agent and Genie One; an MCP
+  `create_deck`, then an MCP `edit_deck` of the deck it made; the first turn of a new
+  Legacy deck in the browser; a PPTX export; and an image made from the image routes.
+  Done when the workspace's own system tables show, read back for each of these:
+  - the SDK requests with the deployed version (not `0.1.0`), the Genie requests as
+    `tellr-app-<hash>`, and the Genie One requests with the MCP User-Agent
+    `tellr/<deployed version> python-httpx/<httpx version>`;
+  - in `system.ai_gateway.usage`, for the browser Agent turn, every `generation` record
+    with `entrypoint` `app`, and its `title` record with `app` (the deck's first turn);
+  - for the MCP `create_deck`, every `generation` record with `entrypoint` `mcp` (the
+    unit tests stub the graph, so this is the one check that LangGraph's node threads
+    carry the mark) and one `title` record, with `mcp`; for the MCP `edit_deck`, every
+    `generation` record with `mcp` and no `title` record;
+  - for the browser Legacy turn, one tagged record: `title` with `app`;
+  - for the PPTX export and the image, `export` and `image` records with no `entrypoint`
+    key;
+  - and the Lakebase branch declared as the app's resource.
+
+  *Live run, 2026-11-20*, against a dev build on a dev workspace. A fresh install with the
+  new installer attached the Lakebase branch. A browser Agent deck using a Genie Agent and
+  Genie One, its title, a PPTX export, an image, an MCP `create_deck`, an MCP `edit_deck`
+  and a browser Legacy deck all completed without a Gateway error, which shows the Gateway
+  accepts the three-key tag. Reading the recorded tag values back from
+  `system.ai_gateway.usage` was still pending when this was written, so the Gateway record
+  checks above were still open.
 
 ## How it reaches installs
 

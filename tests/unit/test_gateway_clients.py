@@ -764,24 +764,42 @@ def _mcp_tool(monkeypatch, *, tool):
     caller's own Agent deck with three), both engine resolvers (``graph``), the
     edit-permission facade (allowed) and the admin defaults (no design system, slide style
     or Genie One default).  Returns ``submit(request_id)``.
+
+    Each tool is sent by its own sender, looked up by its name: a tool with none raises
+    ``KeyError`` here, so a tool added to ``_MCP_TOOLS`` never runs another tool's
+    implementation in its place.
     """
     from src.api import mcp_server
     from src.api.mcp_auth import MCPIdentity
     from src.api.routes import chat
 
+    session_id = f"s-mcp-{tool}"
+    # Each tool's deck message count when its turn is sent, and its sender.
+    senders = {
+        "create_deck": (
+            0,
+            lambda: mcp_server._create_deck_impl(request=MagicMock(), prompt=_TURN_MESSAGE),
+        ),
+        "edit_deck": (
+            3,
+            lambda: mcp_server._edit_deck_impl(
+                request=MagicMock(), session_id=session_id, instruction=_TURN_MESSAGE
+            ),
+        ),
+    }
+    message_count, send_turn = senders[tool]
     identity = MCPIdentity(
         user_id="user-mcp",
         user_name="caller@example.com",
         token="tok",
         source="x-forwarded-access-token",
     )
-    session_id = f"s-mcp-{tool}"
     manager = MagicMock()
     manager.acquire_session_lock.return_value = True
     manager.create_session.return_value = {"session_id": session_id}
     manager.get_deck_mode.return_value = "agent"
     manager.get_session.return_value = {
-        "message_count": 0 if tool == "create_deck" else 3,
+        "message_count": message_count,
         "created_by": identity.user_name,
         "is_contributor_session": False,
     }
@@ -807,14 +825,7 @@ def _mcp_tool(monkeypatch, *, tool):
         async def send():
             manager.create_chat_request.return_value = request_id
             _enter_through(monkeypatch, manager, "graph")
-            if tool == "create_deck":
-                result = await mcp_server._create_deck_impl(
-                    request=MagicMock(), prompt=_TURN_MESSAGE
-                )
-            else:
-                result = await mcp_server._edit_deck_impl(
-                    request=MagicMock(), session_id=session_id, instruction=_TURN_MESSAGE
-                )
+            result = await send_turn()
             assert (result["session_id"], result["request_id"], result["status"]) == (
                 session_id,
                 request_id,
@@ -824,6 +835,13 @@ def _mcp_tool(monkeypatch, *, tool):
         return send
 
     return submit
+
+
+def test_an_mcp_tool_with_no_sender_raises_instead_of_running_another_tools(monkeypatch):
+    """A tool added to ``_MCP_TOOLS`` without a sender in ``_mcp_tool`` fails every test
+    that sends it, instead of passing on ``edit_deck``'s implementation."""
+    with pytest.raises(KeyError, match="duplicate_deck"):
+        _mcp_tool(monkeypatch, tool="duplicate_deck")
 
 
 #: Every way a turn reaches Tellr: the browser route, and each MCP tool that starts one.
@@ -1369,7 +1387,11 @@ def test_each_entry_site_marks_its_entrypoint_before_the_shared_enter():
     before it.  The two entry sites are the only callers of the Enter and the only places in
     ``src`` that mark a turn, each once and with its own value; nothing else touches the
     ContextVar.  The Enter marks nothing: a mark there would give every turn that passes
-    through it, from either site, the same value."""
+    through it, from either site, the same value.  And each site is reached only from its
+    own side: the browser route by its route alone, and each MCP tool's implementation by
+    its own tool alone, which only its MCP registration reaches.  An MCP tool that reused
+    the route would send ``app``, and a browser route that reused an MCP tool would send
+    ``mcp``."""
     assert _uses_in_src("enqueue_job") == [
         ("api/routes/chat.py", "<module>", "imports"),
         ("api/routes/chat.py", "enter_chat_turn", "calls"),
@@ -1386,6 +1408,14 @@ def test_each_entry_site_marks_its_entrypoint_before_the_shared_enter():
         ("api/mcp_server.py", "<module>", "defines"),
         *(("api/mcp_server.py", f"_{tool}_impl", "calls") for tool in _MCP_TOOLS),
     ]
+    # The functions one level above the marks: who reaches each decides its value.
+    assert _uses_in_src("submit_chat_async") == [("api/routes/chat.py", "<module>", "defines")]
+    for tool in _MCP_TOOLS:
+        assert _uses_in_src(f"_{tool}_impl") == [
+            ("api/mcp_server.py", tool, "calls"),
+            ("api/mcp_server.py", "<module>", "defines"),
+        ], tool
+        assert _uses_in_src(tool) == [("api/mcp_server.py", "<module>", "defines")], tool
     markers = _uses_in_src("set_entrypoint")
     assert ("api/routes/chat.py", "enter_chat_turn", "calls") not in markers, (
         "the shared Enter marks every turn that passes through it with one value"
