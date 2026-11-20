@@ -2964,7 +2964,7 @@ class TestRenderTargetPaths:
             raise AssertionError(f"a sidecar was started for an unknown target: {args}")
 
         monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
-        monkeypatch.setattr(pptx_from_html_huashu.subprocess, "run", no_sidecar)
+        monkeypatch.setattr(pptx_from_html_huashu.subprocess, "Popen", no_sidecar)
 
         with pytest.raises(ValueError, match="keynote"):
             pptx_from_html_huashu.build_pptx_huashu(

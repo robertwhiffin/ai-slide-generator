@@ -10,6 +10,11 @@ Apps containers run as non-root with limited memory and ship without Chromium.
 Adopting this on FEVM would require a deeper infra change than this round
 covers. ``is_available()`` returns False outside the local-dev gate.
 
+Timeout. The sidecar runs as the leader of its own process group, so a run
+past ``SIDECAR_TIMEOUT_SECONDS`` is killed whole: node and every Chromium it
+launched. Killing node alone would leave its browser running with no parent,
+holding its memory until the app restarts.
+
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
@@ -42,6 +47,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -120,6 +126,46 @@ def sidecar_subprocess_env() -> dict[str, str]:
 
 class HuashuExportError(RuntimeError):
     """Raised when the huashu sidecar cannot run at all (setup, timeout)."""
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    """SIGKILL every process in the sidecar's group: node and the Chromium it launched.
+
+    Called before ``process`` is reaped, so its id (the group's) is still its own.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # every process of the group has exited already
+
+
+def _run_sidecar(command: list[str], payload: bytes) -> subprocess.CompletedProcess:
+    """Run the sidecar with ``payload`` on stdin, bounded by ``SIDECAR_TIMEOUT_SECONDS``.
+
+    The sidecar starts a new session, so it leads a process group of its own,
+    which the browsers Playwright launches for it join. A run past the timeout,
+    or interrupted, is killed as that whole group, so no Chromium is left
+    running without its node; the timeout is raised as ``HuashuExportError``.
+    """
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=sidecar_subprocess_env(),
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(payload, timeout=SIDECAR_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as e:
+            _kill_process_group(process)
+            raise HuashuExportError(
+                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
+            ) from e
+        except BaseException:
+            _kill_process_group(process)
+            raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _local_dev_gate() -> bool:
@@ -244,19 +290,7 @@ def build_pptx_huashu(
             "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
             " ".join(cmd), len(slides_html), len(payload_bytes),
         )
-        try:
-            result = subprocess.run(
-                cmd,
-                input=payload_bytes,
-                capture_output=True,
-                timeout=SIDECAR_TIMEOUT_SECONDS,
-                check=False,
-                env=sidecar_subprocess_env(),
-            )
-        except subprocess.TimeoutExpired as e:
-            raise HuashuExportError(
-                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
-            ) from e
+        result = _run_sidecar(cmd, payload_bytes)
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees
