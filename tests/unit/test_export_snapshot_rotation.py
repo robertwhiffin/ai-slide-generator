@@ -106,6 +106,7 @@ from tests.fixtures.export_snapshot_support import (
     fidelity_harness,
     google_slides_presentation,
     node_json,
+    pinned_font_css,
     requires_google_slides,
     requires_huashu_sidecar,
     single_line_box_top,
@@ -2121,9 +2122,12 @@ class TestScriptRunsPerRenderer:
         bodies = [SLIDES["tag"], SLIDES["br-lines"], _script_line_body("later-paragraph-plain")]
         bodies += PLAIN_GROWTH_BODIES
         exports = {}
+        # Two exports compared byte for byte, so the deck's fonts are pinned
+        # (pinned_font_css): Google Fonts now and then serves another DM Sans.
+        css = pinned_font_css() + ROTATION_CSS
         for target in ("pptx", "gslides"):
             exports[target], failures = export_slides(
-                bodies, css=DECK_CSS + ROTATION_CSS, monkeypatch=monkeypatch, target=target
+                bodies, css=css, monkeypatch=monkeypatch, target=target
             )
             assert failures == [], failures
 
@@ -2523,13 +2527,18 @@ SCRIPT_LINE_BODIES = [_script_line_body(name) for name in SCRIPT_LINES]
 
 @pytest.fixture(scope="module")
 def script_line_decks() -> Iterator[dict[str, bytes]]:
-    """``SCRIPT_LINES``, exported once written for each renderer target."""
+    """``SCRIPT_LINES``, exported once written for each renderer target.
+
+    The two decks are compared shape for shape, so the deck's fonts are pinned
+    (``pinned_font_css``): Google Fonts now and then serves another DM Sans,
+    whose widths would move a shape in one deck alone.
+    """
     decks = {}
     with pytest.MonkeyPatch.context() as monkeypatch:
         for target in ("pptx", "gslides"):
             decks[target], failures = export_slides(
                 SCRIPT_LINE_BODIES,
-                css=DECK_CSS + ROTATION_CSS,
+                css=pinned_font_css() + ROTATION_CSS,
                 monkeypatch=monkeypatch,
                 target=target,
             )
@@ -2541,7 +2550,9 @@ def _script_line_document(name: str) -> str:
     """The document the decks of ``script_line_decks`` exported as ``name``."""
     index = list(SCRIPT_LINES).index(name)
     return slide_document(
-        SCRIPT_LINE_BODIES[index], css=DECK_CSS + ROTATION_CSS, slide_id=f"snapshot-{index + 1}"
+        SCRIPT_LINE_BODIES[index],
+        css=pinned_font_css() + ROTATION_CSS,
+        slide_id=f"snapshot-{index + 1}",
     )
 
 
@@ -2972,7 +2983,8 @@ class TestRenderTargetPaths:
         target writes, byte for byte, for slides whose two targets differ.
         """
         bodies = [_script_line_body("sup-end"), _script_line_body("sup-mid-line-2")]
-        css = DECK_CSS + ROTATION_CSS
+        # Decks compared byte for byte: the deck's fonts are pinned (pinned_font_css).
+        css = pinned_font_css() + ROTATION_CSS
         decks = {}
         for target in ("pptx", "gslides"):
             decks[target], failures = export_slides(

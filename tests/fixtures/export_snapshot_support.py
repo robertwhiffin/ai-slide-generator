@@ -9,7 +9,13 @@ what the browser itself laid out for the same document.
 * ``export_slides`` / ``export_corpus`` run the production export
   (``build_slide_html`` then ``build_pptx_huashu``) with the engine selected
   through ``TELLR_EXPORT_ENGINE``; ``export_documents`` exports complete
-  documents (corpus and inline slides mixed in one deck).
+  documents (corpus and inline slides mixed in one deck). Every export
+  (``export_logged`` too) fails, naming the line, when the snapshot engine
+  logs ``[html2pptx] model:``, its model check having dropped part of a
+  slide's model; a test that means it passes ``allow_model_drops=True``.
+  ``pinned_font_css`` is the corpus deck's CSS with its Google Fonts
+  @import replaced by the same faces, embedded, for tests that compare
+  exports of one page whole.
 * ``slide_shapes`` parses one slide's ``spTree`` with lxml into ``Shape``
   records, in z-order, with geometry in CSS px (``EMU / 9525``);
   ``slide_xml`` is the slide part itself and ``slide_shape_elements`` each
@@ -76,6 +82,7 @@ Chrome/Chromium are present; ``requires_node`` needs node alone.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import functools
 import importlib.util
@@ -115,6 +122,50 @@ FIDELITY_HARNESS = REPO_ROOT / "scripts" / "export_fidelity" / "run.py"
 DECK_CSS: str = (CORPUS_DIR / "deck.css").read_text(encoding="utf-8")
 # deck.json carries the corpus deck's ``title``, ``scripts`` and ``external_scripts``.
 CORPUS_DECK: dict = json.loads((CORPUS_DIR / "deck.json").read_text(encoding="utf-8"))
+
+# The corpus deck loads DM Sans and DM Mono from Google Fonts, which now and then
+# answers its @import with another stylesheet naming another DM Sans file, so
+# two loads of one document can render it differently (text widths, and a
+# picture's glyph edges). A test that compares exports of one page whole pins
+# the deck's fonts: the latin files Google serves for deck.css's @import
+# (fonts.gstatic.com /s/dmsans/v17/rP2Hp2ywxg089UriCZOIHTWEBlw.woff2,
+# /s/dmmono/v16/aFTU7PB1QTsUX8KYthqQBK6PYK0 and aFTR7PB1QTsUX8KYvumzEYOtbYf-Vlg),
+# committed with their OFL licence under tests/fixtures/export_snapshot/fonts,
+# declared as Google declares them and embedded as data: (the slide CSP's
+# font-src allows it).
+PINNED_FONT_DIR = SNAPSHOT_FIXTURE_DIR / "fonts"
+GOOGLE_FONTS_IMPORT = re.compile(r"^@import url\('https://fonts\.googleapis\.com/[^']*'\);\n", re.M)
+PINNED_FACES = (
+    ("DM Mono", 400, "dm-mono/DMMono-400-latin.woff2"),
+    ("DM Mono", 500, "dm-mono/DMMono-500-latin.woff2"),
+    ("DM Sans", 400, "dm-sans/DMSans-latin.woff2"),
+    ("DM Sans", 500, "dm-sans/DMSans-latin.woff2"),
+    ("DM Sans", 600, "dm-sans/DMSans-latin.woff2"),
+    ("DM Sans", 700, "dm-sans/DMSans-latin.woff2"),
+)
+LATIN_UNICODE_RANGE = (
+    "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, "
+    "U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, "
+    "U+FEFF, U+FFFD"
+)
+
+
+@functools.cache
+def pinned_font_css() -> str:
+    """The corpus deck's CSS with its Google Fonts @import replaced by the same faces, as data:."""
+    assert len(GOOGLE_FONTS_IMPORT.findall(DECK_CSS)) == 1, (
+        "fixture drift: deck.css no longer has the one Google Fonts @import this pins"
+    )
+    faces = []
+    for family, weight, name in PINNED_FACES:
+        font = base64.b64encode((PINNED_FONT_DIR / name).read_bytes()).decode("ascii")
+        faces.append(
+            f"@font-face {{ font-family: '{family}'; font-style: normal; font-weight: {weight}; "
+            f"font-display: swap; src: url(data:font/woff2;base64,{font}) format('woff2'); "
+            f"unicode-range: {LATIN_UNICODE_RANGE}; }}"
+        )
+    return "\n".join(faces) + "\n" + GOOGLE_FONTS_IMPORT.sub("", DECK_CSS, count=1)
+
 
 TEST_DECK_TITLE = "export snapshot test"
 
@@ -204,6 +255,11 @@ def slide_document(
     )
 
 
+# The line the snapshot engine logs when Node drops part of a slide's model
+# (services/pptx-emit-huashu/model_check.cjs dropLine).
+MODEL_DROP_PREFIX = "[html2pptx] model: "
+
+
 def _export_documents(
     documents: list[str],
     *,
@@ -211,17 +267,38 @@ def _export_documents(
     engine: str,
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
+    allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
-    """``build_pptx_huashu`` over ``documents``; ``target`` is passed only when given."""
+    """``build_pptx_huashu`` over ``documents``; ``target`` is passed only when given.
+
+    The sidecar's stderr is teed while it runs. The model check
+    (``model_check.cjs``) keeps the whole of every model the snapshot
+    writes for a real slide, so a ``[html2pptx] model:`` line, which says
+    it dropped part of one, fails the export here, naming the line: a
+    snapshot change that writes a field the check does not know is caught
+    by every test that exports, not left as content missing from the deck.
+    A test that means to drop part of a model (a slide script that forges
+    one) says so with ``allow_model_drops=True``.
+    """
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
     monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
     targets = {} if target is None else {"target": target}
-    return pptx_from_html_huashu.build_pptx_huashu(
-        title,
-        [{"html": document} for document in documents],
-        bypass_validation=True,
-        **targets,
-    )
+    with teed_stderr() as buffer:
+        exported = pptx_from_html_huashu.build_pptx_huashu(
+            title,
+            [{"html": document} for document in documents],
+            bypass_validation=True,
+            **targets,
+        )
+    if not allow_model_drops:
+        drops = [
+            line for line in _sidecar_lines(buffer.getvalue()) if line.startswith(MODEL_DROP_PREFIX)
+        ]
+        assert not drops, (
+            "the model check dropped part of a real slide's model, which the snapshot must "
+            f"write whole (allow_model_drops=True if the test means it): {drops}"
+        )
+    return exported
 
 
 def export_slides(
@@ -233,6 +310,7 @@ def export_slides(
     engine: str = "snapshot",
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
+    allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export slide bodies through the production wrapper with the chosen engine.
 
@@ -240,7 +318,9 @@ def export_slides(
     (1-based ``n``), so ``slide_document(bodies[i], ..., slide_id=f"snapshot-{i + 1}")``
     reproduces the exported page exactly. Returns ``(pptx_bytes, failures)``
     from ``build_pptx_huashu(..., bypass_validation=True)``, with ``target``
-    (the renderer the deck is written for) when one is given.
+    (the renderer the deck is written for) when one is given. A slide model
+    the model check drops part of fails it (``_export_documents``), unless
+    ``allow_model_drops``.
     """
     documents = [
         slide_document(
@@ -253,7 +333,12 @@ def export_slides(
         for position, body in enumerate(bodies, start=1)
     ]
     return _export_documents(
-        documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch, target=target
+        documents,
+        title=TEST_DECK_TITLE,
+        engine=engine,
+        monkeypatch=monkeypatch,
+        target=target,
+        allow_model_drops=allow_model_drops,
     )
 
 
@@ -289,6 +374,7 @@ def export_corpus(
     *,
     monkeypatch: pytest.MonkeyPatch,
     engine: str = "snapshot",
+    allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export corpus slides (by prefix, in the given order) with the corpus deck CSS and scripts."""
     return _export_documents(
@@ -296,6 +382,7 @@ def export_corpus(
         title=CORPUS_DECK.get("title", TEST_DECK_TITLE),
         engine=engine,
         monkeypatch=monkeypatch,
+        allow_model_drops=allow_model_drops,
     )
 
 
@@ -304,6 +391,7 @@ def export_documents(
     *,
     monkeypatch: pytest.MonkeyPatch,
     engine: str = "snapshot",
+    allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export complete slide documents, one slide each and in order, through the production wrapper.
 
@@ -312,7 +400,11 @@ def export_documents(
     deck. Returns ``(pptx_bytes, failures)`` as ``export_slides`` does.
     """
     return _export_documents(
-        documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch
+        documents,
+        title=TEST_DECK_TITLE,
+        engine=engine,
+        monkeypatch=monkeypatch,
+        allow_model_drops=allow_model_drops,
     )
 
 
@@ -374,6 +466,7 @@ def export_logged(
     monkeypatch: pytest.MonkeyPatch,
     engine: str = "snapshot",
     target: str | None = None,
+    allow_model_drops: bool = False,
 ) -> LoggedExport:
     """``export_documents`` (with ``target`` when given), keeping what the wrapper printed.
 
@@ -383,7 +476,12 @@ def export_logged(
     """
     with teed_stderr() as buffer:
         pptx, failures = _export_documents(
-            documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch, target=target
+            documents,
+            title=TEST_DECK_TITLE,
+            engine=engine,
+            monkeypatch=monkeypatch,
+            target=target,
+            allow_model_drops=allow_model_drops,
         )
     return LoggedExport(pptx=pptx, failures=failures, stderr=buffer.getvalue())
 

@@ -193,4 +193,4 @@ function emitSlide(pres, model, captures, renderer) {
   return slide;
 }
 
-module.exports = { emitSlide, pictureData };
+module.exports = { emitSlide, pictureData, RASTER_DATA_URI };

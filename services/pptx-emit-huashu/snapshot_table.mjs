@@ -399,7 +399,8 @@ function createTableLayout(env) {
   // count. Null, announced (positioned), when a span cannot be read, past
   // WALK_STEP_LIMIT rows or columns, or past COLLECTION_ITEM_LIMIT slots in
   // the grid's area or under its cells: no slide holds such a table, and its
-  // grid would be that many cells.
+  // grid would be that many cells. Null too when two cells' spans overlap,
+  // which no a:tbl can hold (model_check.cjs drops such a grid).
   function slotsOf(groups) {
     const rows = [];
     const groupEnd = [];
@@ -432,7 +433,15 @@ function createTableLayout(env) {
         covered += rowspan * colspan;
         if (covered > COLLECTION_ITEM_LIMIT) return positioned('its cells cover more than ' + COLLECTION_ITEM_LIMIT + ' grid slots');
         for (let down = 0; down < rowspan; down++) {
-          for (let across = 0; across < colspan; across++) slots[row + down][column + across] = cells.length;
+          for (let across = 0; across < colspan; across++) {
+            // Spans the HTML table model lets overlap (a row span reaching a
+            // later row's column span): the browser draws both, an a:tbl
+            // holds one cell per slot.
+            if (slots[row + down][column + across] !== undefined) {
+              return positioned('two of its cells cover one grid slot');
+            }
+            slots[row + down][column + across] = cells.length;
+          }
         }
         cells.push({ element: read.element, style: read.style, blocks: read.blocks, row, col: column, rowspan, colspan });
         column += colspan;

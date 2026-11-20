@@ -101,7 +101,6 @@ from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
     NAMESPACES,
     PERCENT_UNITS,
-    SNAPSHOT_FIXTURE_DIR,
     Shape,
     browser_client_rects,
     browser_each_padding_box,
@@ -114,6 +113,7 @@ from tests.fixtures.export_snapshot_support import (
     export_corpus,
     export_slides,
     overlaps,
+    pinned_font_css,
     requires_huashu_sidecar,
     slide_document,
     slide_shape_elements,
@@ -383,46 +383,9 @@ HIDPI_BLUE_AT = 0.875
 CHARTJS_CANVAS = "canvas#segChart"
 CHARTJS_MIN_SHARE = {"industrial": 0.10, "automotive": 0.05}
 
-# C7.4 compares repeated exports of one rendered page. The corpus deck loads DM Sans
-# and DM Mono from Google Fonts, which now and then answers its @import with
-# another stylesheet naming another DM Sans file, so the page (and its text
-# widths) differ. The determinism test pins the deck's fonts: the latin files
-# Google serves for deck.css's @import (fonts.gstatic.com /s/dmsans/v17/
-# rP2Hp2ywxg089UriCZOIHTWEBlw.woff2, /s/dmmono/v16/aFTU7PB1QTsUX8KYthqQBK6PYK0
-# and aFTR7PB1QTsUX8KYvumzEYOtbYf-Vlg), committed with their OFL licence under
-# tests/fixtures/export_snapshot/fonts, declared as Google declares them and
-# embedded as data: (the slide CSP's font-src allows it).
-PINNED_FONT_DIR = SNAPSHOT_FIXTURE_DIR / "fonts"
-GOOGLE_FONTS_IMPORT = re.compile(r"^@import url\('https://fonts\.googleapis\.com/[^']*'\);\n", re.M)
-PINNED_FACES = (
-    ("DM Mono", 400, "dm-mono/DMMono-400-latin.woff2"),
-    ("DM Mono", 500, "dm-mono/DMMono-500-latin.woff2"),
-    ("DM Sans", 400, "dm-sans/DMSans-latin.woff2"),
-    ("DM Sans", 500, "dm-sans/DMSans-latin.woff2"),
-    ("DM Sans", 600, "dm-sans/DMSans-latin.woff2"),
-    ("DM Sans", 700, "dm-sans/DMSans-latin.woff2"),
-)
-LATIN_UNICODE_RANGE = (
-    "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, "
-    "U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, "
-    "U+FEFF, U+FFFD"
-)
-
-
-def _pinned_font_css() -> str:
-    """The corpus deck's CSS with its Google Fonts @import replaced by the same faces, as data:."""
-    assert len(GOOGLE_FONTS_IMPORT.findall(DECK_CSS)) == 1, (
-        "fixture drift: deck.css no longer has the one Google Fonts @import this test pins"
-    )
-    faces = []
-    for family, weight, name in PINNED_FACES:
-        font = base64.b64encode((PINNED_FONT_DIR / name).read_bytes()).decode("ascii")
-        faces.append(
-            f"@font-face {{ font-family: '{family}'; font-style: normal; font-weight: {weight}; "
-            f"font-display: swap; src: url(data:font/woff2;base64,{font}) format('woff2'); "
-            f"unicode-range: {LATIN_UNICODE_RANGE}; }}"
-        )
-    return "\n".join(faces) + "\n" + GOOGLE_FONTS_IMPORT.sub("", DECK_CSS, count=1)
+# C7.4 compares repeated exports of one rendered page, so it pins the corpus
+# deck's fonts (export_snapshot_support.pinned_font_css): Google Fonts now and
+# then names another DM Sans file for the deck's @import.
 
 
 # C7.4: the determinism test makes DETERMINISM_EXPORTS exports, each of the
@@ -2256,7 +2219,7 @@ class TestSnapshotCaptureOutput:
         Every export is of the same rendered page: fixture 03 on the corpus
         deck, its CSS and Chart.js scripts, with the deck's fonts pinned (the
         faces its Google Fonts @import loads, embedded as data:,
-        ``_pinned_font_css``), so no font the network serves can differ
+        ``pinned_font_css``), so no font the network serves can differ
         between them. A rasterization that is not deterministic (GPU
         anti-aliasing) draws one chart in a few differently, so there are
         ``DETERMINISM_EXPORTS`` exports, each holding the slide
@@ -2265,7 +2228,7 @@ class TestSnapshotCaptureOutput:
         structural manifest (every part's SHA-256, ``docProps/core.xml``
         timestamps masked) equals the first's.
         """
-        css = _pinned_font_css()
+        css = pinned_font_css()
         body = corpus_slide("03")
         scripts = CORPUS_DECK.get("scripts", "")
         external_scripts = tuple(CORPUS_DECK.get("external_scripts", []))

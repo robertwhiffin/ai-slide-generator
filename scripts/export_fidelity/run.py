@@ -99,6 +99,9 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
 # slide script cannot pass for one.
 SIDECAR_ECHO_PREFIX = "[huashu-emit] "
 SLIDE_SUMMARY_LINE = SIDECAR_ECHO_PREFIX + "[html2pptx] slide summary "
+# How export_pptx starts its warning for a slide part of whose model Node
+# dropped (the summary's modelDrops, services/pptx-emit-huashu/model_check.cjs).
+MODEL_DROPS_WARNING = "MODEL DROPS: "
 
 
 class _Tee(io.TextIOBase):
@@ -173,7 +176,9 @@ def export_pptx(
     summary lines are recorded in summaries.json or summaries-gslides.json
     (PLAN-CORRECTIONS C8), one entry per document in slide order, null for a
     slide the export failed. Each slide's speaker notes are its document's
-    name, which check_text_loss pairs its reference with.
+    name, which check_text_loss pairs its reference with. A slide whose model
+    Node dropped part of (its summary's modelDrops) exported without that part,
+    so it is named in a MODEL DROPS warning on stderr.
     """
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
     # build_pptx_huashu reads the engine from the environment and sends it to the sidecar.
@@ -190,6 +195,14 @@ def export_pptx(
     (out_dir / f"summaries{suffix}.json").write_text(
         json.dumps(summaries, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    for path, summary in zip(documents, summaries):
+        drops = (summary or {}).get("modelDrops") or 0
+        if drops:
+            print(
+                f"{MODEL_DROPS_WARNING}{path.stem}: {drops} part(s) of its slide model failed "
+                "validation and were dropped; the slide exported without them",
+                file=sys.stderr,
+            )
     pptx_path = out_dir / f"export{suffix}.pptx"
     pptx_path.write_bytes(pptx_bytes)
     return pptx_path

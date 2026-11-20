@@ -50,7 +50,9 @@ harness (spec §6):
   (``services/pptx-emit-huashu/model_check.cjs``, ruling R12d): a capture or
   item the snapshot could not have written is dropped, counted in one
   ``[html2pptx] model: …`` line and in the summary's ``modelDrops``, and the
-  rest of the slide exports.
+  rest of the slide exports. A real slide's model drops nothing: the shared
+  export helpers fail on any such line (``allow_model_drops`` opts out), and
+  the harness names each slide that dropped in a ``MODEL DROPS:`` warning.
 
 The hidden words are pinned per case (task-12 addendum): opacity 0 inline,
 block and inline-block, nested, a word split over two text nodes, a table
@@ -72,6 +74,7 @@ from __future__ import annotations
 import functools
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -96,6 +99,7 @@ from tests.fixtures.export_snapshot_support import (
     export_logged,
     fidelity_harness,
     node_json,
+    pinned_font_css,
     reference_text_loss,
     requires_huashu_sidecar,
     requires_node,
@@ -124,7 +128,17 @@ EXISTING_SUMMARY_KEYS = (
     "captureFailures",
 )
 # The keys Task 12 adds (the brief's counts, and the addendum's captureMs, hiddenText, target).
-ADDED_SUMMARY_KEYS = ("text", "shapes", "lines", "tables", "captureMs", "hiddenText", "target")
+# modelDrops is the model check's count (model_check.cjs, ruling R12d).
+ADDED_SUMMARY_KEYS = (
+    "text",
+    "shapes",
+    "lines",
+    "tables",
+    "captureMs",
+    "hiddenText",
+    "target",
+    "modelDrops",
+)
 # The brief's `pseudo` count is the existing pseudoElements (task-12 addendum).
 REPLACED_SUMMARY_KEY = "pseudo"
 
@@ -315,15 +329,14 @@ JOINED_DOCUMENT = _case_document(JOINED_BODY)
 # returns a decoy, and both querySelectorAll copies find nothing, so a reference
 # read through the page's own accessors would hold the decoy and the SVG's
 # label. It publishes on document.title what it replaced and what a reader
-# then sees. The label is set in a system face: the twins are compared whole,
-# picture bytes included, and the deck's DM Sans comes from Google Fonts, which
-# now and then serves another build of the font (a dynamic kit), whose glyphs
+# then sees. The twins are compared whole, the label's picture included, so
+# they are set on the deck's fonts pinned (pinned_font_css): Google Fonts now
+# and then serves another DM Sans file for the deck's @import, whose glyphs
 # the captured picture would draw a few anti-aliased pixels apart.
 HOSTILE_DECOY = "Forgedword decoy"
 HOSTILE_SLIDE = (
     f'<div class="slide">{LEAD}'
-    '<svg width="200" height="60"><text x="10" y="40" font-size="20" font-family="Arial">'
-    "Svgword</text></svg>"
+    '<svg width="200" height="60"><text x="10" y="40" font-size="20">Svgword</text></svg>'
     "<script>{script}</script></div>"
 )
 HOSTILE_SCRIPT = """(function () {
@@ -355,13 +368,20 @@ HOSTILE_SCRIPT = """(function () {
 })();"""
 # The benign twin runs a script too, so both pages hold the same elements.
 BENIGN_SCRIPT = "(function () { document.title = 'benign'; })();"
-HOSTILE_TEXT_DOCUMENT = _case_document(
+
+
+def _pinned_case_document(body: str) -> str:
+    """A case document on the deck's fonts pinned: two loads of it render alike."""
+    return slide_document(body, css=pinned_font_css(), slide_id="snapshot-1")
+
+
+HOSTILE_TEXT_DOCUMENT = _pinned_case_document(
     HOSTILE_SLIDE.format(script=HOSTILE_SCRIPT % {"decoy": HOSTILE_DECOY, "body": "false"})
 )
-HOSTILE_BODY_DOCUMENT = _case_document(
+HOSTILE_BODY_DOCUMENT = _pinned_case_document(
     HOSTILE_SLIDE.format(script=HOSTILE_SCRIPT % {"decoy": HOSTILE_DECOY, "body": "true"})
 )
-BENIGN_DOCUMENT = _case_document(HOSTILE_SLIDE.format(script=BENIGN_SCRIPT))
+BENIGN_DOCUMENT = _pinned_case_document(HOSTILE_SLIDE.format(script=BENIGN_SCRIPT))
 HOSTILE_REPLACED = (
     "HTMLElement.innerText",
     "Document.querySelectorAll",
@@ -704,6 +724,10 @@ class TestSlideSummary:
         capture_ms = summary["captureMs"]
         assert isinstance(capture_ms, (int, float)) and not isinstance(capture_ms, bool), summary
         assert capture_ms > 0, f"one capture was taken, yet captureMs is {capture_ms}"
+
+    def test_a_valid_slide_drops_nothing_of_its_model(self, counts_export: LoggedExport) -> None:
+        """Every item and capture the snapshot writes for a real slide passes the model check."""
+        assert _only_summary(counts_export)["modelDrops"] == 0
 
     def test_a_slide_that_hides_nothing_has_no_hidden_text(
         self, counts_export: LoggedExport
@@ -1917,6 +1941,16 @@ def _append(path: str, value: object):
     return mutate
 
 
+def _remove(path: str, index: int):
+    def mutate(model: dict) -> None:
+        target = model
+        for key in path.split("."):
+            target = target[int(key)] if isinstance(target, list) else target[key]
+        del target[index]
+
+    return mutate
+
+
 NAN = float("nan")
 INFINITY = float("inf")
 INJECTED_COLOUR = '000000"/><a:latin typeface="x'
@@ -1993,12 +2027,29 @@ MODEL_DEFECTS = {
         {7},
         0,
     ),
+    # The grid: each cell's spans inside it, every slot covered by exactly one cell.
+    "table-cell-column-span-past-the-grid": (_set("items.7.cells.1.colspan", 5), {7}, 0),
+    "table-cell-row-span-past-the-grid": (_set("items.7.cells.0.rowspan", 2), {7}, 0),
+    "table-slot-shared": (_append("items.7.cells", _cell(0, 0)), {7}, 0),
+    "table-slot-uncovered": (_remove("items.7.cells", 1), {7}, 0),
 }
 
 # (mutation, the field reset, as an empty slide has it).
 MODEL_FIELD_DEFECTS = {
     "background-colour-injected": (
         _set("background", {"color": INJECTED_COLOUR}),
+        "background",
+        None,
+    ),
+    # An image that is no raster data: URI is no background (emit_model.cjs
+    # applyBackground), so the colour beside it must be one.
+    "background-image-not-raster-colour-injected": (
+        _set("background", {"image": "x", "color": "<script>"}),
+        "background",
+        None,
+    ),
+    "background-image-not-a-data-uri": (
+        _set("background", {"image": "https://example.test/ground.png"}),
         "background",
         None,
     ),
@@ -2019,6 +2070,27 @@ class TestModelCheck:
 
     def test_a_valid_model_passes_untouched(self) -> None:
         model = _valid_model()
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
+        assert checked["model"] == model
+
+    def test_a_raster_background_passes_untouched(self) -> None:
+        """A gradient ground the snapshot rasterised: a data: PNG, as applyBackground embeds."""
+        model = _valid_model()
+        model["background"] = {"image": "data:image/png;base64,iVBORw0KGgo="}
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
+        assert checked["model"] == model
+
+    def test_a_table_whose_spans_fill_its_grid_passes_untouched(self) -> None:
+        """A 2 by 2 grid: a cell spanning both rows, and one cell in each row beside it."""
+        model = _valid_model()
+        model["items"][7] = {
+            **model["items"][7],
+            "colWidths": [100, 120],
+            "rowHeights": [30, 30],
+            "cells": [_cell(0, 0, rowspan=2), _cell(0, 1), _cell(1, 1)],
+        }
         checked = _check_model(model)
         assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
         assert checked["model"] == model
@@ -2145,6 +2217,8 @@ FORGED_CAPTURE_FORMS = {
     "line-feed-rect-intact": ("line-feed-U+000A", False),
 }
 FORGED_CAPTURE_TEXT = "Revenue grew"
+# How run.py export_pptx starts its warning for each slide whose model dropped anything.
+HARNESS_MODEL_DROPS_PREFIX = "MODEL DROPS: "
 FORGED_CAPTURE_DROP_LINE = (
     "[html2pptx] model: 1 item(s) and 1 capture(s) failed validation and were dropped"
 )
@@ -2250,8 +2324,84 @@ class TestForgedCaptureId:
             assert "image" not in summary["kinds"], summary
         assert "capture failed" not in forged_capture_deck.stderr
 
+    def test_the_harness_warns_of_each_slide_that_dropped(
+        self, forged_capture_deck: ForgedCaptureDeck
+    ) -> None:
+        """run.py export_pptx says it loudly, slide by slide, beside the summaries it records."""
+        warnings = [
+            line
+            for line in forged_capture_deck.stderr.splitlines()
+            if line.startswith(HARNESS_MODEL_DROPS_PREFIX)
+        ]
+        assert warnings == [
+            f"{HARNESS_MODEL_DROPS_PREFIX}{position:02d}-{form}: 2 part(s) of its slide model "
+            "failed validation and were dropped; the slide exported without them"
+            for position, form in enumerate(forged_capture_deck.forms, start=1)
+        ], forged_capture_deck.stderr[-3000:]
+
     def test_the_valid_content_still_exports(self, forged_capture_deck: ForgedCaptureDeck) -> None:
         pptx = (forged_capture_deck.out_dir / "export.pptx").read_bytes()
         for index, form in enumerate(forged_capture_deck.forms):
             texts = [shape.text for shape in slide_shapes(pptx, index) if shape.kind == "text"]
             assert texts == [FORGED_CAPTURE_TEXT], f"{form}: {texts}"
+
+
+# ---------------------------------------------------------------------------
+# A real slide's model drops nothing: the export helpers fail loudly if it does
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestModelDropGuard:
+    """``export_snapshot_support``'s exports fail on any ``[html2pptx] model:`` line.
+
+    Every module that exports through the shared helpers (``export_slides``,
+    ``export_corpus``, ``export_documents``, ``export_logged``) checks this way
+    that the model check keeps the whole of each real slide: a test that means
+    to drop part of one says so with ``allow_model_drops=True``.
+    """
+
+    def test_an_export_whose_model_drops_anything_fails(self) -> None:
+        document = _forged_capture_slide("line-feed-U+000A", True)
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            with pytest.raises(AssertionError, match=re.escape(FORGED_CAPTURE_DROP_LINE)):
+                export_logged([document], monkeypatch=monkeypatch)
+
+    def test_a_caller_that_means_to_drop_says_so(self) -> None:
+        document = _forged_capture_slide("line-feed-U+000A", True)
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([document], monkeypatch=monkeypatch, allow_model_drops=True)
+        assert _only_summary(logged)["modelDrops"] == 2
+
+
+# A native table whose spans overlap: the first row's second cell spans both
+# rows, and the second row's cell spans both columns, so both cover slot (1, 1).
+# The browser draws it; an a:tbl cannot hold it.
+OVERLAPPING_SPANS_WORDS = ("Alpha", "Bravo", "Charlie", "overlapping")
+OVERLAPPING_SPANS_DOCUMENT = slide_document(
+    '<div style="position: absolute; left: 80px; top: 80px; font-family: Arial; '
+    'font-size: 16px;"><table style="border-collapse: collapse"><tr>'
+    '<td style="border: 1px solid #000000;">Alpha</td>'
+    '<td rowspan="2" style="border: 1px solid #000000;">Bravo</td></tr>'
+    '<tr><td colspan="2" style="border: 1px solid #000000;">Charlie overlapping</td></tr>'
+    "</table></div>",
+    css="",
+    slide_id="snapshot-1",
+)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestOverlappingSpans:
+    def test_a_table_whose_cells_share_a_slot_exports_as_positioned_text(self) -> None:
+        """No a:tbl whose grid is not one; its text is all still there."""
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([OVERLAPPING_SPANS_DOCUMENT], monkeypatch=monkeypatch)
+        shapes = slide_shapes(logged.pptx, 0)
+        assert [shape for shape in shapes if shape.kind == "table"] == [], (
+            "a table two of whose cells cover one grid slot reached the deck as an a:tbl"
+        )
+        texts = " ".join(shape.text for shape in shapes if shape.kind == "text").split()
+        assert [word for word in OVERLAPPING_SPANS_WORDS if word not in texts] == [], texts
+        assert text_missing_reports(logged.stderr) == []

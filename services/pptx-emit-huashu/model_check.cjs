@@ -21,12 +21,16 @@
 //       snapshot_text.mjs TextBlock and Run, snapshot_table.mjs TableItem): each
 //       number finite, each colour RRGGBB, each value of a set one of that set,
 //       each text a string; an image item also names a capture that is kept, or
-//       none;
-//     * the fields: items and captures are lists, background is a colour or an
-//       image string, fonts maps families to weights, reference.hiddenText is a
+//       none; a native table's cells, spans included, lie inside its grid
+//       and cover each of its slots once;
+//     * the fields: items and captures are lists, background is a raster data:
+//       image or else a colour (as emit_model.cjs applyBackground takes it),
+//       fonts maps families to weights, reference.hiddenText is a
 //       string, and stats.elements and stats.pseudoElements are counts.
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
 //     The one log line that says what was dropped; null when nothing was.
+
+const { RASTER_DATA_URI } = require('./emit_model.cjs');
 
 const CAPTURE_ID = /^c\d+$/;
 const COLOUR = /^[0-9A-Fa-f]{6}$/;
@@ -38,6 +42,10 @@ const ALIGNMENTS = new Set(['left', 'center', 'right', 'justify']);
 const ANCHORS = new Set(['top', 'middle', 'bottom']);
 const BASELINES = new Set(['super', 'sub']);
 const SIDES = ['top', 'right', 'bottom', 'left'];
+// The most grid slots a native table may have: the snapshot's own bound
+// (snapshot_table.mjs slotsOf, dom_access.mjs COLLECTION_ITEM_LIMIT), which
+// also bounds the walk over its slots here.
+const GRID_SLOT_LIMIT = 1000000;
 
 function isNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -146,13 +154,12 @@ function isText(item) {
     isListOf(item.paragraphs, isParagraph);
 }
 
-// A native table cell, in a grid of `rows` by `columns` slots.
+// A native table cell, in a grid of `rows` by `columns` slots: it and its
+// spans lie inside the grid.
 function isCell(cell, rows, columns) {
   return isObject(cell) &&
-    isCount(cell.row) && cell.row < rows &&
-    isCount(cell.col) && cell.col < columns &&
-    isCount(cell.rowspan) && cell.rowspan >= 1 &&
-    isCount(cell.colspan) && cell.colspan >= 1 &&
+    isCount(cell.row) && isCount(cell.rowspan) && cell.rowspan >= 1 && cell.row + cell.rowspan <= rows &&
+    isCount(cell.col) && isCount(cell.colspan) && cell.colspan >= 1 && cell.col + cell.colspan <= columns &&
     (cell.fill === null || isFill(cell.fill)) &&
     isObject(cell.borders) && SIDES.every((side) => cell.borders[side] === null || isStroke(cell.borders[side])) &&
     hasNumbers(cell.margin, SIDES) &&
@@ -165,11 +172,37 @@ function isCell(cell, rows, columns) {
     (cell.paragraphs === null || isListOf(cell.paragraphs, isParagraph));
 }
 
+// Whether `cells` (each inside the grid, isCell) cover every slot of a grid of
+// `rows` by `columns`, each slot once, as the snapshot writes an a:tbl: every
+// slot is a cell of it, those no HTML cell covers included, and pptxgenjs
+// lays a row's cells out by their order and spans, so a slot two cells cover,
+// or none, shifts the rest of the row. A grid of more than GRID_SLOT_LIMIT
+// slots is none the snapshot writes.
+function fillsGrid(cells, rows, columns) {
+  if (rows * columns > GRID_SLOT_LIMIT) return false;
+  const covered = new Uint8Array(rows * columns);
+  let count = 0;
+  for (const cell of cells) {
+    for (let row = cell.row; row < cell.row + cell.rowspan; row++) {
+      for (let column = cell.col; column < cell.col + cell.colspan; column++) {
+        const slot = row * columns + column;
+        if (covered[slot]) return false;
+        covered[slot] = 1;
+        count += 1;
+      }
+    }
+  }
+  return count === rows * columns;
+}
+
 function isTable(item) {
-  return hasNumbers(item, ['x', 'y']) &&
+  const grid = hasNumbers(item, ['x', 'y']) &&
     isListOf(item.colWidths, isNumber) &&
-    isListOf(item.rowHeights, isNumber) &&
-    isListOf(item.cells, (cell) => isCell(cell, item.rowHeights.length, item.colWidths.length));
+    isListOf(item.rowHeights, isNumber);
+  if (!grid) return false;
+  const rows = item.rowHeights.length;
+  const columns = item.colWidths.length;
+  return isListOf(item.cells, (cell) => isCell(cell, rows, columns)) && fillsGrid(item.cells, rows, columns);
 }
 
 function isItem(item, captureIds) {
@@ -200,9 +233,13 @@ function checkCaptures(captures) {
   return captures.filter((capture) => isCapture(capture) && seen.get(capture.id) === 1);
 }
 
+// The slide's ground as emit_model.cjs applyBackground takes it: an image only
+// when it is a raster data: URI, and otherwise a colour, which must be one.
 function isBackground(background) {
-  return background === null ||
-    (isObject(background) && (typeof background.image === 'string' || isColour(background.color)));
+  if (background === null) return true;
+  if (!isObject(background)) return false;
+  if (typeof background.image === 'string' && RASTER_DATA_URI.test(background.image)) return true;
+  return isColour(background.color);
 }
 
 function isFonts(fonts) {
