@@ -1064,6 +1064,23 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
 HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS = 300
 HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS = 60
 
+# What a Chrome export answers when its worker has no room for it just now
+# (HuashuBusyError): a 429 whose detail the frontend shows as it is. It must not
+# read as "unavailable" (a 503, or "huashu pipeline not available"), which the
+# frontend answers by falling back to the records pipeline without a word.
+EXPORTS_BUSY_DETAIL = "Exports are busy right now. Please try again in a minute."
+EXPORTS_BUSY_RETRY_AFTER_SECONDS = 60
+
+
+def exports_busy(error: Exception, *, route: str) -> HTTPException:
+    """The 429 a Chrome export route answers ``HuashuBusyError`` with; the reason is logged."""
+    logger.warning("%s export refused, its worker busy: %s", route, error)
+    return HTTPException(
+        status_code=429,
+        detail=EXPORTS_BUSY_DETAIL,
+        headers={"Retry-After": str(EXPORTS_BUSY_RETRY_AFTER_SECONDS)},
+    )
+
 
 @router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_available() -> dict:
@@ -1243,7 +1260,8 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     """Export the deck's slides to an editable .pptx through the snapshot engine.
 
     Returns 503 if the gate (``pptx_from_html_huashu.is_available``) doesn't
-    pass. On a partial
+    pass, and 429 with ``Retry-After`` when the worker has no room for another
+    export just now (``HuashuBusyError``, ``exports_busy``). On a partial
     success (some slides reject, others pass), still returns the .pptx
     with an ``X-Huashu-Failures`` header carrying the per-slide error
     JSON so the frontend can surface what huashu objected to.
@@ -1251,6 +1269,7 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     from src.services.pptx_from_html_huashu import (
+        HuashuBusyError,
         HuashuExportError,
         build_pptx_huashu,
         is_available,
@@ -1295,6 +1314,8 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         pptx_bytes, failures = build_pptx_huashu(
             title, slides_with_html, bypass_validation=True
         )
+    except HuashuBusyError as e:
+        raise exports_busy(e, route="PPTX") from e
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")
         raise HTTPException(status_code=500, detail=str(e))

@@ -31,7 +31,16 @@ Concurrency. The export routes run in FastAPI's threadpool, so a worker could
 start a sidecar per request; each node and Chromium tree takes about 790 MB.
 ``build_pptx_huashu`` runs at most ``TELLR_SIDECAR_CONCURRENCY`` of them at
 once per worker process (default 1). An export past the cap waits for a slot,
-logged once, and its timeout starts only once it has one.
+logged once, and its timeout starts only once it has one. A waiting export
+holds one of the threadpool's threads (40 per worker, shared with every sync
+route and every authenticated request's identity lookup), so the waiting is
+bounded: at most ``TELLR_SIDECAR_QUEUE`` exports (default 15) wait past the
+cap, and an export past them is refused at once; one that waits
+``TELLR_SIDECAR_WAIT_SECONDS`` (default 100) is refused then, and one that gets
+its slot logs how long it waited. Either refusal is ``HuashuBusyError``, which
+the export routes answer 429 with a message to retry. With the defaults, an
+export is answered within the 300 s the Databricks Apps proxy allows a
+request: 100 s of waiting plus the 180 s sidecar timeout.
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -60,8 +69,10 @@ So a deck with no script run is the same for both targets.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -69,7 +80,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -123,7 +135,71 @@ def sidecar_concurrency(environ: Mapping[str, str] = os.environ) -> int:
     return cap
 
 
-_sidecar_slots = threading.BoundedSemaphore(sidecar_concurrency())
+# How many exports past the cap one worker lets wait for a slot, and for how
+# long. Each waiting export holds a thread of the worker's threadpool (40 by
+# default, shared with every sync route and with every authenticated request's
+# identity lookup), so both are bounded: with the defaults, exports hold at most
+# 16 of the 40. The default wait plus the sidecar's own timeout, 100 + 180 s,
+# stays under the 300 s the Databricks Apps proxy allows a request.
+SIDECAR_QUEUE_ENV = "TELLR_SIDECAR_QUEUE"
+DEFAULT_SIDECAR_QUEUE = 15
+SIDECAR_WAIT_ENV = "TELLR_SIDECAR_WAIT_SECONDS"
+DEFAULT_SIDECAR_WAIT_SECONDS = 100
+
+
+def sidecar_queue(environ: Mapping[str, str] = os.environ) -> int:
+    """How many exports ``TELLR_SIDECAR_QUEUE`` lets wait past the cap.
+
+    A whole number from 0, else the default, 15.
+    """
+    value = environ.get(SIDECAR_QUEUE_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_QUEUE
+    try:
+        queue = int(value)
+    except ValueError:
+        queue = -1
+    if queue < 0:
+        logger.warning(
+            "%s=%r is not a whole number from 0; letting %d export(s) wait for a sidecar",
+            SIDECAR_QUEUE_ENV,
+            value,
+            DEFAULT_SIDECAR_QUEUE,
+        )
+        return DEFAULT_SIDECAR_QUEUE
+    return queue
+
+
+def sidecar_wait_seconds(environ: Mapping[str, str] = os.environ) -> float:
+    """How long ``TELLR_SIDECAR_WAIT_SECONDS`` lets an export wait for a sidecar slot.
+
+    A number of seconds above 0, else the default, 100.
+    """
+    value = environ.get(SIDECAR_WAIT_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_WAIT_SECONDS
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not (math.isfinite(seconds) and seconds > 0):
+        logger.warning(
+            "%s=%r is not a number of seconds above 0; an export waits up to %ds for a sidecar",
+            SIDECAR_WAIT_ENV,
+            value,
+            DEFAULT_SIDECAR_WAIT_SECONDS,
+        )
+        return DEFAULT_SIDECAR_WAIT_SECONDS
+    return seconds
+
+
+_sidecar_cap = sidecar_concurrency()
+_sidecar_slots = threading.BoundedSemaphore(_sidecar_cap)
+# A place for each export this worker lets in: one per sidecar slot, and one per
+# export queued for a slot. Taken without waiting, so with every place taken an
+# export is refused at once (HuashuBusyError).
+_sidecar_admissions = threading.BoundedSemaphore(_sidecar_cap + sidecar_queue())
+SIDECAR_WAIT_SECONDS = sidecar_wait_seconds()
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
@@ -174,6 +250,67 @@ def sidecar_subprocess_env() -> dict[str, str]:
 
 class HuashuExportError(RuntimeError):
     """Raised when the huashu sidecar cannot run at all (setup, timeout)."""
+
+
+class HuashuBusyError(RuntimeError):
+    """Raised when this worker has no room for another export just now.
+
+    Either every export place is taken (the sidecar slots and the queue for
+    them) or the wait for a slot ran past ``SIDECAR_WAIT_SECONDS``. Not a
+    ``HuashuExportError``: the export routes answer this 429 with a message to
+    retry, but a ``HuashuExportError`` 500 or 503, and the frontend answers a
+    503 by falling back to the records pipeline.
+    """
+
+
+@contextlib.contextmanager
+def _export_place() -> Iterator[None]:
+    """One of this worker's export places, held for the whole export.
+
+    With every place taken, ``HuashuBusyError`` at once.
+    """
+    admissions = _sidecar_admissions
+    if not admissions.acquire(blocking=False):
+        raise HuashuBusyError(
+            f"every export place of this worker is taken: its sidecar slots "
+            f"({SIDECAR_CONCURRENCY_ENV}) and the queue for them ({SIDECAR_QUEUE_ENV})"
+        )
+    try:
+        yield
+    finally:
+        admissions.release()
+
+
+@contextlib.contextmanager
+def _sidecar_slot(slides: int) -> Iterator[None]:
+    """One of this worker's sidecar slots for a run, waited for up to ``SIDECAR_WAIT_SECONDS``.
+
+    A wait past it raises ``HuashuBusyError``. An export that waits says so,
+    and once it has the slot, how long it waited.
+    """
+    slots = _sidecar_slots
+    if not slots.acquire(blocking=False):
+        bound = SIDECAR_WAIT_SECONDS
+        logger.info(
+            "[huashu] export waits for a sidecar slot (%s per worker), up to %gs: %d slide(s)",
+            SIDECAR_CONCURRENCY_ENV,
+            bound,
+            slides,
+        )
+        waiting_since = time.monotonic()
+        if not slots.acquire(timeout=bound):
+            raise HuashuBusyError(
+                f"no sidecar slot came free within {bound:g}s ({SIDECAR_WAIT_ENV})"
+            )
+        logger.info(
+            "[huashu] export took a sidecar slot after %.1fs: %d slide(s)",
+            time.monotonic() - waiting_since,
+            slides,
+        )
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 # How long a sidecar told to stop (SIGTERM) has to end before it is killed
@@ -457,31 +594,26 @@ def build_pptx_huashu(
         "target": target,
     }).encode("utf-8")
 
-    with tempfile.TemporaryDirectory() as td:
+    # A place among this worker's exports for the whole export, refused at once
+    # when every one is taken, and a sidecar slot for the run, waited for before
+    # it so the wait does not count against its timeout (module docstring,
+    # Concurrency). Past either bound: HuashuBusyError.
+    with _export_place(), tempfile.TemporaryDirectory() as td:
         out_path = Path(td) / "out.pptx"
         cmd = ["node", str(SIDECAR_SCRIPT), str(out_path)]
-        logger.info(
-            "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
-            " ".join(cmd), len(slides_html), len(payload_bytes),
-        )
-        # One of this worker's sidecar slots (sidecar_concurrency), waited for
-        # before the run, so the wait does not count against its timeout.
-        slots = _sidecar_slots
-        if not slots.acquire(blocking=False):
+        with _sidecar_slot(len(slides_html)):
             logger.info(
-                "[huashu] export waits for a sidecar slot (%s per worker): %d slide(s)",
-                SIDECAR_CONCURRENCY_ENV,
-                len(slides_html),
+                "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
+                " ".join(cmd), len(slides_html), len(payload_bytes),
             )
-            slots.acquire()
-        try:
-            result = run_sidecar_process(cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as e:
-            raise HuashuExportError(
-                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
-            ) from e
-        finally:
-            slots.release()
+            try:
+                result = run_sidecar_process(
+                    cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired as e:
+                raise HuashuExportError(
+                    f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
+                ) from e
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees

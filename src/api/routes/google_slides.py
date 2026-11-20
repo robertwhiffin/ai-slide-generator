@@ -23,7 +23,7 @@ from src.api.routes._authz import (
     _check_deck_permission_for_session,
     _require_export_job_access,
 )
-from src.api.routes.export import ExportJobResponse
+from src.api.routes.export import ExportJobResponse, exports_busy
 from src.api.services.chat_service import get_chat_service
 from src.core.database import get_db
 from src.core.encryption import decrypt_data
@@ -642,6 +642,7 @@ def export_google_slides_from_huashu(
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
 
     from src.services.pptx_from_html_huashu import (
+        HuashuBusyError,
         HuashuExportError,
         build_pptx_huashu,
     )
@@ -694,6 +695,9 @@ def export_google_slides_from_huashu(
             # Written for Google Slides' own placement (R11g: script runs).
             target="gslides",
         )
+    except HuashuBusyError as exc:
+        # Not a 503: the frontend answers that by falling back to the records pipeline.
+        raise exports_busy(exc, route="Google Slides") from exc
     except HuashuExportError as exc:
         logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
         raise HTTPException(

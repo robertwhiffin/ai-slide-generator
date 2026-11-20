@@ -25,12 +25,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -704,6 +706,87 @@ console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded:
 # Each recorded run lasts this long; the sidecar timeout is shorter than two of them.
 RECORDED_RUN_SECONDS = 2
 CAPPED_TIMEOUT_SECONDS = 3
+# An export refused at once returns within this: well under one recorded run.
+REFUSED_WITHIN_SECONDS = 1
+# The bounded-wait case: the wait for a slot is bounded at WAIT_BOUND_SECONDS, and the run
+# holding the slot lasts longer than the bound and a refusal, so it still runs when the wait ends.
+WAIT_BOUND_SECONDS = 1
+LONG_RUN_SECONDS = 4
+# The longest a few exports at once may take to return, whatever the bounds do.
+EXPORTS_RETURN_WITHIN_SECONDS = 4 * LONG_RUN_SECONDS + RETURN_SLACK_SECONDS
+
+
+def _recorded_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_seconds: float) -> Path:
+    """The export's sidecar made a recorded run of ``run_seconds``; returns the run log."""
+    log = tmp_path / "runs.jsonl"
+    stub = tmp_path / "stub_recorded_run.mjs"
+    stub.write_text(
+        STUB_RECORDED_RUN % {"log": json.dumps(str(log)), "ms": int(run_seconds * 1000)},
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", stub)
+    monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+    return log
+
+
+def _bound(monkeypatch: pytest.MonkeyPatch, *, cap: int, queue: int, wait: float) -> None:
+    """The worker's sidecar bounds: ``cap`` run at once, ``queue`` more wait, each ``wait`` s."""
+    monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap))
+    monkeypatch.setattr(
+        pptx_from_html_huashu, "_sidecar_admissions", threading.BoundedSemaphore(cap + queue)
+    )
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_WAIT_SECONDS", wait)
+
+
+class _Export(NamedTuple):
+    # What the export returned, (pptx bytes, failures), or the exception it raised.
+    outcome: object
+    # How long it took to return.
+    seconds: float
+    # When it returned, on the clock the run log records (time.time, as node's Date.now).
+    returned_at: float
+
+
+def _exports_at_once(count: int) -> list[_Export]:
+    """``count`` exports started together, each in a thread, in the order they returned."""
+    exports: list[_Export] = []
+
+    def export() -> None:
+        started = time.monotonic()
+        try:
+            outcome: object = pptx_from_html_huashu.build_pptx_huashu(
+                "deck", [{"html": "<p>x</p>"}]
+            )
+        except Exception as error:  # noqa: BLE001 (recorded, then asserted on)
+            outcome = error
+        exports.append(_Export(outcome, time.monotonic() - started, time.time()))
+
+    threads = [threading.Thread(target=export) for _ in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=EXPORTS_RETURN_WITHIN_SECONDS)
+    assert not any(thread.is_alive() for thread in threads), "an export never returned"
+    return exports
+
+
+def _runs(log: Path) -> list[tuple[float, float]]:
+    """The sidecar runs the log recorded, each ``(start, end)``, in the order they started."""
+    events: dict[int, dict[str, float]] = {}
+    for line in log.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        events.setdefault(entry["pid"], {})[entry["event"]] = entry["at"]
+    return sorted((run["start"], run["end"]) for run in events.values())
+
+
+def _free(semaphore: threading.BoundedSemaphore) -> int:
+    """How many of the semaphore's places are free: each is taken, counted, then given back."""
+    taken = 0
+    while semaphore.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        semaphore.release()
+    return taken
 
 
 @requires_node
@@ -712,49 +795,20 @@ class TestTheSidecarsAreCappedPerWorker:
 
     The cap is ``TELLR_SIDECAR_CONCURRENCY`` (default 1 per worker process).
     An export past it waits for a slot, says so once on its log, and starts its
-    timeout only once it has the slot.
+    timeout only once it has the slot, logging how long it waited.
     """
 
     def _two_exports(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int
     ) -> list[tuple[float, float]]:
-        log = tmp_path / "runs.jsonl"
-        stub = tmp_path / "stub_recorded_run.mjs"
-        stub.write_text(
-            STUB_RECORDED_RUN
-            % {"log": json.dumps(str(log)), "ms": RECORDED_RUN_SECONDS * 1000},
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", stub)
+        log = _recorded_sidecar(tmp_path, monkeypatch, RECORDED_RUN_SECONDS)
         monkeypatch.setattr(
             pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", CAPPED_TIMEOUT_SECONDS
         )
-        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
-        monkeypatch.setattr(
-            pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap), raising=False
-        )
-        outcomes: list[object] = []
-
-        def export() -> None:
-            try:
-                outcomes.append(
-                    pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
-                )
-            except Exception as error:  # noqa: BLE001 (recorded, then asserted on)
-                outcomes.append(error)
-
-        threads = [threading.Thread(target=export) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=4 * RECORDED_RUN_SECONDS + RETURN_SLACK_SECONDS)
-        assert not any(thread.is_alive() for thread in threads), "an export never returned"
-        assert outcomes == [(b"PK", []), (b"PK", [])], outcomes
-        events: dict[int, dict[str, float]] = {}
-        for line in log.read_text(encoding="utf-8").splitlines():
-            entry = json.loads(line)
-            events.setdefault(entry["pid"], {})[entry["event"]] = entry["at"]
-        return sorted((run["start"], run["end"]) for run in events.values())
+        _bound(monkeypatch, cap=cap, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+        exports = _exports_at_once(2)
+        assert [export.outcome for export in exports] == [(b"PK", []), (b"PK", [])], exports
+        return _runs(log)
 
     def test_with_a_cap_of_one_the_sidecars_run_one_after_the_other(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -763,12 +817,16 @@ class TestTheSidecarsAreCappedPerWorker:
         with caplog.at_level("INFO", logger=pptx_from_html_huashu.__name__):
             (first, second) = self._two_exports(tmp_path, monkeypatch, cap=1)
         assert second[0] >= first[1], f"the sidecars overlapped: {first} and {second}"
-        waits = [
-            record for record in caplog.records if "waits for a sidecar slot" in record.message
-        ]
-        assert len(waits) == 1 and waits[0].message.startswith("[huashu]"), [
-            record.message for record in caplog.records
-        ]
+        messages = [record.message for record in caplog.records]
+        waits = [message for message in messages if "waits for a sidecar slot" in message]
+        assert len(waits) == 1 and waits[0].startswith("[huashu]"), messages
+        took = [message for message in messages if "took a sidecar slot after" in message]
+        assert len(took) == 1 and took[0].startswith("[huashu]"), messages
+        waited = float(re.search(r"after (\d+(?:\.\d+)?)s", took[0]).group(1))
+        # It waited out the first export's run: its node start, its recorded run, its exit.
+        assert RECORDED_RUN_SECONDS <= waited < RECORDED_RUN_SECONDS + REFUSED_WITHIN_SECONDS, (
+            took[0]
+        )
 
     def test_with_a_cap_of_two_they_overlap(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -784,3 +842,172 @@ class TestTheSidecarsAreCappedPerWorker:
     def test_the_cap_is_read_from_the_environment(self, value: str | None, cap: int) -> None:
         environ = {} if value is None else {"TELLR_SIDECAR_CONCURRENCY": value}
         assert pptx_from_html_huashu.sidecar_concurrency(environ) == cap
+
+
+def _raising(error: BaseException):
+    """A sidecar run that raises ``error``."""
+
+    def run(*_: object, **__: object) -> None:
+        raise error
+
+    return run
+
+
+def _writing_no_deck(*_: object, **__: object) -> subprocess.CompletedProcess:
+    """A sidecar run that exits 1 having written no deck and no result line."""
+    return subprocess.CompletedProcess(["node"], 1, b"", b"boom\n")
+
+
+# The run of an export that must be refused before it starts one.
+_RUN_NOT_EXPECTED = _raising(AssertionError("the refused export ran its sidecar"))
+
+
+class TestTheWaitForASidecarIsBounded:
+    """An export waiting for a sidecar slot holds a threadpool thread, so its wait is bounded.
+
+    A worker has 40 threads (Starlette's default), shared with every sync route
+    and with the identity lookup of every authenticated request. So at most
+    ``TELLR_SIDECAR_QUEUE`` exports (default 15) wait past the cap, each for at
+    most ``TELLR_SIDECAR_WAIT_SECONDS`` (default 100, which with the 180 s sidecar
+    timeout stays under the Apps proxy's 300 s per request). An export past either
+    bound raises ``HuashuBusyError``, which the export routes answer 429. It is not
+    a ``HuashuExportError``: the routes answer that 500 or 503, and the frontend
+    answers a 503 by falling back to the records pipeline.
+    """
+
+    @requires_node
+    def test_an_export_past_the_queue_is_refused_at_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cap 1 and queue 1: of three exports at once, one runs, one waits, one is refused."""
+        log = _recorded_sidecar(tmp_path, monkeypatch, RECORDED_RUN_SECONDS)
+        _bound(monkeypatch, cap=1, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+
+        exports = _exports_at_once(3)
+
+        built = [export for export in exports if not isinstance(export.outcome, BaseException)]
+        refused = [export for export in exports if isinstance(export.outcome, BaseException)]
+        assert [export.outcome for export in built] == [(b"PK", []), (b"PK", [])], exports
+        assert len(refused) == 1, exports
+        assert type(refused[0].outcome) is pptx_from_html_huashu.HuashuBusyError, refused
+        assert not isinstance(refused[0].outcome, HuashuExportError)
+        assert refused[0].seconds < REFUSED_WITHIN_SECONDS, (
+            f"the export past the queue was refused after {refused[0].seconds:.1f}s"
+        )
+        assert len(_runs(log)) == 2, "the refused export ran a sidecar"
+
+    @requires_node
+    def test_a_wait_past_its_bound_is_refused_while_the_slot_is_still_taken(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cap 1 and a 1 s bound: the second export is refused after 1 s, the first still runs."""
+        log = _recorded_sidecar(tmp_path, monkeypatch, LONG_RUN_SECONDS)
+        _bound(monkeypatch, cap=1, queue=15, wait=WAIT_BOUND_SECONDS)
+
+        exports = _exports_at_once(2)
+
+        assert [type(export.outcome) for export in exports] == [
+            pptx_from_html_huashu.HuashuBusyError,
+            tuple,
+        ], exports
+        refused, built = exports
+        assert built.outcome == (b"PK", [])
+        assert not isinstance(refused.outcome, HuashuExportError)
+        assert (
+            WAIT_BOUND_SECONDS - 0.1
+            <= refused.seconds
+            < WAIT_BOUND_SECONDS + REFUSED_WITHIN_SECONDS
+        ), f"refused after {refused.seconds:.1f}s, the bound {WAIT_BOUND_SECONDS}s"
+        ((_, first_ended),) = _runs(log)
+        assert refused.returned_at < first_ended, "refused only once the slot was free again"
+
+    @pytest.mark.parametrize(
+        ("run", "raised"),
+        [
+            (_raising(OSError("node not found")), OSError),
+            (
+                _raising(subprocess.TimeoutExpired(["node"], 1, output=b"", stderr=b"")),
+                HuashuExportError,
+            ),
+            (_raising(KeyboardInterrupt()), KeyboardInterrupt),
+            (_raising(RuntimeError("anything else")), RuntimeError),
+            (_writing_no_deck, HuashuExportError),
+        ],
+        ids=["no node", "timed out", "interrupted", "anything else", "no deck written"],
+    )
+    def test_a_failed_run_gives_its_slot_and_its_place_back(
+        self, run, raised: type[BaseException], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _bound(monkeypatch, cap=1, queue=1, wait=WAIT_BOUND_SECONDS)
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", run)
+
+        with pytest.raises(raised):
+            pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
+
+        assert _free(pptx_from_html_huashu._sidecar_slots) == 1, "the slot was kept"
+        assert _free(pptx_from_html_huashu._sidecar_admissions) == 2, "the place was kept"
+
+    def test_a_refused_wait_gives_its_place_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _bound(monkeypatch, cap=1, queue=1, wait=WAIT_BOUND_SECONDS)
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", _RUN_NOT_EXPECTED)
+        slots = pptx_from_html_huashu._sidecar_slots
+        assert slots.acquire(blocking=False)  # another export's run
+        try:
+            # In a thread, bounded: a wait that never ends fails here, not hangs.
+            (export,) = _exports_at_once(1)
+        finally:
+            slots.release()
+
+        assert type(export.outcome) is pptx_from_html_huashu.HuashuBusyError, export
+        assert _free(slots) == 1
+        assert _free(pptx_from_html_huashu._sidecar_admissions) == 2, "the place was kept"
+
+    def test_an_export_refused_at_once_gives_back_nothing_it_did_not_take(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every place taken: the refusal releases none (one too many raises ValueError here)."""
+        _bound(monkeypatch, cap=1, queue=1, wait=WAIT_BOUND_SECONDS)
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", _RUN_NOT_EXPECTED)
+        admissions = pptx_from_html_huashu._sidecar_admissions
+        assert admissions.acquire(blocking=False) and admissions.acquire(blocking=False)
+        try:
+            with pytest.raises(pptx_from_html_huashu.HuashuBusyError):
+                pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
+            assert _free(admissions) == 0, "the refused export gave back a place it never took"
+        finally:
+            admissions.release()
+            admissions.release()
+
+        assert _free(admissions) == 2
+        assert _free(pptx_from_html_huashu._sidecar_slots) == 1
+
+    @pytest.mark.parametrize(
+        ("value", "queue"),
+        [(None, 15), ("15", 15), ("4", 4), ("0", 0), ("-1", 15), ("many", 15), ("2.5", 15)],
+    )
+    def test_the_queue_is_read_from_the_environment(self, value: str | None, queue: int) -> None:
+        environ = {} if value is None else {"TELLR_SIDECAR_QUEUE": value}
+        assert pptx_from_html_huashu.sidecar_queue(environ) == queue
+
+    @pytest.mark.parametrize(
+        ("value", "seconds"),
+        [
+            (None, 100),
+            ("100", 100),
+            ("1", 1),
+            ("2.5", 2.5),
+            ("0", 100),
+            ("-5", 100),
+            ("inf", 100),
+            ("nan", 100),
+            ("soon", 100),
+        ],
+    )
+    def test_the_wait_is_read_from_the_environment(
+        self, value: str | None, seconds: float
+    ) -> None:
+        environ = {} if value is None else {"TELLR_SIDECAR_WAIT_SECONDS": value}
+        assert pptx_from_html_huashu.sidecar_wait_seconds(environ) == seconds
