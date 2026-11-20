@@ -139,9 +139,10 @@ def mcp_user_agent() -> str:
 
 #: How a chat turn reached Tellr: its own UI, or its MCP server.
 ENTRYPOINTS: Final[frozenset[str]] = frozenset({"app", "mcp"})
-#: The chat turn's entrypoint, ``None`` outside a turn.  Each enqueue site sets it in
-#: its request's own context just before ``enqueue_job``, which copies that context
-#: for the worker, so every Gateway client built for the turn reads it.
+#: The chat turn's entrypoint, ``None`` outside a turn.  Each entry site (the browser
+#: chat route, the MCP server) sets it in its request's own context just before it calls
+#: the shared ``enter_chat_turn``, whose ``enqueue_job`` copies that context for the
+#: worker, so every Gateway client built for the turn reads it.
 _entrypoint_var: ContextVar[str | None] = ContextVar("tellr_entrypoint", default=None)
 
 

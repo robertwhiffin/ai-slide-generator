@@ -11,7 +11,7 @@ from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import httpx
 import openai
@@ -639,7 +639,7 @@ def test_clients_built_in_a_turn_send_its_entrypoint_beside_their_component(
         )
 
 
-# --- through the real job queue: enqueue site -> enqueue_job -> worker -> model call ---
+# --- through the real job queue: entry site -> enter_chat_turn -> enqueue_job -> worker ---
 
 _TURN_MESSAGE = "build me a deck about eider ducks"
 
@@ -705,12 +705,25 @@ def title_calling_turns(real_job_queue, monkeypatch):
     return service
 
 
+def _enter_through(monkeypatch, manager, engine_mode: str) -> None:
+    """Point the shared Enter (``chat.enter_chat_turn``) at ``manager`` and ``engine_mode``.
+
+    The browser route and the MCP tools both enter their turns through it, so each sender
+    calls this as it sends: turns from both, sent one after another, each get their own.
+    """
+    from src.api.routes import chat
+
+    monkeypatch.setattr(chat, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(chat, "resolve_engine_mode_or_unavailable", lambda session_id: engine_mode)
+
+
 def _app_route(monkeypatch, *, deck_mode):
     """``POST /api/chat/async``'s own coroutine, with no database and no permission check.
 
     ``deck_mode="legacy"`` sends a Legacy deck's turn (the monolith); ``None`` a new Agent
-    deck's (the graph; its Enter snapshot is the ``MagicMock`` manager's).  Returns
-    ``submit(request_id)``, the coroutine function that sends one turn.
+    deck's (the graph; its Enter snapshot is the ``MagicMock`` manager's).  The route and
+    the shared Enter it calls are real.  Returns ``submit(request_id)``, the coroutine
+    function that sends one turn.
     """
     from src.api.routes import chat
     from src.api.schemas.requests import ChatRequest
@@ -722,12 +735,11 @@ def _app_route(monkeypatch, *, deck_mode):
     manager.get_session.return_value = {"message_count": 0}
     monkeypatch.setattr(chat, "_check_chat_permission", lambda *args, **kwargs: None)
     monkeypatch.setattr(chat, "_maybe_create_session", lambda request, session_manager: False)
-    monkeypatch.setattr(chat, "get_session_manager", lambda: manager)
-    monkeypatch.setattr(chat, "resolve_engine_mode_or_unavailable", lambda session_id: engine_mode)
 
     def submit(request_id):
         async def send():
             manager.create_chat_request.return_value = request_id
+            _enter_through(monkeypatch, manager, engine_mode)
             result = await chat.submit_chat_async(
                 ChatRequest(session_id="s-app", message=_TURN_MESSAGE), db=MagicMock()
             )
@@ -738,23 +750,102 @@ def _app_route(monkeypatch, *, deck_mode):
     return submit
 
 
-def _mcp_tool(monkeypatch):
-    """The MCP tools' ``enqueue_create_job``, with no database; returns ``submit(request_id)``."""
-    from src.api import mcp_server
+#: The MCP tools that start a turn.  Both enter it through ``_enter_turn_or_tool_error``.
+_MCP_TOOLS = ("create_deck", "edit_deck")
 
+
+def _mcp_tool(monkeypatch, *, tool):
+    """An MCP tool's own implementation (``_create_deck_impl`` or ``_edit_deck_impl``).
+
+    Real from there through ``_enter_turn_or_tool_error`` and the shared Enter to
+    ``enqueue_job``: an Agent deck's turn.  Stubbed, as ``tests/unit/test_mcp_server.py``
+    stubs them: the auth scope (it yields a fixed identity), the session manager (a
+    ``MagicMock``; ``create_deck``'s new deck has no messages, ``edit_deck``'s is the
+    caller's own Agent deck with three), both engine resolvers (``graph``), the
+    edit-permission facade (allowed) and the admin defaults (no design system, slide style
+    or Genie One default).  Returns ``submit(request_id)``.
+    """
+    from src.api import mcp_server
+    from src.api.mcp_auth import MCPIdentity
+    from src.api.routes import chat
+
+    identity = MCPIdentity(
+        user_id="user-mcp",
+        user_name="caller@example.com",
+        token="tok",
+        source="x-forwarded-access-token",
+    )
+    session_id = f"s-mcp-{tool}"
     manager = MagicMock()
     manager.acquire_session_lock.return_value = True
-    manager.get_session.return_value = {"message_count": 0}
+    manager.create_session.return_value = {"session_id": session_id}
+    manager.get_deck_mode.return_value = "agent"
+    manager.get_session.return_value = {
+        "message_count": 0 if tool == "create_deck" else 3,
+        "created_by": identity.user_name,
+        "is_contributor_session": False,
+    }
+    manager.live_generation_holder.return_value = None
+
+    @contextlib.contextmanager
+    def auth_scope(request):
+        yield identity
+
+    monkeypatch.setattr(mcp_server, "mcp_auth_scope", auth_scope)
     monkeypatch.setattr(mcp_server, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(
+        mcp_server, "permission_service", MagicMock(**{"can_edit_deck.return_value": True})
+    )
+    monkeypatch.setattr(
+        mcp_server, "resolve_engine_mode_or_unavailable", lambda session_id: "graph"
+    )
+    monkeypatch.setattr(mcp_server, "get_default_design_system_id", lambda: None)
+    monkeypatch.setattr(mcp_server, "get_default_slide_style_id", lambda: None)
+    monkeypatch.setattr(chat, "get_genie_one_default", lambda: False)
 
     def submit(request_id):
         async def send():
             manager.create_chat_request.return_value = request_id
-            assert await mcp_server.enqueue_create_job("s-mcp", _TURN_MESSAGE) == request_id
+            _enter_through(monkeypatch, manager, "graph")
+            if tool == "create_deck":
+                result = await mcp_server._create_deck_impl(
+                    request=MagicMock(), prompt=_TURN_MESSAGE
+                )
+            else:
+                result = await mcp_server._edit_deck_impl(
+                    request=MagicMock(), session_id=session_id, instruction=_TURN_MESSAGE
+                )
+            assert (result["session_id"], result["request_id"], result["status"]) == (
+                session_id,
+                request_id,
+                "pending",
+            )
 
         return send
 
     return submit
+
+
+#: Every way a turn reaches Tellr: the browser route, and each MCP tool that starts one.
+_ENTRY_SITES = ("app", *(f"mcp-{tool}" for tool in _MCP_TOOLS))
+
+
+def _entry_site(monkeypatch, entry: str):
+    """``(entrypoint, submit)`` for one of ``_ENTRY_SITES``.  The browser route sends a
+    Legacy deck's turn here (only the browser sends turns to Legacy decks); MCP's are
+    Agent decks' turns."""
+    if entry == "app":
+        return "app", _app_route(monkeypatch, deck_mode="legacy")
+    return "mcp", _mcp_tool(monkeypatch, tool=entry.removeprefix("mcp-"))
+
+
+def _assert_completed(manager, request_id: str, *, agent: bool) -> None:
+    """The runner completed the turn: an Agent turn with ``complete_chat_request``, which
+    writes its result and status at once, any other with the ``completed`` status."""
+    if agent:
+        manager.complete_chat_request.assert_any_call(request_id, ANY)
+    else:
+        manager.update_chat_request_status.assert_any_call(request_id, "completed")
 
 
 def _job_payload(session_id: str) -> dict:
@@ -831,26 +922,24 @@ def _assert_turn_sent(service, manager, request_id: str, tags: dict) -> None:
     _assert_sent_with_tags(sent[0], tags)
 
 
-@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS)
+@pytest.mark.parametrize("entry", _ENTRY_SITES)
 def test_a_turn_tags_its_model_calls_with_its_entrypoint_through_the_real_job_queue(
-    real_job_queue, title_calling_turns, monkeypatch, entrypoint
+    real_job_queue, title_calling_turns, monkeypatch, entry
 ):
-    """From the real enqueue site (the chat route for ``app``, the MCP tools' helper for
-    ``mcp``) through the real ``enqueue_job``, ``worker`` and ``process_chat_request``.
-    The job runs in ``enqueue_job``'s copy of the site's context, so the entrypoint the
-    site set before enqueueing is on the turn's title call, and nowhere else."""
-    if entrypoint == "app":
-        submit = _app_route(monkeypatch, deck_mode="legacy")
-    else:
-        submit = _mcp_tool(monkeypatch)
-    request_id = f"req-{entrypoint}"
+    """From each real entry site (the chat route for ``app``; ``create_deck`` and
+    ``edit_deck`` for ``mcp``) through the real shared Enter, ``enqueue_job``, ``worker``
+    and ``process_chat_request``.  The site marks its own context before it calls the
+    Enter, and the job runs in ``enqueue_job``'s copy of that context, so the turn's title
+    call carries the site's entrypoint, and nothing else does."""
+    entrypoint, submit = _entry_site(monkeypatch, entry)
+    request_id = f"req-{entry}"
 
     outer = _run_turns(submit(request_id))
 
     _assert_turn_sent(
         title_calling_turns, real_job_queue.manager, request_id, _title_tags(entrypoint)
     )
-    real_job_queue.manager.update_chat_request_status.assert_any_call(request_id, "completed")
+    _assert_completed(real_job_queue.manager, request_id, agent=entrypoint == "mcp")
     assert real_job_queue.module.jobs == {}
     assert outer == [None, None], "the site's entrypoint reached the runner's context"
 
@@ -858,11 +947,12 @@ def test_a_turn_tags_its_model_calls_with_its_entrypoint_through_the_real_job_qu
 def test_one_turns_entrypoint_never_reaches_another_turn_on_the_same_runner(
     real_job_queue, title_calling_turns, monkeypatch
 ):
-    """Five jobs, ONE runner, in this order: an MCP turn, a recovered job (no captured
-    context: a copy of the runner's own), a job enqueued from a context that marked
-    nothing, an app turn, and a second recovered job.  Each carries its own entrypoint,
-    or none: no job's value reaches the next, nor the runner."""
-    from_mcp = _mcp_tool(monkeypatch)
+    """Five jobs, ONE runner, in this order: an MCP turn (``create_deck``, an Agent deck's),
+    a recovered job (no captured context: a copy of the runner's own), a job enqueued from
+    a context that marked nothing, an app turn (a Legacy deck's), and a second recovered
+    job.  Each carries its own entrypoint, or none: no job's value reaches the next, nor
+    the runner."""
+    from_mcp = _mcp_tool(monkeypatch, tool="create_deck")
     from_app = _app_route(monkeypatch, deck_mode="legacy")
     turns = [
         ("req-1-mcp", from_mcp("req-1-mcp"), "mcp"),
@@ -908,14 +998,19 @@ def _turn_workspace(monkeypatch) -> MockChatCompletionsWorkspace:
     return workspace
 
 
-def test_an_agent_decks_turn_from_the_app_tags_its_graph_and_title_calls(
-    real_job_queue, monkeypatch
-):
-    """The whole Agent-deck turn: the REAL route enqueues it and the REAL worker runs the
-    REAL chat service's graph limb.  Its graph thread makes a production adapter call
-    (``DatabricksModelAdapter()``: the default model factory, as the service principal)
-    and its title thread a production title call.  Each thread runs in a copy of the
-    job's context, so each call carries the app entrypoint beside its own component."""
+def _run_an_agent_turn(monkeypatch, submit, request_id: str) -> SimpleNamespace:
+    """Send one Agent deck's turn with ``submit`` and run it on the REAL worker and the REAL
+    chat service's graph limb.
+
+    Its graph thread makes a production adapter call (``DatabricksModelAdapter()``: the
+    default model factory, as the service principal) and, on a deck's first message, its
+    title thread makes a production title call.  Stubbed: ``invoke_graph`` (it makes that
+    one adapter call instead of running a pinned Graph Release), the service's deck store
+    and its own collaborators (``_service_double``, ``_service_env``: settings, its session
+    manager, the liveness poll and the seal), ``has_generation_snapshot``,
+    ``get_system_client`` and the HTTP layer (a mock transport).  Returns the graph calls,
+    the title calls, the graph threads' names and ``_run_turns``' outer entrypoints.
+    """
     from src.domain.skill_io import OUTPUT_SCHEMAS
     from src.services.agent_runtime import AgentModelConfiguration, DatabricksModelAdapter
     from tests.unit.test_stage_slide_wiring import _service_double, _service_env
@@ -940,7 +1035,6 @@ def test_an_agent_decks_turn_from_the_app_tags_its_graph_and_title_calls(
         return {}
 
     chat_service = _service_double()
-    submit = _app_route(monkeypatch, deck_mode=None)
     with (
         _service_env(),
         # Inside _service_env, so this stub replaces its recorder.
@@ -948,37 +1042,83 @@ def test_an_agent_decks_turn_from_the_app_tags_its_graph_and_title_calls(
         patch("src.services.generation_rollback.has_generation_snapshot", return_value=False),
     ):
         monkeypatch.setattr("src.api.services.chat_service.get_chat_service", lambda: chat_service)
-        outer = _run_turns(submit("req-agent"))
+        outer = _run_turns(submit(request_id))
+
+    return SimpleNamespace(
+        graph_calls=[r for r in workspace.requests if json.loads(r.content).get("tools")],
+        title_calls=[r for r in workspace.requests if not json.loads(r.content).get("tools")],
+        graph_threads=graph_threads,
+        outer=outer,
+    )
+
+
+def test_an_agent_decks_turn_from_the_app_tags_its_graph_and_title_calls(
+    real_job_queue, monkeypatch
+):
+    """The whole Agent-deck turn: the REAL route enters it through the shared Enter and the
+    REAL worker runs the REAL chat service's graph limb.  The graph thread and the title
+    thread each run in a copy of the job's context, so each call carries the app
+    entrypoint beside its own component."""
+    turn = _run_an_agent_turn(monkeypatch, _app_route(monkeypatch, deck_mode=None), "req-agent")
 
     real_job_queue.manager.complete_chat_request.assert_called_once()
-    assert len(graph_threads) == 1 and not graph_threads[0].startswith("chat-job"), graph_threads
-    graph_calls = [r for r in workspace.requests if json.loads(r.content).get("tools")]
-    title_calls = [r for r in workspace.requests if not json.loads(r.content).get("tools")]
-    assert (len(graph_calls), len(title_calls)) == (1, 1), workspace.requests
+    threads = turn.graph_threads
+    assert len(threads) == 1 and not threads[0].startswith("chat-job"), threads
+    sent = (turn.graph_calls, turn.title_calls)
+    assert (len(turn.graph_calls), len(turn.title_calls)) == (1, 1), sent
     _assert_sent_with_tags(
-        graph_calls[0], {"source": "tellr", "component": "generation", "entrypoint": "app"}
+        turn.graph_calls[0], {"source": "tellr", "component": "generation", "entrypoint": "app"}
     )
     _assert_sent_with_tags(
-        title_calls[0], {"source": "tellr", "component": "title", "entrypoint": "app"}
+        turn.title_calls[0], {"source": "tellr", "component": "title", "entrypoint": "app"}
     )
-    assert outer == [None, None]
+    assert turn.outer == [None, None]
 
 
-@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS)
-def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
-    real_job_queue, monkeypatch, entrypoint
+@pytest.mark.parametrize("tool", _MCP_TOOLS)
+def test_an_agent_decks_turn_from_mcp_tags_its_graph_and_title_calls(
+    real_job_queue, monkeypatch, tool
 ):
-    """The Legacy (monolith) limb of the REAL chat service, reached from the real enqueue
-    site through the real worker.  While MCP jobs run on the Legacy engine (their payload
-    has no ``engine_mode``), this is the only place ``mcp`` reaches the Gateway: the Legacy
-    engine's deck calls build no Gateway client, so the turn's first-message title call is
-    its one tagged request.  The limb makes that call on its own title thread, started in a
-    copy of the job's context, so it carries the turn's entrypoint beside the ``title``
-    component.  Stubbed: the deck store (``_get_or_load_deck``), the agent
+    """MCP decks are Agent decks: ``create_deck`` makes one and ``edit_deck`` enters only
+    one.  The REAL tool implementation enters the turn through ``_enter_turn_or_tool_error``
+    and the shared Enter (``_mcp_tool``), and the REAL worker runs the REAL chat service's
+    graph limb (``_run_an_agent_turn``).  The graph call carries ``mcp`` beside the
+    ``generation`` component.  A new deck's first turn (``create_deck``) also makes its
+    title call, which carries ``mcp`` beside ``title``; an edit of a deck that already has
+    messages makes no title call."""
+    request_id = f"req-agent-{tool}"
+    turn = _run_an_agent_turn(monkeypatch, _mcp_tool(monkeypatch, tool=tool), request_id)
+
+    real_job_queue.manager.complete_chat_request.assert_called_once_with(request_id, ANY)
+    threads = turn.graph_threads
+    assert len(threads) == 1 and not threads[0].startswith("chat-job"), threads
+    titles = 1 if tool == "create_deck" else 0
+    sent = (turn.graph_calls, turn.title_calls)
+    assert (len(turn.graph_calls), len(turn.title_calls)) == (1, titles), sent
+    _assert_sent_with_tags(
+        turn.graph_calls[0], {"source": "tellr", "component": "generation", "entrypoint": "mcp"}
+    )
+    for title_call in turn.title_calls:
+        _assert_sent_with_tags(
+            title_call, {"source": "tellr", "component": "title", "entrypoint": "mcp"}
+        )
+    assert turn.outer == [None, None]
+
+
+def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
+    real_job_queue, monkeypatch
+):
+    """The Legacy (monolith) limb of the REAL chat service, reached from the real browser
+    route through the real worker.  Only the browser sends turns to Legacy decks: MCP's
+    ``create_deck`` makes Agent decks and its ``edit_deck`` refuses a Legacy deck.  The
+    Legacy engine's deck calls build no Gateway client, so the turn's first-message title
+    call is its one tagged request.  The limb makes that call on its own title thread,
+    started in a copy of the job's context, so it carries the app entrypoint beside the
+    ``title`` component.  Stubbed: the deck store (``_get_or_load_deck``), the agent
     (``_build_agent_for_session``; it returns no HTML, so no deck is saved), two helpers
     (``_persist_genie_conversation_ids``, ``_substitute_images_for_response``), the session
     managers, the settings, ``get_system_client`` and the HTTP layer (a mock transport);
-    the enqueue sites' own stubs are in ``_app_route`` and ``_mcp_tool``."""
+    the route's own stubs are in ``_app_route``."""
     from src.api.services.chat_service import ChatService
 
     workspace = _text_workspace(monkeypatch)
@@ -1012,11 +1152,8 @@ def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
     )
     monkeypatch.setattr("src.core.settings_db.get_settings", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr("src.api.services.chat_service.get_chat_service", lambda: service)
-    if entrypoint == "app":
-        submit, session_id = _app_route(monkeypatch, deck_mode="legacy"), "s-app"
-    else:
-        submit, session_id = _mcp_tool(monkeypatch), "s-mcp"
-    request_id = f"req-legacy-{entrypoint}"
+    submit, session_id = _app_route(monkeypatch, deck_mode="legacy"), "s-app"
+    request_id = "req-legacy-app"
 
     outer = _run_turns(submit(request_id))
 
@@ -1026,7 +1163,7 @@ def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
     agent.generate_slides_streaming.assert_called_once()
     assert len(workspace.requests) == 1, workspace.requests
     _assert_sent_with_tags(
-        workspace.requests[0], {"source": "tellr", "component": "title", "entrypoint": entrypoint}
+        workspace.requests[0], {"source": "tellr", "component": "title", "entrypoint": "app"}
     )
     # Sent from the limb's own title thread, not from the chat-job thread the job runs on.
     assert len(calling_threads) == 1, calling_threads
@@ -1036,7 +1173,7 @@ def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
     assert outer == [None, None]
 
 
-# --- the two enqueue sites mark their entrypoint before enqueueing ---
+# --- the two entry sites mark their entrypoint before the shared Enter enqueues ---
 
 
 def _called_name(call: ast.Call) -> str | None:
@@ -1073,8 +1210,8 @@ def _sets_entrypoint(statement: ast.stmt, value: str) -> bool:
     )
 
 
-def _entrypoint_set_before_each_enqueue(source: str, value: str) -> list[bool]:
-    """For each ``enqueue_job`` call in ``source``: whether ``set_entrypoint(value)`` runs on
+def _entrypoint_set_before_each_call(source: str, callee: str, value: str) -> list[bool]:
+    """For each call to ``callee`` in ``source``: whether ``set_entrypoint(value)`` runs on
     every path to it, earlier in its own function.
 
     That holds when the set is a statement of the block holding the call's statement, or of
@@ -1085,7 +1222,7 @@ def _entrypoint_set_before_each_enqueue(source: str, value: str) -> list[bool]:
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     results = []
     for call in ast.walk(tree):
-        if not (isinstance(call, ast.Call) and _called_name(call) == "enqueue_job"):
+        if not (isinstance(call, ast.Call) and _called_name(call) == callee):
             continue
         node, dominated = call, False
         while not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Module)):
@@ -1111,68 +1248,161 @@ def _async_function(*body: str, before: str = "") -> str:
 
 
 _SET_APP = 'set_entrypoint("app")'
-_ENQUEUE = "await enqueue_job(r, p)"
+_ENTER = "await enter_chat_turn(r, p)"
 
-_ENQUEUE_READER_CASES = {
-    "set-first": (_async_function(_SET_APP, _ENQUEUE), [True]),
-    "through-the-module": (_async_function(f"attribution.{_SET_APP}", _ENQUEUE), [True]),
-    "by-keyword": (_async_function('set_entrypoint(value="app")', _ENQUEUE), [True]),
+_ENTER_READER_CASES = {
+    "set-first": (_async_function(_SET_APP, _ENTER), [True]),
+    "through-the-module": (_async_function(f"attribution.{_SET_APP}", _ENTER), [True]),
+    "by-keyword": (_async_function('set_entrypoint(value="app")', _ENTER), [True]),
     "before-the-enclosing-statements": (
         _async_function(
-            _SET_APP, "try:", "    if x:", f"        {_ENQUEUE}", "finally:", "    pass"
+            _SET_APP, "try:", "    if x:", f"        {_ENTER}", "finally:", "    pass"
         ),
         [True],
     ),
-    "each-call": (_async_function(_SET_APP, _ENQUEUE, _ENQUEUE), [True, True]),
-    "set-after": (_async_function(_ENQUEUE, _SET_APP), [False]),
-    "set-in-a-branch": (_async_function("if x:", f"    {_SET_APP}", _ENQUEUE), [False]),
+    "before-a-try-whose-body-assigns-the-call": (
+        _async_function(_SET_APP, "try:", f"    entered: T = {_ENTER}", "except E:", "    raise"),
+        [True],
+    ),
+    "each-call": (_async_function(_SET_APP, _ENTER, _ENTER), [True, True]),
+    "set-after": (_async_function(_ENTER, _SET_APP), [False]),
+    "set-in-a-branch": (_async_function("if x:", f"    {_SET_APP}", _ENTER), [False]),
     "set-in-the-try-the-call-is-the-finally-of": (
-        _async_function("try:", f"    {_SET_APP}", "finally:", f"    {_ENQUEUE}"),
+        _async_function("try:", f"    {_SET_APP}", "finally:", f"    {_ENTER}"),
         [False],
     ),
-    "set-at-module-level": (_async_function(_ENQUEUE, before=f"{_SET_APP}\n"), [False]),
+    "set-at-module-level": (_async_function(_ENTER, before=f"{_SET_APP}\n"), [False]),
     "set-in-another-function": (
-        _async_function(_ENQUEUE, before=f"def g():\n    {_SET_APP}\n"),
+        _async_function(_ENTER, before=f"def g():\n    {_SET_APP}\n"),
         [False],
     ),
-    "the-other-entrypoint": (_async_function('set_entrypoint("mcp")', _ENQUEUE), [False]),
-    "not-a-literal": (_async_function("set_entrypoint(x)", _ENQUEUE), [False]),
-    "commented-out": (_async_function(f"# {_SET_APP}", _ENQUEUE), [False]),
+    "the-other-entrypoint": (_async_function('set_entrypoint("mcp")', _ENTER), [False]),
+    "not-a-literal": (_async_function("set_entrypoint(x)", _ENTER), [False]),
+    "commented-out": (_async_function(f"# {_SET_APP}", _ENTER), [False]),
 }
 
 
 @pytest.mark.parametrize(
-    "source, expected", list(_ENQUEUE_READER_CASES.values()), ids=list(_ENQUEUE_READER_CASES)
+    "source, expected", list(_ENTER_READER_CASES.values()), ids=list(_ENTER_READER_CASES)
 )
-def test_the_enqueue_reader_counts_only_a_set_on_every_path_before_the_call(source, expected):
-    assert _entrypoint_set_before_each_enqueue(source, "app") == expected
+def test_the_entry_reader_counts_only_a_set_on_every_path_before_the_call(source, expected):
+    assert _entrypoint_set_before_each_call(source, "enter_chat_turn", "app") == expected
 
 
-def test_both_enqueue_sites_mark_their_entrypoint_before_enqueueing():
-    """``enqueue_job`` copies the context it is called in, so a job carries an entrypoint only
-    if it was set on every path to the call, in the same function, before it.  These two
-    are the only places in ``src`` a chat turn is enqueued or marked, and each marks only
-    its own: a mark anywhere else (in the chat service, say) would relabel the turns that
-    pass through it."""
-    src = Path(__file__).resolve().parents[2] / "src"
-    sites = sorted(
-        path.relative_to(src).as_posix()
-        for path in src.rglob("*.py")
-        if any(
-            isinstance(node, ast.Call) and _called_name(node) == "enqueue_job"
-            for node in ast.walk(ast.parse(path.read_text()))
-        )
+def _uses(source: str, name: str) -> list[tuple[str, str]]:
+    """``(function, kind)`` for each place ``source`` names ``name``, in source order.
+
+    ``function`` is the innermost enclosing ``def`` (``<module>`` outside one).  ``kind`` is
+    ``defines`` (its ``def``), ``imports`` (an import of it, under any alias), ``calls`` (a
+    call by its own name, or as ``module.<name>``) or ``refers`` (any other mention in code:
+    a callback, an assignment, an attribute such as ``.set``).  Prose and comments are not
+    uses.  A call through an import alias is not a ``calls`` of ``name``: the import is.
+    """
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+
+    def function_of(node: ast.AST) -> str:
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node.name
+        return "<module>"
+
+    uses = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            kind = "defines"
+        elif isinstance(node, ast.alias) and node.name == name:
+            kind = "imports"
+        elif (isinstance(node, ast.Name) and node.id == name) or (
+            isinstance(node, ast.Attribute) and node.attr == name
+        ):
+            kind = "calls" if id(node) in called else "refers"
+        else:
+            continue
+        uses.append((node.lineno, node.col_offset, function_of(node), kind))
+    return [(function, kind) for _, _, function, kind in sorted(uses)]
+
+
+def test_the_use_reader_names_each_use_by_its_function_and_kind():
+    source = (
+        "from src.api.routes.chat import enter_chat_turn as enter\n"
+        "from src.api.routes import chat\n"
+        "async def enter_chat_turn(**kwargs):\n"
+        "    pass\n"
+        "async def a():\n"
+        "    await chat.enter_chat_turn(x)\n"
+        "    await enter(x)\n"
+        "def b():\n"
+        "    callback = enter_chat_turn\n"
+        "    def inner():\n"
+        "        enter_chat_turn()\n"
+        '    """enter_chat_turn() in prose"""\n'
+        "    # enter_chat_turn() in a comment\n"
     )
-    assert sites == ["api/mcp_server.py", "api/routes/chat.py"]
-    # Calls only: ``core/attribution.py`` defines ``set_entrypoint`` and calls it nowhere.
-    markers = {
-        path.relative_to(src).as_posix()
-        for path in src.rglob("*.py")
-        if _set_entrypoint_literals(path.read_text())
-    }
-    assert markers == {"api/routes/chat.py", "api/mcp_server.py"}
+    assert _uses(source, "enter_chat_turn") == [
+        ("<module>", "imports"),
+        ("<module>", "defines"),
+        ("a", "calls"),
+        ("b", "refers"),
+        ("inner", "calls"),
+    ]
 
+
+def _uses_in_src(name: str) -> list[tuple[str, str, str]]:
+    """``(file, function, kind)`` for every use of ``name`` under ``src`` (``_uses``)."""
+    src = Path(__file__).resolve().parents[2] / "src"
+    return [
+        (path.relative_to(src).as_posix(), function, kind)
+        for path in sorted(src.rglob("*.py"))
+        for function, kind in _uses(path.read_text(), name)
+    ]
+
+
+def test_each_entry_site_marks_its_entrypoint_before_the_shared_enter():
+    """``enqueue_job`` copies the context it is called in, and its one call is in the shared
+    Enter, ``enter_chat_turn``, which each entry site awaits in its own task: the browser
+    route (``submit_chat_async``) and the MCP server (``_enter_turn_or_tool_error``, which
+    every MCP tool that starts a turn calls).  So a turn carries an entrypoint only if its
+    entry site set it on every path to its call into the Enter, in the same function,
+    before it.  The two entry sites are the only callers of the Enter and the only places in
+    ``src`` that mark a turn, each once and with its own value; nothing else touches the
+    ContextVar.  The Enter marks nothing: a mark there would give every turn that passes
+    through it, from either site, the same value."""
+    assert _uses_in_src("enqueue_job") == [
+        ("api/routes/chat.py", "<module>", "imports"),
+        ("api/routes/chat.py", "enter_chat_turn", "calls"),
+        ("api/services/job_queue.py", "<module>", "defines"),
+    ]
+    assert _uses_in_src("enter_chat_turn") == [
+        ("api/mcp_server.py", "<module>", "imports"),
+        ("api/mcp_server.py", "_enter_turn_or_tool_error", "calls"),
+        ("api/routes/chat.py", "<module>", "defines"),
+        ("api/routes/chat.py", "submit_chat_async", "calls"),
+    ]
+    # The MCP tools that start a turn, each run end to end by the tests above (_MCP_TOOLS).
+    assert _uses_in_src("_enter_turn_or_tool_error") == [
+        ("api/mcp_server.py", "<module>", "defines"),
+        *(("api/mcp_server.py", f"_{tool}_impl", "calls") for tool in _MCP_TOOLS),
+    ]
+    markers = _uses_in_src("set_entrypoint")
+    assert ("api/routes/chat.py", "enter_chat_turn", "calls") not in markers, (
+        "the shared Enter marks every turn that passes through it with one value"
+    )
+    assert markers == [
+        ("api/mcp_server.py", "<module>", "imports"),
+        ("api/mcp_server.py", "_enter_turn_or_tool_error", "calls"),
+        ("api/routes/chat.py", "<module>", "imports"),
+        ("api/routes/chat.py", "submit_chat_async", "calls"),
+        ("core/attribution.py", "<module>", "defines"),
+    ]
+    assert {path for path, _, _ in _uses_in_src("_entrypoint_var")} == {"core/attribution.py"}
+
+    src = Path(__file__).resolve().parents[2] / "src"
     for relative, value in (("api/routes/chat.py", "app"), ("api/mcp_server.py", "mcp")):
         source = (src / relative).read_text()
-        assert _entrypoint_set_before_each_enqueue(source, value) == [True], relative
+        assert _entrypoint_set_before_each_call(source, "enter_chat_turn", value) == [True], (
+            relative
+        )
         assert _set_entrypoint_literals(source) == [value], relative

@@ -4,6 +4,9 @@ Date: 2026-11-18. Status: approved.
 
 Decisions marked **(decided)** were approved by the owner on 2026-11-19. Unmarked text
 describes the code as it stands on `main` at c1b11d9f (v0.5.7).
+The entrypoint design (section 5) was reworked after `main` gained a shared enqueue
+function, `enter_chat_turn`, and ran MCP decks in Agent mode (v0.5.8); section 5 describes
+that code.
 
 ## Intent
 
@@ -18,8 +21,9 @@ cannot be told apart from other apps in the same workspace.
 
 The rule for the branch is: **identifiers only**. A label is a product name, a version or
 one of a fixed list of feature names. No prompt, no deck content, no user text and no
-customer name is ever put in one. In the app, the branch adds no behaviour, no permission
-and no network call, and sends no data anywhere new. In the installer, it adds one read of
+customer name is ever put in one. In the app, the branch changes only the labels on its
+requests: no new identity, scope, request body or network call, and no data sent anywhere
+new. In the installer, it adds one read of
 the app, one read-only lookup of the branch's Postgres roles and one resources-only update
 of the app; the resource that update declares carries `CAN_CONNECT_AND_CREATE` on the
 app's own database. With the resource attached, the platform supplies the app's Postgres
@@ -199,9 +203,11 @@ is dropped without raising, so a tag can never carry free text:
 | `export` | PPTX and Google Slides export |
 | `image` | image generation |
 
-Model calls that do not go through the Gateway carry no tag at all: the Legacy engine's
-deck calls, the feedback chat and its report, the configuration check and slide
-verification (item 8 above).
+Model calls Tellr makes as the app outside the Gateway carry no tag at all: the Legacy
+engine's deck calls, the feedback chat and its report, the configuration check and slide
+verification (item 8 above). The Agent Bricks and model-endpoint tools call the customer's
+own endpoints as the signed-in user, also outside the Gateway, with the user's SDK label
+(`tellr-app-<hash>`) and no tag.
 
 `gateway_request_headers`, `gateway_chat_model` and `gateway_openai_client` take an
 optional `component`. The existing tests pin the header to exactly
@@ -210,17 +216,24 @@ unknown component falls back to `{"source": "tellr"}`.
 
 ### 5. An `entrypoint` tag for decks made through Tellr's MCP server (decided)
 
-`src/api/mcp_server.py` marks the turn `mcp` and the browser route
-(`src/api/routes/chat.py`) marks it `app`, each with `set_entrypoint` immediately before
-its `enqueue_job` call. The mark is a ContextVar; `enqueue_job` already copies the context
-into the worker, so every model call of the turn sees it, and `gateway_request_headers`
-adds `"entrypoint"` to the tag only when it is an exact `str` from those two values
+A turn is enqueued in one place: the shared Enter, `enter_chat_turn`
+(`src/api/routes/chat.py`), makes the one `enqueue_job` call. It has two callers, the two
+entry sites, and each marks its turn with `set_entrypoint` once, immediately before its
+call into `enter_chat_turn`: the browser route `submit_chat_async` marks it `app`, and the
+MCP server's `_enter_turn_or_tool_error`, which `create_deck` and `edit_deck` both call,
+marks it `mcp`. `enter_chat_turn` marks nothing, since every turn from both sites passes
+through it. The mark is a ContextVar. Each site awaits `enter_chat_turn` in its own task,
+with no task or thread in between, and `enqueue_job` copies that task's context into the
+worker, so every model call of the turn sees the mark. `gateway_request_headers` adds
+`"entrypoint"` to the tag only when it is an exact `str` from those two values
 (`set_entrypoint` ignores any other value in the same way). This separates what other
 agents use through Tellr from what its own users use.
 
-On `main` an MCP job runs the Legacy engine, whose deck calls do not go through the
-Gateway, so the `mcp` value shows on that job's title call today. It reaches the deck
-calls when MCP jobs run on the graph, with no further change.
+MCP decks run in Agent mode: `create_deck` makes an Agent deck and `edit_deck` edits only
+an Agent deck. So an MCP turn's graph calls carry `entrypoint` `mcp` beside `component`
+`generation`, and so does a new deck's title call, beside `title`. Only the browser sends
+turns to Legacy-mode decks. Their deck calls do not go through the Gateway, so on a Legacy
+deck the title call is the one call that carries the entrypoint, `app`.
 
 ## Considered and not included
 
@@ -256,7 +269,10 @@ on its allow-list is omitted. The installer change prints a warning and continue
   transport: Agent-mode Genie and the first-stage `/Me` request carry the product and
   version; an MCP request carries exactly one `User-Agent`, starting `tellr/`, and no tag
   header. Gateway: exact tag for each component, unknown component dropped, entrypoint
-  present only inside a job that set it, every tool-loop round still tagged. Installer:
+  present only inside a job that set it, every tool-loop round still tagged; each entry
+  site (the browser route, and both MCP tools that start a turn) marks its turn before the
+  shared Enter, end to end through the real worker, and a source scan pins where the marks
+  are. Installer:
   `apps.create` carries no database resource for autoscaling and keeps the provisioned one;
   create and update attach after the role (and not without it) and before the deploy; the
   attach is a resources-only update that sends every existing resource back, leaves an app

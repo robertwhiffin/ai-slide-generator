@@ -652,10 +652,18 @@ header. The header is a JSON object, and the Gateway records it with each reques
 an export, has no `entrypoint` key. Each value comes from a fixed list in the code, and any
 other value adds no key, so a tag never carries free text.
 
-Model calls that do not go through the AI Gateway carry no request tag: the Legacy engine's
-deck calls, the feedback chat and its report, the configuration check and slide
-verification. A chat turn sent through Tellr's MCP server runs on the Legacy engine, so of
-its model calls only the session-title call carries `entrypoint` `mcp`.
+Model calls Tellr makes as the app outside the AI Gateway carry no request tag: the Legacy
+engine's deck calls, the feedback chat and its report, the configuration check and slide
+verification. The Agent Bricks and model-endpoint tools call the customer's own endpoints
+as the signed-in user, also outside the AI Gateway, so their requests carry the user's SDK
+label (`tellr-app-<hash>`) and no request tag.
+
+A chat turn sent through Tellr's MCP server runs in Agent mode: `create_deck` makes an
+Agent deck, and `edit_deck` edits only an Agent deck. The turn's agent calls carry
+`entrypoint` `mcp` beside `component` `generation`, and so does a new deck's session-title
+call, beside `title`. Only Tellr's own UI sends a turn to a Legacy-mode deck. The Legacy
+engine's deck calls carry no tag, so on a Legacy deck the session-title call is the one
+call that carries `entrypoint` `app`.
 
 **MCP calls.** The MCP calls Tellr's Agent-mode tools make as the signed-in user (Genie One,
 other AI Gateway MCP services, and MCP servers reached through a Unity Catalog connection)
