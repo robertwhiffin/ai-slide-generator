@@ -26,9 +26,11 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -70,6 +72,10 @@ HUNG_SLIDE = (
 )
 # What only Playwright's launched browser processes carry on their command line.
 PLAYWRIGHT_BROWSER_FLAG = "--remote-debugging-pipe"
+# Playwright makes each browser's profile in a directory of its own under the
+# launching node's TMPDIR, named with this prefix, and names it on the browser's
+# command line (--user-data-dir), so a browser says which run's TMPDIR it is of.
+PLAYWRIGHT_PROFILE_PREFIX = "playwright_chromiumdev_profile-"
 
 # A stub node script. The browser child is detached and killed (its group) by
 # the stub's exit handler, as Playwright does; the helper child stays in the
@@ -208,15 +214,20 @@ def _write_stub(path: Path, pids_path: Path, script: str = STUB_SCRIPT) -> None:
     )
 
 
-def _playwright_browsers() -> dict[int, int]:
-    """Every running Playwright browser process: pid -> process group id."""
+def _playwright_browsers(scope: str) -> dict[int, int]:
+    """The running Playwright browsers launched with TMPDIR ``scope``: pid -> process group id.
+
+    Only those: a browser another run on the machine launched (another test run,
+    a developer's own) is not this run's to watch or kill.
+    """
+    profile = f"{scope}/{PLAYWRIGHT_PROFILE_PREFIX}"
     listing = subprocess.run(
         ["ps", "-axo", "pid=,pgid=,command="], capture_output=True, text=True, check=True
     ).stdout
     browsers = {}
     for line in listing.splitlines():
         fields = line.split(None, 2)
-        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2]:
+        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile in fields[2]:
             browsers[int(fields[0])] = int(fields[1])
     return browsers
 
@@ -234,10 +245,15 @@ def _group_members(groups: set[int]) -> list[int]:
 
 
 class _BrowserWatch:
-    """The Playwright browsers that start while it watches, with their process groups."""
+    """The Playwright browsers of its run that start while it watches, with their process groups.
 
-    def __init__(self) -> None:
-        self._before = set(_playwright_browsers())
+    Its run is every node launched with TMPDIR ``scope`` (``browser_watch`` sets it
+    for the test).
+    """
+
+    def __init__(self, scope: str) -> None:
+        self._scope = scope
+        self._before = set(_playwright_browsers(scope))
         self.seen: dict[int, int] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._watch, daemon=True)
@@ -245,7 +261,7 @@ class _BrowserWatch:
 
     def _watch(self) -> None:
         while not self._stop.is_set():
-            for pid, group in _playwright_browsers().items():
+            for pid, group in _playwright_browsers(self._scope).items():
                 if pid not in self._before:
                     self.seen[pid] = group
             time.sleep(0.2)
@@ -253,6 +269,15 @@ class _BrowserWatch:
     def stop(self) -> None:
         self._stop.set()
         self._thread.join()
+
+    def end(self) -> None:
+        """Stop watching, and SIGKILL the group of every browser it saw."""
+        self.stop()
+        for group in set(self.seen.values()):
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def survivors(self) -> list[int]:
         """The processes of the browsers' groups still alive after ``GONE_WITHIN_SECONDS``."""
@@ -267,17 +292,21 @@ class _BrowserWatch:
 
 
 @pytest.fixture
-def browser_watch() -> Iterator[_BrowserWatch]:
-    watch = _BrowserWatch()
+def browser_watch(monkeypatch: pytest.MonkeyPatch) -> Iterator[_BrowserWatch]:
+    """A watch over the browsers this test's nodes launch: each gets TMPDIR of the watch's own.
+
+    TMPDIR reaches every sidecar through ``sidecar_subprocess_env``. It is a short
+    path under /tmp because Chrome makes its singleton socket under TMPDIR, and a
+    socket path may not be much longer than 100 bytes.
+    """
+    scope = tempfile.mkdtemp(prefix="tellr-watch-", dir="/tmp")
+    monkeypatch.setenv("TMPDIR", scope)
+    watch = _BrowserWatch(scope)
     try:
         yield watch
     finally:
-        watch.stop()
-        for group in set(watch.seen.values()):
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        watch.end()
+        shutil.rmtree(scope, ignore_errors=True)
 
 
 @requires_node
@@ -467,6 +496,106 @@ class TestASidecarWhosePipesOutliveIt:
                     os.killpg(holder, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+
+# Another run's Playwright browser: launched, a ready file written, then held open.
+FOREIGN_BROWSER = """
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+const require = createRequire(%(sidecar)s);
+const { chromium } = require('playwright');
+await chromium.launch();
+fs.writeFileSync(%(ready)s, 'ready');
+await new Promise(() => {});
+"""
+
+
+# How long a SIGKILLed process takes to stop running, with slack.
+KILL_SETTLE_SECONDS = 2
+
+
+def _running_after(pid: int, seconds: float) -> bool:
+    """Whether ``pid`` still runs (a zombie does not) once ``seconds`` have passed."""
+    time.sleep(seconds)
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _browser_of(node_pid: int) -> int | None:
+    """The Playwright browser node ``node_pid`` launched (its child with the pipe flag), or None."""
+    listing = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, check=True
+    ).stdout
+    for line in listing.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3 and int(fields[1]) == node_pid:
+            if PLAYWRIGHT_BROWSER_FLAG in fields[2]:
+                return int(fields[0])
+    return None
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTheWatchIsItsOwnRuns:
+    def test_a_browser_of_another_run_is_neither_counted_nor_killed(
+        self, tmp_path: Path, browser_watch: _BrowserWatch
+    ) -> None:
+        """A Playwright browser another run starts while the watch runs outlives the watch.
+
+        Another agent's or a developer's test run can launch Playwright browsers
+        on the same machine at any time. The watch sees, and so kills, only the
+        browsers of its own run; this one is launched with a TMPDIR of its own.
+        """
+        other = tempfile.mkdtemp(prefix="tellr-other-", dir="/tmp")
+        ready = tmp_path / "foreign_browser.ready"
+        script = tmp_path / "foreign_browser.mjs"
+        script.write_text(
+            FOREIGN_BROWSER
+            % {
+                "sidecar": json.dumps(str(pptx_from_html_huashu.SIDECAR_DIR) + "/"),
+                "ready": json.dumps(str(ready)),
+            },
+            encoding="utf-8",
+        )
+        env = {**pptx_from_html_huashu.sidecar_subprocess_env(), "TMPDIR": other}
+        node = subprocess.Popen(
+            ["node", str(script)],
+            cwd=pptx_from_html_huashu.SIDECAR_DIR,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        browser = None
+        try:
+            deadline = time.monotonic() + HUNG_SLIDE_TIMEOUT_SECONDS
+            while not ready.exists():
+                assert node.poll() is None and time.monotonic() < deadline, (
+                    "fixture drift: the other run's browser never started"
+                )
+                time.sleep(0.1)
+            browser = _browser_of(node.pid)
+            assert browser is not None, "fixture drift: the other run launched no browser"
+            time.sleep(1)  # several of the watch's looks at the process table
+
+            browser_watch.end()
+
+            counted = browser in browser_watch.seen
+            killed = not _running_after(browser, KILL_SETTLE_SECONDS)
+            assert not counted and not killed, (
+                f"another run's browser {browser}: counted by the watch {counted}, killed {killed}"
+            )
+        finally:
+            for group in (browser, node.pid):
+                if group is not None:
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass  # gone already, or a zombie group macOS will not signal
+            node.wait()
+            shutil.rmtree(other, ignore_errors=True)
 
 
 @pytest.mark.slow
