@@ -21,9 +21,11 @@ browser ``detached``, the leader of a process group of its own, and kills those
 groups from node's exit handler, so no signal to node's group reaches a
 browser. ``run_sidecar_process`` therefore sends SIGTERM to the sidecar's own
 group first, which emit_deck.mjs answers with ``process.exit(143)``, so node
-leaves through that exit path, and SIGKILLs the group only after a grace
-period, as a backstop. The admin routes that run probe_launch.mjs and the
-Playwright installer use the same helper.
+leaves through that exit path. A node still running after a grace period could
+not (its event loop blocked), so the helper kills the groups of node's detached
+children, its browsers, itself, then SIGKILLs node's group as a backstop. The
+admin routes that run probe_launch.mjs and the Playwright installer use the
+same helper.
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -147,17 +149,72 @@ def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> Non
     """Send ``sig`` to the process group ``process`` leads, else to ``process`` itself.
 
     The group's id is the process's own (``start_new_session``). A group that
-    cannot be found while the process still runs (it was started in another
-    session) gets the signal on the process alone.
+    cannot be found (ProcessLookupError), or cannot be signalled
+    (PermissionError: macOS answers EPERM for a group whose only member is the
+    process, exited and not yet reaped), gets the signal on the process alone
+    while it still runs; ``poll`` reaps it otherwise.
     """
     try:
         os.killpg(process.pid, sig)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         if process.poll() is None:
             try:
                 process.send_signal(sig)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
                 pass  # it exited between the poll and the signal
+
+
+def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
+    """Every running process as ``(pid, ppid, pgid)``: from /proc on Linux, else from ``ps``.
+
+    Bounded: ``ps`` gets ``SIDECAR_TERM_GRACE_SECONDS``, and a process that
+    exits while it is read is skipped. An unreadable table is empty, logged.
+    """
+    if (proc / "self" / "stat").exists():
+        table = []
+        for entry in os.listdir(proc):
+            if not entry.isdigit():
+                continue
+            try:
+                stat = (proc / entry / "stat").read_text()
+            except OSError:
+                continue  # it exited, or is not ours to read
+            # "pid (comm) state ppid pgrp …": comm can hold spaces and parentheses.
+            fields = stat[stat.rindex(")") + 2 :].split()
+            table.append((int(entry), int(fields[1]), int(fields[2])))
+        return table
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="],
+            capture_output=True,
+            text=True,
+            timeout=SIDECAR_TERM_GRACE_SECONDS,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("could not list processes to sweep a blocked sidecar's browsers: %s", error)
+        return []
+    table = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 3:
+            table.append((int(fields[0]), int(fields[1]), int(fields[2])))
+    return table
+
+
+def _kill_detached_children(process: subprocess.Popen) -> None:
+    """SIGKILL the group of each of the sidecar's children that leads a group of its own.
+
+    The browsers Playwright launches are such children (``detached``). Only
+    called while the sidecar still runs: a living node has not reaped its
+    children, so none of their ids can have been reused by another process.
+    """
+    for pid, ppid, pgid in _process_table():
+        if ppid == process.pid and pgid == pid and pid != process.pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # gone already, or a zombie its node has yet to reap
 
 
 def _end_process_group(process: subprocess.Popen) -> None:
@@ -167,15 +224,19 @@ def _end_process_group(process: subprocess.Popen) -> None:
     (emit_deck.mjs, probe_launch.mjs), and Playwright's exit handler then
     SIGKILLs the group of every browser it launched. Playwright launches each
     browser ``detached``, the leader of a group of its own, so no signal to the
-    sidecar's group reaches a browser: only node's exit path does. Then, after
-    ``SIDECAR_TERM_GRACE_SECONDS``, SIGKILL to whatever of the group remains: a
-    node that could not exit, or a child it started in its own group.
+    sidecar's group reaches a browser: only node's exit path does. A node still
+    running after ``SIDECAR_TERM_GRACE_SECONDS`` could not take that path (its
+    event loop blocked, so no handler of its ran), so the groups of its detached
+    children, its browsers, are killed here. Then SIGKILL to whatever of the
+    sidecar's own group remains: node, or a child it started in that group.
     """
     _signal_process_group(process, signal.SIGTERM)
     try:
         process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         pass
+    if process.poll() is None:
+        _kill_detached_children(process)
     _signal_process_group(process, signal.SIGKILL)
     try:
         process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
@@ -200,7 +261,8 @@ def run_sidecar_process(
     ``subprocess.TimeoutExpired`` is raised with what it printed. After any
     exit, a failing one included, the group is swept with SIGKILL, so no child
     it started in its own group outlives it. No wait is unbounded: the run
-    returns within ``timeout`` plus three grace periods.
+    returns within ``timeout`` plus four grace periods (the waits, and the
+    process listing a blocked sidecar's sweep reads).
     """
     process = subprocess.Popen(
         command,
@@ -225,10 +287,12 @@ def run_sidecar_process(
             raise
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     finally:
-        _signal_process_group(process, signal.SIGKILL)
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream:
-                stream.close()
+        try:
+            _signal_process_group(process, signal.SIGKILL)
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream:
+                    stream.close()
 
 
 def _remaining_output(process: subprocess.Popen) -> tuple[bytes, bytes]:

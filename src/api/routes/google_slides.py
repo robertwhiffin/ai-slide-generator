@@ -7,6 +7,7 @@ Credentials come from the global ``GoogleGlobalCredentials`` table;
 user tokens are stored per-user in the ``google_oauth_tokens`` table.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -670,7 +671,10 @@ async def export_google_slides_from_huashu(
     ]
 
     try:
-        pptx_bytes, failures = build_pptx_huashu(
+        # In a worker thread: the sidecar runs for as long as the deck takes,
+        # and on the event loop the server would answer nothing else meanwhile.
+        pptx_bytes, failures = await asyncio.to_thread(
+            build_pptx_huashu,
             title=title,
             slides_html=slides_html,
             bypass_validation=True,

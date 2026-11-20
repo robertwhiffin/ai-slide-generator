@@ -48,8 +48,9 @@ STUB_LIFETIME_SECONDS = 30
 # launchd/init once its parent is gone too.
 GONE_WITHIN_SECONDS = 10
 # The longest a timed-out run may take to return: its timeout, the helper's
-# SIGTERM grace and its bounded waits after the SIGKILL, with slack.
-RETURN_SLACK_SECONDS = 3 * pptx_from_html_huashu.SIDECAR_TERM_GRACE_SECONDS + 3
+# SIGTERM grace, its process listing and its bounded waits after the SIGKILL,
+# with slack.
+RETURN_SLACK_SECONDS = 4 * pptx_from_html_huashu.SIDECAR_TERM_GRACE_SECONDS + 3
 
 # The real sidecar's timeout for a slide that never loads: long enough for the
 # browser to launch, so the test sees the browser it must not leave behind.
@@ -92,6 +93,62 @@ process.on('SIGTERM', () => {});
 fs.writeFileSync(%(pids)s, JSON.stringify({ sidecar: process.pid, helper: helper.pid }));
 setTimeout(() => process.exit(0), %(lifetime_ms)d);
 setInterval(() => {}, 1000);
+"""
+
+# node exits at once, leaving a detached child that holds its stdout and
+# stderr: the pipes outlive node, so its run times out with node a zombie that
+# leads a group of no other member (on macOS, killpg on it answers EPERM).
+STUB_EXITS_LEAVING_ITS_PIPES = """
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+const holder = spawn(
+  'sleep', ['%(lifetime_s)d'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }
+);
+fs.writeFileSync(%(pids)s, JSON.stringify({ sidecar: process.pid, holder: holder.pid }));
+holder.unref();
+process.exit(0);
+"""
+
+# node starts a detached browser and then blocks its own event loop, so its
+# SIGTERM handler, which would exit through the exit handler that kills the
+# browser, never runs. It ends itself after the lifetime, the loop still blocked.
+STUB_BLOCKED_LOOP = """
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+const browser = spawn('sleep', ['%(lifetime_s)d'], { detached: true, stdio: 'ignore' });
+process.on('exit', () => {
+  try { process.kill(-browser.pid, 'SIGKILL'); } catch (error) { /* already gone */ }
+});
+process.on('SIGTERM', () => process.exit(143));
+fs.writeFileSync(%(pids)s, JSON.stringify({ sidecar: process.pid, browser: browser.pid }));
+const until = Date.now() + %(lifetime_s)d * 1000;
+while (Date.now() < until) { /* the event loop blocked */ }
+process.exit(0);
+"""
+
+# Loaded into the real emit_deck.mjs through NODE_OPTIONS: once its browser has
+# loaded the slide, node blocks its event loop for good, so no handler of
+# node's runs. A browser with a page open outlives node's pipe closing (Chrome
+# on macOS: seven processes measured); one with none exits by itself.
+BLOCKING_LAUNCH_PRELOAD = """
+import { createRequire } from 'node:module';
+const require = createRequire(%(sidecar)s);
+const { chromium } = require('playwright-core');
+const launch = chromium.launch.bind(chromium);
+chromium.launch = async (options) => {
+  const browser = await launch(options);
+  const newPage = browser.newPage.bind(browser);
+  browser.newPage = async (...pageArguments) => {
+    const page = await newPage(...pageArguments);
+    const goto = page.goto.bind(page);
+    page.goto = async (...gotoArguments) => {
+      await goto(...gotoArguments);
+      for (;;) { /* the event loop blocked */ }
+    };
+    return page;
+  };
+  return browser;
+};
 """
 
 # Loaded into the real probe_launch.mjs through NODE_OPTIONS: the browser it
@@ -301,6 +358,97 @@ class TestTheHelperEndsTheWholeSidecar:
             _kill([pids["sidecar"], pids["helper"]])
 
 
+@requires_node
+class TestASidecarWhoseLoopIsBlocked:
+    def test_its_detached_browser_is_swept(self, tmp_path: Path) -> None:
+        """No handler of node's can run: the helper kills its detached child's group itself."""
+        pids_path = tmp_path / "pids.json"
+        stub = tmp_path / "stub_blocked_loop.mjs"
+        stub.write_text(
+            STUB_BLOCKED_LOOP
+            % {"pids": json.dumps(str(pids_path)), "lifetime_s": STUB_LIFETIME_SECONDS},
+            encoding="utf-8",
+        )
+
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            pptx_from_html_huashu.run_sidecar_process(
+                ["node", str(stub)], input=b"", timeout=STUB_TIMEOUT_SECONDS
+            )
+        elapsed = time.monotonic() - started
+
+        pids = json.loads(pids_path.read_text(encoding="utf-8"))
+        everything = [pids["sidecar"], pids["browser"]]
+        try:
+            assert elapsed < STUB_TIMEOUT_SECONDS + RETURN_SLACK_SECONDS, elapsed
+            alive = _still_alive(everything)
+            assert alive == [], f"still running after the timeout: {alive} of {pids}"
+        finally:
+            _kill(everything)
+
+
+class TestTheProcessTable:
+    """What the blocked-sidecar sweep reads: every process as (pid, ppid, pgid)."""
+
+    def test_it_holds_this_process(self) -> None:
+        table = pptx_from_html_huashu._process_table()
+        assert (os.getpid(), os.getppid(), os.getpgrp()) in table
+
+    def test_it_reads_proc_whatever_a_command_name_holds(self, tmp_path: Path) -> None:
+        """Linux: /proc/<pid>/stat, whose command name can hold spaces and parentheses."""
+        for pid, stat in {
+            "self": "7 (python) S 1 7 7 0",
+            "7": "7 (python) S 1 7 7 0",
+            "42": "42 (Chrome (helper) x) S 7 42 42 0",
+            "43": "43 (node) R 7 7 7 0",
+        }.items():
+            (tmp_path / pid).mkdir()
+            (tmp_path / pid / "stat").write_text(stat, encoding="utf-8")
+        (tmp_path / "meminfo").write_text("not a process", encoding="utf-8")
+
+        table = pptx_from_html_huashu._process_table(tmp_path)
+
+        assert sorted(table) == [(7, 1, 7), (42, 7, 42), (43, 7, 7)]
+
+
+def _open_descriptors() -> int:
+    """How many file descriptors this process holds open."""
+    return len(os.listdir("/dev/fd"))
+
+
+@requires_node
+class TestASidecarWhosePipesOutliveIt:
+    def test_its_run_is_reported_as_timed_out_and_cleaned_up(self, tmp_path: Path) -> None:
+        """A timeout, node reaped and the pipes closed, though its group is a zombie alone."""
+        pids_path = tmp_path / "pids.json"
+        stub = tmp_path / "stub_exits_leaving_its_pipes.mjs"
+        stub.write_text(
+            STUB_EXITS_LEAVING_ITS_PIPES
+            % {"pids": json.dumps(str(pids_path)), "lifetime_s": STUB_LIFETIME_SECONDS},
+            encoding="utf-8",
+        )
+        descriptors = _open_descriptors()
+
+        started = time.monotonic()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                pptx_from_html_huashu.run_sidecar_process(
+                    ["node", str(stub)], input=b"", timeout=STUB_TIMEOUT_SECONDS
+                )
+            elapsed = time.monotonic() - started
+            pids = json.loads(pids_path.read_text(encoding="utf-8"))
+            assert not _alive(pids["sidecar"]), "node was left a zombie: never reaped"
+            assert _open_descriptors() == descriptors, "the sidecar's pipes were left open"
+            assert elapsed < STUB_TIMEOUT_SECONDS + RETURN_SLACK_SECONDS, elapsed
+        finally:
+            if pids_path.exists():
+                holder = json.loads(pids_path.read_text(encoding="utf-8"))["holder"]
+                try:
+                    os.killpg(holder, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestTheRealSidecarLeavesNoBrowser:
@@ -323,6 +471,46 @@ class TestTheRealSidecarLeavesNoBrowser:
             f"the timed-out export left its browser running: {survivors} "
             f"(browser groups {sorted(set(browser_watch.seen.values()))})"
         )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTheRealSidecarWithItsLoopBlocked:
+    def test_its_browser_is_swept(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        browser_watch: _BrowserWatch,
+    ) -> None:
+        """emit_deck.mjs blocks once its browser has loaded the slide: the browser goes too."""
+        preload = tmp_path / "blocking_launch.mjs"
+        preload.write_text(
+            BLOCKING_LAUNCH_PRELOAD
+            % {"sidecar": json.dumps(str(pptx_from_html_huashu.SIDECAR_DIR) + "/")},
+            encoding="utf-8",
+        )
+        sidecar_env = pptx_from_html_huashu.sidecar_subprocess_env
+
+        def env_with_preload() -> dict[str, str]:
+            env = sidecar_env()
+            env["NODE_OPTIONS"] = f"--import={preload.as_uri()}"
+            return env
+
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setattr(pptx_from_html_huashu, "sidecar_subprocess_env", env_with_preload)
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HUNG_SLIDE_TIMEOUT_SECONDS
+        )
+
+        with pytest.raises(HuashuExportError, match="timed out"):
+            pptx_from_html_huashu.build_pptx_huashu(
+                "blocked deck", [{"html": "<div class='slide'><p>x</p></div>"}]
+            )
+        browser_watch.stop()
+
+        assert browser_watch.seen, "fixture drift: the export launched no browser"
+        survivors = browser_watch.survivors()
+        assert survivors == [], f"the blocked sidecar left its browser running: {survivors}"
 
 
 @requires_node

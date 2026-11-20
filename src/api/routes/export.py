@@ -1,5 +1,6 @@
 """Export endpoints for PDF and PPTX generation."""
 
+import asyncio
 import logging
 import re
 import tempfile
@@ -710,7 +711,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     """
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
-    import asyncio
     from src.api.services.export_job_queue import (
         enqueue_export_job,
         generate_job_id,
@@ -1155,7 +1155,9 @@ async def export_pptx_huashu_install_chromium() -> dict:
         logger.warning("huashu install-chromium: playwright cli not found at %s", cli)
         return {"ok": False, "error": "playwright cli not found"}
     try:
-        result = run_sidecar_process(
+        # In a worker thread, as the exports run theirs: the event loop stays free.
+        result = await asyncio.to_thread(
+            run_sidecar_process,
             ["node", str(cli), "install", "chromium"],
             input=b"",
             timeout=HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS,
@@ -1206,7 +1208,9 @@ async def export_pptx_huashu_probe_launch() -> dict:
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
     try:
-        result = run_sidecar_process(
+        # In a worker thread, as the exports run theirs: the event loop stays free.
+        result = await asyncio.to_thread(
+            run_sidecar_process,
             ["node", str(probe_js)],
             input=b"",
             timeout=HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS,
@@ -1286,8 +1290,10 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         # Mirrors the Google Slides /from-huashu route's behaviour.
         # Per-slide failure metadata still comes back in `failures` and
         # rides on the X-Huashu-Failures response header for the frontend.
-        pptx_bytes, failures = build_pptx_huashu(
-            title, slides_with_html, bypass_validation=True
+        # In a worker thread: the sidecar runs for as long as the deck takes,
+        # and on the event loop the server would answer nothing else meanwhile.
+        pptx_bytes, failures = await asyncio.to_thread(
+            build_pptx_huashu, title, slides_with_html, bypass_validation=True
         )
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")
