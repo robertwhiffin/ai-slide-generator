@@ -7,7 +7,6 @@ Credentials come from the global ``GoogleGlobalCredentials`` table;
 user tokens are stored per-user in the ``google_oauth_tokens`` table.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -510,8 +509,43 @@ class GoogleSlidesExportResponse(BaseModel):
     failures: list[dict] = []
 
 
+def _upload_session_deck(
+    auth: GoogleSlidesAuth, session_id: str, pptx_bytes: bytes, title: str, *, route: str
+) -> tuple[str, str, bool]:
+    """Upload ``pptx_bytes`` to Drive as the session's Google Slides deck, and record it.
+
+    A re-export replaces the presentation the session already has. Returns
+    ``(presentation_id, url, replaced)``; a Drive failure is a 502 "Drive
+    upload failed", logged with ``route``. Blocking (Drive's HTTP calls), so it
+    runs in the threadpool with the plain ``def`` routes that call it.
+    """
+    from src.api.services.session_manager import get_session_manager
+
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(session_id)
+    existing_id = existing_info["presentation_id"] if existing_info else None
+
+    try:
+        if existing_id:
+            presentation_id, url = replace_presentation(auth, existing_id, pptx_bytes, title)
+        else:
+            presentation_id, url = upload_pptx_as_slides(auth, pptx_bytes, title)
+    except Exception as exc:
+        logger.error("Drive upload failed (%s)", route, exc_info=True)
+        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
+
+    session_manager.set_google_slides_info(
+        session_id=session_id,
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+    return presentation_id, url, bool(existing_id)
+
+
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the
+# PPTX build, the Drive upload) holds no event loop.
 @router.post("/from-records", response_model=GoogleSlidesExportResponse)
-async def export_google_slides_from_records(
+def export_google_slides_from_records(
     request: GoogleSlidesFromRecordsRequest,
     db: Session = Depends(get_db),
 ):
@@ -547,28 +581,8 @@ async def export_google_slides_from_records(
         logger.error("PPTX build failed for Google Slides export", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PPTX build failed: {exc}") from exc
 
-    from src.api.services.session_manager import get_session_manager
-    session_manager = get_session_manager()
-    existing_info = session_manager.get_google_slides_info(request.session_id)
-    existing_id = existing_info["presentation_id"] if existing_info else None
-
-    try:
-        if existing_id:
-            presentation_id, url = replace_presentation(
-                auth, existing_id, pptx_bytes, request.title,
-            )
-        else:
-            presentation_id, url = upload_pptx_as_slides(
-                auth, pptx_bytes, request.title,
-            )
-    except Exception as exc:
-        logger.error("Drive upload failed", exc_info=True)
-        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
-
-    session_manager.set_google_slides_info(
-        session_id=request.session_id,
-        presentation_id=presentation_id,
-        presentation_url=url,
+    presentation_id, url, replaced = _upload_session_deck(
+        auth, request.session_id, pptx_bytes, request.title, route="records path"
     )
 
     logger.info(
@@ -576,7 +590,7 @@ async def export_google_slides_from_records(
         extra={
             "session_id": request.session_id,
             "presentation_id": presentation_id,
-            "replaced": bool(existing_id),
+            "replaced": replaced,
         },
     )
 
@@ -600,8 +614,10 @@ class GoogleSlidesFromHuashuRequest(BaseModel):
     session_id: str
 
 
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the
+# database and token reads, the sidecar, the Drive upload) holds no event loop.
 @router.post("/from-huashu", response_model=GoogleSlidesExportResponse)
-async def export_google_slides_from_huashu(
+def export_google_slides_from_huashu(
     request: GoogleSlidesFromHuashuRequest,
     db: Session = Depends(get_db),
 ):
@@ -671,10 +687,7 @@ async def export_google_slides_from_huashu(
     ]
 
     try:
-        # In a worker thread: the sidecar runs for as long as the deck takes,
-        # and on the event loop the server would answer nothing else meanwhile.
-        pptx_bytes, failures = await asyncio.to_thread(
-            build_pptx_huashu,
+        pptx_bytes, failures = build_pptx_huashu(
             title=title,
             slides_html=slides_html,
             bypass_validation=True,
@@ -700,31 +713,8 @@ async def export_google_slides_from_huashu(
             detail=f"Huashu produced no output. failures={failures}",
         )
 
-    from src.api.services.session_manager import get_session_manager
-    session_manager = get_session_manager()
-    existing_info = session_manager.get_google_slides_info(request.session_id)
-    existing_id = existing_info["presentation_id"] if existing_info else None
-
-    try:
-        if existing_id:
-            presentation_id, url = replace_presentation(
-                auth, existing_id, pptx_bytes, title,
-            )
-        else:
-            presentation_id, url = upload_pptx_as_slides(
-                auth, pptx_bytes, title,
-            )
-    except Exception as exc:
-        logger.error("Drive upload failed (huashu path)", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail="Drive upload failed",
-        ) from exc
-
-    session_manager.set_google_slides_info(
-        session_id=request.session_id,
-        presentation_id=presentation_id,
-        presentation_url=url,
+    presentation_id, url, replaced = _upload_session_deck(
+        auth, request.session_id, pptx_bytes, title, route="huashu path"
     )
 
     logger.info(
@@ -732,7 +722,7 @@ async def export_google_slides_from_huashu(
         extra={
             "session_id": request.session_id,
             "presentation_id": presentation_id,
-            "replaced": bool(existing_id),
+            "replaced": replaced,
             "huashu_failures": len(failures),
         },
     )

@@ -1236,8 +1236,10 @@ async def export_pptx_huashu_probe_launch() -> dict:
         return {"ok": False, "error": "probe failed"}
 
 
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the deck
+# read, the sidecar) holds no event loop.
 @router.post("/pptx/editable/huashu/from-html")
-async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
+def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     """Export the deck's slides to an editable .pptx through the snapshot engine.
 
     Returns 503 if the gate (``pptx_from_html_huashu.is_available``) doesn't
@@ -1290,10 +1292,8 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         # Mirrors the Google Slides /from-huashu route's behaviour.
         # Per-slide failure metadata still comes back in `failures` and
         # rides on the X-Huashu-Failures response header for the frontend.
-        # In a worker thread: the sidecar runs for as long as the deck takes,
-        # and on the event loop the server would answer nothing else meanwhile.
-        pptx_bytes, failures = await asyncio.to_thread(
-            build_pptx_huashu, title, slides_with_html, bypass_validation=True
+        pptx_bytes, failures = build_pptx_huashu(
+            title, slides_with_html, bypass_validation=True
         )
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")

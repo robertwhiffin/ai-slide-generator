@@ -27,6 +27,12 @@ children, its browsers, itself, then SIGKILLs node's group as a backstop. The
 admin routes that run probe_launch.mjs and the Playwright installer use the
 same helper.
 
+Concurrency. The export routes run in FastAPI's threadpool, so a worker could
+start a sidecar per request; each node and Chromium tree takes about 790 MB.
+``build_pptx_huashu`` runs at most ``TELLR_SIDECAR_CONCURRENCY`` of them at
+once per worker process (default 1). An export past the cap waits for a slot,
+logged once, and its timeout starts only once it has one.
+
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
@@ -62,6 +68,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -87,6 +95,35 @@ SIDECAR_DIR = _resolve_sidecar_dir()
 SIDECAR_SCRIPT = SIDECAR_DIR / "emit_deck.mjs"
 SIDECAR_SYS_LIBS_DIR = SIDECAR_DIR / "sys-libs"
 SIDECAR_TIMEOUT_SECONDS = 180  # huashu opens chromium per-slide; slower than pptx-emit
+
+# How many sidecars one worker process runs at once. Each is a node and
+# Chromium tree of about 790 MB (measured), and the export routes run in the
+# threadpool, so without a cap a burst of exports would start them all.
+SIDECAR_CONCURRENCY_ENV = "TELLR_SIDECAR_CONCURRENCY"
+DEFAULT_SIDECAR_CONCURRENCY = 1
+
+
+def sidecar_concurrency(environ: Mapping[str, str] = os.environ) -> int:
+    """The cap ``TELLR_SIDECAR_CONCURRENCY`` sets: a whole number from 1, else the default, 1."""
+    value = environ.get(SIDECAR_CONCURRENCY_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_CONCURRENCY
+    try:
+        cap = int(value)
+    except ValueError:
+        cap = 0
+    if cap < 1:
+        logger.warning(
+            "%s=%r is not a whole number from 1; running %d sidecar(s) at once",
+            SIDECAR_CONCURRENCY_ENV,
+            value,
+            DEFAULT_SIDECAR_CONCURRENCY,
+        )
+        return DEFAULT_SIDECAR_CONCURRENCY
+    return cap
+
+
+_sidecar_slots = threading.BoundedSemaphore(sidecar_concurrency())
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
@@ -177,11 +214,11 @@ def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
                 continue
             try:
                 stat = (proc / entry / "stat").read_text()
-            except OSError:
-                continue  # it exited, or is not ours to read
-            # "pid (comm) state ppid pgrp …": comm can hold spaces and parentheses.
-            fields = stat[stat.rindex(")") + 2 :].split()
-            table.append((int(entry), int(fields[1]), int(fields[2])))
+                # "pid (comm) state ppid pgrp …": comm can hold spaces and parentheses.
+                fields = stat[stat.rindex(")") + 2 :].split()
+                table.append((int(entry), int(fields[1]), int(fields[2])))
+            except (OSError, ValueError, IndexError):
+                continue  # it exited, is not ours to read, or its line does not parse
         return table
     try:
         listing = subprocess.run(
@@ -427,12 +464,24 @@ def build_pptx_huashu(
             "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
             " ".join(cmd), len(slides_html), len(payload_bytes),
         )
+        # One of this worker's sidecar slots (sidecar_concurrency), waited for
+        # before the run, so the wait does not count against its timeout.
+        slots = _sidecar_slots
+        if not slots.acquire(blocking=False):
+            logger.info(
+                "[huashu] export waits for a sidecar slot (%s per worker): %d slide(s)",
+                SIDECAR_CONCURRENCY_ENV,
+                len(slides_html),
+            )
+            slots.acquire()
         try:
             result = run_sidecar_process(cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as e:
             raise HuashuExportError(
                 f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
             ) from e
+        finally:
+            slots.release()
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees

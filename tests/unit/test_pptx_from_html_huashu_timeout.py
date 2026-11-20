@@ -394,6 +394,19 @@ class TestTheProcessTable:
         table = pptx_from_html_huashu._process_table()
         assert (os.getpid(), os.getppid(), os.getpgrp()) in table
 
+    def test_a_malformed_entry_is_skipped(self, tmp_path: Path) -> None:
+        """A stat line that does not parse (no closing parenthesis, no numbers) is no process."""
+        for pid, stat in {
+            "self": "7 (python) S 1 7 7 0",
+            "7": "7 (python) S 1 7 7 0",
+            "8": "8 (truncated",
+            "9": "9 (node) S not-a-number 9 9 0",
+        }.items():
+            (tmp_path / pid).mkdir()
+            (tmp_path / pid / "stat").write_text(stat, encoding="utf-8")
+
+        assert pptx_from_html_huashu._process_table(tmp_path) == [(7, 1, 7)]
+
     def test_it_reads_proc_whatever_a_command_name_holds(self, tmp_path: Path) -> None:
         """Linux: /proc/<pid>/stat, whose command name can hold spaces and parentheses."""
         for pid, stat in {
@@ -664,12 +677,110 @@ class TestTheUnavailableMessageSaysWhatItNeeds:
         monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: False)
         monkeypatch.setattr(export_routes, "_check_deck_permission_for_session", lambda *_: None)
         with pytest.raises(HTTPException) as raised:
-            asyncio.run(
-                export_routes.export_pptx_huashu_from_html(
-                    export_routes.ExportPPTXEditableRequest(session_id="session")
-                )
+            export_routes.export_pptx_huashu_from_html(
+                export_routes.ExportPPTXEditableRequest(session_id="session")
             )
         assert raised.value.status_code == 503
         detail = str(raised.value.detail)
         assert "local dev only" not in detail, detail
         assert "HUASHU_PIPELINE_ENABLED=1" in detail and "ENVIRONMENT=development" in detail
+
+
+# The export's sidecar, its run recorded: it appends a line when it starts and
+# when it ends, sleeps between, and writes the .pptx and the result line.
+STUB_RECORDED_RUN = """
+import fs from 'node:fs';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const record = (event) => fs.appendFileSync(
+  %(log)s, JSON.stringify({ pid: process.pid, event, at: Date.now() / 1000 }) + '\\n'
+);
+record('start');
+await new Promise((resolve) => setTimeout(resolve, %(ms)d));
+fs.writeFileSync(process.argv[2], 'PK');
+record('end');
+console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded: 1, failed: [] }));
+"""
+# Each recorded run lasts this long; the sidecar timeout is shorter than two of them.
+RECORDED_RUN_SECONDS = 2
+CAPPED_TIMEOUT_SECONDS = 3
+
+
+@requires_node
+class TestTheSidecarsAreCappedPerWorker:
+    """Each node and Chromium tree takes about 790 MB: a worker runs at most its cap at once.
+
+    The cap is ``TELLR_SIDECAR_CONCURRENCY`` (default 1 per worker process).
+    An export past it waits for a slot, says so once on its log, and starts its
+    timeout only once it has the slot.
+    """
+
+    def _two_exports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: int
+    ) -> list[tuple[float, float]]:
+        log = tmp_path / "runs.jsonl"
+        stub = tmp_path / "stub_recorded_run.mjs"
+        stub.write_text(
+            STUB_RECORDED_RUN
+            % {"log": json.dumps(str(log)), "ms": RECORDED_RUN_SECONDS * 1000},
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", stub)
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", CAPPED_TIMEOUT_SECONDS
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap), raising=False
+        )
+        outcomes: list[object] = []
+
+        def export() -> None:
+            try:
+                outcomes.append(
+                    pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
+                )
+            except Exception as error:  # noqa: BLE001 (recorded, then asserted on)
+                outcomes.append(error)
+
+        threads = [threading.Thread(target=export) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=4 * RECORDED_RUN_SECONDS + RETURN_SLACK_SECONDS)
+        assert not any(thread.is_alive() for thread in threads), "an export never returned"
+        assert outcomes == [(b"PK", []), (b"PK", [])], outcomes
+        events: dict[int, dict[str, float]] = {}
+        for line in log.read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            events.setdefault(entry["pid"], {})[entry["event"]] = entry["at"]
+        return sorted((run["start"], run["end"]) for run in events.values())
+
+    def test_with_a_cap_of_one_the_sidecars_run_one_after_the_other(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The second waits for the first, and its wait does not count against its timeout."""
+        with caplog.at_level("INFO", logger=pptx_from_html_huashu.__name__):
+            (first, second) = self._two_exports(tmp_path, monkeypatch, cap=1)
+        assert second[0] >= first[1], f"the sidecars overlapped: {first} and {second}"
+        waits = [
+            record for record in caplog.records if "waits for a sidecar slot" in record.message
+        ]
+        assert len(waits) == 1 and waits[0].message.startswith("[huashu]"), [
+            record.message for record in caplog.records
+        ]
+
+    def test_with_a_cap_of_two_they_overlap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO", logger=pptx_from_html_huashu.__name__):
+            (first, second) = self._two_exports(tmp_path, monkeypatch, cap=2)
+        assert second[0] < first[1], f"the sidecars ran one after the other: {first}, {second}"
+        assert not [record for record in caplog.records if "sidecar slot" in record.message]
+
+    @pytest.mark.parametrize(
+        ("value", "cap"), [(None, 1), ("1", 1), ("3", 3), ("0", 1), ("-2", 1), ("two", 1)]
+    )
+    def test_the_cap_is_read_from_the_environment(self, value: str | None, cap: int) -> None:
+        environ = {} if value is None else {"TELLR_SIDECAR_CONCURRENCY": value}
+        assert pptx_from_html_huashu.sidecar_concurrency(environ) == cap
