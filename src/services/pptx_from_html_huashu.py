@@ -36,11 +36,16 @@ holds one of the threadpool's threads (40 per worker, shared with every sync
 route and every authenticated request's identity lookup), so the waiting is
 bounded: at most ``TELLR_SIDECAR_QUEUE`` exports (default 15) wait past the
 cap, and an export past them is refused at once; one that waits
-``TELLR_SIDECAR_WAIT_SECONDS`` (default 100) is refused then, and one that gets
+``TELLR_SIDECAR_WAIT_SECONDS`` (default 60) is refused then, and one that gets
 its slot logs how long it waited. Either refusal is ``HuashuBusyError``, which
 the export routes answer 429 with a message to retry. With the defaults, an
-export is answered within the 300 s the Databricks Apps proxy allows a
-request: 100 s of waiting plus the 180 s sidecar timeout.
+export is answered within the 300 s the Databricks Apps proxy allows a request
+(measured): 60 s of waiting plus the 180 s sidecar timeout, and on the Google
+Slides route its Drive upload, each request of which fails after
+``DRIVE_HTTP_TIMEOUT_SECONDS`` (drive_uploader.py) of silence. Bounds that
+would defeat this, a wait whose worst case reaches the proxy's 300 s or as
+many places as the worker has threads, are warned about once, when this
+module loads (``sidecar_bounds_warnings``).
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -139,12 +144,23 @@ def sidecar_concurrency(environ: Mapping[str, str] = os.environ) -> int:
 # long. Each waiting export holds a thread of the worker's threadpool (40 by
 # default, shared with every sync route and with every authenticated request's
 # identity lookup), so both are bounded: with the defaults, exports hold at most
-# 16 of the 40. The default wait plus the sidecar's own timeout, 100 + 180 s,
-# stays under the 300 s the Databricks Apps proxy allows a request.
+# 16 of the 40. The default wait, the sidecar's own timeout and a Drive upload,
+# 60 + 180 + about 20 s, stay under the 300 s the Databricks Apps proxy allows a
+# request, with some 40 s to spare.
 SIDECAR_QUEUE_ENV = "TELLR_SIDECAR_QUEUE"
 DEFAULT_SIDECAR_QUEUE = 15
 SIDECAR_WAIT_ENV = "TELLR_SIDECAR_WAIT_SECONDS"
-DEFAULT_SIDECAR_WAIT_SECONDS = 100
+DEFAULT_SIDECAR_WAIT_SECONDS = 60
+
+# What the bounds are checked against (sidecar_bounds_warnings). The Databricks
+# Apps proxy ends a request at about 300 s (measured: a request answered at
+# 185 s returned, one at 310 s got 502 at 300 s). The Google Slides route, the
+# longest, answers after its slot wait, its sidecar run and its Drive upload,
+# which DRIVE_UPLOAD_MARGIN_SECONDS stands for (4 to 20 s measured). A worker
+# runs every sync route in Starlette's threadpool, THREADPOOL_THREADS threads.
+APPS_PROXY_REQUEST_SECONDS = 300
+DRIVE_UPLOAD_MARGIN_SECONDS = 20
+THREADPOOL_THREADS = 40
 
 
 def sidecar_queue(environ: Mapping[str, str] = os.environ) -> int:
@@ -173,7 +189,9 @@ def sidecar_queue(environ: Mapping[str, str] = os.environ) -> int:
 def sidecar_wait_seconds(environ: Mapping[str, str] = os.environ) -> float:
     """How long ``TELLR_SIDECAR_WAIT_SECONDS`` lets an export wait for a sidecar slot.
 
-    A number of seconds above 0, else the default, 100.
+    A number of seconds above 0 and under ``threading.TIMEOUT_MAX``, the longest
+    wait a lock can be told (a longer one raises OverflowError, not
+    HuashuBusyError), else the default, 60.
     """
     value = environ.get(SIDECAR_WAIT_ENV)
     if value is None:
@@ -182,24 +200,57 @@ def sidecar_wait_seconds(environ: Mapping[str, str] = os.environ) -> float:
         seconds = float(value)
     except ValueError:
         seconds = 0.0
-    if not (math.isfinite(seconds) and seconds > 0):
+    if not (math.isfinite(seconds) and 0 < seconds < threading.TIMEOUT_MAX):
         logger.warning(
-            "%s=%r is not a number of seconds above 0; an export waits up to %ds for a sidecar",
+            "%s=%r is not a number of seconds above 0 and under %g; "
+            "an export waits up to %ds for a sidecar",
             SIDECAR_WAIT_ENV,
             value,
+            threading.TIMEOUT_MAX,
             DEFAULT_SIDECAR_WAIT_SECONDS,
         )
         return DEFAULT_SIDECAR_WAIT_SECONDS
     return seconds
 
 
+def sidecar_bounds_warnings(
+    cap: int, queue: int, wait: float, timeout: float = SIDECAR_TIMEOUT_SECONDS
+) -> list[str]:
+    """What these sidecar bounds defeat in the app they run in, one message each: [] for nothing.
+
+    ``cap`` sidecars run at once, ``queue`` exports more wait for one, each up
+    to ``wait`` seconds, and a run is bounded by ``timeout``.
+    """
+    warnings = []
+    worst = wait + timeout + DRIVE_UPLOAD_MARGIN_SECONDS
+    if worst >= APPS_PROXY_REQUEST_SECONDS:
+        warnings.append(
+            f"{SIDECAR_WAIT_ENV}={wait:g}: a queued Google Slides export can take {wait:g} s "
+            f"of waiting, the {timeout:g} s sidecar timeout and about "
+            f"{DRIVE_UPLOAD_MARGIN_SECONDS} s of Drive upload, {worst:g} s, which reaches the "
+            f"{APPS_PROXY_REQUEST_SECONDS} s the Databricks Apps proxy allows a request: the "
+            "proxy would answer it 502 before the app does"
+        )
+    if cap + queue >= THREADPOOL_THREADS:
+        warnings.append(
+            f"{SIDECAR_CONCURRENCY_ENV}={cap} and {SIDECAR_QUEUE_ENV}={queue}: {cap + queue} "
+            f"exports at once can hold all {THREADPOOL_THREADS} threads of the worker's "
+            "threadpool, which every sync route and every authenticated request's identity "
+            "lookup need too"
+        )
+    return warnings
+
+
 _sidecar_cap = sidecar_concurrency()
+_sidecar_queue = sidecar_queue()
 _sidecar_slots = threading.BoundedSemaphore(_sidecar_cap)
 # A place for each export this worker lets in: one per sidecar slot, and one per
 # export queued for a slot. Taken without waiting, so with every place taken an
 # export is refused at once (HuashuBusyError).
-_sidecar_admissions = threading.BoundedSemaphore(_sidecar_cap + sidecar_queue())
+_sidecar_admissions = threading.BoundedSemaphore(_sidecar_cap + _sidecar_queue)
 SIDECAR_WAIT_SECONDS = sidecar_wait_seconds()
+for _warning in sidecar_bounds_warnings(_sidecar_cap, _sidecar_queue, SIDECAR_WAIT_SECONDS):
+    logger.warning("%s", _warning)
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike

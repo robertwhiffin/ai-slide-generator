@@ -28,6 +28,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -40,6 +41,10 @@ from src.api.routes import export as export_routes
 from src.services import pptx_from_html_huashu
 from src.services.pptx_from_html_huashu import HuashuExportError
 from tests.fixtures.export_snapshot_support import requires_huashu_sidecar, requires_node
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# A fresh interpreter imports the wrapper within this.
+MODULE_LOAD_TIMEOUT_SECONDS = 60
 
 # Short enough to keep the stub tests quick, long enough for node to start the
 # stub and write its process ids first.
@@ -868,8 +873,9 @@ class TestTheWaitForASidecarIsBounded:
     A worker has 40 threads (Starlette's default), shared with every sync route
     and with the identity lookup of every authenticated request. So at most
     ``TELLR_SIDECAR_QUEUE`` exports (default 15) wait past the cap, each for at
-    most ``TELLR_SIDECAR_WAIT_SECONDS`` (default 100, which with the 180 s sidecar
-    timeout stays under the Apps proxy's 300 s per request). An export past either
+    most ``TELLR_SIDECAR_WAIT_SECONDS`` (default 60, which with the 180 s sidecar
+    timeout and a Drive upload stays under the Apps proxy's 300 s per request, by
+    some 40 s). An export past either
     bound raises ``HuashuBusyError``, which the export routes answer 429. It is not
     a ``HuashuExportError``: the routes answer that 500 or 503, and the frontend
     answers a 503 by falling back to the records pipeline.
@@ -920,6 +926,43 @@ class TestTheWaitForASidecarIsBounded:
         ), f"refused after {refused.seconds:.1f}s, the bound {WAIT_BOUND_SECONDS}s"
         ((_, first_ended),) = _runs(log)
         assert refused.returned_at < first_ended, "refused only once the slot was free again"
+
+    @requires_node
+    def test_an_export_keeps_its_place_while_its_sidecar_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """While the first export's sidecar runs, of two exports more one waits, one is refused.
+
+        Cap 1 and queue 1. The two arrive only after the first export's sidecar
+        has recorded its start, so the first holds its slot and, all the while
+        it runs, its place: a place given back once the slot is taken would let
+        both in.
+        """
+        log = _recorded_sidecar(tmp_path, monkeypatch, RECORDED_RUN_SECONDS)
+        _bound(monkeypatch, cap=1, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+        first: list[_Export] = []
+        running = threading.Thread(target=lambda: first.extend(_exports_at_once(1)))
+        running.start()
+        try:
+            deadline = time.monotonic() + RECORDED_RUN_SECONDS
+            while not (log.exists() and log.read_text(encoding="utf-8").strip()):
+                assert time.monotonic() < deadline, "the first export's sidecar never started"
+                time.sleep(0.02)
+
+            later = _exports_at_once(2)
+        finally:
+            running.join(timeout=EXPORTS_RETURN_WITHIN_SECONDS)
+
+        assert not running.is_alive() and [export.outcome for export in first] == [(b"PK", [])]
+        refused = [export for export in later if isinstance(export.outcome, BaseException)]
+        built = [export for export in later if not isinstance(export.outcome, BaseException)]
+        assert len(refused) == 1 and len(built) == 1, later
+        assert type(refused[0].outcome) is pptx_from_html_huashu.HuashuBusyError, refused
+        assert refused[0].seconds < REFUSED_WITHIN_SECONDS, (
+            f"the export past the queue was refused after {refused[0].seconds:.1f}s"
+        )
+        assert built[0].outcome == (b"PK", [])
+        assert len(_runs(log)) == 2, "the refused export ran a sidecar"
 
     @pytest.mark.parametrize(
         ("run", "raised"),
@@ -995,15 +1038,19 @@ class TestTheWaitForASidecarIsBounded:
     @pytest.mark.parametrize(
         ("value", "seconds"),
         [
-            (None, 100),
+            (None, 60),
             ("100", 100),
             ("1", 1),
             ("2.5", 2.5),
-            ("0", 100),
-            ("-5", 100),
-            ("inf", 100),
-            ("nan", 100),
-            ("soon", 100),
+            ("0", 60),
+            ("-5", 60),
+            ("inf", 60),
+            ("nan", 60),
+            ("soon", 60),
+            # A lock's wait cannot be told this long (threading.TIMEOUT_MAX): the
+            # wait would raise OverflowError, not HuashuBusyError.
+            ("1e10", 60),
+            (repr(threading.TIMEOUT_MAX), 60),
         ],
     )
     def test_the_wait_is_read_from_the_environment(
@@ -1011,3 +1058,83 @@ class TestTheWaitForASidecarIsBounded:
     ) -> None:
         environ = {} if value is None else {"TELLR_SIDECAR_WAIT_SECONDS": value}
         assert pptx_from_html_huashu.sidecar_wait_seconds(environ) == seconds
+
+    def test_a_wait_a_lock_cannot_be_told_is_refused_and_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A wait at threading.TIMEOUT_MAX or more falls back to the default, and says so."""
+        with caplog.at_level("WARNING", logger=pptx_from_html_huashu.__name__):
+            seconds = pptx_from_html_huashu.sidecar_wait_seconds(
+                {"TELLR_SIDECAR_WAIT_SECONDS": "1e10"}
+            )
+        assert seconds == pptx_from_html_huashu.DEFAULT_SIDECAR_WAIT_SECONDS
+        messages = [record.message for record in caplog.records]
+        assert len(messages) == 1 and "TELLR_SIDECAR_WAIT_SECONDS='1e10'" in messages[0], messages
+
+
+class TestTheBoundsAreCheckedAgainstTheApp:
+    """Bounds that defeat what they are for are warned about once, when the module loads.
+
+    * a wait whose worst case, with the sidecar timeout and a Drive upload,
+      reaches the 300 s the Databricks Apps proxy allows a request (measured):
+      the proxy would answer the Google Slides export 502 before the app does;
+    * as many export places as the worker's 40 threads (Starlette's
+      threadpool): waiting exports alone could hold every one.
+    """
+
+    def test_the_default_bounds_are_within_both(self) -> None:
+        assert (
+            pptx_from_html_huashu.sidecar_bounds_warnings(
+                pptx_from_html_huashu.sidecar_concurrency({}),
+                pptx_from_html_huashu.sidecar_queue({}),
+                pptx_from_html_huashu.sidecar_wait_seconds({}),
+            )
+            == []
+        )
+
+    @pytest.mark.parametrize(("wait", "warned"), [(99.5, False), (100, True), (150, True)])
+    def test_a_wait_that_reaches_the_proxy_limit_is_warned_about(
+        self, wait: float, warned: bool
+    ) -> None:
+        """100 s of waiting, the 180 s sidecar timeout and 20 s of Drive upload make 300 s."""
+        warnings = pptx_from_html_huashu.sidecar_bounds_warnings(1, 15, wait)
+        assert bool(warnings) is warned, warnings
+        if warned:
+            (warning,) = warnings
+            assert "TELLR_SIDECAR_WAIT_SECONDS" in warning and "300 s" in warning, warning
+
+    @pytest.mark.parametrize(
+        ("cap", "queue", "warned"), [(1, 38, False), (1, 39, True), (4, 36, True), (2, 50, True)]
+    )
+    def test_as_many_places_as_threads_is_warned_about(
+        self, cap: int, queue: int, warned: bool
+    ) -> None:
+        warnings = pptx_from_html_huashu.sidecar_bounds_warnings(cap, queue, 60)
+        assert bool(warnings) is warned, warnings
+        if warned:
+            (warning,) = warnings
+            assert "TELLR_SIDECAR_QUEUE" in warning and "40 threads" in warning, warning
+
+    def test_the_module_warns_once_when_it_loads(self) -> None:
+        """Both bounds out of reach in a fresh interpreter: each warning once, the bounds kept."""
+        script = (
+            "import logging, sys\n"
+            "logging.basicConfig(level=logging.WARNING, stream=sys.stderr)\n"
+            "from src.services import pptx_from_html_huashu as m\n"
+            "print(m.SIDECAR_WAIT_SECONDS, m._sidecar_cap, m._sidecar_queue)\n"
+        )
+        env = {**os.environ, "TELLR_SIDECAR_WAIT_SECONDS": "150", "TELLR_SIDECAR_QUEUE": "45"}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=MODULE_LOAD_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["150.0", "1", "45"], result.stdout
+        lines = result.stderr.splitlines()
+        budget = [line for line in lines if "SIDECAR_WAIT_SECONDS" in line and "300 s" in line]
+        threads = [line for line in lines if "SIDECAR_QUEUE" in line and "40 threads" in line]
+        assert len(budget) == 1 and len(threads) == 1, result.stderr

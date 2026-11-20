@@ -20,8 +20,10 @@ from typing import Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.http import build_http
 
 logger = logging.getLogger(__name__)
 
@@ -281,10 +283,21 @@ class GoogleSlidesAuth:
         creds = self.get_credentials()
         return build("slides", "v1", credentials=creds)
 
-    def build_drive_service(self):
-        """Return an authenticated Google Drive API service."""
+    def build_drive_service(self, *, timeout: float | None = None):
+        """Return an authenticated Google Drive API service.
+
+        ``timeout``, in seconds, bounds each socket read and write of its
+        requests: a request whose server stops answering raises
+        ``TimeoutError`` instead of waiting on. None keeps googleapiclient's
+        own default (``socket.getdefaulttimeout()``, else 60 s), which any code
+        in the process can change.
+        """
         creds = self.get_credentials()
-        return build("drive", "v3", credentials=creds)
+        if timeout is None:
+            return build("drive", "v3", credentials=creds)
+        http = build_http()
+        http.timeout = timeout
+        return build("drive", "v3", http=AuthorizedHttp(creds, http=http))
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -34,6 +34,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -46,7 +47,8 @@ import httpx
 import pytest
 
 from src.api.routes import export as export_routes
-from src.services import pptx_from_html_huashu
+from src.services import drive_uploader, pptx_from_html_huashu
+from src.services.google_slides_auth import GoogleSlidesAuth
 from tests.fixtures.export_snapshot_support import requires_node
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -750,3 +752,124 @@ class TestAWorkerFullOfExportsStillAnswers:
             measured["answered"]
         )
         assert runs.read_text(encoding="utf-8").split() == ["start"] * cap, "past the cap"
+
+
+
+# A Drive request that has heard nothing for this long fails (the test's
+# DRIVE_HTTP_TIMEOUT_SECONDS), and an export must answer within this many of
+# them plus the slack: the sidecar stub, and the app around the upload.
+DRIVE_SILENCE_SECONDS = 1
+DRIVE_ANSWER_SLACK_SECONDS = 4
+# A token Credentials take as valid: it expires long after the test, so no refresh is tried.
+FAKE_GOOGLE_TOKEN = {
+    "token": "fake-access-token",
+    "expiry": "2099-01-01T00:00:00Z",
+    "refresh_token": "fake-refresh-token",
+    "client_id": "fake-client-id",
+    "client_secret": "fake-client-secret",
+    "token_uri": "https://oauth2.googleapis.com/token",
+}
+
+
+@pytest.fixture
+def silent_drive(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Google's API hosts replaced by a server that takes each connection and never answers.
+
+    Every lookup and connection the process makes for a ``*.googleapis.com`` host
+    goes to a local socket that accepts it and never writes, so the real Drive
+    client, from its http object to its TLS handshake, waits on a server that
+    never answers: the Drive that hangs. Nothing reaches the network.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(16)
+    silent = server.getsockname()
+    lookup = socket.getaddrinfo
+    connect = socket.socket.connect
+
+    def google(host: object) -> bool:
+        return isinstance(host, str) and host.endswith("googleapis.com")
+
+    def resolve(host, port, *args, **kwargs):
+        if google(host):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", silent)]
+        return lookup(host, port, *args, **kwargs)
+
+    def connect_silently(self: socket.socket, address: object) -> None:
+        if isinstance(address, tuple) and google(address[0]):
+            address = silent
+        return connect(self, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(socket.socket, "connect", connect_silently)
+    try:
+        yield
+    finally:
+        server.close()
+
+
+@requires_node
+@pytest.mark.usefixtures("admin_and_db", "silent_drive")
+class TestADriveThatNeverAnswers:
+    """A Drive request whose server never answers fails, and the export answers 502.
+
+    The real Drive client runs: ``upload_pptx_as_slides`` and
+    ``replace_presentation`` (drive_uploader.py) on the service
+    ``GoogleSlidesAuth.build_drive_service`` builds, with the timeout
+    ``DRIVE_HTTP_TIMEOUT_SECONDS`` on its http object. Each request waits on
+    its socket until the timeout ends it, and the route answers as for any Drive
+    failure, 502 "Drive upload failed", having recorded nothing. Without the
+    timeout a hung Drive request would hold the export, and its thread, for as
+    long as the socket's default lets it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_drive(
+        self, stub_sidecar: Path, google_route: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (stub_sidecar / "emit_deck.mjs").write_text(STUB_EMIT_DECK % {"ms": 0}, encoding="utf-8")
+        auth = GoogleSlidesAuth(credentials_json="{}", token_json=json.dumps(FAKE_GOOGLE_TOKEN))
+        assert auth.is_authorized(), "fixture drift: the fake token is not valid"
+        routes = google_route["routes"]
+        monkeypatch.setattr(f"{routes}._get_auth", lambda db: auth)
+        monkeypatch.setattr(f"{routes}.upload_pptx_as_slides", drive_uploader.upload_pptx_as_slides)
+        monkeypatch.setattr(f"{routes}.replace_presentation", drive_uploader.replace_presentation)
+        monkeypatch.setattr(drive_uploader, "DRIVE_HTTP_TIMEOUT_SECONDS", DRIVE_SILENCE_SECONDS)
+
+    @pytest.mark.parametrize(
+        ("existing", "requests"),
+        [(None, 1), ("existing-1", 2)],
+        ids=["upload", "replace"],
+    )
+    def test_the_export_is_answered_502_within_the_timeout(
+        self, existing: str | None, requests: int, google_route: dict
+    ) -> None:
+        """A first export uploads (one request); a re-export deletes, then uploads (two)."""
+        from fastapi.testclient import TestClient
+
+        google_route["sessions"].get_google_slides_info.return_value = (
+            None if existing is None else {"presentation_id": existing}
+        )
+        bound = requests * DRIVE_SILENCE_SECONDS + DRIVE_ANSWER_SLACK_SECONDS
+        answer: dict = {}
+
+        def export() -> None:
+            started = time.monotonic()
+            answer["response"] = TestClient(_app()).post(
+                "/api/export/google-slides/from-huashu", json={"session_id": "s1"}
+            )
+            answer["seconds"] = time.monotonic() - started
+
+        thread = threading.Thread(target=export, daemon=True)
+        thread.start()
+        thread.join(timeout=bound)
+
+        assert not thread.is_alive(), (
+            f"no answer within {bound}s: a Drive request that never answers holds the export"
+        )
+        response = answer["response"]
+        assert (response.status_code, response.json()) == (502, {"detail": "Drive upload failed"})
+        assert answer["seconds"] >= requests * DRIVE_SILENCE_SECONDS, (
+            f"answered after {answer['seconds']:.1f}s, before its Drive requests timed out"
+        )
+        google_route["sessions"].set_google_slides_info.assert_not_called()
