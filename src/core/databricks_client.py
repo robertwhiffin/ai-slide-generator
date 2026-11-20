@@ -7,9 +7,12 @@ This module provides two types of WorkspaceClient:
 
 The user client is set per-request via middleware and stored in a ContextVar.
 
-Both client types set product tracking headers for API call attribution:
-- System client: product="tellr-app-system", product_version from package
-- User client: product="tellr-app-{hashed_user_id}"
+Both client types name a product for API call attribution. The SDK sends it, with
+product_version (the installed release, ``src/core/attribution.py``), at the start of
+each request's User-Agent:
+- System client: product="tellr-app-system"
+- User client: product="tellr-app-<hash>", the first 12 hex of the SHA-256 of the
+  user's email local part ("tellr-app-unknown" when the user cannot be looked up)
 
 For Homebrew installations, supports OAuth browser authentication via config file.
 """

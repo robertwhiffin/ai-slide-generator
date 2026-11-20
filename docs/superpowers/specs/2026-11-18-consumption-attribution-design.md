@@ -73,11 +73,13 @@ clean environment, and a test install on a dev workspace.
 
 `_get_package_version()` returns the installed `databricks-tellr-app` wheel's version when
 the wheel is installed, and falls back to today's chain (`src._version`, `src.__version__`,
-`"unknown"`) otherwise. `gateway_clients._tellr_version()` becomes a call to it, so the two
-cannot drift again. The function moves to a new leaf module, `src/core/attribution.py`,
-with the product constants (`PRODUCT_NAME_SYSTEM`, `PRODUCT_NAME_USER_PREFIX`) and
-`_hash_username`; `databricks_client.py` re-exports the names it has today, so no caller or
-test import changes.
+`"unknown"`) otherwise. The lookup lives in a new leaf module, `src/core/attribution.py`, as
+`package_version()` (looked up once per process), with the product constants
+(`PRODUCT_NAME_SYSTEM`, `PRODUCT_NAME_USER_PREFIX`, `PRODUCT_NAME_UNKNOWN`) and
+`hash_username`. `_get_package_version()` and `gateway_clients._tellr_version()` are both
+calls to it, so the two cannot drift again. `databricks_client.py` imports the constants and
+keeps `_get_package_version` and `_hash_username` as thin wrappers, so every existing caller
+and test import keeps working.
 
 The product **names** do not change. `tellr-app-system` and `tellr-app-<hash>` are the
 labels in use today, and anything that reads them must keep working across the upgrade. Only `product_version` changes, from `0.1.0` to the real version.
@@ -92,15 +94,17 @@ Every `WorkspaceClient` Tellr builds carries a Tellr product and the real versio
 | `mcp_transport.py:147` (Genie One, Gateway MCP, UC-connection MCP) | bare | same |
 | `tools/mcp_tool.py:68`, `:135` (Legacy MCP tool) | bare | same |
 | `databricks_client.py:469` (first-stage client that calls `/Me`) | bare | `product=tellr-app-system` |
-| `model_endpoint_catalog.py:201` | built from the system client's `Config` | verify it inherits the product; set it if not |
+| `model_endpoint_catalog.py:201` | built from the system client's `Config` | inherits `product=tellr-app-system` (tested; no change needed) |
 
 One helper in `src/core/attribution.py` supplies the keyword arguments:
 `user_product_kwargs(token)` returns `{"product": "tellr-app-<hash>", "product_version":
 <version>}`. It looks the label up by the user's token, which `_create_user_client`
-records when it first computes the hash; several of these clients are built in worker
+records only when its `/Me` lookup succeeds, so a failed lookup never replaces a label
+already known for the token; several of these clients are built in worker
 threads where the request's context is not visible, and every one of them holds the token.
 Without a recorded token it falls back to the request's user (`get_current_user()`), then
-to `tellr-app-unknown`. Only a SHA-256 of the token is kept. No site makes an extra
+to `tellr-app-unknown`. Only a SHA-256 of the token is kept, never the token, in a map
+bounded at 200 entries (the oldest is dropped first). No site makes an extra
 network call to learn the user.
 
 The MCP HTTP client (`_UserMCPClient._session_run`) sends
@@ -108,11 +112,15 @@ The MCP HTTP client (`_UserMCPClient._session_run`) sends
 library's own agent kept after it, as the Gateway clients do. It sends no request-tags
 header, because that header is not recorded on MCP routes (item 4 above).
 
-**Guard.** A source-scan test, like the one in `tests/unit/test_gateway_clients.py`, fails
-when any file under `src/` constructs a `WorkspaceClient` without a `product=` argument or
-a `config=` argument, and when `mcp_transport.py` opens an `httpx` client without a
-`User-Agent`. The Gateway guard exists because another product's tag was once dropped
-silently by an unrelated change; this is the same protection for the SDK and MCP clients.
+**Guard.** A source-scan test (`tests/unit/test_client_labels.py`), like the one in
+`tests/unit/test_gateway_clients.py`, fails when any file under `src/` constructs a
+`WorkspaceClient` without a label (a non-blank `product=`, a `**user_product_kwargs(...)` or
+`**system_product_kwargs()` spread, or a `config=` argument); when it constructs the SDK's
+`Config(...)` without a `product=` or one of those spreads, since a
+`WorkspaceClient(config=...)` takes its label from that `Config`; and when
+`mcp_transport.py` opens an `httpx` client without `headers=mcp_http_headers()`. The
+Gateway guard exists because another product's tag was once dropped silently by an
+unrelated change; this is the same protection for the SDK and MCP clients.
 
 ### 3. Lakebase linked to the app (decided; live-tested 19 Nov 2026)
 
@@ -126,16 +134,27 @@ the order is: create the app with no database resource (as today), run
 `_ensure_sp_autoscaling_role`, then attach. Passing the resource to `apps.create` is not an
 option (see the second test below).
 
-- The attach follows `_ensure_app_user_api_scopes` and
-  `secret_key.attach_secret_resource`: read the app, keep every existing resource, append
-  the missing one, carry every mutable field, omit `compute_size`. An app that already has
-  a resource named `app_database` is left alone.
-- It is warn-and-continue on both paths: a failure prints one line and the install or
-  update goes on.
+- The attach is a resources-only masked update, `apps.create_update` with
+  `update_mask="resources"`, not a full-replace `apps.update`. It sends only the app's name
+  and its resources (every existing one sent back unchanged, plus the new one), so it
+  cannot change or clear any other app field. An app that already has a database resource
+  of either kind, or any resource named `app_database`, is left alone.
+- It is warn-and-continue on both paths and never raises: a skip or a failure prints a
+  warning and the install or update goes on. It is skipped when the SDK is older than
+  0.95.0 (no `AppResourcePostgres`), when the role SDK is unavailable, when the app has no
+  service principal client id, when the service principal's role is not found on the
+  branch (or the branch's roles cannot be listed), and when the app has a resource the SDK
+  cannot represent (it reads back without its definition, so sending it back would strip
+  it). The role lookup is read-only and matches the role's Postgres name, so a role made
+  by hand counts as well as `sp-<client id>`.
+- The installer's SDK floor is `databricks-sdk>=0.95.0` (it was `>=0.85.0`), the first
+  release with `AppResourcePostgres`.
 - Connection settings stay as they are. The app keeps reading `LAKEBASE_PG_HOST`,
   `LAKEBASE_PROJECT_ID` and `LAKEBASE_ENDPOINT_NAME` from `app.yaml`.
 - The resource names the branch the install uses: `production` for a normal install, the
-  fork's own branch for a devloop fork (`lakebase_result["branch_id"]`).
+  fork's own branch for a devloop fork (`lakebase_result["branch_id"]`). The branch is
+  computed once and used for both the role and the resource, so the resource names the
+  branch the role was created on.
 
 **What the live test showed.** A fresh `tellr.create` of v0.5.7 on a new autoscaling
 project, on the dev workspace, then:
@@ -148,6 +167,7 @@ project, on the dev workspace, then:
 | `tellr.update` with the released 0.5.7 installer | Kept the resource. App healthy and writing afterwards. |
 | Fresh install, the installer's own steps in today's order with the attach added after the role setup and before the first deploy | Role setup succeeded. Roles afterwards were only the ones the installer created. First deploy healthy: 48 tables owned by the service principal, and a row written. |
 | The same app pinned to v0.4.2, then to v0.2.7 (the oldest release), each on a fresh schema with the resource attached | Both started healthy on the autoscaling path, created their own schema (28 and 18 tables) with the same owner, and logged in without error. |
+| The resources-only masked update on a live install, then the branch's own `_ensure_app_postgres_resource` against a live install | The masked update was accepted in about 2 s. No restart. Description, user scopes, source code path and compute size untouched; the service principal's role unchanged. The helper attached the resource, and a second call was a no-op. |
 
 **Why not at `apps.create`.** A second app was created with the resource already on it,
 against a fresh branch. The platform then created the service principal's role itself, as
@@ -163,11 +183,12 @@ checked on the test install before release.
 
 The request tag becomes `{"source": "tellr", "component": "<value>"}`. `source` is
 unchanged, so every existing reader keeps working. `component` is one of a fixed set, and
-a value outside the set is dropped, so a tag can never carry free text:
+only an exact `str` from the set is accepted; any other value, a `str` subclass included,
+is dropped without raising, so a tag can never carry free text:
 
 | Value | Client |
 |---|---|
-| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`) |
+| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`), and the admin's model probe (`model_endpoint_probe.py`), which builds its model with the same factory |
 | `title` | session titles (`build_session_title_model`) |
 | `export` | PPTX and Google Slides export |
 | `image` | image generation |
@@ -179,11 +200,13 @@ unknown component falls back to `{"source": "tellr"}`.
 
 ### 5. An `entrypoint` tag for decks made through Tellr's MCP server (decided)
 
-`src/api/mcp_server.py` marks the turn `mcp` just before it enqueues the chat job, and the
-browser route marks it `app`. The mark is a ContextVar; `enqueue_job` already copies the
-context into the worker, so every model call of the turn sees it, and
-`gateway_request_headers` adds `"entrypoint"` to the tag when it is one of those two
-values. This separates what other agents use through Tellr from what its own users use.
+`src/api/mcp_server.py` marks the turn `mcp` and the browser route
+(`src/api/routes/chat.py`) marks it `app`, each with `set_entrypoint` immediately before
+its `enqueue_job` call. The mark is a ContextVar; `enqueue_job` already copies the context
+into the worker, so every model call of the turn sees it, and `gateway_request_headers`
+adds `"entrypoint"` to the tag only when it is an exact `str` from those two values
+(`set_entrypoint` ignores any other value in the same way). This separates what other
+agents use through Tellr from what its own users use.
 
 On `main` an MCP job runs the Legacy engine, whose deck calls do not go through the
 Gateway, so the `mcp` value shows on that job's title call today. It reaches the deck
@@ -213,8 +236,8 @@ calls when MCP jobs run on the graph, with no further change.
 ## Error handling
 
 Every addition is passive. `user_product_kwargs()` and the version lookup never raise: a
-failure yields `tellr-app-unknown` and `"unknown"`. A tag value outside its allow-list is
-omitted. The installer change prints a warning and continues.
+failure yields `tellr-app-unknown` and `"unknown"`. A tag value that is not an exact `str`
+on its allow-list is omitted. The installer change prints a warning and continues.
 
 ## Testing
 
@@ -224,10 +247,13 @@ omitted. The installer change prints a warning and continues.
   version; an MCP request carries exactly one `User-Agent`, starting `tellr/`, and no tag
   header. Gateway: exact tag for each component, unknown component dropped, entrypoint
   present only inside a job that set it, every tool-loop round still tagged. Installer:
-  create passes the resource for autoscaling and not for provisioned; update appends
-  without dropping resources, scopes or description, is a no-op the second time, and
-  continues when the API refuses.
-- **Guards.** The two source scans in section 2, each with a sabotage case.
+  `apps.create` carries no database resource for autoscaling and keeps the provisioned one;
+  create and update attach after the role (and not without it) and before the deploy; the
+  attach is a resources-only update that sends every existing resource back, leaves an app
+  that already has a database resource alone, and warns and continues when the API
+  refuses or a skip condition holds.
+- **Guards.** The three source scans in section 2. The `WorkspaceClient` and `Config` scans
+  each have a sabotage case; the `httpx` scan fails if it finds no client to check.
 - **Live, on the dev workspace (devloop, never devtest).** The section 3 sequence again
   with the new installer (create, update, second update), then one
   deck in Agent mode with a Genie Agent and Genie One, a title and a PPTX export. Done when

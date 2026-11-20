@@ -609,6 +609,95 @@ Deployment automatically selects the best Lakebase backend:
 Autoscaling requires `databricks-sdk>=0.96.0` with `databricks.sdk.service.postgres`
 support (`Project`, `ProjectSpec`, `ProjectDefaultEndpointSettings`).
 
+### How Tellr identifies its own requests
+
+**Why.** Tellr puts labels on the requests it sends that say they came from Tellr. With
+them, what Tellr uses shows up correctly in the workspace's own usage and billing system
+tables, so an admin can see what the app costs and which part of it the cost comes from.
+Databricks uses the same labels to understand how Tellr is adopted.
+
+A label is a product name, a version or a fixed feature name; it never carries prompts,
+deck content, user text or customer names.
+
+**Databricks SDK clients.** Each client Tellr builds with the Databricks SDK names a
+product, and the SDK starts the User-Agent of every request it sends with
+`<product>/<version>`. The version is the installed `databricks-tellr-app` release. There
+are three product names:
+
+- `tellr-app-system`: a client that runs as the app's service principal, and the first
+  client built from a user's token, which only looks up who the user is.
+- `tellr-app-<hash>`: a client that runs as a signed-in user. `<hash>` is the first 12 hex
+  characters of the SHA-256 of the user's email local part (the part before `@`). Only the
+  hash goes into the label, never the email.
+- `tellr-app-unknown`: a user client whose user Tellr cannot determine.
+
+**AI Gateway calls.** Every model call Tellr makes through the AI Gateway carries a
+User-Agent that starts with `tellr/<version>`, and a `Databricks-Ai-Gateway-Request-Tags`
+header. The header is a JSON object, and the Gateway records it with each request:
+
+| Key | Value | Meaning |
+|-----|-------|---------|
+| `source` | `tellr` | Always present. |
+| `component` | `generation` | The agents that create and edit a deck, and an admin's check of a model configured for them. |
+| `component` | `title` | Naming a session. |
+| `component` | `export` | PPTX and Google Slides export. |
+| `component` | `image` | Image generation. |
+| `entrypoint` | `app` | The chat turn was sent from Tellr's own UI. |
+| `entrypoint` | `mcp` | The chat turn was sent through Tellr's MCP server. |
+
+`entrypoint` is present only on calls made for a chat turn. A call made outside one, such as
+an export, has no `entrypoint` key. Each value comes from a fixed list in the code, and any
+other value adds no key, so a tag never carries free text.
+
+**MCP calls.** The MCP calls Tellr's agent tools make as the signed-in user (Genie One and
+other AI Gateway MCP services) send this User-Agent:
+`tellr/<version> python-httpx/<httpx version>`. They carry no request-tags header, because
+the AI Gateway records that header on model routes, not on MCP routes.
+
+**The Lakebase database as an app resource.** On an install that uses autoscaling Lakebase,
+the installer attaches the install's Lakebase branch to the app as a Postgres app resource
+named `app_database`. The resource is what lets the platform attribute the database's usage
+to the app. A provisioned install already has a database resource of that name from
+`tellr.create`.
+
+- **When.** `tellr.create` attaches it after creating the service principal's Postgres
+  role, before the first deploy. `tellr.update` attaches it to an app that lacks it, before
+  the new deployment. Either way, it is attached only once the service principal's role is
+  found on the branch: given the resource before that role exists, the platform creates a
+  role of its own, and the installer's role setup then fails.
+- **What it names.** The branch the install uses (`production` for a normal install), its
+  `databricks-postgres` database, and the `CAN_CONNECT_AND_CREATE` permission.
+- **What it changes.** Only the app's resource list. The request is a resources-only
+  update, so no other app setting changes and the app is not restarted. How the app
+  connects does not change: it keeps reading `LAKEBASE_PG_HOST` and the other `LAKEBASE_*`
+  settings from `app.yaml`. With the resource attached, the platform also sets `PGHOST` and
+  `PGUSER`; they name the host and the service principal the app already connects with.
+- **When it is skipped.** It never fails an install or an update. It is skipped with a
+  warning when the installed `databricks-sdk` has no Postgres app resource (it is older
+  than 0.95.0) or no Postgres role API; when the app has no service principal client id;
+  when the branch has no Postgres role for that service principal, or its roles cannot be
+  listed; when the app has a resource of a kind the installed SDK cannot represent (sending
+  the resource list back would drop it); and when the update is refused or does not
+  succeed. An app that already has a database resource, or a resource named
+  `app_database`, is left as it is, with no warning.
+- **SDK.** The installer needs `databricks-sdk>=0.95.0`, the first release with the
+  Postgres app resource. `databricks-tellr` requires that version.
+
+**Example query.** The Gateway stores the tag in the `request_tags` column of
+`system.ai_gateway.usage`. This counts Tellr's Gateway requests by component and
+entrypoint:
+
+```sql
+SELECT
+  request_tags['component']  AS component,
+  request_tags['entrypoint'] AS entrypoint,
+  count(*)                   AS requests
+FROM system.ai_gateway.usage
+WHERE request_tags['source'] = 'tellr'
+GROUP BY request_tags['component'], request_tags['entrypoint']
+ORDER BY requests DESC
+```
+
 ### Error Handling
 
 Common deployment errors:
