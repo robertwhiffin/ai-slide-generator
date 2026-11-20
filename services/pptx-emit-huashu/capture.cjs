@@ -211,7 +211,9 @@ async function captureOne(page, capture, viewport) {
 }
 
 // Sequential and in capture-id order (DOM pre-order), so the same page gives
-// the same pictures in the same order every time.
+// the same pictures in the same order every time. A capture's id and the
+// reason it failed come from the page, so each is printed on one line
+// (log_line.cjs oneLine).
 async function captureAll(page, captures) {
   const pictures = new Map();
   const ordered = (captures || []).slice().sort((a, b) => captureNumber(a) - captureNumber(b));
@@ -223,7 +225,7 @@ async function captureAll(page, captures) {
     // The snapshot could not name its target, and has said so.
     if (capture.failed) continue;
     if (timedOut) {
-      console.error(`[html2pptx] capture failed: ${capture.id} not attempted: an earlier capture of this slide timed out`);
+      console.error(`[html2pptx] capture failed: ${oneLine(capture.id)} not attempted: an earlier capture of this slide timed out`);
       continue;
     }
     try {
@@ -231,7 +233,7 @@ async function captureAll(page, captures) {
     } catch (error) {
       if (error && error.name === 'TimeoutError') timedOut = true;
       const message = oneLine(String((error && error.message) || error).split('\n')[0]);
-      console.error(`[html2pptx] capture failed: ${capture.id} ${message}`);
+      console.error(`[html2pptx] capture failed: ${oneLine(capture.id)} ${message}`);
     }
   }
   return pictures;

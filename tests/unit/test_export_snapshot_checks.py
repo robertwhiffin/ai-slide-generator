@@ -45,6 +45,12 @@ harness (spec §6):
   and every text reference (the sidecar's, ``render_truth.cjs``'s and
   ``measure.cjs``'s) hides the graphics the same way, against a deck's
   ``!important`` display rule and a display transition alike.
+* The slide's realm builds the model (with an ``Array.prototype.push`` slide
+  script can replace), so Node checks it before any use
+  (``services/pptx-emit-huashu/model_check.cjs``, ruling R12d): a capture or
+  item the snapshot could not have written is dropped, counted in one
+  ``[html2pptx] model: …`` line and in the summary's ``modelDrops``, and the
+  rest of the slide exports.
 
 The hidden words are pinned per case (task-12 addendum): opacity 0 inline,
 block and inline-block, nested, a word split over two text nodes, a table
@@ -309,11 +315,15 @@ JOINED_DOCUMENT = _case_document(JOINED_BODY)
 # returns a decoy, and both querySelectorAll copies find nothing, so a reference
 # read through the page's own accessors would hold the decoy and the SVG's
 # label. It publishes on document.title what it replaced and what a reader
-# then sees.
+# then sees. The label is set in a system face: the twins are compared whole,
+# picture bytes included, and the deck's DM Sans comes from Google Fonts, which
+# now and then serves another build of the font (a dynamic kit), whose glyphs
+# the captured picture would draw a few anti-aliased pixels apart.
 HOSTILE_DECOY = "Forgedword decoy"
 HOSTILE_SLIDE = (
     f'<div class="slide">{LEAD}'
-    '<svg width="200" height="60"><text x="10" y="40" font-size="20">Svgword</text></svg>'
+    '<svg width="200" height="60"><text x="10" y="40" font-size="20" font-family="Arial">'
+    "Svgword</text></svg>"
     "<script>{script}</script></div>"
 )
 HOSTILE_SCRIPT = """(function () {
@@ -1636,3 +1646,612 @@ class TestNormalisationSets:
             for code_point in range(start, end + 1)
         }
         assert set(_node_character_sets()["defaultIgnorable"]) == python
+
+
+# ---------------------------------------------------------------------------
+# The page-built model, validated in Node (ruling R12d)
+# ---------------------------------------------------------------------------
+
+MODEL_CHECK_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "model_check.cjs"
+CAPTURE_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "capture.cjs"
+
+# The id a slide that owns Array.prototype.push gives the capture the snapshot pushes.
+FORGED_CAPTURE_ID_PAYLOAD = (FORGED_RESULT_LINE, FORGED_SUMMARY_LINE)
+
+
+def _forged_capture_id(line_break: str) -> str:
+    return line_break.join(("c0", *FORGED_CAPTURE_ID_PAYLOAD))
+
+
+def _run(text: str, **style: object) -> dict:
+    run = {
+        "text": text,
+        "family": "Arial",
+        "weight": 400,
+        "italic": False,
+        "sizePx": 20,
+        "color": "1B3139",
+        "letterSpacingPx": 0,
+        "underline": False,
+        "strike": False,
+        "baseline": None,
+        "opticalTrackingPx": 0,
+    }
+    run.update(style)
+    return run
+
+
+def _paragraph(*runs: dict, **fields: object) -> dict:
+    paragraph = {"sizePx": 20, "lineHeightPx": 24, "ascentPx": 18, "lines": [{"runs": list(runs)}]}
+    paragraph.update(fields)
+    return paragraph
+
+
+def _border() -> dict:
+    """A fresh border, so a mutation of one cell's reaches no other model."""
+    return {"color": "000000", "alpha": 1, "widthPx": 1, "dash": "solid"}
+
+
+def _cell(row: int, col: int, **fields: object) -> dict:
+    cell = {
+        "row": row,
+        "col": col,
+        "rowspan": 1,
+        "colspan": 1,
+        "fill": None,
+        "borders": {"top": _border(), "right": None, "bottom": _border(), "left": None},
+        "margin": {"top": 0.04, "right": 0.04, "bottom": 0.04, "left": 0.04},
+        "valign": "top",
+        "align": "left",
+        "rtl": False,
+        "font": {"family": "Arial", "weight": 400, "italic": False, "sizePx": 16},
+        "paragraphs": [_paragraph(_run("Cell"))],
+    }
+    cell.update(fields)
+    return cell
+
+
+def _valid_model() -> dict:
+    """One item of every kind, every optional field the snapshot writes, and two captures."""
+    return {
+        "width": 1280,
+        "height": 720,
+        "background": {"color": "F9F7F4"},
+        "fonts": {"DM Sans": [400, 700]},
+        "reference": {"hiddenText": "secretword"},
+        "stats": {"elements": 12, "pseudoElements": 1, "truncated": False},
+        "captures": [
+            {
+                "id": "c0",
+                "x": 700,
+                "y": 200,
+                "w": 120,
+                "h": 60,
+                "mode": "subtree",
+                "selector": '[data-tellr-capture="c0"]',
+                "pseudo": None,
+                "hiddenWithin": False,
+                "paint": None,
+                "bordersHidden": False,
+            },
+            {
+                "id": "c1",
+                "x": 80,
+                "y": 500,
+                "w": 40,
+                "h": 40,
+                "mode": "box",
+                "selector": '[data-tellr-pseudo-host="p1"]',
+                "pseudo": "before",
+                "hiddenWithin": False,
+                "paint": {"borderColors": ["rgb(0, 0, 0)"] * 4, "boxShadow": "none"},
+                "bordersHidden": False,
+            },
+        ],
+        "items": [
+            {
+                "kind": "shape",
+                "id": 0,
+                "order": [0],
+                "x": 80,
+                "y": 200,
+                "w": 200,
+                "h": 80,
+                "geometry": "roundRect",
+                "radius": 8,
+                "fill": {"color": "123456", "alpha": 1},
+                "line": {"color": "FF0000", "alpha": 0.5, "widthPx": 2, "dash": "dash"},
+                "shadow": {
+                    "color": "000000",
+                    "alpha": 0.25,
+                    "blurPx": 4,
+                    "offsetPx": 2,
+                    "angle": 90,
+                },
+                "rotate": None,
+            },
+            {
+                "kind": "shape",
+                "id": 1,
+                "order": [1],
+                "x": 300,
+                "y": 200,
+                "w": 40,
+                "h": 40,
+                "geometry": "path",
+                "radius": 0,
+                "fill": {"color": "00A972", "alpha": 1},
+                "line": None,
+                "shadow": None,
+                "rotate": 15,
+                "path": [[{"x": 0, "y": 0}, {"x": 40, "y": 0}, {"x": 20, "y": 40}]],
+                "closed": True,
+            },
+            {
+                "kind": "line",
+                "id": 2,
+                "order": [2],
+                "x1": 400,
+                "y1": 280,
+                "x2": 600,
+                "y2": 280,
+                "color": "FF0000",
+                "alpha": 1,
+                "widthPx": 3,
+                "dash": "dot",
+            },
+            {
+                "kind": "image",
+                "id": 3,
+                "order": [3],
+                "x": 700,
+                "y": 200,
+                "w": 120,
+                "h": 60,
+                "src": None,
+                "captureId": "c0",
+                "alpha": 1,
+                "rotate": None,
+            },
+            {
+                "kind": "image",
+                "id": 4,
+                "order": [4],
+                "x": 900,
+                "y": 200,
+                "w": 60,
+                "h": 60,
+                "src": "data:image/png;base64,iVBORw0KGgo=",
+                "captureId": None,
+                "alpha": 0.8,
+                "rotate": 30,
+            },
+            {
+                "kind": "text",
+                "id": 5,
+                "order": [5],
+                "x": 80,
+                "y": 60,
+                "w": 400,
+                "h": 30,
+                "rotate": None,
+                "wrap": True,
+                "align": "left",
+                "rtl": False,
+                "paragraphs": [
+                    _paragraph(_run("Alpha "), _run("1", baseline="super", sizePx=14)),
+                    {
+                        "sizePx": 18,
+                        "lineHeightPx": None,
+                        "ascentPx": None,
+                        "lines": [
+                            {"runs": [_run("Beta", sizePx=18, underline=True)]},
+                            {"runs": [], "growthPx": 2.5},
+                        ],
+                    },
+                ],
+            },
+            {
+                "kind": "text",
+                "id": 6,
+                "order": [6],
+                "x": 1000,
+                "y": 300,
+                "w": 30,
+                "h": 200,
+                "rotate": 90,
+                "wrap": True,
+                "align": "center",
+                "rtl": True,
+                "inset": {"left": 2, "top": 4, "right": 2, "bottom": 0},
+                "paragraphs": [_paragraph(_run("Turned"))],
+            },
+            {
+                "kind": "table",
+                "id": 7,
+                "order": [7],
+                "x": 80,
+                "y": 320,
+                "colWidths": [100, 120],
+                "rowHeights": [30],
+                "cells": [
+                    _cell(0, 0, fill={"color": "EEEEEE", "alpha": 1}),
+                    _cell(0, 1, paragraphs=None),
+                ],
+            },
+        ],
+    }
+
+
+def _check_model(model: dict) -> dict:
+    """``checkModel(model)`` in Node, the model written as a JavaScript literal (NaN, Infinity)."""
+    return node_json(
+        f"const {{ checkModel }} = require({json.dumps(str(MODEL_CHECK_MODULE))});"
+        f"process.stdout.write(JSON.stringify(checkModel({json.dumps(model)})));"
+    )
+
+
+def _set(path: str, value: object):
+    """A mutation of the valid model: ``path`` (dotted, list indices as digits) set to ``value``."""
+
+    def mutate(model: dict) -> None:
+        *parents, last = path.split(".")
+        target = model
+        for key in parents:
+            target = target[int(key)] if isinstance(target, list) else target[key]
+        if isinstance(target, list):
+            target[int(last)] = value
+        else:
+            target[last] = value
+
+    return mutate
+
+
+def _append(path: str, value: object):
+    def mutate(model: dict) -> None:
+        target = model
+        for key in path.split("."):
+            target = target[int(key)] if isinstance(target, list) else target[key]
+        target.append(value)
+
+    return mutate
+
+
+NAN = float("nan")
+INFINITY = float("inf")
+INJECTED_COLOUR = '000000"/><a:latin typeface="x'
+
+# (mutation, item ids dropped, captures dropped). Items are listed by id; the
+# image item 3 shows capture c0, so dropping c0 drops it too.
+MODEL_DEFECTS = {
+    "capture-id-forged": (_set("captures.0.id", _forged_capture_id("\n")), {3}, 1),
+    "capture-id-not-c-n": (_set("captures.1.id", "x1"), set(), 1),
+    "capture-id-not-a-string": (_set("captures.1.id", 1), set(), 1),
+    "capture-id-shared": (_set("captures.1.id", "c0"), {3}, 2),
+    "capture-x-not-a-number": (_set("captures.0.x", "not a number"), {3}, 1),
+    "capture-w-infinite": (_set("captures.0.w", INFINITY), {3}, 1),
+    "capture-h-nan": (_set("captures.0.h", NAN), {3}, 1),
+    "capture-mode-unknown": (_set("captures.0.mode", "everything"), {3}, 1),
+    "capture-selector-not-a-string": (_set("captures.0.selector", None), {3}, 1),
+    "capture-pseudo-unknown": (_set("captures.1.pseudo", "first-line"), set(), 1),
+    "capture-not-an-object": (_append("captures", "c9"), set(), 1),
+    "item-kind-unknown": (_append("items", {"kind": "script", "id": 8, "x": 0, "y": 0}), {8}, 0),
+    "item-not-an-object": (_append("items", None), {None}, 0),
+    "image-capture-missing": (_set("items.3.captureId", "c9"), {3}, 0),
+    "image-x-not-a-number": (_set("items.4.x", "10"), {4}, 0),
+    "image-alpha-nan": (_set("items.4.alpha", NAN), {4}, 0),
+    "image-src-not-a-string": (_set("items.4.src", 7), {4}, 0),
+    "shape-x-not-a-number": (_set("items.0.x", "80"), {0}, 0),
+    "shape-w-infinite": (_set("items.0.w", INFINITY), {0}, 0),
+    "shape-rotate-nan": (_set("items.1.rotate", NAN), {1}, 0),
+    "shape-geometry-unknown": (_set("items.0.geometry", "star"), {0}, 0),
+    "shape-radius-missing": (_set("items.0.radius", None), {0}, 0),
+    "shape-fill-colour-injected": (_set("items.0.fill.color", INJECTED_COLOUR), {0}, 0),
+    "shape-outline-width-nan": (_set("items.0.line.widthPx", NAN), {0}, 0),
+    "shape-outline-dash-unknown": (_set("items.0.line.dash", "wavy"), {0}, 0),
+    "shape-shadow-angle-not-a-number": (_set("items.0.shadow.angle", "90"), {0}, 0),
+    "shape-path-point-nan": (_set("items.1.path.0.1.x", NAN), {1}, 0),
+    "shape-path-closed-not-a-boolean": (_set("items.1.closed", "yes"), {1}, 0),
+    "line-x1-nan": (_set("items.2.x1", NAN), {2}, 0),
+    "line-colour-short": (_set("items.2.color", "F00"), {2}, 0),
+    "text-x-infinite": (_set("items.5.x", INFINITY), {5}, 0),
+    "text-rotate-not-a-number": (_set("items.6.rotate", "90"), {6}, 0),
+    "text-align-unknown": (_set("items.5.align", "start"), {5}, 0),
+    "text-wrap-not-a-boolean": (_set("items.5.wrap", 1), {5}, 0),
+    "text-inset-nan": (_set("items.6.inset.top", NAN), {6}, 0),
+    "text-paragraph-size-not-a-number": (_set("items.5.paragraphs.0.sizePx", "20"), {5}, 0),
+    "text-paragraph-line-height-nan": (_set("items.5.paragraphs.0.lineHeightPx", NAN), {5}, 0),
+    "text-line-growth-nan": (_set("items.5.paragraphs.1.lines.1.growthPx", NAN), {5}, 0),
+    "text-run-text-not-a-string": (_set("items.5.paragraphs.0.lines.0.runs.0.text", 5), {5}, 0),
+    "text-run-size-infinite": (
+        _set("items.5.paragraphs.0.lines.0.runs.0.sizePx", INFINITY),
+        {5},
+        0,
+    ),
+    "text-run-colour-injected": (
+        _set("items.5.paragraphs.0.lines.0.runs.0.color", INJECTED_COLOUR),
+        {5},
+        0,
+    ),
+    "text-run-baseline-unknown": (
+        _set("items.5.paragraphs.0.lines.0.runs.1.baseline", "top"),
+        {5},
+        0,
+    ),
+    "table-column-width-nan": (_set("items.7.colWidths.1", NAN), {7}, 0),
+    "table-cell-row-outside-the-grid": (_set("items.7.cells.0.row", 1), {7}, 0),
+    "table-cell-span-zero": (_set("items.7.cells.1.colspan", 0), {7}, 0),
+    "table-cell-border-colour-injected": (
+        _set("items.7.cells.0.borders.top.color", INJECTED_COLOUR),
+        {7},
+        0,
+    ),
+    "table-cell-margin-nan": (_set("items.7.cells.0.margin.left", NAN), {7}, 0),
+    "table-cell-valign-unknown": (_set("items.7.cells.0.valign", "baseline"), {7}, 0),
+    "table-cell-run-colour-injected": (
+        _set("items.7.cells.0.paragraphs.0.lines.0.runs.0.color", INJECTED_COLOUR),
+        {7},
+        0,
+    ),
+}
+
+# (mutation, the field reset, as an empty slide has it).
+MODEL_FIELD_DEFECTS = {
+    "background-colour-injected": (
+        _set("background", {"color": INJECTED_COLOUR}),
+        "background",
+        None,
+    ),
+    "fonts-not-a-map": (_set("fonts", ["DM Sans"]), "fonts", {}),
+    "fonts-weight-nan": (_set("fonts", {"DM Sans": [NAN]}), "fonts", {}),
+    "hidden-text-not-a-string": (
+        _set("reference", {"hiddenText": ["Forgedword"]}),
+        "reference",
+        {"hiddenText": ""},
+    ),
+    "element-count-nan": (_set("stats.elements", NAN), "stats", None),
+}
+
+
+@requires_node
+class TestModelCheck:
+    """``model_check.cjs checkModel``: Node keeps only what the snapshot could have written."""
+
+    def test_a_valid_model_passes_untouched(self) -> None:
+        model = _valid_model()
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
+        assert checked["model"] == model
+
+    @pytest.mark.parametrize("defect", tuple(MODEL_DEFECTS))
+    def test_each_invalid_part_is_dropped_and_counted(self, defect: str) -> None:
+        mutate, dropped_items, dropped_captures = MODEL_DEFECTS[defect]
+        model = _valid_model()
+        mutate(model)
+        checked = _check_model(model)
+        assert checked["dropped"] == {
+            "items": len(dropped_items),
+            "captures": dropped_captures,
+            "fields": 0,
+        }, checked["dropped"]
+        kept_ids = [item["id"] for item in checked["model"]["items"]]
+        valid = _valid_model()
+        assert kept_ids == [
+            item["id"] for item in valid["items"] if item["id"] not in dropped_items
+        ]
+        # What is kept is kept as it was.
+        by_id = {item["id"]: item for item in valid["items"]}
+        for item in checked["model"]["items"]:
+            assert item == by_id[item["id"]], item
+
+    @pytest.mark.parametrize("defect", tuple(MODEL_FIELD_DEFECTS))
+    def test_each_invalid_field_is_reset_and_counted(self, defect: str) -> None:
+        mutate, field, reset = MODEL_FIELD_DEFECTS[defect]
+        model = _valid_model()
+        mutate(model)
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 1}, checked["dropped"]
+        if field == "stats":
+            assert checked["model"]["stats"]["elements"] == 0
+            assert checked["model"]["stats"]["pseudoElements"] == 0
+        else:
+            assert checked["model"][field] == reset
+        assert checked["model"]["items"] == _valid_model()["items"]
+
+    @pytest.mark.parametrize("field", ["items", "captures"])
+    def test_a_list_that_is_not_one_is_empty(self, field: str) -> None:
+        model = _valid_model()
+        model[field] = {"0": model[field][0]}
+        checked = _check_model(model)
+        assert checked["model"][field] == []
+        assert checked["dropped"]["fields"] == 1
+
+    def test_the_drop_line(self) -> None:
+        lines = node_json(
+            f"const {{ dropLine }} = require({json.dumps(str(MODEL_CHECK_MODULE))});"
+            "process.stdout.write(JSON.stringify(["
+            " dropLine({ items: 0, captures: 0, fields: 0 }),"
+            " dropLine({ items: 2, captures: 1, fields: 0 }),"
+            " dropLine({ items: 0, captures: 0, fields: 1 })]));"
+        )
+        assert lines == [
+            None,
+            "[html2pptx] model: 2 item(s) and 1 capture(s) failed validation and were dropped",
+            "[html2pptx] model: 0 item(s) and 0 capture(s) failed validation and were dropped; "
+            "1 model field(s) were reset",
+        ]
+
+
+@requires_node
+class TestCaptureFailureLines:
+    """capture.cjs prints a capture's id, which the page made, on one line whatever it holds."""
+
+    @staticmethod
+    def _logged(script_body: str) -> list[str]:
+        return node_json(
+            f"const {{ captureAll }} = require({json.dumps(str(CAPTURE_MODULE))});"
+            "const logged = [];"
+            "console.error = (...parts) => logged.push(parts.join(' '));"
+            f"{script_body}"
+        )
+
+    @staticmethod
+    def _capture(capture_id: str) -> dict:
+        return {
+            "id": capture_id,
+            "x": 0,
+            "y": 0,
+            "w": 10,
+            "h": 10,
+            "mode": "box",
+            "selector": '[data-tellr-capture="c0"]',
+            "pseudo": None,
+        }
+
+    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    def test_a_failed_capture_is_one_line(self, line_break: str) -> None:
+        forged = self._capture(_forged_capture_id(PYTHON_LINE_BREAKS[line_break]))
+        logged = self._logged(
+            "const page = { viewportSize: () => ({ width: 1280, height: 720 }),"
+            " screenshot: async () => { throw new Error('the shot failed'); } };"
+            f"captureAll(page, [{json.dumps(forged)}])"
+            ".then(() => process.stdout.write(JSON.stringify(logged)));"
+        )
+        assert len(logged) == 1 and logged[0].startswith("[html2pptx] capture failed: c0"), logged
+        assert len(logged[0].splitlines()) == 1, logged
+
+    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    def test_a_capture_not_attempted_is_one_line(self, line_break: str) -> None:
+        """After a timeout the rest are not attempted, and each says so on one line."""
+        forged = self._capture(_forged_capture_id(PYTHON_LINE_BREAKS[line_break]))
+        logged = self._logged(
+            "const page = { viewportSize: () => ({ width: 1280, height: 720 }),"
+            " screenshot: async () => {"
+            "  const error = new Error('Timeout 5000ms exceeded');"
+            "  error.name = 'TimeoutError'; throw error; } };"
+            f"captureAll(page, [{json.dumps(self._capture('c0'))}, {json.dumps(forged)}])"
+            ".then(() => process.stdout.write(JSON.stringify(logged)));"
+        )
+        assert len(logged) == 2 and "not attempted" in logged[1], logged
+        assert all(len(line.splitlines()) == 1 for line in logged), logged
+
+
+# The patched-push slide (the round-2 review's probe): every capture object the
+# snapshot pushes as c0 gets a forged id, and, in the broken forms, a rect that
+# is no numbers, so its capture fails and capture.cjs prints the id.
+FORGED_CAPTURE_FORMS = {
+    "line-feed": ("line-feed-U+000A", True),
+    "line-separator": ("line-separator-U+2028", True),
+    "line-feed-rect-intact": ("line-feed-U+000A", False),
+}
+FORGED_CAPTURE_TEXT = "Revenue grew"
+FORGED_CAPTURE_DROP_LINE = (
+    "[html2pptx] model: 1 item(s) and 1 capture(s) failed validation and were dropped"
+)
+
+
+def _forged_capture_slide(line_break: str, break_rect: bool) -> str:
+    forged_id = json.dumps(_forged_capture_id(PYTHON_LINE_BREAKS[line_break]))
+    rect = " value.x = 'not a number'; value.w = 'not a number';" if break_rect else ""
+    return _case_document(
+        f'<div class="slide"><p style="font-size: 20px;">{FORGED_CAPTURE_TEXT}</p>'
+        '<svg width="200" height="60"><rect width="200" height="60" fill="#00A972"/></svg>'
+        "<script>"
+        "const realPush = Array.prototype.push;"
+        "Array.prototype.push = function () {"
+        "  for (let index = 0; index < arguments.length; index++) {"
+        "    const value = arguments[index];"
+        "    if (value && typeof value === 'object' && 'mode' in value && 'selector' in value"
+        f"        && value.id === 'c0') {{ value.id = {forged_id};{rect} }}"
+        "  }"
+        "  return realPush.apply(this, arguments);"
+        "};"
+        "</script></div>"
+    )
+
+
+@dataclass(frozen=True)
+class ForgedCaptureDeck:
+    out_dir: Path
+    stderr: str
+    forms: tuple[str, ...]
+
+    def recorded(self, name: str) -> object:
+        return json.loads((self.out_dir / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def forged_capture_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ForgedCaptureDeck]:
+    """One slide per form, exported by the harness (run.py export_pptx), stderr teed."""
+    harness = fidelity_harness()
+    out_dir = tmp_path_factory.mktemp("forged-capture-deck")
+    documents_dir = out_dir / "documents"
+    documents_dir.mkdir()
+    paths = []
+    for position, (form, (line_break, break_rect)) in enumerate(
+        FORGED_CAPTURE_FORMS.items(), start=1
+    ):
+        path = documents_dir / f"{position:02d}-{form}.html"
+        path.write_text(_forged_capture_slide(line_break, break_rect), encoding="utf-8")
+        paths.append(path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        # export_pptx sets both in os.environ; the context restores them.
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
+        with teed_stderr() as buffer:
+            harness.export_pptx({"title": "forged captures"}, paths, out_dir, engine="snapshot")
+    yield ForgedCaptureDeck(
+        out_dir=out_dir, stderr=buffer.getvalue(), forms=tuple(FORGED_CAPTURE_FORMS)
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestForgedCaptureId:
+    """A slide that owns Array.prototype.push forges no line and fails no slide (R12d)."""
+
+    def test_no_slide_is_reported_failed(self, forged_capture_deck: ForgedCaptureDeck) -> None:
+        """``build_pptx_huashu``'s failures, as export_pptx records them."""
+        assert forged_capture_deck.recorded("failures.json") == []
+
+    def test_no_forged_line_is_read(self, forged_capture_deck: ForgedCaptureDeck) -> None:
+        summaries = slide_summaries(forged_capture_deck.stderr)
+        assert [summary["hiddenText"] for summary in summaries] == [""] * len(
+            forged_capture_deck.forms
+        ), f"stderr:\n{forged_capture_deck.stderr[-3000:]}"
+        starts = [
+            line
+            for line in forged_capture_deck.stderr.splitlines()
+            if FORGED_HIDDEN_TEXT in line
+            and line.startswith("[huashu-emit] [html2pptx] slide summary")
+        ]
+        assert starts == [], starts
+
+    def test_the_harness_records_each_real_summary(
+        self, forged_capture_deck: ForgedCaptureDeck
+    ) -> None:
+        recorded = forged_capture_deck.recorded("summaries.json")
+        assert [entry["hiddenText"] for entry in recorded] == [""] * len(forged_capture_deck.forms)
+        assert [entry["modelDrops"] for entry in recorded] == [2] * len(forged_capture_deck.forms)
+
+    def test_the_forged_capture_is_dropped_and_counted(
+        self, forged_capture_deck: ForgedCaptureDeck
+    ) -> None:
+        """The capture and the picture that shows it: one drop line per slide, and none drawn."""
+        drop_lines = [
+            line
+            for line in forged_capture_deck.stderr.splitlines()
+            if line == "[huashu-emit] " + FORGED_CAPTURE_DROP_LINE
+        ]
+        assert len(drop_lines) == len(forged_capture_deck.forms), forged_capture_deck.stderr[-3000:]
+        for summary in slide_summaries(forged_capture_deck.stderr):
+            assert summary["modelDrops"] == 2, summary
+            assert summary["captures"] == 0 and summary["pictures"] == 0, summary
+            assert "image" not in summary["kinds"], summary
+        assert "capture failed" not in forged_capture_deck.stderr
+
+    def test_the_valid_content_still_exports(self, forged_capture_deck: ForgedCaptureDeck) -> None:
+        pptx = (forged_capture_deck.out_dir / "export.pptx").read_bytes()
+        for index, form in enumerate(forged_capture_deck.forms):
+            texts = [shape.text for shape in slide_shapes(pptx, index) if shape.kind == "text"]
+            assert texts == [FORGED_CAPTURE_TEXT], f"{form}: {texts}"

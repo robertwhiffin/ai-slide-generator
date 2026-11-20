@@ -11,7 +11,10 @@
 //                        protocol, read-only; nothing is inserted into the
 //                        page for them (ruling R8);
 //   5. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate of what
-//                        step 4 read, which returns the slide model (snapshot.mjs);
+//                        step 4 read, which returns the slide model (snapshot.mjs),
+//                        checked in Node before any use (model_check.cjs): the
+//                        slide's realm built it, so what slide script made of it
+//                        is dropped and counted (ruling R12d);
 //   6. capture           capture.cjs: an element-isolated 2x screenshot of each
 //                        capture target the model names, from the same page;
 //   7. reference         the page's rendered text, read once every capture is
@@ -41,6 +44,7 @@ const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
 const { logJson, oneLine } = require('./log_line.cjs');
+const { checkModel, dropLine } = require('./model_check.cjs');
 const { textLossLine } = require('./text_check.cjs');
 
 const PT_PER_PX = 0.75;
@@ -273,9 +277,10 @@ async function runPreprocess(page, preProcessSource) {
   try {
     const result = await page.evaluate(preProcessSource);
     if (result && typeof result === 'object') {
-      console.log(`[preprocess] wrapped ${result.wrapped || 0} text nodes, ` +
-                  `replaced ${result.replacedImgs || 0} bg-image divs, ` +
-                  `peeled ${result.peeledTextTags || 0} text tags`);
+      // The counts come from the page, so each is printed on one line.
+      console.log(`[preprocess] wrapped ${oneLine(result.wrapped || 0)} text nodes, ` +
+                  `replaced ${oneLine(result.replacedImgs || 0)} bg-image divs, ` +
+                  `peeled ${oneLine(result.peeledTextTags || 0)} text tags`);
       // No slide root means no background transfer, so this slide exports on the
       // untouched body default (white): indistinguishable in the .pptx from a
       // locator regression. The page-side '[preprocess] no slide root' line
@@ -413,7 +418,13 @@ function elapsedMs(start) {
 // never into the deck. `hiddenText` is the words the page reads that the
 // slide does not show (snapshot.mjs model.reference), which the text-loss
 // check leaves out, and `target` the renderer the deck is written for.
-function summarise(model, captures, preprocessResult, animations, pseudoData, captureMs, target) {
+// `modelDrops` is how many captures, items and model fields Node could not
+// take from the page as the snapshot writes them (model_check.cjs), 0 for a
+// slide whose script shaped none of its model.
+//   readings  {preprocessResult, animations, pseudoData, captureMs, target,
+//             dropped}: what the slide's render read besides the model.
+function summarise(model, captures, readings) {
+  const { preprocessResult, animations, pseudoData, captureMs, target, dropped } = readings;
   const kinds = {};
   let pictures = 0;
   let skippedPictures = 0;
@@ -442,6 +453,7 @@ function summarise(model, captures, preprocessResult, animations, pseudoData, ca
     captureMs,
     hiddenText: model.reference.hiddenText,
     target,
+    modelDrops: dropped.items + dropped.captures + dropped.fields,
   };
 }
 
@@ -480,6 +492,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
     let captures;
     let captureMs;
     let renderedText;
+    let dropped;
     try {
       const page = await browser.newPage({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
       forwardConsole(page);
@@ -492,7 +505,10 @@ async function renderSlide(htmlFile, pres, options = {}) {
       bodyDimensions = await readBodyDimensions(page, sources);
       // Read from the settled page the snapshot reads, just before it.
       pseudoData = await sources.readPseudoElements(page);
-      model = await page.evaluate(sources.snapshotOf(pseudoData));
+      // Checked before the captures and everything after use any of it.
+      ({ model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData))));
+      const drops = dropLine(dropped);
+      if (drops) console.error(drops);
       // Capture id -> data: PNG for the targets the model names in model.captures,
       // taken from this page as the snapshot left it. A target without an entry
       // is a failed capture: its picture is skipped.
@@ -512,7 +528,9 @@ async function renderSlide(htmlFile, pres, options = {}) {
     ], bypassValidation);
 
     const slide = emitSlide(pres, model, captures, { target });
-    const summary = summarise(model, captures, preprocessResult, animations, pseudoData, captureMs, target);
+    const summary = summarise(model, captures, {
+      preprocessResult, animations, pseudoData, captureMs, target, dropped,
+    });
     reportChecks(summary, model, renderedText);
     return { slide, summary };
   } catch (error) {

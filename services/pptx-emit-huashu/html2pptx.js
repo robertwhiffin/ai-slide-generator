@@ -1305,9 +1305,10 @@ async function html2pptx(htmlFile, pres, options = {}) {
         try {
           const result = await page.evaluate(preProcessSource);
           if (result && typeof result === 'object') {
-            console.log(`[preprocess] wrapped ${result.wrapped || 0} text nodes, ` +
-                        `replaced ${result.replacedImgs || 0} bg-image divs, ` +
-                        `peeled ${result.peeledTextTags || 0} text tags`);
+            // Tellr addition: the counts come from the page, so each is printed on one line.
+            console.log(`[preprocess] wrapped ${oneLine(result.wrapped || 0)} text nodes, ` +
+                        `replaced ${oneLine(result.replacedImgs || 0)} bg-image divs, ` +
+                        `peeled ${oneLine(result.peeledTextTags || 0)} text tags`);
             // Tellr addition: attribute the one outcome the artifact cannot
             // explain. No slide root means no slide-root → body background
             // transfer, so this slide exports on the untouched body default
