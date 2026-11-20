@@ -63,7 +63,23 @@ try:
 except ImportError:
     pass
 
+# App Postgres resource imports (requires newer SDK — names an autoscaling
+# Lakebase branch as an app resource)
+HAS_POSTGRES_RESOURCE = False
+try:
+    from databricks.sdk.service.apps import (
+        AppResourcePostgres,
+        AppResourcePostgresPostgresPermission,
+    )
+    HAS_POSTGRES_RESOURCE = True
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
+
+#: The app resource that names the app's Lakebase database (provisioned installs
+#: already use this name for their ``AppResourceDatabase``).
+DATABASE_RESOURCE_NAME = "app_database"
 
 # OAuth scopes the app's user-token calls need. Requested on create, and
 # ensured on every update so apps created before a scope was added get it.
@@ -502,12 +518,22 @@ def _create_databricks(
         _ensure_app_sp_can_manage(ws, app_name, _get_app_client_id(app))
         print()
 
-        # Step 3b: For autoscaling, create SP role via Postgres API
+        # Step 3b: For autoscaling, create SP role via Postgres API, then attach
+        # the branch to the app. The attach must follow the role: given the
+        # resource first, the platform creates its own role for the SP.
         if lakebase_type == "autoscaling":
             client_id = _get_app_client_id(app)
             if client_id:
+                # One branch for both, so the resource names the branch the
+                # role was created on.
+                branch_name = lakebase_result.get("branch_id") or "production"
                 print("Configuring SP role on autoscaling project...")
-                _ensure_sp_autoscaling_role(ws, lakebase_name, client_id)
+                _ensure_sp_autoscaling_role(
+                    ws, lakebase_name, client_id, branch_name=branch_name
+                )
+                _ensure_app_postgres_resource(
+                    ws, app_name, lakebase_name, branch_name=branch_name
+                )
             else:
                 print("   Warning: Could not get SP client ID — role setup skipped")
 
@@ -711,6 +737,15 @@ def _update_databricks(
         # The admin sync reads the app's ACL as the app's own service
         # principal, which needs CAN_MANAGE on the app. Never aborts the update.
         _ensure_app_sp_can_manage(ws, app_name)
+
+        # Attach an autoscaling install's Lakebase branch to the app, so the
+        # platform attributes the database's usage to it. The SP's role was
+        # created at install time. Never aborts the update.
+        if lakebase_type == "autoscaling":
+            branch_name = lakebase_result.get("branch_id") or "production"
+            _ensure_app_postgres_resource(
+                ws, app_name, lakebase_name, branch_name=branch_name
+            )
 
         # Trigger new deployment
         print("   Deploying...")
@@ -1678,8 +1713,14 @@ def _create_app(
     The app's service principal is available after creation, which is needed
     for setting up database schema permissions before deployment.
 
-    For autoscaling, AppResourceDatabase is not supported — connection info
-    is passed via env vars instead.
+    For autoscaling, no database resource is passed here. The app connects
+    through the ``LAKEBASE_*`` settings in ``app.yaml``, and its branch is
+    attached as an ``AppResourcePostgres`` later, by
+    ``_ensure_app_postgres_resource``, once ``_ensure_sp_autoscaling_role`` has
+    created the service principal's role. Given the resource here, the
+    platform creates that role itself (as ``dbrx-apps-<client id>``, with no
+    membership) and the installer's role setup then fails with "role with
+    that name already exists".
     """
     compute_size_enum = ComputeSize(compute_size)
 
@@ -1687,7 +1728,7 @@ def _create_app(
     if lakebase_type == "provisioned":
         app_resources = [
             AppResource(
-                name="app_database",
+                name=DATABASE_RESOURCE_NAME,
                 database=AppResourceDatabase(
                     instance_name=lakebase_name,
                     database_name="databricks_postgres",
@@ -1696,9 +1737,13 @@ def _create_app(
             )
         ]
     else:
-        # Autoscaling: no AppResourceDatabase, connection via env vars
+        # Autoscaling: no database resource at create. The branch is attached
+        # after the SP's role exists (_ensure_app_postgres_resource); the app
+        # connects via the LAKEBASE_* env vars either way.
         app_resources = []
-        logger.info("Autoscaling mode: skipping AppResourceDatabase (using env vars)")
+        logger.info(
+            "Autoscaling mode: database resource attached after the SP role exists"
+        )
 
     # Both branches: autoscaling builds an empty resource list, so appending
     # after the branch covers provisioned and autoscaling alike.
@@ -1756,6 +1801,92 @@ def _ensure_app_user_api_scopes(
     )
     print(f"   Scopes added: {', '.join(missing)}")
     return missing
+
+
+def _ensure_app_postgres_resource(
+    ws: WorkspaceClient,
+    app_name: str,
+    project_name: str,
+    branch_name: str = "production",
+) -> bool:
+    """Attach an autoscaling install's Lakebase branch to its app as a resource.
+
+    The resource is what lets the platform attribute the database's usage to
+    the app. It changes nothing about how the app connects: the app keeps
+    reading the ``LAKEBASE_*`` settings from ``app.yaml``.
+
+    Call this only after ``_ensure_sp_autoscaling_role``, with the same
+    ``branch_name``. Given the resource at ``apps.create`` instead, the
+    platform creates the service principal's role itself (as
+    ``dbrx-apps-<client id>``, with no membership) and the installer's own role
+    setup then fails with "role with that name already exists" (verified live,
+    Nov 2026). For the same reason it does nothing when the role SDK is
+    unavailable: ``_ensure_sp_autoscaling_role`` then creates no role.
+
+    ``apps.update`` is a full replace on the fields it accepts, so every
+    mutable field is carried and ``compute_size`` is omitted, as in
+    ``_ensure_app_user_api_scopes``. An app that already has a database
+    resource of either kind, or any resource named ``app_database``, is left
+    alone.
+
+    Never raises.
+
+    Returns:
+        True only when it attached the resource. False when nothing was
+        needed, or when it could not attach (a warning is printed).
+    """
+    if not HAS_POSTGRES_RESOURCE:
+        print(
+            f"   WARNING: Lakebase branch not attached to {app_name}: "
+            f"databricks-sdk is too old for AppResourcePostgres"
+        )
+        return False
+    if not HAS_ROLE_SDK:
+        print(
+            f"   WARNING: Lakebase branch not attached to {app_name}: "
+            f"databricks-sdk is too old for the Postgres role API, so the app's "
+            f"role may not exist"
+        )
+        return False
+    try:
+        current = ws.apps.get(name=app_name)
+        existing = list(current.resources or [])
+        if any(
+            resource.name == DATABASE_RESOURCE_NAME
+            or resource.postgres is not None
+            or resource.database is not None
+            for resource in existing
+        ):
+            return False
+        branch = f"projects/{project_name}/branches/{branch_name}"
+        database_resource = AppResource(
+            name=DATABASE_RESOURCE_NAME,
+            postgres=AppResourcePostgres(
+                branch=branch,
+                database=f"{branch}/databases/databricks-postgres",
+                permission=AppResourcePostgresPostgresPermission.CAN_CONNECT_AND_CREATE,
+            ),
+        )
+        ws.apps.update(
+            name=app_name,
+            app=App(
+                name=app_name,
+                description=current.description,
+                default_source_code_path=current.default_source_code_path,
+                user_api_scopes=current.user_api_scopes,
+                resources=existing + [database_resource],
+                # compute_size deliberately omitted — passing it is rejected.
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — the deploy continues without it
+        print(
+            f"   WARNING: could not attach the Lakebase branch to {app_name} as an "
+            f"app resource: {exc}"
+        )
+        print("   The app works without it; only its database usage is not attributed to it.")
+        return False
+    print("   Lakebase branch attached to the app as a resource")
+    return True
 
 
 def _ensure_app_sp_can_manage(

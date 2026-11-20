@@ -59,6 +59,7 @@ from databricks_tellr.deploy import (
     _get_app_client_id,
     _ensure_app_sp_can_manage,
     _ensure_sp_autoscaling_role,
+    _ensure_app_postgres_resource,
     delete,
 )
 
@@ -612,6 +613,11 @@ def create_local(
                 _ensure_sp_autoscaling_role(
                     ws, lakebase_name, client_id, branch_name=sp_branch
                 )
+                # Only now that the role exists: attach the same branch to the
+                # app (usage attribution). Never aborts the deploy.
+                _ensure_app_postgres_resource(
+                    ws, app_name, lakebase_name, branch_name=sp_branch
+                )
                 grant_job_id = config.get("owner_grant_job_id")
                 if branch_from_env and grant_job_id and client_id:
                     _trigger_owner_grant_job(
@@ -757,9 +763,14 @@ def update_local(
             sp_owner_grant_ran = False
             if client_id:
                 print("Configuring SP role on new branch...")
+                sp_branch = lakebase_result["branch_id"]
                 _ensure_sp_autoscaling_role(
-                    ws, lakebase_name, client_id,
-                    branch_name=lakebase_result["branch_id"],
+                    ws, lakebase_name, client_id, branch_name=sp_branch,
+                )
+                # Only now that the role exists: attach the same branch to the
+                # app (usage attribution). Never aborts the deploy.
+                _ensure_app_postgres_resource(
+                    ws, app_name, lakebase_name, branch_name=sp_branch
                 )
                 # update re-forks the branch (fresh prod copy), so the SP's
                 # fork-scoped tellr_app_owners membership from the previous
