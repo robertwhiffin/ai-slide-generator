@@ -111,6 +111,7 @@ export const DOM_ACCESS_SOURCE = `
       const cellRowSpan = describe(realm.HTMLTableCellElement.prototype, 'rowSpan');
       const cellColSpan = describe(realm.HTMLTableCellElement.prototype, 'colSpan');
       const columnSpan = describe(realm.HTMLTableColElement.prototype, 'span');
+      const fonts = captureFontAccess(realm, describe);
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -180,6 +181,8 @@ export const DOM_ACCESS_SOURCE = `
         rowSpan: (cell) => cellRowSpan.get.call(cell),
         colSpan: (cell) => cellColSpan.get.call(cell),
         columnSpan: (column) => columnSpan.get.call(column),
+        fontsReady: fonts.fontsReady,
+        loadingFontFaces: fonts.loadingFontFaces,
       };
     } catch (e) {
       return null;
@@ -191,6 +194,44 @@ export const DOM_ACCESS_SOURCE = `
           else frame.remove();
         } catch (e) { /* already detached — nothing to undo */ }
       }
+    }
+  }
+
+  // The document's font faces, each one's load status and the promise that
+  // settles once none is loading (render_slide.cjs pageFontsSettled), from the
+  // pristine realm when it has them all, else the page's own (OWN_DOM_ACCESS):
+  // apart from the rest, because not every Chromium exposes FontFaceSet as a
+  // global (the 147 headless shell does not), so its prototype is taken from
+  // the pristine document's own font set, and a browser without one must not
+  // cost the other reads their pristine accessors.
+  function captureFontAccess(realm, describe) {
+    try {
+      const documentFonts = describe(realm.Document.prototype, 'fonts');
+      const fontSet = documentFonts && typeof documentFonts.get === 'function'
+        ? documentFonts.get.call(realm.document)
+        : null;
+      const fontSetPrototype = fontSet ? realm.Object.getPrototypeOf(fontSet) : null;
+      const fontSetReady = fontSetPrototype ? describe(fontSetPrototype, 'ready') : null;
+      const fontSetForEach = fontSetPrototype ? fontSetPrototype.forEach : null;
+      const fontFaceStatus = realm.FontFace ? describe(realm.FontFace.prototype, 'status') : null;
+      if (!fontSetReady || typeof fontSetReady.get !== 'function' ||
+          typeof fontSetForEach !== 'function' ||
+          !fontFaceStatus || typeof fontFaceStatus.get !== 'function') {
+        return OWN_DOM_ACCESS;
+      }
+      return {
+        fontsReady: () => fontSetReady.get.call(documentFonts.get.call(document)),
+        // The set's own forEach visits each face it holds once, so the count needs no bound.
+        loadingFontFaces: () => {
+          let loading = 0;
+          fontSetForEach.call(documentFonts.get.call(document), (face) => {
+            if (fontFaceStatus.get.call(face) === 'loading') loading += 1;
+          });
+          return loading;
+        },
+      };
+    } catch (e) {
+      return OWN_DOM_ACCESS;
     }
   }
 
@@ -225,6 +266,18 @@ export const DOM_ACCESS_SOURCE = `
     rowSpan: (cell) => cell.rowSpan,
     colSpan: (cell) => cell.colSpan,
     columnSpan: (column) => column.span,
+    fontsReady: () => document.fonts.ready,
+    // The realm's own iterator, which page script can make endless, read under the bound.
+    loadingFontFaces: () => {
+      const faces = document.fonts.values();
+      let loading = 0;
+      for (let step = 0; step < COLLECTION_ITEM_LIMIT; step++) {
+        const next = faces.next();
+        if (!next || next.done) break;
+        if (next.value && next.value.status === 'loading') loading += 1;
+      }
+      return loading;
+    },
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.

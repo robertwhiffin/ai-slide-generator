@@ -7,12 +7,12 @@ emitted slide XML back, comparing geometry, colours and stacking order against
 what the browser itself laid out for the same document.
 
 * ``export_slides`` / ``export_corpus`` run the production export
-  (``build_slide_html`` then ``build_pptx_huashu``) with the engine selected
-  through ``TELLR_EXPORT_ENGINE``; ``export_documents`` exports complete
-  documents (corpus and inline slides mixed in one deck). Every export
-  (``export_logged`` too) fails, naming the line, when the snapshot engine
-  logs ``[html2pptx] model:``, its model check having dropped part of a
-  slide's model; a test that means it passes ``allow_model_drops=True``.
+  (``build_slide_html`` then ``build_pptx_huashu``); ``export_documents``
+  exports complete documents (corpus and inline slides mixed in one deck).
+  Every export (``export_logged`` too) fails, naming the line, when the
+  snapshot engine logs ``[html2pptx] model:``, its model check having dropped
+  part of a slide's model (``assert_no_model_drops``, for an export a test
+  runs itself); a test that means it passes ``allow_model_drops=True``.
   ``pinned_font_css`` is the corpus deck's CSS with its Google Fonts
   @import replaced by the same faces, embedded, for tests that compare
   exports of one page whole.
@@ -63,7 +63,9 @@ what the browser itself laid out for the same document.
   wrapper printed to stderr (``teed_stderr`` copies stderr for any block);
   ``slide_summaries`` and ``text_missing_reports``
   read the sidecar's own ``[html2pptx] slide summary`` and ``[html2pptx] text
-  missing:`` lines from it, never a line a slide's page logged.
+  missing:`` lines from it, never a line a slide's page logged;
+  ``summary_without_clock`` drops a summary's clock readings, so two exports
+  of one page compare equal.
 * ``text_loss`` runs the export fidelity harness's text-loss oracle
   (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck;
   ``slide_text_loss`` runs it on one slide of a deck, and
@@ -260,28 +262,39 @@ def slide_document(
 MODEL_DROP_PREFIX = "[html2pptx] model: "
 
 
+def assert_no_model_drops(stderr: str) -> None:
+    """Fail, naming the lines, when an export's stderr holds a ``[html2pptx] model:`` line.
+
+    The model check (``model_check.cjs``) keeps the whole of every model the
+    snapshot writes for a real slide, so the line, which says it dropped part
+    of one, is a snapshot change that writes a field the check does not know:
+    caught by every test that exports, not left as content missing from the
+    deck. Every export the helpers below run is checked; a test that runs
+    ``build_pptx_huashu`` itself checks what it teed (``teed_stderr``).
+    """
+    drops = [line for line in _sidecar_lines(stderr) if line.startswith(MODEL_DROP_PREFIX)]
+    assert not drops, (
+        "the model check dropped part of a real slide's model, which the snapshot must "
+        f"write whole (allow_model_drops=True if the test means it): {drops}"
+    )
+
+
 def _export_documents(
     documents: list[str],
     *,
     title: str,
-    engine: str,
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
     allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """``build_pptx_huashu`` over ``documents``; ``target`` is passed only when given.
 
-    The sidecar's stderr is teed while it runs. The model check
-    (``model_check.cjs``) keeps the whole of every model the snapshot
-    writes for a real slide, so a ``[html2pptx] model:`` line, which says
-    it dropped part of one, fails the export here, naming the line: a
-    snapshot change that writes a field the check does not know is caught
-    by every test that exports, not left as content missing from the deck.
-    A test that means to drop part of a model (a slide script that forges
-    one) says so with ``allow_model_drops=True``.
+    The sidecar's stderr is teed while it runs, and a slide model the model
+    check dropped part of fails the export (``assert_no_model_drops``). A test
+    that means to drop part of a model (a slide script that forges one) says so
+    with ``allow_model_drops=True``.
     """
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-    monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
     targets = {} if target is None else {"target": target}
     with teed_stderr() as buffer:
         exported = pptx_from_html_huashu.build_pptx_huashu(
@@ -291,13 +304,7 @@ def _export_documents(
             **targets,
         )
     if not allow_model_drops:
-        drops = [
-            line for line in _sidecar_lines(buffer.getvalue()) if line.startswith(MODEL_DROP_PREFIX)
-        ]
-        assert not drops, (
-            "the model check dropped part of a real slide's model, which the snapshot must "
-            f"write whole (allow_model_drops=True if the test means it): {drops}"
-        )
+        assert_no_model_drops(buffer.getvalue())
     return exported
 
 
@@ -307,12 +314,11 @@ def export_slides(
     css: str = DECK_CSS,
     scripts: str = "",
     external_scripts: tuple[str, ...] = (),
-    engine: str = "snapshot",
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
     allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
-    """Export slide bodies through the production wrapper with the chosen engine.
+    """Export slide bodies through the production wrapper.
 
     Each body becomes ``slide_document(body, ..., slide_id=f"snapshot-{n}")``
     (1-based ``n``), so ``slide_document(bodies[i], ..., slide_id=f"snapshot-{i + 1}")``
@@ -335,7 +341,6 @@ def export_slides(
     return _export_documents(
         documents,
         title=TEST_DECK_TITLE,
-        engine=engine,
         monkeypatch=monkeypatch,
         target=target,
         allow_model_drops=allow_model_drops,
@@ -373,14 +378,12 @@ def export_corpus(
     prefixes: list[str],
     *,
     monkeypatch: pytest.MonkeyPatch,
-    engine: str = "snapshot",
     allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export corpus slides (by prefix, in the given order) with the corpus deck CSS and scripts."""
     return _export_documents(
         [corpus_document(prefix) for prefix in prefixes],
         title=CORPUS_DECK.get("title", TEST_DECK_TITLE),
-        engine=engine,
         monkeypatch=monkeypatch,
         allow_model_drops=allow_model_drops,
     )
@@ -390,7 +393,7 @@ def export_documents(
     documents: list[str],
     *,
     monkeypatch: pytest.MonkeyPatch,
-    engine: str = "snapshot",
+    title: str = TEST_DECK_TITLE,
     allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export complete slide documents, one slide each and in order, through the production wrapper.
@@ -401,8 +404,7 @@ def export_documents(
     """
     return _export_documents(
         documents,
-        title=TEST_DECK_TITLE,
-        engine=engine,
+        title=title,
         monkeypatch=monkeypatch,
         allow_model_drops=allow_model_drops,
     )
@@ -464,7 +466,6 @@ def export_logged(
     documents: list[str],
     *,
     monkeypatch: pytest.MonkeyPatch,
-    engine: str = "snapshot",
     target: str | None = None,
     allow_model_drops: bool = False,
 ) -> LoggedExport:
@@ -478,7 +479,6 @@ def export_logged(
         pptx, failures = _export_documents(
             documents,
             title=TEST_DECK_TITLE,
-            engine=engine,
             monkeypatch=monkeypatch,
             target=target,
             allow_model_drops=allow_model_drops,
@@ -506,6 +506,15 @@ def slide_summaries(stderr: str) -> list[dict]:
         for line in _sidecar_lines(stderr)
         if line.startswith(SLIDE_SUMMARY_PREFIX)
     ]
+
+
+# The summary keys that are clock readings: two exports of one page differ in them.
+CLOCK_SUMMARY_KEYS = ("captureMs",)
+
+
+def summary_without_clock(summary: dict) -> dict:
+    """A slide summary without its clock readings, so two exports of one page compare equal."""
+    return {key: value for key, value in summary.items() if key not in CLOCK_SUMMARY_KEYS}
 
 
 def text_missing_reports(stderr: str) -> list[list[str]]:

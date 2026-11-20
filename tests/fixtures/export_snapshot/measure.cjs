@@ -104,7 +104,7 @@ const SIDECAR_DIR = path.resolve(__dirname, '..', '..', '..', 'services', 'pptx-
 const { chromium } = require(path.join(SIDECAR_DIR, 'node_modules', 'playwright'));
 
 function launchOptions() {
-  // Same launch as html2pptx.js: Chrome on macOS, Chromium without the sandbox
+  // The export's launch (render_slide.cjs): Chrome on macOS, Chromium without the sandbox
   // elsewhere, and the inherited env so LD_LIBRARY_PATH reaches the browser.
   const options = { env: { ...process.env } };
   if (process.platform === 'darwin') {

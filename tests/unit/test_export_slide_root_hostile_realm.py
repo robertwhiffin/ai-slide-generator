@@ -40,10 +40,8 @@ A note on what these tests do NOT cover. A hostile realm can also replace a
 collection's ``[Symbol.iterator]``, which every ``Array.from(<collection>)`` in
 this pass consumed — including, one line above the descent, the loop over this
 locator's own wrapper NodeList. That residual is closed, and is pinned by
-``test_export_collection_iteration_hostile_realm.py``; what stays open there is
-the same defect in the vendored walker, ``html2pptx.js``. (The line numbers this
-note used to carry were correct when written and stale two commits later; the
-sibling suite names functions and sites instead.)
+``test_export_collection_iteration_hostile_realm.py``, which holds the snapshot's
+reads to the same standard.
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.

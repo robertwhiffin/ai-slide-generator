@@ -195,6 +195,10 @@ function fillsGrid(cells, rows, columns) {
   return count === rows * columns;
 }
 
+// A native table: a grid of at least one row and one column, as the snapshot
+// writes one (an empty grid is no table there), whose cells fill it. pptxgenjs
+// throws on a table with no rows, failing the whole slide, and writes a row of
+// no cells for one with no columns.
 function isTable(item) {
   const grid = hasNumbers(item, ['x', 'y']) &&
     isListOf(item.colWidths, isNumber) &&
@@ -202,6 +206,7 @@ function isTable(item) {
   if (!grid) return false;
   const rows = item.rowHeights.length;
   const columns = item.colWidths.length;
+  if (rows < 1 || columns < 1) return false;
   return isListOf(item.cells, (cell) => isCell(cell, rows, columns)) && fillsGrid(item.cells, rows, columns);
 }
 

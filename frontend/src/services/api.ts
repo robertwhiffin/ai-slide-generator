@@ -1753,12 +1753,12 @@ export const api = {
   },
 
   /**
-   * Local-only "huashu (test)" export. Sends session_id; backend fetches
-   * the deck and runs alchaincyf/huashu-design's html2pptx.js pipeline
-   * (server-side Playwright + pptxgenjs) over each slide's complete HTML.
+   * The "huashu" editable PPTX export. Sends session_id; backend fetches the
+   * deck and runs the snapshot engine (server-side Playwright reads each
+   * slide's complete HTML as the browser laid it out, pptxgenjs writes it).
    * Returns the .pptx blob plus per-slide validation failures (parsed
    * from the X-Huashu-Failures response header) so the UI can surface
-   * what huashu rejected.
+   * what the export rejected.
    */
   async huashuExportAvailable(): Promise<{ available: boolean }> {
     try {

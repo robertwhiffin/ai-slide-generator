@@ -3006,15 +3006,14 @@ class TestTablesInAHostileRealm:
         ``nextSibling`` return the node itself, ``childNodes`` claims a billion
         entries, ``textContent`` and ``data`` return a decoy). The export
         completes within the hostile bound, and the table is one native frame
-        whose cells read the slide's real text, not the decoy.
+        whose cells read the slide's real text, not the decoy; its model whole,
+        so no item is dropped from it (``export_documents``).
         """
-        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
         monkeypatch.setattr(
             pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
         )
-        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-            "snapshot tables", [{"html": _with_table(HOSTILE_TEXT_NODES)}], bypass_validation=True
+        pptx, failures = export_documents(
+            [_with_table(HOSTILE_TEXT_NODES)], monkeypatch=monkeypatch, title="snapshot tables"
         )
 
         assert pptx and failures == [], f"the hostile deck did not export: {failures}"

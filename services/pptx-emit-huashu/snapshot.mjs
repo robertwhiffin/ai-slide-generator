@@ -350,7 +350,7 @@ async function snapshotPage(config, pseudoData) {
   }
 
   // ─── the slide background ────────────────────────────────────────────
-  // The background transfer (BG_TRANSFER_SOURCE) has already moved the slide
+  // The background transfer (preprocess.mjs) has already moved the slide
   // root's ground onto body, so body is the slide's ground: its raster image if
   // it has one, else its colour composited over html's over the white canvas.
   function backgroundImageOf(value) {

@@ -1,11 +1,13 @@
 'use strict';
 // The snapshot engine, one slide at a time:
 //
-//   1. load and settle   networkidle, document.fonts.ready, the canvas wait, then
-//                        every animation finished, so a fade-in exports settled;
-//   2. preprocess        BG_TRANSFER_SOURCE: the slide root's ground onto body,
-//                        nothing that moves layout;
-//   3. validate          the legacy converter's body and text-box checks;
+//   1. load and settle   networkidle, every font face the text asks for loaded
+//                        (pageFontsSettled), the canvas wait, then every
+//                        animation finished, so a fade-in exports settled;
+//   2. preprocess        PREPROCESS_SOURCE (preprocess.mjs): the slide root's
+//                        ground onto body, nothing that moves layout;
+//   3. validate          body overflow, the layout's size and text too near
+//                        the bottom edge;
 //   4. pseudo-elements   pseudo.mjs: every ::before, ::after and list item
 //                        ::marker, read from Node through the DevTools
 //                        protocol, read-only; nothing is inserted into the
@@ -24,7 +26,7 @@
 //                        lacks a word of the reference, then the slide's
 //                        summary line, both on stderr (spec §6).
 //
-// renderSlide(htmlFile, pres, { bypassValidation, preProcessSource, target })
+// renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir })
 //   -> { slide, summary }
 // Each slide that renders logs
 //   [html2pptx] text missing: <json array>   when a word is missing, then
@@ -32,12 +34,10 @@
 // which pptx_from_html_huashu.py echoes and the export fidelity harness reads
 // (scripts/export_fidelity/run.py export_pptx). A slide that fails logs
 // neither.
-// preProcessSource defaults to BG_TRANSFER_SOURCE; null runs no preprocess.
 // target is the renderer the deck is written for, 'pptx' (the default) or
 // 'gslides': emit_model.cjs writes the few constructs the two place apart
 // for it (emit_text.cjs writtenParagraphs, emit_typography.cjs fontSizePt).
-// The `slide` matches what html2pptx.js returns, so emit_deck.mjs attaches
-// speaker notes to it the same way for both engines.
+// emit_deck.mjs attaches the speaker notes to the returned `slide`.
 
 const path = require('path');
 const { chromium } = require('playwright');
@@ -58,6 +58,10 @@ const DEVICE_SCALE_FACTOR = 2;
 
 const NETWORK_IDLE_TIMEOUT_MS = 4000;
 const FONTS_READY_TIMEOUT_MS = 5000;
+// How many times the font wait reads the faces again after one started
+// loading: each round waits for document.fonts.ready, all within
+// FONTS_READY_TIMEOUT_MS.
+const FONT_SETTLE_ROUNDS = 8;
 const CANVAS_READY_TIMEOUT_MS = 5000;
 // Chart.js animates for 1000 ms by default, after the chart-init IIFE's own
 // setTimeout chain in build_slide_html; 2000 ms covers both.
@@ -69,12 +73,34 @@ const MIN_BOTTOM_MARGIN_IN = 0.5;
 
 // ─── page-side reads ───────────────────────────────────────────────────
 // Each runs in the page after DOM_ACCESS_SOURCE, whose helpers (queryAll,
-// queryOne) and limits are their free names. They are stringified, so they
-// close over nothing here. Slide script has already run in this page by the
+// queryOne) and limits are their free names, and after the constants it is
+// composed with. They are stringified, so they close over nothing here. Slide script has already run in this page by the
 // time any of them fires, so none of them walks the DOM any other way.
 
 function pageCanvasCount() {
   return queryAll('canvas').length;
+}
+
+// Every font face the slide's text uses has loaded. document.fonts.ready alone
+// can resolve while one has yet to start: it settles on the loads in flight
+// when it is read, and the layout asks for a face (a weight, a unicode-range
+// subset) only once it lays out text that needs it. So each round forces the
+// layout, through body's box, and the faces are settled once none is loading.
+// A face that stays unloaded is one no text on the slide asks for (a Google
+// Fonts sheet declares a latin-ext subset of every weight: measured, 8 of the
+// corpus deck's 12 faces stay unloaded), so it is not waited for. The faces,
+// their status and the ready promise are read through the pristine accessors:
+// slide script can replace document.fonts, its iteration and a face's status.
+// Resolves whether the faces settled within FONT_SETTLE_ROUNDS.
+async function pageFontsSettled() {
+  const dom = domAccess();
+  const body = queryOne('body');
+  for (let round = 0; round < FONT_SETTLE_ROUNDS; round++) {
+    await dom.fontsReady();
+    if (body) dom.clientRects(body);
+    if (dom.loadingFontFaces() === 0) return true;
+  }
+  return false;
 }
 
 // Every canvas has a drawing buffer: Chart.js sets the size once it initialises.
@@ -162,10 +188,12 @@ function loadPageSources() {
       import('./pseudo.mjs'),
     ])
       .then(([access, preprocess, snapshot, pseudo]) => {
-        // `helpers` are the page functions `pageFunction` calls by name.
-        const withDomAccess = (pageFunction, helpers = []) => `(() => {
+        // `helpers` are the page functions `pageFunction` calls by name, and
+        // `constants` the values it reads by name, each written as a const.
+        const withDomAccess = (pageFunction, helpers = [], constants = {}) => `(() => {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${access.DOM_ACCESS_SOURCE}
+${Object.entries(constants).map(([name, value]) => `  const ${name} = ${JSON.stringify(value)};`).join('\n')}
 ${helpers.map((helper) => helper.toString()).join('\n')}
   return (${pageFunction.toString()})();
 })()`;
@@ -173,9 +201,10 @@ ${helpers.map((helper) => helper.toString()).join('\n')}
           canvasCount: withDomAccess(pageCanvasCount),
           canvasesReady: withDomAccess(pageCanvasesReady),
           finishAnimations: withDomAccess(pageFinishAnimations),
+          fontsSettled: withDomAccess(pageFontsSettled, [], { FONT_SETTLE_ROUNDS }),
           bodyDimensions: withDomAccess(pageBodyDimensions),
           renderedText: withDomAccess(pageRenderedText, [pageFinishAnimations]),
-          bgTransfer: preprocess.BG_TRANSFER_SOURCE,
+          preprocess: preprocess.PREPROCESS_SOURCE,
           // The snapshot page function applied to what pseudo.mjs read: JSON is
           // a JavaScript expression, so the data is the call's argument.
           snapshotOf: (pseudoData) => `${snapshot.SNAPSHOT_SOURCE}(${JSON.stringify(pseudoData)})`,
@@ -227,15 +256,20 @@ function forwardConsole(page) {
 }
 
 // ─── settle ────────────────────────────────────────────────────────────
-async function waitForFonts(page) {
-  // Bounded here, not in the page: a font set that never reports ready must
-  // cost seconds, not the export.
+// pageFontsSettled, bounded here, not in the page: a font set that never
+// reports ready, or a face that never finishes loading, must cost seconds, not
+// the export. Either is said on stderr, since the slide is then read with the
+// fonts it has.
+async function waitForFonts(page, sources) {
   let timer;
   try {
-    await Promise.race([
-      page.evaluate('document.fonts.ready.then(() => true)'),
-      new Promise((resolve) => { timer = setTimeout(resolve, FONTS_READY_TIMEOUT_MS); }),
+    const settled = await Promise.race([
+      page.evaluate(sources.fontsSettled),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), FONTS_READY_TIMEOUT_MS); }),
     ]);
+    if (settled !== true) {
+      console.error(`[html2pptx] the slide's fonts did not finish loading within ${FONTS_READY_TIMEOUT_MS} ms — continuing`);
+    }
   } catch (e) {
     console.error(`[html2pptx] document.fonts.ready failed: ${oneLine(e.message)} — continuing`);
   } finally {
@@ -265,22 +299,16 @@ async function settle(page, sources) {
   try {
     await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS });
   } catch (e) { /* ignore — some slides legitimately keep a long-poll open */ }
-  await waitForFonts(page);
+  await waitForFonts(page, sources);
   await waitForCanvases(page, sources);
   return finishAnimations(page, sources);
 }
 
 // ─── preprocess ────────────────────────────────────────────────────────
-// The same log lines html2pptx.js prints, so both engines read alike in the log.
-async function runPreprocess(page, preProcessSource) {
-  if (!preProcessSource) return null;
+async function runPreprocess(page, sources) {
   try {
-    const result = await page.evaluate(preProcessSource);
+    const result = await page.evaluate(sources.preprocess);
     if (result && typeof result === 'object') {
-      // The counts come from the page, so each is printed on one line.
-      console.log(`[preprocess] wrapped ${oneLine(result.wrapped || 0)} text nodes, ` +
-                  `replaced ${oneLine(result.replacedImgs || 0)} bg-image divs, ` +
-                  `peeled ${oneLine(result.peeledTextTags || 0)} text tags`);
       // No slide root means no background transfer, so this slide exports on the
       // untouched body default (white): indistinguishable in the .pptx from a
       // locator regression. The page-side '[preprocess] no slide root' line
@@ -298,7 +326,9 @@ async function runPreprocess(page, preProcessSource) {
 }
 
 // ─── validation ────────────────────────────────────────────────────────
-// The legacy converter's three checks, with its message texts.
+// Three authoring checks, with the message texts the export has always given:
+// body overflowing by more than TELLR_OVERFLOW_TOLERANCE_PX, a body whose size
+// is not the presentation layout's, and text over 12 pt too near the bottom.
 async function readBodyDimensions(page, sources) {
   const bodyDimensions = await page.evaluate(sources.bodyDimensions);
   const errors = [];
@@ -477,11 +507,6 @@ async function renderSlide(htmlFile, pres, options = {}) {
 
   try {
     const sources = await loadPageSources();
-    // The snapshot reads the slide root's ground from body, so the background
-    // transfer is the default preprocess; only an explicit null skips it.
-    const preProcessSource = options.preProcessSource === undefined
-      ? sources.bgTransfer
-      : options.preProcessSource;
     const browser = await chromium.launch(launchOptions(tmpDir));
     const filePath = path.isAbsolute(htmlFile) ? htmlFile : path.join(process.cwd(), htmlFile);
     let bodyDimensions;
@@ -498,7 +523,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
       forwardConsole(page);
       await page.goto(`file://${filePath}`);
       animations = await settle(page, sources);
-      preprocessResult = await runPreprocess(page, preProcessSource);
+      preprocessResult = await runPreprocess(page, sources);
       // The background transfer writes body's inline style, which starts any
       // transition a deck declares on it; finish that too before reading.
       await finishAnimations(page, sources);

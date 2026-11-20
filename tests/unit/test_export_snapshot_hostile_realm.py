@@ -1,13 +1,12 @@
 """Snapshot engine: the text walk in a HOSTILE JS realm.
 
 ``SLIDE_CSP`` carries ``script-src 'unsafe-inline'``, so inline script in an
-uploaded slide runs in the export page before the snapshot does. The legacy
-hostile-realm suites (``test_export_*_hostile_realm.py``) pin the preprocess pass
-and the vendored walker. This module pins the snapshot engine
-(``TELLR_EXPORT_ENGINE=snapshot``), whose text walk reads child NODES (text
-included), each node's type and each text node's characters, and measures every
-word with a ``Range``. Each of those reads is a configurable property page script
-can replace.
+uploaded slide runs in the export page before the snapshot does. The sibling
+hostile-realm suites (``test_export_*_hostile_realm.py``) pin the background
+transfer and the settle reads. This module pins the snapshot's text walk, which
+reads child NODES (text included), each node's type and each text node's
+characters, and measures every word with a ``Range``. Each of those reads is a
+configurable property page script can replace.
 
 * ``hostile_text_nodes`` replaces every node-level read the text walk could make:
   ``firstChild`` and ``nextSibling`` return the node itself, ``nodeType`` is
@@ -18,12 +17,15 @@ can replace.
 * ``hostile_range_rects`` makes ``Range.getClientRects`` report a trillion rects.
   Correctness is forfeit (no rect is real), but the export must terminate and
   announce the loss with the ``[html2pptx] collection`` line.
-* Every other hostile fixture of the legacy suites must still terminate under the
-  snapshot engine, and the two legacy twins must still export identically.
+* Every other hostile fixture of the sibling suites must terminate, and the two
+  twins of the collection-iteration suite must export identically.
 
 Each fixture is a byte-identical copy of its benign twin plus its ``<script>``,
 which publishes on ``document.title`` what it managed to replace and what a
 reader of the realm now sees, so the poisoning is proven rather than assumed.
+Every export goes through the model check's zero-drop guard
+(``export_documents``): a twin pair whose models both lose the same item would
+otherwise still compare equal.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import json
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import export_documents
 from tests.unit.test_export_collection_iteration_hostile_realm import (
     HOSTILE_EXPORT_TIMEOUT_SECONDS,
 )
@@ -45,15 +48,15 @@ EXPORT_TITLE = "snapshot hostile realm"
 TEXT_NODES = "hostile_text_nodes"
 RANGE_RECTS = "hostile_range_rects"
 
-# Each hostile fixture and the benign twin it must export identically to under
-# the snapshot engine: this module's text-node fixture, then the legacy twins.
+# Each hostile fixture and the benign twin it must export identically to: this
+# module's text-node fixture, then the collection-iteration suite's twins.
 SNAPSHOT_TWINS = {
     TEXT_NODES: "collection_passes",
     "hostile_collection_passes": "collection_passes",
     "hostile_wrapper_iterator": "wrapped_nested_bare_slide",
 }
 
-# Every other hostile fixture: it must terminate under the snapshot engine.
+# Every other hostile fixture: its export must terminate.
 TERMINATION_FIXTURES = tuple(
     sorted(
         path.stem
@@ -80,20 +83,17 @@ COLLECTION_LOSS_LINE = "[html2pptx] collection"
 
 
 def _export_snapshot(monkeypatch: pytest.MonkeyPatch, fixture: str) -> tuple[bytes, list[dict]]:
-    """Export one fixture slide with the snapshot engine, bounded so a hang fails in seconds.
+    """Export one fixture slide, bounded so a hang fails in seconds, its model whole.
 
     A sidecar that does not finish within ``HOSTILE_EXPORT_TIMEOUT_SECONDS`` raises
-    ``HuashuExportError``.
+    ``HuashuExportError``; a slide model the model check dropped part of fails
+    the export (``export_documents``).
     """
-    monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-    monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
     monkeypatch.setattr(
         pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
     )
     html = (FIXTURE_DIR / f"{fixture}.html").read_text(encoding="utf-8")
-    return pptx_from_html_huashu.build_pptx_huashu(
-        EXPORT_TITLE, [{"html": html}], bypass_validation=True
-    )
+    return export_documents([html], monkeypatch=monkeypatch, title=EXPORT_TITLE)
 
 
 def test_every_other_hostile_fixture_is_covered() -> None:

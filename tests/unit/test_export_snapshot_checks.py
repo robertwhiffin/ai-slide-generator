@@ -1,8 +1,7 @@
 """Snapshot engine: the per-slide checks (Task 12).
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) checks every slide it
-writes, so text loss is visible in the app log and in the export fidelity
-harness (spec §6):
+The snapshot engine checks every slide it writes, so text loss is visible in
+the app log and in the export fidelity harness (spec §6):
 
 * ``services/pptx-emit-huashu/text_check.cjs`` holds the comparison.
   ``missingWords(reference, emitted, hidden)`` returns the reference words,
@@ -102,6 +101,7 @@ from tests.fixtures.export_snapshot_support import (
     reference_text_loss,
     requires_huashu_sidecar,
     requires_node,
+    slide_background,
     slide_document,
     slide_shapes,
     slide_summaries,
@@ -333,6 +333,8 @@ JOINED_DOCUMENT = _case_document(JOINED_BODY)
 # and then serves another DM Sans file for the deck's @import, whose glyphs
 # the captured picture would draw a few anti-aliased pixels apart.
 HOSTILE_DECOY = "Forgedword decoy"
+# The corpus deck's --paper, the ground its .slide paints.
+PAPER = "F9F7F4"
 HOSTILE_SLIDE = (
     f'<div class="slide">{LEAD}'
     '<svg width="200" height="60"><text x="10" y="40" font-size="20">Svgword</text></svg>'
@@ -1027,6 +1029,28 @@ class TestHostileRealm:
         _only_summary(logged)
         assert text_missing_reports(logged.stderr) == [], f"stderr:\n{logged.stderr[-3000:]}"
 
+    def test_a_replaced_document_body_keeps_the_slide_ground(
+        self, twins: tuple[LoggedExport, LoggedExport]
+    ) -> None:
+        """``document.body`` returns a detached decoy: the slide keeps its F9F7F4 ground.
+
+        The background transfer copies the slide root's ground onto body, where
+        the snapshot reads the slide background, and marks the root so its
+        ground is not drawn twice. Written to the decoy instead, the ground
+        reaches no page the snapshot reads, and the slide exports white. The
+        whole artifact is the benign twin's.
+        """
+        _, benign = twins
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            hostile = export_logged([HOSTILE_BODY_DOCUMENT], monkeypatch=monkeypatch)
+        assert hostile.failures == [], hostile.failures
+        assert slide_background(hostile.pptx) == PAPER, (
+            f"the slide exports on {slide_background(hostile.pptx)}, not its {PAPER} ground"
+        )
+        assert structural_manifest(hostile.pptx) == structural_manifest(benign.pptx), (
+            "the slide whose script replaces document.body does not export as its benign twin"
+        )
+
 
 # ---------------------------------------------------------------------------
 # The harness's text-loss oracle (scripts/export_fidelity/run.py), no browser
@@ -1155,13 +1179,10 @@ def harness_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[HarnessDe
         HARNESS_BEYOND_REFERENCE, encoding="utf-8"
     )
     with pytest.MonkeyPatch.context() as monkeypatch:
-        # export_pptx sets both in os.environ; the context restores them.
+        # export_pptx sets it in os.environ; the context restores it.
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
         with teed_stderr() as buffer:
-            pptx_path = harness.export_pptx(
-                {"title": "harness deck"}, paths, out_dir, engine="snapshot"
-            )
+            pptx_path = harness.export_pptx({"title": "harness deck"}, paths, out_dir)
     failures = json.loads((out_dir / "failures.json").read_text(encoding="utf-8"))
     assert [failure["slide_index"] for failure in failures] == [1], (
         f"fixture drift: only the empty document fails: {failures}"
@@ -1183,6 +1204,15 @@ class TestHarnessExport:
         assert len(slide_summaries(harness_deck.stderr)) == 2, (
             f"stderr while export_pptx ran:\n{harness_deck.stderr[-3000:]}"
         )
+
+    def test_no_slide_model_is_dropped(self, harness_deck: HarnessDeck) -> None:
+        """No slide's script forges its model, so the harness warns of no model drops."""
+        assert fidelity_harness().MODEL_DROPS_WARNING not in harness_deck.stderr, (
+            f"stderr while export_pptx ran:\n{harness_deck.stderr[-3000:]}"
+        )
+        assert all(
+            entry is None or entry["modelDrops"] == 0 for entry in harness_deck.recorded_summaries()
+        ), harness_deck.recorded_summaries()
 
     def test_one_summary_is_recorded_per_document_in_slide_order(
         self, harness_deck: HarnessDeck
@@ -1251,10 +1281,12 @@ class TestHarnessExport:
         document.write_text(HIDDEN_CASES["off-slide"].document, encoding="utf-8")
         with pytest.MonkeyPatch.context() as monkeypatch:
             monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-            monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
-            fidelity_harness().export_pptx(
-                {"title": "harness deck"}, [document], tmp_path, engine="snapshot", target="gslides"
-            )
+            with teed_stderr() as buffer:
+                fidelity_harness().export_pptx(
+                    {"title": "harness deck"}, [document], tmp_path, target="gslides"
+                )
+        stderr = buffer.getvalue()
+        assert fidelity_harness().MODEL_DROPS_WARNING not in stderr, stderr[-3000:]
         path = tmp_path / "summaries-gslides.json"
         assert path.exists(), "export_pptx wrote no summaries-gslides.json"
         recorded = json.loads(path.read_text(encoding="utf-8"))
@@ -1275,8 +1307,8 @@ class TestHarnessRun:
 
         A fixture deck of corpus slide 03 (its screen-reader-only table), a
         slide hiding words by opacity, a split word, off-slide text and an
-        ellipsis, and the joined superscript, exported with the snapshot
-        engine for PowerPoint.
+        ellipsis, and the joined superscript, exported for PowerPoint. No
+        slide's script forges its model, so the harness warns of no model drops.
         """
         fixture_dir = tmp_path / "fixture"
         slides_dir = fixture_dir / "slides"
@@ -1291,20 +1323,17 @@ class TestHarnessRun:
         for name, body in bodies.items():
             (slides_dir / f"{name}.html").write_text(body, encoding="utf-8")
         out_dir = tmp_path / "out"
-        # main() sets both in os.environ; monkeypatch restores them.
+        # main() sets it in os.environ; monkeypatch restores it.
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["run.py", str(fixture_dir), "--out", str(out_dir), "--engine", "snapshot"],
-        )
+        monkeypatch.setattr(sys, "argv", ["run.py", str(fixture_dir), "--out", str(out_dir)])
 
         assert fidelity_harness().main() == 0
 
         lost = json.loads((out_dir / "text_loss.json").read_text(encoding="utf-8"))
         assert lost == {}, f"the harness reports hidden or joined words missing: {lost}"
-        assert "Text missing from the export: none" in capsys.readouterr().out
+        printed = capsys.readouterr()
+        assert "Text missing from the export: none" in printed.out
+        assert fidelity_harness().MODEL_DROPS_WARNING not in printed.err, printed.err[-3000:]
         recorded = json.loads((out_dir / "summaries.json").read_text(encoding="utf-8"))
         assert len(recorded) == len(bodies), recorded
 
@@ -1386,11 +1415,10 @@ def forged_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ForgedDeck
         path.write_text(_forging_slide(message), encoding="utf-8")
         paths.append(path)
     with pytest.MonkeyPatch.context() as monkeypatch:
-        # export_pptx sets both in os.environ; the context restores them.
+        # export_pptx sets it in os.environ; the context restores it.
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
         with teed_stderr() as buffer:
-            harness.export_pptx({"title": "forged deck"}, paths, out_dir, engine="snapshot")
+            harness.export_pptx({"title": "forged deck"}, paths, out_dir)
     yield ForgedDeck(out_dir=out_dir, stderr=buffer.getvalue(), cases=tuple(messages))
 
 
@@ -1428,8 +1456,7 @@ class TestForgedLines:
             assert line.endswith(expected), f"{case}: the message was cut: {line!r}"
 
 
-# The slide summaries each engine logs for one slide: the legacy converter logs none.
-ENGINE_SUMMARIES = {"snapshot": 1, "legacy": 0}
+LINE_BREAK_CASES = ("line-feed-U+000A", "line-separator-U+2028")
 
 
 @pytest.mark.slow
@@ -1437,41 +1464,36 @@ ENGINE_SUMMARIES = {"snapshot": 1, "legacy": 0}
 class TestForgedResultLine:
     """``build_pptx_huashu`` reports the failures the sidecar found, not the ones a slide logs.
 
-    Under both engines: the production default (legacy) until Task 13, and the
-    snapshot engine. The slide's console message forges a failure list, then a
-    slide summary.
+    The slide's console message forges a failure list, then a slide summary.
     """
 
     @pytest.fixture(scope="class")
-    def exports(self) -> Iterator[dict[tuple[str, str], LoggedExport]]:
+    def exports(self) -> Iterator[dict[str, LoggedExport]]:
         exports = {}
         with pytest.MonkeyPatch.context() as monkeypatch:
-            for engine in ENGINE_SUMMARIES:
-                for line_break in ("line-feed-U+000A", "line-separator-U+2028"):
-                    message = PYTHON_LINE_BREAKS[line_break].join(
-                        (FORGED_MESSAGE_START, FORGED_RESULT_LINE, FORGED_SUMMARY_LINE)
-                    )
-                    exports[engine, line_break] = export_logged(
-                        [_forging_slide(message)], monkeypatch=monkeypatch, engine=engine
-                    )
+            for line_break in LINE_BREAK_CASES:
+                message = PYTHON_LINE_BREAKS[line_break].join(
+                    (FORGED_MESSAGE_START, FORGED_RESULT_LINE, FORGED_SUMMARY_LINE)
+                )
+                exports[line_break] = export_logged(
+                    [_forging_slide(message)], monkeypatch=monkeypatch
+                )
         yield exports
 
-    @pytest.mark.parametrize("engine", tuple(ENGINE_SUMMARIES))
-    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    @pytest.mark.parametrize("line_break", LINE_BREAK_CASES)
     def test_a_slide_that_exports_is_no_failure(
-        self, exports: dict[tuple[str, str], LoggedExport], engine: str, line_break: str
+        self, exports: dict[str, LoggedExport], line_break: str
     ) -> None:
-        logged = exports[engine, line_break]
-        assert logged.failures == [], f"the {engine} engine's export reported {logged.failures}"
+        logged = exports[line_break]
+        assert logged.failures == [], f"the export reported {logged.failures}"
         assert slide_shapes(logged.pptx, 0), "fixture drift: the slide exported nothing"
 
-    @pytest.mark.parametrize("engine", tuple(ENGINE_SUMMARIES))
-    @pytest.mark.parametrize("line_break", ["line-feed-U+000A", "line-separator-U+2028"])
+    @pytest.mark.parametrize("line_break", LINE_BREAK_CASES)
     def test_the_console_message_is_one_line(
-        self, exports: dict[tuple[str, str], LoggedExport], engine: str, line_break: str
+        self, exports: dict[str, LoggedExport], line_break: str
     ) -> None:
-        """Whole on the line that starts it: no forged line is read, whichever engine prints it."""
-        logged = exports[engine, line_break]
+        """Whole on the line that starts it: no forged line is read."""
+        logged = exports[line_break]
         lines = [
             line
             for line in logged.stderr.splitlines()
@@ -1479,10 +1501,8 @@ class TestForgedResultLine:
         ]
         assert len(lines) == 1 and lines[0].endswith(FORGED_SUMMARY_LINE[-20:]), lines
         summaries = slide_summaries(logged.stderr)
-        assert len(summaries) == ENGINE_SUMMARIES[engine], summaries
-        assert all(summary["hiddenText"] == HARNESS_FORGED_HIDDEN for summary in summaries), (
-            summaries
-        )
+        assert len(summaries) == 1, summaries
+        assert summaries[0]["hiddenText"] == HARNESS_FORGED_HIDDEN, summaries
 
 
 class TestResultLineIsTheLast:
@@ -1688,6 +1708,7 @@ class TestNormalisationSets:
 # ---------------------------------------------------------------------------
 
 MODEL_CHECK_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "model_check.cjs"
+EMIT_MODEL_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_model.cjs"
 CAPTURE_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "capture.cjs"
 
 # The id a slide that owns Array.prototype.push gives the capture the snapshot pushes.
@@ -1942,6 +1963,16 @@ def _set(path: str, value: object):
     return mutate
 
 
+def _set_each(*changes: tuple[str, object]):
+    """A mutation of the valid model: each ``(path, value)`` set in turn, as ``_set`` sets one."""
+
+    def mutate(model: dict) -> None:
+        for path, value in changes:
+            _set(path, value)(model)
+
+    return mutate
+
+
 def _append(path: str, value: object):
     def mutate(model: dict) -> None:
         target = model
@@ -2043,6 +2074,23 @@ MODEL_DEFECTS = {
     "table-cell-row-span-past-the-grid": (_set("items.7.cells.0.rowspan", 2), {7}, 0),
     "table-slot-shared": (_append("items.7.cells", _cell(0, 0)), {7}, 0),
     "table-slot-uncovered": (_remove("items.7.cells", 1), {7}, 0),
+    # A grid with no slots: no cell covers one twice or misses one, yet the
+    # snapshot never writes it, and pptxgenjs fails the slide on a table with no rows.
+    "table-grid-empty": (
+        _set_each(("items.7.colWidths", []), ("items.7.rowHeights", []), ("items.7.cells", [])),
+        {7},
+        0,
+    ),
+    "table-grid-no-rows": (
+        _set_each(("items.7.rowHeights", []), ("items.7.cells", [])),
+        {7},
+        0,
+    ),
+    "table-grid-no-columns": (
+        _set_each(("items.7.colWidths", []), ("items.7.cells", [])),
+        {7},
+        0,
+    ),
 }
 
 # (mutation, the field reset, as an empty slide has it).
@@ -2140,6 +2188,32 @@ class TestModelCheck:
         else:
             assert checked["model"][field] == reset
         assert checked["model"]["items"] == _valid_model()["items"]
+
+    @pytest.mark.parametrize(
+        "defect", ["table-grid-empty", "table-grid-no-rows", "table-grid-no-columns"]
+    )
+    def test_a_forged_empty_grid_does_not_fail_its_slide(self, defect: str) -> None:
+        """The checked model of a slide holding a table with no slots writes, the table dropped.
+
+        pptxgenjs throws on a table with no rows, which fails the whole slide,
+        and writes a row of no cells for a table with no columns: the model
+        check drops the item first, and counts it, so the rest of the slide exports.
+        """
+        model = _valid_model()
+        MODEL_DEFECTS[defect][0](model)
+        written = node_json(
+            "const pptxgen = require('pptxgenjs');"
+            f"const {{ checkModel }} = require({json.dumps(str(MODEL_CHECK_MODULE))});"
+            f"const {{ emitSlide }} = require({json.dumps(str(EMIT_MODEL_MODULE))});"
+            f"const {{ model, dropped }} = checkModel({json.dumps(model)});"
+            "const pres = new pptxgen(); pres.layout = 'LAYOUT_WIDE';"
+            "emitSlide(pres, model, new Map(), { target: 'pptx' });"
+            "pres.write({ outputType: 'nodebuffer' }).then((deck) =>"
+            " process.stdout.write(JSON.stringify({ dropped, tables: model.items.filter("
+            "(item) => item.kind === 'table').length, bytes: deck.length })));"
+        )
+        assert written["dropped"] == {"items": 1, "captures": 0, "fields": 0}, written
+        assert written["tables"] == 0 and written["bytes"] > 0, written
 
     @pytest.mark.parametrize("field", ["items", "captures"])
     def test_a_list_that_is_not_one_is_empty(self, field: str) -> None:
@@ -2280,11 +2354,10 @@ def forged_capture_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Fo
         path.write_text(_forged_capture_slide(line_break, break_rect), encoding="utf-8")
         paths.append(path)
     with pytest.MonkeyPatch.context() as monkeypatch:
-        # export_pptx sets both in os.environ; the context restores them.
+        # export_pptx sets it in os.environ; the context restores it.
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
         with teed_stderr() as buffer:
-            harness.export_pptx({"title": "forged captures"}, paths, out_dir, engine="snapshot")
+            harness.export_pptx({"title": "forged captures"}, paths, out_dir)
     yield ForgedCaptureDeck(
         out_dir=out_dir, stderr=buffer.getvalue(), forms=tuple(FORGED_CAPTURE_FORMS)
     )

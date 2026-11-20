@@ -1,7 +1,6 @@
 """Snapshot engine: run typography (spec §3 Text "Runs carry", §5 Emitter "Weights").
 
-Every run the snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) emits carries
-the browser's typography (RC7):
+Every run the snapshot engine emits carries the browser's typography (RC7):
 
 * **Weights.** 400 is the family and 700 is the family plus bold. Every other
   weight of a webfont the page loaded is a weight-named typeface ("DM Sans
@@ -85,7 +84,6 @@ from tests.fixtures.export_snapshot_support import (
     text_shapes,
 )
 
-ENGINE = "snapshot"
 TYPOGRAPHY_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.cjs"
 
 PT_PER_PX = 0.75
@@ -373,7 +371,7 @@ def typography_pptx() -> Iterator[bytes]:
     """The custom slides in ``SLIDES``, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_slides(
-            list(SLIDES.values()), css=DECK_CSS, engine=ENGINE, monkeypatch=monkeypatch
+            list(SLIDES.values()), css=DECK_CSS, monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected a slide: {failures}"
     yield pptx
@@ -384,7 +382,7 @@ def corpus_pptx() -> Iterator[bytes]:
     """Corpus slides 09 and 13, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_corpus(
-            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, engine=ENGINE
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx

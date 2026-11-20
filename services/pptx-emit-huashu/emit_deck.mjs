@@ -1,25 +1,18 @@
 #!/usr/bin/env node
-// Tellr ⇄ huashu-design bridge — local-only.
+// Tellr's PPTX export sidecar: the snapshot engine over a whole deck.
 //
-// Read deck-shape JSON from stdin, run alchaincyf/huashu-design's
-// html2pptx.js (server-side Playwright + DOM walk + pptxgenjs) over
-// every slide, write a single editable .pptx to argv[2].
+// Read deck-shape JSON from stdin, render every slide with render_slide.cjs
+// (server-side Playwright: the page read as the browser laid it out, then
+// written with pptxgenjs), write a single editable .pptx to argv[2].
 //
 // stdin payload (UTF-8 JSON, no schema validation here — wrapper enforces):
 //   { title?: string, slides: [{ html: string, notes?: string }],
-//     bypassValidation?: boolean, engine?: 'legacy' | 'snapshot',
-//     target?: 'pptx' | 'gslides' }
-//
-// engine selects the per-slide converter: 'legacy' (the default) is
-// html2pptx.js after the DOM-mutating PREPROCESS_SOURCE; 'snapshot' is
-// render_slide.cjs, which runs only the layout-neutral BG_TRANSFER_SOURCE and
-// then reads the page as rendered. Notes and failure handling are the same.
+//     bypassValidation?: boolean, target?: 'pptx' | 'gslides' }
 //
 // target is the renderer the deck is written for: 'pptx' (the default) for
-// PowerPoint, 'gslides' for the Google Slides conversion. The snapshot engine
-// writes the few constructs the two apps place apart for it (around script
-// runs: their size, and for PowerPoint the lines they end or grow;
-// emit_text.cjs); the legacy converter writes one deck for both.
+// PowerPoint, 'gslides' for the Google Slides conversion. The engine writes
+// the few constructs the two apps place apart for it (around script runs:
+// their size, and for PowerPoint the lines they end or grow; emit_text.cjs).
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
@@ -28,20 +21,15 @@
 // where <json> is { totalSlides, succeeded, failed: [{ slide_index, error }] }
 // so the Python wrapper can surface per-slide validation messages.
 //
-// Why a custom orchestrator instead of huashu's export_deck_pptx.mjs:
-// theirs reads .html files from a directory; we get HTML over a pipe so
-// we don't have to round-trip through the filesystem (we still write a
-// tmp .html per slide because html2pptx.js takes a path — see below).
+// The HTML arrives over a pipe, and each slide is still written to a tmp
+// .html file, because the browser loads it from a file:// URL (render_slide.cjs).
 
 import pptxgen from 'pptxgenjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { BG_TRANSFER_SOURCE, PREPROCESS_SOURCE } from './preprocess.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 // Every line printed here is one line as the Python wrapper reads it: a
 // failure's message can carry text the slide's page threw.
@@ -69,33 +57,28 @@ async function main() {
   }
 
   const slides = payload.slides || [];
-  // When set by the caller, validation errors in html2pptx become console
+  // When set by the caller, a slide's validation errors become console
   // warnings instead of throws — slides that violate design rules still get
-  // emitted into the pptx. Used by the Google Slides upload route.
+  // emitted into the pptx. Used by both export routes.
   const bypassValidation = !!payload.bypassValidation;
   if (!slides.length) {
     console.error('[huashu] no slides in payload');
     process.exit(3);
   }
 
-  const engine = payload.engine === 'snapshot' ? 'snapshot' : 'legacy';
-  if (payload.engine !== undefined && payload.engine !== 'snapshot' && payload.engine !== 'legacy') {
-    console.error(`[huashu] unknown engine ${logJson(payload.engine)}; using legacy`);
-  }
   const target = payload.target === 'gslides' ? 'gslides' : 'pptx';
   if (payload.target !== undefined && payload.target !== 'gslides' && payload.target !== 'pptx') {
     console.error(`[huashu] unknown target ${logJson(payload.target)}; writing for pptx`);
   }
 
-  // Lazily resolve the converter (CommonJS, sibling file). If playwright/
-  // chromium isn't installed yet, the require itself succeeds but the
-  // first call throws. We surface that as a single "setup" failure.
-  const converterFile = engine === 'snapshot' ? 'render_slide.cjs' : 'html2pptx.js';
-  let converter;
+  // Lazily resolve the renderer (CommonJS, sibling file), so a sidecar whose
+  // node_modules are missing fails with one "setup" message. If chromium
+  // isn't installed yet, the require itself succeeds but the first slide throws.
+  let renderSlide;
   try {
-    converter = require(path.join(__dirname, converterFile));
+    ({ renderSlide } = require('./render_slide.cjs'));
   } catch (e) {
-    console.error(`[huashu] failed to load ${converterFile}:`, oneLine(e.message));
+    console.error('[huashu] failed to load render_slide.cjs:', oneLine(e.message));
     console.error('[huashu] hint: cd services/pptx-emit-huashu && npm install && npx playwright install chromium');
     process.exit(4);
   }
@@ -103,19 +86,6 @@ async function main() {
   const pres = new pptxgen();
   pres.layout = 'LAYOUT_WIDE';  // 13.333" × 7.5", matches our 1280×720 px @ 96 dpi
   pres.title = payload.title || 'slides';
-
-  // Both converters return { slide } for the notes below and throw for a slide
-  // they reject.
-  const convertSlide = engine === 'snapshot'
-    ? (htmlFile) => converter.renderSlide(htmlFile, pres, {
-      preProcessSource: BG_TRANSFER_SOURCE,
-      bypassValidation,
-      target,
-    })
-    : (htmlFile) => converter(htmlFile, pres, {
-      preProcessSource: PREPROCESS_SOURCE,
-      bypassValidation,
-    });
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'huashu-deck-'));
   const failed = [];
@@ -130,15 +100,16 @@ async function main() {
     const tmpHtml = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.html`);
     try {
       await fs.writeFile(tmpHtml, slide.html, 'utf-8');
-      const result = await convertSlide(tmpHtml);
+      // { slide } for the notes below; throws for a slide it rejects.
+      const result = await renderSlide(tmpHtml, pres, { bypassValidation, target });
       if (slide.notes && result.slide && typeof result.slide.addNotes === 'function') {
         result.slide.addNotes(slide.notes);
       }
       succeeded += 1;
       console.error(`[huashu] [${i + 1}/${slides.length}] OK`);
     } catch (e) {
-      // Both converters prefix their message with the htmlFile path; strip
-      // the tmp prefix so the user sees a clean message.
+      // renderSlide prefixes its message with the htmlFile path; strip the
+      // tmp prefix so the user sees a clean message.
       const msg = String(e.message || e).replace(tmpHtml + ': ', '');
       failed.push({ slide_index: i, error: msg });
       console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${oneLine(msg.split('\n')[0])}`);

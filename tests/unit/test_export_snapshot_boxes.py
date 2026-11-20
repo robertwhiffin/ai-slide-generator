@@ -1,7 +1,7 @@
 """Snapshot engine: boxes, the slide background and CSS paint order.
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) reads the rendered page
-and emits each painted box as a native shape:
+The snapshot engine reads the rendered page and emits each painted box as a
+native shape:
 
 * a circle (all four radii at least half the matching side) is an ``ellipse``,
   not a rounded rectangle with a 50 % corner;
@@ -57,7 +57,7 @@ FADE_IN_KEYFRAMES = "@keyframes tellr-fade-in { from { opacity: 0; } to { opacit
 
 
 def _export_one(body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS) -> bytes:
-    pptx, failures = export_slides([body], css=css, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -304,10 +304,10 @@ class TestSnapshotBoxes:
         """PLAN-CORRECTIONS C1: no layout-mutating preprocess pass runs before the snapshot.
 
         A monospace panel holding one ``<div>`` per code line is exactly what the
-        legacy ``flattenMonospaceCodeBlocks`` collapses into a single ``<p>``,
-        taking every line's own background with it. The snapshot engine runs
-        only the background transfer, so each line's box is still on the page
-        when it is read and exports as its own shape.
+        retired converter's preprocess collapsed into a single ``<p>``, taking
+        every line's own background with it. The export runs only the
+        background transfer, so each line's box is still on the page when it is
+        read and exports as its own shape.
         """
         body = (
             '<div class="slide">'

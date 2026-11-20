@@ -1,9 +1,8 @@
 """Snapshot engine: line spacing, first-line placement and metric calibration.
 
 Spec §3 Text "Spacing" and "Metrics", the plan's Task 4 and its binding
-addendum (``task-4-addendum.md`` A1, A2). The snapshot engine
-(``TELLR_EXPORT_ENGINE=snapshot``) writes text so that PowerPoint and Google
-Slides lay it out as the browser did:
+addendum (``task-4-addendum.md`` A1, A2). The snapshot engine writes text so
+that PowerPoint and Google Slides lay it out as the browser did:
 
 * **Line spacing against the renderers' single spacing (RC6; Task 4 rulings R1,
   R2).** PowerPoint and Google Slides draw 100% spacing at 1.2 x the font size,
@@ -129,7 +128,6 @@ from tests.fixtures.export_snapshot_support import (
     text_shapes,
 )
 
-ENGINE = "snapshot"
 SIDECAR_DIR = Path(pptx_from_html_huashu.SIDECAR_DIR)
 EMIT_TEXT_MODULE = SIDECAR_DIR / "emit_text.cjs"
 EMIT_TYPOGRAPHY_MODULE = SIDECAR_DIR / "emit_typography.cjs"
@@ -262,7 +260,7 @@ def corpus_pptx() -> Iterator[bytes]:
     """Corpus slides 01 and 09, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_corpus(
-            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, engine=ENGINE
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx
@@ -273,7 +271,7 @@ def metrics_pptx() -> Iterator[bytes]:
     """The custom metrics slide, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_slides(
-            [METRICS_SLIDE], css=DECK_CSS, engine=ENGINE, monkeypatch=monkeypatch
+            [METRICS_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected the metrics slide: {failures}"
     yield pptx

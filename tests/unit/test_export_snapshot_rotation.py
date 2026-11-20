@@ -123,8 +123,6 @@ from tests.unit.test_export_slide_root_background import FIXTURE_DIR
 from tests.unit.test_export_snapshot_line_spacing import _assert_script_run_size, _script_factor
 from tests.unit.test_export_svg_raster import structural_manifest
 
-ENGINE = "snapshot"
-
 # The brief: the unrotated box and its centre agree with the browser within 1 px
 # (offsetWidth and offsetHeight are whole px; the bounds are not).
 GEOMETRY_TOLERANCE_PX = 1.0
@@ -739,7 +737,6 @@ def rotation_pptx() -> Iterator[bytes]:
         pptx, failures = export_slides(
             list(SLIDES.values()),
             css=DECK_CSS + ROTATION_CSS,
-            engine=ENGINE,
             monkeypatch=monkeypatch,
         )
     assert failures == [], f"the export rejected a slide: {failures}"
@@ -750,7 +747,7 @@ def rotation_pptx() -> Iterator[bytes]:
 def corpus_pptx() -> Iterator[bytes]:
     """Corpus slide 13, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
-        pptx, failures = export_corpus(["13"], monkeypatch=monkeypatch, engine=ENGINE)
+        pptx, failures = export_corpus(["13"], monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected corpus slide 13: {failures}"
     yield pptx
 
@@ -3063,7 +3060,7 @@ def _export_bounded(monkeypatch: pytest.MonkeyPatch, document: str) -> tuple[byt
     monkeypatch.setattr(
         pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
     )
-    return export_documents([document], monkeypatch=monkeypatch, engine=ENGINE)
+    return export_documents([document], monkeypatch=monkeypatch)
 
 
 @pytest.mark.slow

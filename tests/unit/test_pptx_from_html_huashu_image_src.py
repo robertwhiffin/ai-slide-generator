@@ -1,26 +1,29 @@
 """SDR-4437 F-CR-35 follow-up — the huashu sidecar must never read files.
 
-The huashu path (``services/pptx-emit-huashu/html2pptx.js``) renders each
-slide in server-side Chromium and hands every ``<img>`` ``src`` and the body's
-CSS ``background-image`` URL to pptxgenjs. Anything that was not a ``data:``
-URI went in as a pptxgenjs ``path`` (``file://`` stripped), which pptxgenjs
-reads from disk and embeds — the same file-read class as the records sidecar.
-The slide CSP (``img-src data:``) stops Chromium loading such an image, but
-not the Node side reading it: ``el.src`` still reports the attribute.
+The sidecar renders each slide in server-side Chromium and hands pptxgenjs the
+pictures the slide model names. pptxgenjs reads any image given to it as a
+``path`` from disk and embeds it, the same file-read class as the records
+sidecar, and the slide CSP (``img-src data:``) stops Chromium loading such an
+image but not the Node side reading it: an ``<img>``'s ``src`` still reports the
+attribute.
 
 Fixed the same two ways as the records sidecar:
 
-1. ``html2pptx.js`` passes only ``data:`` sources to pptxgenjs and skips the
-   rest. Legitimate decks lose nothing: the preprocessor rasterizes canvases,
-   SVGs and gradients to PNG data URIs, and stored images are data URIs.
+1. Only raster ``data:`` sources are ever embedded: ``emit_model.cjs`` writes a
+   picture from a capture ``render_slide.cjs`` took of the page, or from the
+   item's own raster ``data:`` ``src``, and skips anything else; the snapshot
+   takes a body ``background-image`` only when it is a raster ``data:`` URI.
+   Legitimate decks lose nothing: what the browser draws without a raster
+   source (an SVG, a canvas, a gradient) is captured, and stored images are
+   data URIs.
 2. ``sidecar_subprocess_env`` is an allowlist instead of a copy of the app's
    environment. Unlike the records sidecar it must keep the real ``HOME``
    (Playwright finds Chromium under ``~/.cache/ms-playwright``) and any proxy
    settings (the page loads Chart.js from a CDN).
 
-Both engines are held to it (``TELLR_EXPORT_ENGINE``): the legacy converter
-and the snapshot engine, which embeds a raster ``data:`` image as it is and
-captures nothing whose source is not ``data:``.
+Every export here goes through the model check's zero-drop guard
+(``export_documents``), so a slide model the check dropped part of cannot pass
+for one that never named the file.
 """
 
 from __future__ import annotations
@@ -29,12 +32,12 @@ import base64
 import os
 import zipfile
 from io import BytesIO
-from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import export_documents
 
 # 1x1 transparent PNG.
 PNG_B64 = (
@@ -91,26 +94,17 @@ def _zip_entries(pptx: bytes) -> dict[str, bytes]:
         return {n: zf.read(n) for n in zf.namelist() if not n.endswith("/")}
 
 
-# The per-slide converters the sidecar can run (emit_deck.mjs).
-ENGINES = ("legacy", "snapshot")
-
-
 @pytest.mark.slow
 @requires_huashu_sidecar
-@pytest.mark.parametrize("engine", ENGINES)
 class TestHuashuImageSrc:
-    def test_local_files_are_not_embedded(self, tmp_path, monkeypatch, engine):
-        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
+    def test_local_files_are_not_embedded(self, tmp_path, monkeypatch):
         img = tmp_path / "img-canary"
         img.write_bytes(IMG_CANARY)
         bg = tmp_path / "bg-canary"
         bg.write_bytes(BG_CANARY)
         html = _slide_html(img.as_uri(), body_bg=f'url("{bg.as_uri()}")')
 
-        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-            "t", [{"html": html, "notes": ""}], bypass_validation=True
-        )
+        pptx, failures = export_documents([html], monkeypatch=monkeypatch, title="t")
 
         assert failures == [], failures
         leaked = [
@@ -119,12 +113,9 @@ class TestHuashuImageSrc:
         ]
         assert not leaked, f"canary file bytes embedded in {leaked}"
 
-    def test_data_image_is_still_embedded(self, monkeypatch, engine):
-        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
-
-        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-            "t", [{"html": _slide_html(PNG_DATA_URI), "notes": ""}], bypass_validation=True
+    def test_data_image_is_still_embedded(self, monkeypatch):
+        pptx, failures = export_documents(
+            [_slide_html(PNG_DATA_URI)], monkeypatch=monkeypatch, title="t"
         )
 
         assert failures == [], failures

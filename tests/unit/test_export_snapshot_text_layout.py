@@ -1,7 +1,7 @@
 """Snapshot engine: text blocks, the browser's line breaks and text-box geometry.
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) groups the rendered text
-into text blocks and emits each block as one text box (spec §3 Text):
+The snapshot engine groups the rendered text into text blocks and emits each
+block as one text box (spec §3 Text):
 
 * every flex or grid item is its own block, so a footer's brand line and page
   number, or an agenda row's number and title, never merge into one paragraph
@@ -131,7 +131,7 @@ def _slack(width: float) -> float:
 
 
 def _export_one(body: str, monkeypatch: pytest.MonkeyPatch) -> bytes:
-    pptx, failures = export_slides([body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -147,7 +147,7 @@ def corpus_pptx() -> Iterator[bytes]:
     """Corpus slides 02, 03 and 17, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_corpus(
-            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, engine="snapshot"
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx

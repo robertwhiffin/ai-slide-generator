@@ -186,28 +186,29 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A contract framing `body`
     # and stretching its CHILD to `position: absolute !important; inset: 0
     # !important; width/height: 100% !important` was injected into this sheet at
-    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroys tables.
+    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroyed tables.
     #
-    # `services/pptx-emit-huashu/preprocess.mjs::flattenTables()` reads every
-    # `<td>/<th>`'s bounding rect and re-emits each cell as an absolutely
-    # positioned <div> carrying its own `left/top/width/height` as NON-important
-    # INLINE styles, then calls `document.body.appendChild(div)`. Every cell is
-    # therefore a DIRECT CHILD of `body` by the time the walker runs, so a
-    # stylesheet `!important` rule on `body > *` outranks each cell's inline
-    # position and collapses all of them onto one rect. Measured on a real
+    # The converter that path ran then read every `<td>/<th>`'s bounding rect and
+    # re-emitted each cell as an absolutely positioned <div> carrying its own
+    # `left/top/width/height` as NON-important INLINE styles, appended to `body`.
+    # Every cell was therefore a DIRECT CHILD of `body` by the time it walked the
+    # page, so a stylesheet `!important` rule on `body > *` outranked each cell's
+    # inline position and collapsed all of them onto one rect. Measured on a real
     # 21-cell deck: distinct cell rects in ppt/slides/slide1.xml went 42 -> 11,
     # with 12 shapes stacked at (12.0, 349.8) and 12 more at (0.0, 719.5).
     #
-    # The document itself is unchanged by this — `body` has exactly one rendered
-    # child before scripts run — so a document-level geometry probe reads 0.00 px
-    # and is structurally blind to the defect. It is an EMIT-TIME regression; only
-    # diffing the emitted slide XML can see it.
+    # The document itself was unchanged by this — `body` has exactly one rendered
+    # child before scripts run — so a document-level geometry probe read 0.00 px
+    # and was structurally blind to the defect: an EMIT-TIME regression, which only
+    # diffing the emitted slide XML could see. The snapshot engine that replaced
+    # that converter appends nothing to `body`, but it reads the page as laid out,
+    # so whatever a contract changes in that layout reaches the deck.
     #
     # What the contract was for (a section-wrapped design-system deck whose ground
     # never paints) is handled on the capture surfaces by aiming at the slide ROOT
     # instead — see `findSlideRoot` in frontend/src/services/slideDocument.ts. That
-    # locator injects no CSS, so it cannot perturb huashu geometry. This path never
-    # needed the contract regardless: the sidecar reads
+    # locator injects no CSS, so it cannot perturb the export's geometry. This path
+    # never needed the contract regardless: the sidecar reads
     # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
     # the right colour, so the .pptx was immune here BY CONSTRUCTION.
     complete_html = f"""<!DOCTYPE html>
@@ -1048,11 +1049,13 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
 
 
 # ---------------------------------------------------------------------------
-# Huashu pipeline (alchaincyf/huashu-design) — LOCAL-ONLY test export
+# Huashu pipeline — the snapshot engine's editable PPTX export
 # ---------------------------------------------------------------------------
-# Uses Playwright + their html2pptx.js server-side. Not deployed to Apps:
-# the gate in pptx_from_html_huashu.is_available() blocks anything but
-# local dev. Surface as an additive 5th export mode in the frontend modal.
+# Server-side Playwright + Chromium reads each slide as the browser laid it out
+# and pptxgenjs writes it (services/pptx-emit-huashu, render_slide.cjs). The
+# gate in pptx_from_html_huashu.is_available() serves it only where the sidecar
+# is installed: HUASHU_PIPELINE_ENABLED=1 on Databricks Apps (setup.sh at boot)
+# or local dev. Surfaced as an export mode in the frontend modal.
 
 
 @router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
@@ -1170,7 +1173,7 @@ async def export_pptx_huashu_install_chromium() -> dict:
 
 @router.post("/pptx/editable/huashu/probe-launch", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_probe_launch() -> dict:
-    """Spawn chromium with our standard launch options. No html2pptx, no pptxgenjs.
+    """Spawn chromium with our standard launch options. No slide, no pptxgenjs.
 
     De-risks the rest of the sidecar: if this exits 0 with PROBE_OK on the
     deployed app, chromium-on-Apps is solid and the full export will work.
@@ -1218,9 +1221,10 @@ async def export_pptx_huashu_probe_launch() -> dict:
 
 @router.post("/pptx/editable/huashu/from-html")
 async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
-    """Run the LLM-generated deck HTML through huashu's html2pptx pipeline.
+    """Export the deck's slides to an editable .pptx through the snapshot engine.
 
-    Local-only. Returns 503 if the gate doesn't pass. On a partial
+    Returns 503 if the gate (``pptx_from_html_huashu.is_available``) doesn't
+    pass. On a partial
     success (some slides reject, others pass), still returns the .pptx
     with an ``X-Huashu-Failures`` header carrying the per-slide error
     JSON so the frontend can surface what huashu objected to.

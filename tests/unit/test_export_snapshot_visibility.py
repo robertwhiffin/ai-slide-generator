@@ -1,12 +1,12 @@
 """Snapshot engine: visibility, clipping and off-slide content.
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) emits only what the
-browser shows (spec §3 *Visibility*, RC10). An element is skipped when it is
-``visibility: hidden``, at cumulative opacity 0, entirely outside the slide, or
-clipped to under 2 px by ``clip``, ``clip-path`` or an ``overflow`` ancestor
-(the visually-hidden pattern). The walk carries a clip rect down the tree,
-starting from the slide rect and narrowed by the padding box of every
-``overflow`` ancestor and by ``clip: rect()`` on absolutely positioned ones:
+The snapshot engine emits only what the browser shows (spec §3 *Visibility*,
+RC10). An element is skipped when it is ``visibility: hidden``, at cumulative
+opacity 0, entirely outside the slide, or clipped to under 2 px by ``clip``,
+``clip-path`` or an ``overflow`` ancestor (the visually-hidden pattern). The
+walk carries a clip rect down the tree, starting from the slide rect and
+narrowed by the padding box of every ``overflow`` ancestor and by
+``clip: rect()`` on absolutely positioned ones:
 
 * a shape is cut to that clip, so a box spilling out of an ``overflow: hidden``
   card is drawn only where the card shows it, and a decoration hanging past the
@@ -381,7 +381,7 @@ CUT_PLAIN_RECTS = {
 
 
 def _export_one(body: str, monkeypatch: pytest.MonkeyPatch) -> bytes:
-    pptx, failures = export_slides([body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -396,7 +396,7 @@ def _document(body: str) -> str:
 def fixture_03_pptx() -> Iterator[bytes]:
     """Corpus slide 03 exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
-        pptx, failures = export_corpus(["03"], monkeypatch=monkeypatch, engine="snapshot")
+        pptx, failures = export_corpus(["03"], monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected corpus slide 03: {failures}"
     yield pptx
 

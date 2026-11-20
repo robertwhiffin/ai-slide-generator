@@ -644,7 +644,7 @@ RASTER_BODY = _raster_body()
 
 
 def _export_one(body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS) -> bytes:
-    pptx, failures = export_slides([body], css=css, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx

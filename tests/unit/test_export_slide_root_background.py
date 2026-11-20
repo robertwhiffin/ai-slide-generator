@@ -8,9 +8,10 @@ The huashu export sidecar located the slide root with ``body > [class*="slide"]`
 and a ``body > div`` fallback. A preserved ``<section data-label="...">`` carries
 no class and is not a div, so both lookups missed,
 ``transferSlideRootBackground()`` returned ``'no-root'``, and the slide-root →
-body background transfer stopped running for pinned decks. html2pptx.js derives
-the *slide* background from the *body* background, so dark/white variant slides
-whose export is correct today would have exported white.
+body background transfer stopped running for pinned decks. The export derives
+the *slide* background from the *body* background (snapshot.mjs
+slideBackground), so dark/white variant slides whose export is correct today
+would have exported white.
 
 These tests measure the emitted .pptx. A DOM-level assertion that the selector
 matched cannot show that the background actually reached the artifact, so the
@@ -25,6 +26,7 @@ Gating matches the sibling export suite: needs ``node``, the extracted sidecar
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import subprocess
@@ -35,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import slide_shapes
 
 # Reuse the sibling suite's timestamp-canonical manifest so both modules mean
 # exactly the same thing by "structurally identical pptx".
@@ -52,8 +55,8 @@ PROBE_SCRIPT = (
 # The fixtures' only colour. Synthetic — no brand palette in test data.
 GROUND = "123456"
 GROUND_RGB = "rgb(18, 52, 86)"
-# rgbToHex() in html2pptx.js resolves a transparent body to white, which is
-# what a lost background looks like in the artifact.
+# A transparent body is ground on the white canvas (snapshot.mjs groundColour),
+# which is what a lost background looks like in the artifact.
 LOST = "FFFFFF"
 
 requires_huashu_sidecar = pytest.mark.skipif(
@@ -109,7 +112,7 @@ class TestPinnedWrapperBackground:
     def test_wrapped_deck_exports_identically_to_the_unwrapped_deck(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The wrapper is invisible to the artifact.
+        """The wrapper costs the artifact nothing: the same ground, the same slide.
 
         The two fixtures share one stylesheet and differ only by the
         ``<section>`` wrapper, so this pins the regression exactly: before the
@@ -117,13 +120,25 @@ class TestPinnedWrapperBackground:
         unwrapped deck exported the ground. Comparing the two artifacts from
         the same run keeps the assertion independent of any golden, and of the
         machine's Chrome build.
+
+        The wrapped page paints one layer more, and the export draws it: the
+        wrapper is the slide root, whose ground is the slide background, and
+        the ``.slide.dark`` body inside it paints the same ground again over
+        it, a slide-sized rect beneath everything else. Every other item is the
+        unwrapped deck's, in the same order (item names are sequence numbers,
+        so they are left out).
         """
         wrapped = _build(monkeypatch, "wrapped_dark.html")
         unwrapped = _build(monkeypatch, "unwrapped_dark.html")
 
         assert _slide_background(unwrapped) == GROUND
         assert _slide_background(wrapped) == GROUND
-        assert structural_manifest(wrapped) == structural_manifest(unwrapped)
+        body, *rest = slide_shapes(wrapped)
+        assert (body.kind, body.geometry, body.fill) == ("shape", "rect", GROUND), body
+        assert (body.x, body.y, body.w, body.h) == (0, 0, 1280, 720), body
+        assert [dataclasses.replace(shape, name="") for shape in rest] == [
+            dataclasses.replace(shape, name="") for shape in slide_shapes(unwrapped)
+        ]
 
     def test_wrapper_ground_survives_when_the_slide_body_is_bare(
         self, monkeypatch: pytest.MonkeyPatch

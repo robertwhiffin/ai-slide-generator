@@ -1,8 +1,8 @@
 """Snapshot engine: inline decorations and atomic inline boxes.
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) keeps a sentence's text
-in its sentence and draws what sits inside the line around it (spec §3 Text,
-*Inline decorations* and *Inline boxes*):
+The snapshot engine keeps a sentence's text in its sentence and draws what
+sits inside the line around it (spec §3 Text, *Inline decorations* and
+*Inline boxes*):
 
 * an inline element with a background, a border or padding (a pill, a code
   chip, ``<mark>``, ``<kbd>``) is one shape per box fragment the browser lays
@@ -237,7 +237,7 @@ def _slack(width: float) -> float:
 
 
 def _export_one(body: str, monkeypatch: pytest.MonkeyPatch) -> bytes:
-    pptx, failures = export_slides([body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -253,7 +253,7 @@ def corpus_pptx() -> Iterator[bytes]:
     """Corpus slides 03, 06, 09 and 12, exported once through the snapshot engine."""
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_corpus(
-            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, engine="snapshot"
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx
@@ -1366,7 +1366,7 @@ class TestSnapshotInlineDecorationsInAHostileRealm:
         )
         capsys.readouterr()
         pptx, failures = export_slides(
-            [hostile_body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch
+            [hostile_body], css=DECK_CSS, monkeypatch=monkeypatch
         )
         assert pptx and failures == [], f"the export did not complete: {failures}"
         stderr = capsys.readouterr().err

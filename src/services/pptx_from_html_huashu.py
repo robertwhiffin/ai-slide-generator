@@ -1,14 +1,18 @@
-"""Local-only Tellr → huashu-design pipeline bridge.
+"""Tellr → editable .pptx through the snapshot engine, a Node sidecar.
 
-Spawns the ``services/pptx-emit-huashu/emit_deck.mjs`` Node sidecar, which
-runs alchaincyf/huashu-design's ``html2pptx.js`` (Playwright + pptxgenjs
-server-side) over each slide's complete HTML doc and writes a single
-editable .pptx.
+Spawns ``services/pptx-emit-huashu/emit_deck.mjs``, which loads each slide's
+complete HTML document in server-side Chromium (Playwright), reads the page as
+the browser laid it out (``render_slide.cjs``: settle the page, move the slide
+root's ground onto body, snapshot the page read-only, screenshot what cannot be
+drawn natively) and writes one editable .pptx with pptxgenjs: text boxes,
+shapes, native tables and pictures where the browser drew them.
 
-Why local-only: huashu's pipeline needs Chromium via Playwright. Databricks
-Apps containers run as non-root with limited memory and ship without Chromium.
-Adopting this on FEVM would require a deeper infra change than this round
-covers. ``is_available()`` returns False outside the local-dev gate.
+Availability. ``is_available()`` gates every call: it needs node, the
+sidecar's ``node_modules`` and a Playwright Chromium, and either
+``HUASHU_PIPELINE_ENABLED=1`` (set by the deployed app's app.yaml, whose boot
+runs the sidecar's ``setup.sh`` to install them) or ``ENVIRONMENT=development``.
+Until then the export routes answer 503, and the frontend's Google Slides
+export falls back to the records pipeline.
 
 Timeout. The sidecar runs as the leader of its own process group, so a run
 past ``SIDECAR_TIMEOUT_SECONDS`` is killed whole: node and every Chromium it
@@ -19,15 +23,14 @@ Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
 apart, and only those are written differently, all on lines that hold a
-superscript or subscript run (task-11 rulings R11g, R11i and R11j and
-findings r4, measured in both apps; ``scripts/export_fidelity/CALIBRATION.md``
-A2, A4 and A5):
+superscript or subscript run (measured in both apps;
+``scripts/export_fidelity/CALIBRATION.md`` A2, A4 and A5):
 
 * a script run's size. PowerPoint shrinks a script run and places its line by
   its other runs, so the run is written enlarged and PowerPoint draws it at the
   browser's size; Google Slides sizes the whole line by that enlarged size and
   draws it low, so for it the run is capped at its line's size (its glyph then
-  drawn at 0.8 of the browser's, the trade-off R11i accepts);
+  drawn at 0.8 of the browser's, an accepted trade-off);
 * for PowerPoint alone, a word joiner after a script run that ends its line,
   which PowerPoint would otherwise size the line by;
 * the growth of a later line the browser set further down than its spacing
@@ -35,8 +38,8 @@ A2, A4 and A5):
   block's strut), which both apps space by its paragraph alone: written as
   that line's space before, in both decks but for a line within its paragraph
   that holds a script run, which Google Slides grows by the run's written
-  size instead (R11g; a later paragraph's first line holding one takes the
-  space before, R11j).
+  size instead (a later paragraph's first line holding one takes the space
+  before).
 
 So a deck with no script run is the same for both targets.
 """
@@ -275,10 +278,6 @@ def build_pptx_huashu(
         "title": title,
         "slides": slides_html,
         "bypassValidation": bypass_validation,
-        # The sidecar's per-slide converter: "legacy" (html2pptx.js) or
-        # "snapshot" (render_slide.cjs). Read here and sent in the payload, so the
-        # sidecar env allowlist stays as it is.
-        "engine": os.environ.get("TELLR_EXPORT_ENGINE", "legacy"),
         # The app the deck is written for (module docstring, Renderer target).
         "target": target,
     }).encode("utf-8")

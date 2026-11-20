@@ -6,36 +6,38 @@ with a hardcoded broken-image placeholder PNG (``IMG_BROKEN``) as the primary
 PowerPoint renders the extension (masking the bug); Google Drive PPTX→Slides
 conversion, LibreOffice, and most thumbnailers render the placeholder.
 
-The fix rasterizes SVG data-URI images to PNG *in the browser page that
-already rendered them*, before the Node sidecars ever see them:
+SVG never reaches either Node sidecar as SVG data; it arrives as a PNG drawn
+by the browser page that already rendered it:
 
 * records path — ``rasterizeSvgImage`` inside the walker
   (``frontend/src/services/domWalker.ts``); the sidecar
   (``services/pptx-emit/emit.bundle.mjs``) is intentionally UNCHANGED.
-* huashu path — ``rasterizeSvgDataUriImages`` in the preprocess pass
-  (``services/pptx-emit-huashu/preprocess.mjs``).
+* huashu path — the snapshot engine embeds only raster ``data:`` images as
+  they are, and captures everything else the browser draws (an ``<img>`` with
+  an SVG source, an SVG CSS background) as an element-isolated screenshot of
+  its box at device scale 2 (``services/pptx-emit-huashu/capture.cjs``).
 
 This module protects two invariants:
 
-1. REGRESSION (golden manifests): for SVG-free decks both emitters must
-   produce structurally identical output before and after the fix. Raw byte
-   equality is impossible (pptx zips embed wall-clock timestamps), so the
-   goldens record the sorted zip entry list plus a SHA256 per entry, with
-   ``docProps/core.xml`` canonicalized by masking the ``dcterms``
-   created/modified values. Goldens were captured at d50b716 (pre-fix).
+1. REGRESSION (golden manifests): for SVG-free decks each emitter's output
+   is pinned structurally. Raw byte equality is impossible (pptx zips embed
+   wall-clock timestamps), so the goldens record the sorted zip entry list
+   plus a SHA256 per entry, with ``docProps/core.xml`` canonicalized by
+   masking the ``dcterms`` created/modified values. The records golden was
+   captured at d50b716; the huashu golden is the snapshot engine's.
 
-   The goldens are pinned to the machine/Chrome build that captured them
-   (huashu extracts computed styles from a live Chrome). To re-capture:
+   The huashu golden is pinned to the machine/Chrome build that captured it
+   (the snapshot reads the page from a live Chrome). To re-capture:
    ``TELLR_REGEN_EXPORT_GOLDENS=1 uv run --no-sync pytest
    tests/unit/test_export_svg_raster.py`` (regen runs report as skipped so
    they can never fake a pass).
 
 2. NEW BEHAVIOR: an SVG-bearing deck exported through the huashu pipeline
    must contain no ``.svg`` media, no ``svgBlip`` references, no media blob
-   matching the IMG_BROKEN placeholder, and real PNGs at 2x the source
-   layout box. (The records-path equivalent lives in the frontend runner —
-   ``frontend/tests/e2e/svg-raster-export.spec.ts`` — because the walker
-   needs a real browser.)
+   matching the IMG_BROKEN placeholder, and real PNGs at 2x the layout box
+   they were captured from. (The records-path equivalent lives in the
+   frontend runner — ``frontend/tests/e2e/svg-raster-export.spec.ts`` —
+   because the walker needs a real browser.)
 
 Gating: records tests need ``node`` + the checked-in sidecar bundle; huashu
 tests additionally need the extracted sidecar ``node_modules`` and a local
@@ -71,6 +73,10 @@ REGEN_ENV = "TELLR_REGEN_EXPORT_GOLDENS"
 # pptxgenjs upgrade changes the constant, this fails loudly instead of the
 # no-placeholder assertions silently passing against the wrong bytes.
 IMG_BROKEN_SHA256 = "0db2447fffb75ae48f57c711c26783f619591d48b1713f997a7bc34626c95ff1"
+
+# The device scale the snapshot engine captures at (render_slide.cjs
+# DEVICE_SCALE_FACTOR): every captured picture is twice its CSS box.
+CAPTURE_SCALE = 2
 
 _DCTERMS_RE = re.compile(
     rb"(<dcterms:(?:created|modified)[^>]*>)[^<]*(</dcterms:(?:created|modified)>)"
@@ -228,7 +234,7 @@ class TestRecordsEmitterGolden:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestHuashuEmitter:
-    """The fix lives in preprocess.mjs, which this pipeline loads as source."""
+    """The snapshot engine: raster data: images embedded, everything else captured at 2x."""
 
     def _build(self, monkeypatch: pytest.MonkeyPatch, fixture: str, title: str) -> bytes:
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
@@ -257,9 +263,9 @@ class TestHuashuEmitter:
         """NEW BEHAVIOR: SVG data-URI images arrive in the pptx as real PNGs.
 
         The fixture has an ``<img>`` SVG at 240x80 and a CSS
-        ``background-image`` SVG on a 300x200 div (which the preprocess pass
-        converts to an ``<img>`` before rasterization). At 2x those must land
-        as 480x160 and 600x400 PNGs — with no svg media, no svgBlip
+        ``background-image`` SVG on a 300x200 div. Each is captured as a
+        screenshot of its box at device scale 2, so they must land as 480x160
+        and 600x400 PNGs, twice the box — with no svg media, no svgBlip
         extension, and no IMG_BROKEN placeholder anywhere.
         """
         pptx = self._build(monkeypatch, "huashu_svg.html", "P5 SVG deck (huashu)")
@@ -295,8 +301,10 @@ class TestHuashuEmitter:
                 f"IMG_BROKEN placeholder embedded: {placeholder_media}"
             )
             dims = sorted(_png_dimensions(blob) for blob in media.values())
-            assert dims == [(480, 160), (600, 400)], (
-                f"expected 2x rasters of the 240x80 img and 300x200 bg div, got {dims}"
+            boxes = [(240, 80), (300, 200)]
+            assert dims == [(CAPTURE_SCALE * w, CAPTURE_SCALE * h) for w, h in boxes], (
+                f"expected captures at {CAPTURE_SCALE}x the img's and the bg div's boxes "
+                f"{boxes}, got {dims}"
             )
 
     def test_non_ratio_true_box_letterboxes_instead_of_stretching(
@@ -305,8 +313,10 @@ class TestHuashuEmitter:
         """The stretched-footer-logo bug: a 3:1 logo in a 13.8:1 flex-stretched
         box must be CONTAIN-fit (letterboxed), not stretch-filled.
 
-        The raster canvas still covers the layout box, so dimensions alone
-        cannot tell the two apart — the artwork's own geometry is what differs.
+        The browser draws the SVG letterboxed in its box (its viewBox keeps
+        the default ``xMidYMid meet``), and the capture is that box at 2x, so
+        dimensions alone cannot tell the two apart — the artwork's own
+        geometry is what differs.
         The fixture logo is a rounded navy rect on transparency, so with
         contain-fit the drawn artwork occupies a centered 3:1 band and the far
         left/right of the canvas stays EMPTY; a stretch-fill paints navy all

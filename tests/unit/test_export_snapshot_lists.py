@@ -82,6 +82,7 @@ from tests.fixtures.export_snapshot_support import (
     corpus_document,
     corpus_slide,
     export_corpus,
+    export_documents,
     export_slides,
     node_json,
     requires_huashu_sidecar,
@@ -473,7 +474,7 @@ UNREAD_BOXES_SCRIPT = """
 
 
 def _export(body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS) -> bytes:
-    pptx, failures = export_slides([body], css=css, engine="snapshot", monkeypatch=monkeypatch)
+    pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -1512,15 +1513,16 @@ def _with_list(name: str) -> str:
 
 
 def _export_document(monkeypatch: pytest.MonkeyPatch, html: str) -> tuple[bytes, list[dict]]:
-    """Export one complete document with the snapshot engine, bounded so a hang fails in seconds."""
-    monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-    monkeypatch.setenv("TELLR_EXPORT_ENGINE", "snapshot")
+    """Export one complete document, bounded so a hang fails in seconds, its model whole.
+
+    A slide model the model check dropped part of fails the export
+    (``export_documents``): the hostile twin and its benign one losing the
+    same item would otherwise still compare equal.
+    """
     monkeypatch.setattr(
         pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
     )
-    return pptx_from_html_huashu.build_pptx_huashu(
-        "snapshot list markers", [{"html": html}], bypass_validation=True
-    )
+    return export_documents([html], monkeypatch=monkeypatch, title="snapshot list markers")
 
 
 @pytest.mark.slow

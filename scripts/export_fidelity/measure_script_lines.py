@@ -419,7 +419,7 @@ def main() -> int:
             deck_dir.mkdir(parents=True, exist_ok=True)
             with sidecar(path):
                 pptx_path = harness.export_pptx(
-                    deck, documents, deck_dir, engine="snapshot", target=target
+                    deck, documents, deck_dir, target=target
                 )
             key = f"{label} {target}"
             results["decks"][key] = {"scriptPx": script_sizes_px(pptx_path.read_bytes(), names)}

@@ -1,9 +1,9 @@
 """Text metric calibration for the snapshot export engine, against PowerPoint and Google Slides.
 
-The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) writes each text box at
-the browser's first glyph top, raised by a first-line offset. Line spacing is
-written against the renderers' single spacing, 1.2 x the font size: up to it as
-a percentage with soft breaks, beyond it as single-spaced lines, each its own
+The snapshot engine writes each text box at the browser's first glyph top,
+raised by a first-line offset. Line spacing is written against the renderers'
+single spacing, 1.2 x the font size: up to it as a percentage with soft
+breaks, beyond it as single-spaced lines, each its own
 paragraph, with the extra leading as space before (``emit_text.cjs``). Runs
 carry optical-size tracking, and superscript and subscript runs are enlarged
 for the renderers' own shrink. This script measures how PowerPoint for Mac and
@@ -964,9 +964,9 @@ def main() -> int:
     documents = harness.build_documents(deck, probe_deck.slides, out_dir)
     render_truth(documents, out_dir)
     # Each app gets the deck written for it, as the two exports write them.
-    pptx_path = harness.export_pptx(deck, documents, out_dir, engine="snapshot", target="pptx")
+    pptx_path = harness.export_pptx(deck, documents, out_dir, target="pptx")
     gslides_path = harness.export_pptx(
-        deck, documents, out_dir, engine="snapshot", target="gslides"
+        deck, documents, out_dir, target="gslides"
     )
     boxes = exported_text_boxes(pptx_path)
     renderer_boxes = {"powerpoint": boxes, "gslides": exported_text_boxes(gslides_path)}

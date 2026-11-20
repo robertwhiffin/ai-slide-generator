@@ -6,7 +6,7 @@ For a fixture deck (``deck.css`` + ``deck.json`` + ``slides/*.html``) this:
    ``build_slide_html`` (so the harness exercises exactly what the export
    routes feed the sidecar);
 2. renders the ground truth: a 1280x720 Chromium screenshot of that document;
-3. runs the production huashu export (``build_pptx_huashu``) to a .pptx,
+3. runs the production export (``build_pptx_huashu``) to a .pptx,
    written for PowerPoint (``target="pptx"``), recording the snapshot
    engine's per-slide summary lines in ``summaries.json``, and reports the
    words the browser renders that the .pptx lacks (``text_loss.json``),
@@ -24,9 +24,6 @@ Usage (from the repo root)::
 
     uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py \
         tests/fixtures/export_fidelity --out /tmp/fidelity --lo --gslides
-
-``--engine snapshot`` exports with the snapshot engine (``render_slide.cjs``)
-instead of the legacy converter, through ``TELLR_EXPORT_ENGINE``.
 
 The Google Slides path uses gcloud application-default credentials and the
 quota project in ``GOOGLE_QUOTA_PROJECT``. Converted presentations are left in
@@ -146,7 +143,7 @@ def _summaries_by_document(
     The sidecar writes the documents in order and logs a summary for each
     slide it writes, so the summaries belong to the documents ``failures`` does
     not name, in order. Summaries that do not match those documents one for
-    one (the legacy engine logs none) say nothing of any document.
+    one say nothing of any document.
     """
     failed = {failure.get("slide_index") for failure in failures}
     written = [index for index in range(count) if index not in failed]
@@ -164,9 +161,7 @@ def _summaries_by_document(
     return recorded
 
 
-def export_pptx(
-    deck: dict, documents: list[Path], out_dir: Path, engine: str = "legacy", target: str = "pptx"
-) -> Path:
+def export_pptx(deck: dict, documents: list[Path], out_dir: Path, target: str = "pptx") -> Path:
     """The production export of ``documents``, written for ``target``: export.pptx for
     PowerPoint, export-gslides.pptx for Google Slides, with failures.json or
     failures-gslides.json beside it.
@@ -181,8 +176,6 @@ def export_pptx(
     so it is named in a MODEL DROPS warning on stderr.
     """
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
-    # build_pptx_huashu reads the engine from the environment and sends it to the sidecar.
-    os.environ["TELLR_EXPORT_ENGINE"] = engine
     slides_payload = [{"html": path.read_text(encoding="utf-8"), "notes": path.stem} for path in documents]
     echoed = io.StringIO()
     with contextlib.redirect_stderr(_Tee(sys.stderr, echoed)):
@@ -558,12 +551,6 @@ def main() -> int:
     parser.add_argument("--lo", action="store_true", help="render the .pptx with LibreOffice (smoke check only)")
     parser.add_argument("--gslides", action="store_true", help="convert through Google Drive")
     parser.add_argument("--only", nargs="*", help="slide name prefixes to include")
-    parser.add_argument(
-        "--engine",
-        choices=("legacy", "snapshot"),
-        default="legacy",
-        help="the sidecar's per-slide converter (sets TELLR_EXPORT_ENGINE)",
-    )
     args = parser.parse_args()
 
     deck, slides = load_fixture_deck(args.fixture_dir)
@@ -573,7 +560,7 @@ def main() -> int:
     names = [name for name, _ in slides]
     documents = build_documents(deck, slides, args.out)
     render_truth(documents, args.out)
-    pptx_path = export_pptx(deck, documents, args.out, engine=args.engine)
+    pptx_path = export_pptx(deck, documents, args.out)
     # Each slide's hidden text, from its summary; none for a slide without one.
     hidden_text = [(summary or {}).get("hiddenText", "") for summary in recorded_summaries(args.out)]
     lost = check_text_loss(pptx_path, names, args.out, hidden_text=hidden_text)
@@ -584,7 +571,7 @@ def main() -> int:
         render_with_libreoffice(pptx_path, names, args.out)
     if args.gslides:
         # The Google Slides export writes its deck for Google (R11g), so the conversion here does too.
-        gslides_path = export_pptx(deck, documents, args.out, engine=args.engine, target="gslides")
+        gslides_path = export_pptx(deck, documents, args.out, target="gslides")
         print("Google Slides:", render_with_google_slides(gslides_path, names, args.out))
     scores = compare(names, args.out)
     print(json.dumps(scores, indent=2))

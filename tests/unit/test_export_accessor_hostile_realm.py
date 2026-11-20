@@ -6,50 +6,43 @@ This module is the vector that survived it, and it is a different property.
 
 ``NodeList.prototype.forEach`` is its own CONFIGURABLE own property. A document
 that leaves ``[Symbol.iterator]`` entirely alone can still replace ``forEach``,
-and every ``document.querySelectorAll(...).forEach(...)`` in the preprocess pass
-then does whatever that replacement does. So can the LOOKUPS themselves:
-``querySelector`` and ``querySelectorAll`` are configurable own properties of
-``Document.prototype`` and ``Element.prototype`` — and those are DISTINCT function
-objects, a Document one invoked on an element throwing *Illegal invocation*, so
-hardening one leaves the other exactly as open as before.
+and every ``document.querySelectorAll(...).forEach(...)`` then does whatever
+that replacement does. So can the LOOKUPS themselves: ``querySelector`` and
+``querySelectorAll`` are configurable own properties of ``Document.prototype``
+and ``Element.prototype`` — and those are DISTINCT function objects, a Document
+one invoked on an element throwing *Illegal invocation*, so hardening one leaves
+the other exactly as open as before. Every page-side read therefore goes through
+the pristine-realm lookups of ``dom_access.mjs``.
 
 REACHABILITY is the sibling suites' and no weaker: ``SLIDE_CSP``
 (``src/utils/html_safety.py``) carries ``script-src 'unsafe-inline'``, so inline
-script in an uploaded slide runs in the export page at load, before this pass.
+script in an uploaded slide runs in the export page at load, before any pass.
 
 FOUR measured failure modes, which is why the expectations below are not merely
 "did not hang":
 
   * a HANG — an endless ``forEach`` spins, denying service in a sidecar that has
     no execution budget of its own.
-  * SILENT CONTENT LOSS — a no-op ``forEach`` lets the pass return promptly and
-    report success with sub-passes that did nothing. No timeout catches this and
-    no artifact explains it, which is why it is asserted on the pass's own
-    per-sub-pass COUNTS.
+  * SILENT CONTENT LOSS — a no-op ``forEach`` lets a read return promptly and
+    report success having read nothing. No timeout catches this and no failure
+    explains it, which is why it is asserted on the COUNTS the export reports
+    and on the deck itself.
   * a WRONG DOCUMENT — a decoy-returning ``querySelector`` makes the slide-root
-    locator resolve an element that is not in the document. The ground then goes
-    transparent, and ``rgbToHex`` in html2pptx.js resolves a transparent body to
-    WHITE, so the deck exports white: the exact surfaces-disagree failure the
-    slide-root work exists to prevent, reached by another route.
+    locator resolve an element that is not in the document. The ground then
+    never reaches body, and a slide without one exports WHITE: the exact
+    surfaces-disagree failure the slide-root work exists to prevent, reached by
+    another route.
   * a RAISE — a ``querySelectorAll`` returning something that is not a NodeList
     takes the whole pass down.
 
 The fixtures are PURE ADDITIONS to one benign twin, ``every_collection_pass``,
-which is built to drive EVERY sub-pass to a non-zero count. That is what gives
-per-site attribution rather than a single pass/fail: each count below is produced
-by exactly one collection read, so reverting one site drops exactly one count.
-
-    bgTransferred          the slide-root lookups        preprocess.mjs 461, 477
-    (wrappers)             the wrapper collection                       464
-    codeBlocks             monospace panel                              40
-    wrapped                bare inline text in a div                    180
-    replacedImgs           div with a background-image                  603
-    peeledTextTags         <p> carrying a background                    640
-    tableCells             table + its th/td                            681, 682
-    canvasImgs             <canvas>                                     890
-    svgImgsRasterized      <img> with an svg data URI                   955
-    inlineSvgsRasterized   inline <svg>                                 1012
-    inlineBgs              inline element with a background             866
+which holds one of every kind of thing the snapshot reads: a heading, prose
+and a monospace panel (text), a ``<div>`` with a background image, an SVG
+data-URI ``<img>``, an inline ``<svg>`` and a ``<canvas>`` (pictures), a ``<p>``
+and an inline element with a background (shapes), and a table. Each
+hostile document is compared with it through the background transfer's result
+(``{bgTransferred}``), the snapshot's slide summary (every count it reports, but
+the clock reading ``captureMs``) and the whole exported deck.
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
@@ -61,7 +54,13 @@ import json
 
 import pytest
 
+from tests.fixtures.export_snapshot_support import (
+    export_logged,
+    slide_summaries,
+    summary_without_clock,
+)
 from tests.unit.test_export_slide_root_background import (
+    FIXTURE_DIR,
     GROUND_RGB,
     _build,
     requires_huashu_sidecar,
@@ -75,10 +74,9 @@ from tests.unit.test_export_svg_raster import structural_manifest
 # The benign document every fixture below is a copy of, plus one <script>.
 BENIGN = "every_collection_pass"
 
-# The sub-pass inside emitInlineBackgrounds. It was the last site reading through
-# the realm's own prototype, so it is stated on its own below as well as in the
-# aggregate parity claim, rather than only in the aggregate.
-INLINE_BG_SUB_PASS = "inlineBgs"
+# The summary counts the benign twin must hold above zero: a count left at zero
+# would make the hostile document's equal count vacuous.
+TWIN_COUNTS = ("elements", "text", "shapes", "tables", "pictures", "captures")
 
 # Fixtures whose vector is CLOSED: the pass returns and reads the real document.
 CLOSED_FIXTURES = ("hostile_foreach_silent", "hostile_selector_decoy")
@@ -93,6 +91,16 @@ POISONED_INTERFACES = {
     "hostile_selector_decoy": ("Document",),
     "hostile_selector_all_decoy": ("Document", "Element"),
 }
+
+
+def _summary(monkeypatch: pytest.MonkeyPatch, fixture: str) -> dict:
+    """The slide summary of the fixture's export, without its clock reading."""
+    logged = export_logged(
+        [(FIXTURE_DIR / f"{fixture}.html").read_text(encoding="utf-8")], monkeypatch=monkeypatch
+    )
+    assert logged.failures == [], f"{fixture}: {logged.failures}"
+    (summary,) = slide_summaries(logged.stderr)
+    return summary_without_clock(summary)
 
 
 @requires_huashu_sidecar
@@ -122,26 +130,21 @@ class TestThePoisoningIsActuallyHostile:
 
 
 @requires_huashu_sidecar
-class TestTheBenignTwinDrivesEverySubPass:
+class TestTheBenignTwinDrivesEveryCount:
     """The instrument itself, asserted rather than assumed.
 
     Every claim below is "the hostile document read the same elements as this
-    one". A twin that left a sub-pass at zero would make the corresponding
+    one". A twin that left a count at zero would make the corresponding
     comparison vacuously true, so the twin's own counts are pinned first.
     """
 
-    def test_every_sub_pass_reports_a_non_zero_count(self) -> None:
-        counts = _probe_bounded(BENIGN)[BENIGN]["counts"]
-
-        assert counts["bgTransferred"] == "solid"
-        zeroed = [
-            name
-            for name, value in counts.items()
-            if name != "bgTransferred" and not value
-        ]
+    def test_every_count_is_non_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert _probe_bounded(BENIGN)[BENIGN]["counts"] == {"bgTransferred": "solid"}
+        summary = _summary(monkeypatch, BENIGN)
+        zeroed = [name for name in TWIN_COUNTS if not summary[name]]
         assert zeroed == [], (
-            f"{BENIGN} leaves these sub-passes at zero, so they cannot attribute "
-            f"a regression: {zeroed}"
+            f"{BENIGN} leaves these counts at zero, so they cannot attribute "
+            f"a regression: {zeroed} ({summary})"
         )
 
 
@@ -162,17 +165,18 @@ class TestTheClosedSitesReadTheRealDocument:
         )
 
     @pytest.mark.parametrize("fixture", CLOSED_FIXTURES)
-    def test_every_closed_sub_pass_matches_the_benign_twin(self, fixture: str) -> None:
-        """Same elements, per sub-pass, measured as the counts the pass returns.
+    def test_every_count_matches_the_benign_twin(
+        self, monkeypatch: pytest.MonkeyPatch, fixture: str
+    ) -> None:
+        """Same elements, measured as the counts the background transfer and the snapshot report.
 
-        Probed in ONE run so both documents share a browser. EVERY sub-pass is
-        compared, ``inlineBgs`` included: the exclusion that used to sit here
-        existed only because ``emitInlineBackgrounds`` was fenced, and closing
-        that site is what removed the reason for it.
+        The transfer's result is probed in ONE run so both documents share a
+        browser; the slide summaries are compared whole but for ``captureMs``.
         """
         probed = _probe_bounded(fixture, BENIGN)
 
         assert probed[fixture]["counts"] == probed[BENIGN]["counts"]
+        assert _summary(monkeypatch, fixture) == _summary(monkeypatch, BENIGN)
 
     def test_the_ground_is_the_documents_own_and_not_the_decoy(self) -> None:
         """The positive half of the locator claim.
@@ -201,10 +205,7 @@ class TestTheClosedSitesReadTheRealDocument:
 
         The absence of that SPECIFIC failure is asserted first, because it is the
         attributable half: it is exactly what reverting the locator's collection
-        read would bring back. The clean pass is then asserted as well — while
-        ``emitInlineBackgrounds`` was fenced this fixture still raised further down
-        the same run, so a clean pass could not be claimed; closing that site is
-        what makes the stronger statement true.
+        read would bring back. The clean pass is then asserted as well.
         """
         result = _probe_bounded("hostile_wrapper_selector_all")[
             "hostile_wrapper_selector_all"
@@ -233,19 +234,14 @@ class TestTheClosedSitesReadTheRealDocument:
 
 
 @requires_huashu_sidecar
-class TestTheLastSiteIsClosed:
-    """``emitInlineBackgrounds``, which was the one site left reading raw.
+class TestTheEndlessAndTheSilentForEach:
+    """A poisoned ``forEach`` ignores its receiver, so a raw read spins on ANY document.
 
-    It was fenced when the sibling sites were hardened, and these three
-    expectations were the disclosure of what that cost: a poisoned ``forEach``
-    ignores its receiver, so the raw site spun on ANY document — an empty
-    ``'span, mark, kbd'`` NodeList still called it — leaving the hang and the
-    raise open for EVERY deck. The site now reads through ``queryAll``, so they
-    are ordinary passing expectations.
-
-    Asserted through the bounded probe rather than a real export: a hang costs
-    the probe its 5s bound instead of the sidecar's 180s timeout, so a
-    regression here stays cheap to catch.
+    An empty NodeList still calls it, which would leave the hang and the raise
+    open for EVERY deck. The background transfer is asserted through the bounded
+    probe: a hang costs the probe its 5s bound instead of the sidecar's 180s
+    timeout, so a regression here stays cheap to catch. The snapshot's reads of
+    these documents are held to terminate by test_export_snapshot_hostile_realm.py.
     """
 
     def test_an_endless_foreach_does_not_hang_the_pass(self) -> None:
@@ -268,16 +264,16 @@ class TestTheLastSiteIsClosed:
             "through the realm's own prototype somewhere in the pass"
         )
 
-    def test_a_silent_foreach_costs_the_deck_no_content_at_all(self) -> None:
-        """This sub-pass on its own, named rather than only inside the aggregate.
+    def test_a_silent_foreach_costs_the_deck_no_content_at_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Measured on the .pptx, not on counts: the deck is the benign twin's, entry for entry.
 
-        The parity claim above now covers ``inlineBgs`` too, so this overlaps it
-        deliberately: a no-op ``forEach`` is the failure mode that reports SUCCESS,
-        and the count it silently zeroes is worth naming in a test of its own.
+        The count parity above overlaps this deliberately: a no-op ``forEach``
+        is the failure mode that reports SUCCESS, and what it would silently
+        drop is worth naming in a test of its own.
         """
-        probed = _probe_bounded("hostile_foreach_silent", BENIGN)
+        hostile = _build(monkeypatch, "hostile_foreach_silent.html")
+        benign = _build(monkeypatch, f"{BENIGN}.html")
 
-        assert (
-            probed["hostile_foreach_silent"]["counts"][INLINE_BG_SUB_PASS]
-            == probed[BENIGN]["counts"][INLINE_BG_SUB_PASS]
-        )
+        assert structural_manifest(hostile) == structural_manifest(benign)
