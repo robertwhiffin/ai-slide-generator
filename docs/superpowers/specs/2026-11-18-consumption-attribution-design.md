@@ -157,8 +157,8 @@ option (see the second test below).
   cannot represent (it reads back without its definition, so sending it back would strip
   it). The role lookup is read-only and matches the role's Postgres name, so a role made
   by hand counts as well as `sp-<client id>`.
-- The installer's SDK floor is `databricks-sdk>=0.95.0` (it was `>=0.85.0`), the first
-  release with `AppResourcePostgres`.
+- The installer's SDK floor is `databricks-sdk>=0.96.0` (it was `>=0.85.0`), the version
+  the install instructions already use. `AppResourcePostgres` first shipped in 0.95.0.
 - Connection settings stay as they are. The app keeps reading `LAKEBASE_PG_HOST`,
   `LAKEBASE_PROJECT_ID` and `LAKEBASE_ENDPOINT_NAME` from `app.yaml`.
 - The resource names the branch the install uses: `production` for a normal install, the

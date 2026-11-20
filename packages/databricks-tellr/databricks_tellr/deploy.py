@@ -64,10 +64,10 @@ try:
 except ImportError:
     pass
 
-# App Postgres resource imports (requires databricks-sdk>=0.95.0, the first
-# release with AppResourcePostgres — names an autoscaling Lakebase branch as an
-# app resource). The package floor is 0.95.0; the guard covers an older SDK
-# installed in the same environment regardless.
+# App Postgres resource imports (AppResourcePostgres — names an autoscaling
+# Lakebase branch as an app resource — first shipped in databricks-sdk 0.95.0).
+# The package floor is 0.96.0, the version the install instructions use; the
+# guard covers an older SDK installed in the same environment regardless.
 HAS_POSTGRES_RESOURCE = False
 try:
     from databricks.sdk.service.apps import (
@@ -1854,7 +1854,7 @@ def _ensure_app_postgres_resource(
     if not HAS_POSTGRES_RESOURCE:
         print(
             f"{not_attached}: databricks-sdk is too old for AppResourcePostgres "
-            f"(needs databricks-sdk>=0.95.0)"
+            f"(needs databricks-sdk>=0.96.0)"
         )
         return False
     if not HAS_ROLE_SDK:

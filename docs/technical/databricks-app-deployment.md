@@ -94,7 +94,7 @@ The distribution splits into two complementary PyPI packages:
 **Dependencies (minimal):**
 ```toml
 dependencies = [
-    "databricks-sdk>=0.95.0",
+    "databricks-sdk>=0.96.0",
     "psycopg2-binary>=2.9.0",
     "pyyaml>=6.0.0",
     "requests>=2.31.0",
@@ -700,8 +700,8 @@ to the app. A provisioned install already has a database resource of that name f
   the resource list back would drop it); and when the update is refused or does not
   succeed. An app that already has a database resource, or a resource named
   `app_database`, is left as it is, with no warning.
-- **SDK.** The installer needs `databricks-sdk>=0.95.0`, the first release with the
-  Postgres app resource. `databricks-tellr` requires that version.
+- **SDK.** `databricks-tellr` requires `databricks-sdk>=0.96.0`, the version the install
+  instructions use. The Postgres app resource first shipped in 0.95.0.
 
 **Example query.** The Gateway stores the tag in the `request_tags` column of
 `system.ai_gateway.usage`. This counts Tellr's Gateway requests by component and

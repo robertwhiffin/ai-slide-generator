@@ -417,8 +417,9 @@ def test_a_failed_lookup_warns_with_the_error_and_continues(capsys):
 
 
 def test_an_sdk_without_the_postgres_resource_warns_and_continues(monkeypatch, capsys):
-    """An SDK older than 0.95.0 (the installer's floor) has no
-    ``AppResourcePostgres``. Model that SDK: the names are gone from the SDK
+    """An SDK older than 0.95.0 has no ``AppResourcePostgres`` (the installer's
+    floor is 0.96.0, so this is an older SDK left in the environment). Model
+    that SDK: the names are gone from the SDK
     module and from deploy's namespace, so the helper must neither raise nor
     call anything, and must say, on one line, which SDK it needs."""
     for name in ("AppResourcePostgres", "AppResourcePostgresPostgresPermission"):
@@ -434,7 +435,7 @@ def test_an_sdk_without_the_postgres_resource_warns_and_continues(monkeypatch, c
     ws.apps.update.assert_not_called()
     lines = _warning_lines(capsys.readouterr().out)
     assert len(lines) == 1, lines
-    assert "databricks-sdk" in lines[0] and "0.95.0" in lines[0], lines
+    assert "databricks-sdk" in lines[0] and "0.96.0" in lines[0], lines
 
 
 def test_an_sdk_without_the_role_api_warns_and_does_not_attach(monkeypatch, capsys):
