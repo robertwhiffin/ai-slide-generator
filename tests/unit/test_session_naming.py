@@ -685,9 +685,10 @@ class TestBuildSessionTitleModel:
         assert len(workspace.requests) == 1
         request = workspace.requests[0]
         expected_ua = gateway_request_headers()["User-Agent"]
-        assert [
-            json.loads(tags) for tags in request.headers.get_list("databricks-ai-gateway-request-tags")
-        ] == [{"source": "tellr", "component": "title"}]
+        sent_tags = request.headers.get_list("databricks-ai-gateway-request-tags")
+        assert [json.loads(tags) for tags in sent_tags] == [
+            {"source": "tellr", "component": "title"}
+        ]
         assert request.headers.get_list("user-agent") == [expected_ua]
         sent = json.loads(request.content)
         assert "extra_headers" not in sent and "extra_params" not in sent

@@ -743,8 +743,8 @@ def _update_databricks(
 
         # Attach an autoscaling install's Lakebase branch to the app, so the
         # platform attributes the database's usage to it. It runs after every
-        # step that can abort the update, and only once the helper has found
-        # the SP's role on the branch. Never aborts the update.
+        # pre-deploy step that can abort the update, and only once the helper
+        # has found the SP's role on the branch. Never aborts the update.
         if lakebase_type == "autoscaling":
             branch_name = lakebase_result.get("branch_id") or "production"
             _ensure_app_postgres_resource(
@@ -1913,6 +1913,8 @@ def _ensure_app_postgres_resource(
                 permission=AppResourcePostgresPostgresPermission.CAN_CONNECT_AND_CREATE,
             ),
         )
+        # The wait below can be long, so say what it is waiting on first.
+        print("   Attaching the Lakebase branch to the app as a resource...")
         update = ws.apps.create_update(
             app_name=app_name,
             update_mask="resources",

@@ -969,12 +969,16 @@ def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
     real_job_queue, monkeypatch, entrypoint
 ):
     """The Legacy (monolith) limb of the REAL chat service, reached from the real enqueue
-    site through the real worker.  It is the only place ``mcp`` reaches the Gateway today:
-    an MCP job runs the Legacy engine, whose deck calls build no Gateway client, so the
-    turn's first-message title call is its one tagged request.  The limb makes that call on
-    its own title thread, started in a copy of the job's context, so it carries the turn's
-    entrypoint beside the ``title`` component.  Only the service's stores and its agent are
-    stubbed; the agent returns no HTML, so no deck is saved."""
+    site through the real worker.  While MCP jobs run on the Legacy engine (their payload
+    has no ``engine_mode``), this is the only place ``mcp`` reaches the Gateway: the Legacy
+    engine's deck calls build no Gateway client, so the turn's first-message title call is
+    its one tagged request.  The limb makes that call on its own title thread, started in a
+    copy of the job's context, so it carries the turn's entrypoint beside the ``title``
+    component.  Stubbed: the deck store (``_get_or_load_deck``), the agent
+    (``_build_agent_for_session``; it returns no HTML, so no deck is saved), two helpers
+    (``_persist_genie_conversation_ids``, ``_substitute_images_for_response``), the session
+    managers, the settings, ``get_system_client`` and the HTTP layer (a mock transport);
+    the enqueue sites' own stubs are in ``_app_route`` and ``_mcp_tool``."""
     from src.api.services.chat_service import ChatService
 
     workspace = _text_workspace(monkeypatch)

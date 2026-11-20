@@ -18,9 +18,14 @@ cannot be told apart from other apps in the same workspace.
 
 The rule for the branch is: **identifiers only**. A label is a product name, a version or
 one of a fixed list of feature names. No prompt, no deck content, no user text and no
-customer name is ever put in one. The branch adds no behaviour, no permission and no
-network call, sends no data anywhere new, and does nothing that can fail an install or an
-upgrade.
+customer name is ever put in one. In the app, the branch adds no behaviour, no permission
+and no network call, and sends no data anywhere new. In the installer, it adds one read of
+the app, one read-only lookup of the branch's Postgres roles and one resources-only update
+of the app; the resource that update declares carries `CAN_CONNECT_AND_CREATE` on the
+app's own database. With the resource attached, the platform supplies the app's Postgres
+user as `PGUSER`, and the app's existing code takes the user from it instead of looking it
+up; it is the same service principal the app already connects as. Nothing in the branch
+can fail an install or an upgrade.
 
 ## What the code does today
 
@@ -91,8 +96,8 @@ Every `WorkspaceClient` Tellr builds carries a Tellr product and the real versio
 | Site | Today | After |
 |---|---|---|
 | `genie_agent.py:150` (Agent-mode Genie) | bare | `product=tellr-app-<hash>` of the signed-in user |
-| `mcp_transport.py:147` (Genie One, Gateway MCP, UC-connection MCP) | bare | same |
-| `tools/mcp_tool.py:68`, `:135` (Legacy MCP tool) | bare | same |
+| `mcp_transport.py:147` (Agent mode: Genie One, Gateway MCP, UC-connection MCP) | bare | same |
+| `tools/mcp_tool.py:68`, `:135` (Legacy MCP tool) | bare | same, on its SDK client only: the tool's MCP HTTP requests go through `databricks-mcp`'s own HTTP client and keep the library's default User-Agent, `python-httpx/<version>` |
 | `databricks_client.py:469` (first-stage client that calls `/Me`) | bare | `product=tellr-app-system` |
 | `model_endpoint_catalog.py:201` | built from the system client's `Config` | inherits `product=tellr-app-system` (tested; no change needed) |
 
@@ -103,7 +108,8 @@ records only when its `/Me` lookup succeeds, so a failed lookup never replaces a
 already known for the token; several of these clients are built in worker
 threads where the request's context is not visible, and every one of them holds the token.
 Without a recorded token it falls back to the request's user (`get_current_user()`), then
-to `tellr-app-unknown`. Only a SHA-256 of the token is kept, never the token, in a map
+to `tellr-app-unknown`. When its own `/Me` lookup fails, `_create_user_client` labels the
+client it builds with this same label, so a token already known keeps its user's label. Only a SHA-256 of the token is kept, never the token, in a map
 bounded at 200 entries (the oldest is dropped first). No site makes an extra
 network call to learn the user.
 
@@ -188,10 +194,14 @@ is dropped without raising, so a tag can never carry free text:
 
 | Value | Client |
 |---|---|
-| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`), and the admin's model probe (`model_endpoint_probe.py`), which builds its model with the same factory |
+| `generation` | graph agents (`DatabricksModelAdapter._default_model_factory`), the admin's model probe (`model_endpoint_probe.py`) and the admin's agent test runs (`agent_runtime.get_agent_test_runtime`), which build their models with the same factory; the probe and the test runs carry no `entrypoint` |
 | `title` | session titles (`build_session_title_model`) |
 | `export` | PPTX and Google Slides export |
 | `image` | image generation |
+
+Model calls that do not go through the Gateway carry no tag at all: the Legacy engine's
+deck calls, the feedback chat and its report, the configuration check and slide
+verification (item 8 above).
 
 `gateway_request_headers`, `gateway_chat_model` and `gateway_openai_client` take an
 optional `component`. The existing tests pin the header to exactly
@@ -252,8 +262,9 @@ on its allow-list is omitted. The installer change prints a warning and continue
   attach is a resources-only update that sends every existing resource back, leaves an app
   that already has a database resource alone, and warns and continues when the API
   refuses or a skip condition holds.
-- **Guards.** The three source scans in section 2. The `WorkspaceClient` and `Config` scans
-  each have a sabotage case; the `httpx` scan fails if it finds no client to check.
+- **Guards.** The three source scans in section 2. Each scan has a sabotage case (the
+  `httpx` scan's includes `from httpx import AsyncClient` and module aliases), and the
+  `httpx` scan also fails if it finds no client to check.
 - **Live, on the dev workspace (devloop, never devtest).** The section 3 sequence again
   with the new installer (create, update, second update), then one
   deck in Agent mode with a Genie Agent and Genie One, a title and a PPTX export. Done when

@@ -36,7 +36,7 @@ warning and the deploy carries on.
 import inspect
 from contextlib import contextmanager
 from dataclasses import replace
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 
 import pytest
 
@@ -250,6 +250,29 @@ def test_attaches_the_branch_last_with_a_resources_only_update():
     ws.postgres.list_roles.assert_called_once_with(parent=BRANCH)
 
 
+def test_says_it_is_attaching_before_the_update_it_waits_on(capsys):
+    """``create_update(...).result()`` can wait a long time, so one progress line is
+    printed just before the request, and the success line once it has SUCCEEDED."""
+    ws = _ws(_live_app())
+    printed_before_the_update: list[str] = []
+
+    def _record_what_was_printed(*args, **kwargs):
+        printed_before_the_update.extend(capsys.readouterr().out.splitlines())
+        return DEFAULT  # the mock's own return value: an update that reaches SUCCEEDED
+
+    ws.apps.create_update.side_effect = _record_what_was_printed
+
+    assert deploy._ensure_app_postgres_resource(ws, APP_NAME, PROJECT) is True
+
+    ws.apps.create_update.assert_called_once()
+    assert printed_before_the_update == [
+        "   Attaching the Lakebase branch to the app as a resource..."
+    ]
+    assert capsys.readouterr().out.splitlines() == [
+        "   Lakebase branch attached to the app as a resource"
+    ]
+
+
 def test_names_the_forks_own_branch():
     fork_branch = f"projects/{PROJECT}/branches/dev-x"
     ws = _ws(_live_app(), roles={fork_branch: [_sp_role("cid")]})
@@ -322,13 +345,15 @@ def test_names_the_forks_own_branch():
         "app_database-of-another-kind",
     ],
 )
-def test_an_app_that_already_has_a_database_resource_is_left_alone(existing):
+def test_an_app_that_already_has_a_database_resource_is_left_alone(capsys, existing):
     ws = _ws(_live_app(resources=[existing]))
 
     assert deploy._ensure_app_postgres_resource(ws, APP_NAME, PROJECT) is False
 
     ws.apps.create_update.assert_not_called()
     ws.apps.update.assert_not_called()
+    # Nothing to do, so nothing printed: no progress line, no warning.
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(
@@ -507,6 +532,22 @@ def test_a_role_made_by_hand_counts_by_its_postgres_name():
     """The match is on the Postgres name the service principal logs in as, not
     on the installer's ``sp-<client id>`` role id."""
     ws = _ws(_live_app(), roles={BRANCH: [_sp_role("cid", role_id="made-by-hand")]})
+
+    assert deploy._ensure_app_postgres_resource(ws, APP_NAME, PROJECT) is True
+
+    _, update_mask, sent = _sent_update(ws)
+    assert update_mask == "resources"
+    assert sent.resources[-1].as_dict() == EXPECTED_RESOURCE
+
+
+def test_a_role_without_a_status_listed_first_does_not_hide_the_service_principals_role():
+    """``Role.status`` is optional.  A role without one, listed before the service
+    principal's role, is skipped: it must not end the lookup in an error, which reads
+    as "could not list the roles" and attaches nothing."""
+    ws = _ws(
+        _live_app(),
+        roles={BRANCH: [Role(name=f"{BRANCH}/roles/unknown", status=None), _sp_role("cid")]},
+    )
 
     assert deploy._ensure_app_postgres_resource(ws, APP_NAME, PROJECT) is True
 
@@ -713,7 +754,7 @@ def test_a_failed_attach_warns_and_the_create_still_deploys(monkeypatch, capsys)
     assert any("postgres app resources are not enabled" in line for line in lines), lines
 
 
-# --- update: attach after every step that can abort, before the deploy -----------
+# --- update: attach after every pre-deploy step that can abort, before the deploy -
 # These live here, not in test_deploy_app_scopes.py, because this module imports
 # databricks_tellr in the CI shape (see the deploy_local import at the top).
 

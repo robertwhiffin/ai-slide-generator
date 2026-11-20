@@ -18,10 +18,10 @@ fixed list: ``component``, the feature the client is built for (one of
 :data:`COMPONENTS`), and ``entrypoint``, how the chat turn that built it reached
 Tellr (one of ``attribution.ENTRYPOINTS``).  A value off its list adds no key, so
 the tag never carries free text, and no value makes it raise.  These headers go
-only on these clients' requests; the Databricks SDK clients and their
-``product=`` tags (``src/core/databricks_client.py``) are deliberately untouched
-— those tags are how installs are tracked.  ``tests/unit/test_gateway_clients.py``
-fails if a Gateway client is built anywhere else.
+only on Gateway requests, the ones these clients send.  The Databricks SDK clients
+carry their own product and version labels instead (``src/core/attribution.py``).
+``tests/unit/test_gateway_clients.py`` fails if a Gateway client is built anywhere
+else.
 """
 
 from __future__ import annotations

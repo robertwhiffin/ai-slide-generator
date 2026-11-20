@@ -3,8 +3,9 @@
 Two kinds of test:
 
 - **Guards** scan ``src/`` for an SDK ``WorkspaceClient`` or ``Config`` built without a
-  label, and ``mcp_transport.py`` for an ``httpx`` client opened without Tellr's headers.
-  Each guard has its own test showing that it flags the bare form.
+  label, and ``mcp_transport.py`` for an ``httpx`` client opened without Tellr's headers
+  (``httpx.AsyncClient`` or ``from httpx import AsyncClient``, aliases included).  Each
+  guard has its own test showing that it flags the bare form.
 - **Wire tests** build the real client at each site and read what it sends, on a mock
   transport, so nothing leaves the machine: ``requests``' adapter under the SDK, and
   ``httpx``'s transport under the MCP client.  The user signs in through the real
@@ -241,18 +242,63 @@ def test_a_config_built_for_a_client_carries_the_label():
     assert _scan_src(_bare_sdk_configs) == {}
 
 
+#: The ``httpx`` clients an MCP transport may open.
+_HTTPX_CLIENTS = frozenset({"httpx.AsyncClient", "httpx.Client"})
+
+
+def _httpx_clients(source: str) -> list[ast.Call]:
+    """Calls that open an ``httpx`` client, through the file's imports: ``httpx.AsyncClient``,
+    the same through an ``import httpx as ...`` alias, or ``from httpx import AsyncClient``
+    (aliased or not).  A class of that name imported from anywhere else is not one."""
+    tree = ast.parse(source)
+    bindings = _import_bindings(tree)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _called_paths(node.func, bindings) & _HTTPX_CLIENTS
+    ]
+    return sorted(calls, key=lambda call: call.lineno)
+
+
+def _mcp_clients_without_headers(source: str) -> list[int]:
+    """Lines that open an ``httpx`` client without ``headers=mcp_http_headers()``."""
+    return [
+        call.lineno
+        for call in _httpx_clients(source)
+        if not any(
+            keyword.arg == "headers" and ast.unparse(keyword.value) == "mcp_http_headers()"
+            for keyword in call.keywords
+        )
+    ]
+
+
+def test_mcp_headers_guard_flags_a_bare_client_and_accepts_tellrs_headers():
+    source = (
+        "import httpx\n"
+        "import httpx as hx\n"
+        "from httpx import AsyncClient\n"
+        "from httpx import AsyncClient as OpenedClient\n"
+        "a = httpx.AsyncClient(auth=a)\n"
+        "b = httpx.AsyncClient(auth=a, headers=mcp_http_headers())\n"
+        "c = AsyncClient(auth=a)\n"
+        "d = AsyncClient(auth=a, headers=mcp_http_headers())\n"
+        "e = hx.AsyncClient(auth=a)\n"
+        "f = OpenedClient(auth=a)\n"
+        "g = httpx.Client(auth=a)\n"
+        "h = httpx.AsyncClient(auth=a, headers={'User-Agent': 'x'})\n"
+        "i = httpx.AsyncClient(auth=a, **kwargs)\n"
+        "# j = httpx.AsyncClient(auth=a)\n"
+        "k = httpx.Timeout(30)\n"
+    )
+    assert _mcp_clients_without_headers(source) == [5, 7, 9, 10, 11, 12, 13]
+    other_library = "from aiohttp import AsyncClient\nc = AsyncClient()\n"
+    assert _mcp_clients_without_headers(other_library) == []
+
+
 def test_mcp_transport_opens_its_http_client_with_those_headers():
     source = (SRC / "services/agent_tools/mcp_transport.py").read_text()
-    clients = [
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and ast.unparse(node.func) in {"httpx.AsyncClient", "httpx.Client"}
-    ]
-    assert clients
-    for node in clients:
-        kwargs = {kw.arg: ast.unparse(kw.value) for kw in node.keywords}
-        assert kwargs.get("headers") == "mcp_http_headers()", f"line {node.lineno}"
+    assert _httpx_clients(source), "no httpx client found: the scan is vacuous"
+    assert _mcp_clients_without_headers(source) == []
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +480,9 @@ def test_first_stage_user_client_is_labelled(installed_version, sdk_wire, monkey
 
 
 def test_a_failed_me_lookup_never_hides_a_known_label(installed_version, sdk_wire, monkeypatch):
-    """Logfood rate-limits ``/Me``, and a failed lookup is not cached, so the next request
-    builds the client again.  Its fallback, ``tellr-app-unknown``, must not replace the
-    label already known for that token, nor hide the request's user for a token never
+    """A workspace can rate-limit ``/Me``, and a failed lookup is not cached, so the next request
+    builds the client again.  Its fallback label is never remembered: it must not replace
+    the label already known for that token, nor hide the request's user for a token never
     seen (``mcp_auth`` binds the user from a second ``/Me`` after this one failed)."""
     from src.core import databricks_client
 
@@ -450,6 +496,33 @@ def test_a_failed_me_lookup_never_hides_a_known_label(installed_version, sdk_wir
         assert attribution.user_product_kwargs("tok-never-seen")["product"] == (
             OTHER_REQUEST_USER_PRODUCT
         )
+
+
+def test_a_client_built_while_me_fails_carries_the_label_known_for_its_token(
+    installed_version, sdk_wire, monkeypatch
+):
+    """When ``/Me`` fails for a token whose user is already known, the client built then
+    still carries that user's label; only a token never seen gets ``tellr-app-unknown``."""
+    from src.core import databricks_client
+
+    _sign_in(sdk_wire, monkeypatch, "tok-known")  # from here on, /Me fails
+    known, known_user = databricks_client._create_user_client("tok-known")
+    never_seen, never_seen_user = databricks_client._create_user_client("tok-never-seen")
+    assert known_user is None and never_seen_user is None
+    assert len(sdk_wire.sent_to(ME_PATH)) == 2, "both builds must have met a failing /Me"
+
+    sdk_wire.bodies[ME_PATH] = {"userName": TOKEN_USER, "id": "1"}
+    sdk_wire.sent.clear()
+    known.current_user.me()
+    never_seen.current_user.me()
+
+    known_request, never_seen_request = sdk_wire.sent_to(ME_PATH)
+    assert known_request.headers["Authorization"] == "Bearer tok-known"
+    assert known_request.headers["User-Agent"].startswith(f"{TOKEN_USER_PRODUCT}/{VERSION} ")
+    assert never_seen_request.headers["Authorization"] == "Bearer tok-never-seen"
+    assert never_seen_request.headers["User-Agent"].startswith(
+        f"{attribution.PRODUCT_NAME_UNKNOWN}/{VERSION} "
+    )
 
 
 def test_catalog_clients_derived_from_the_system_client_keep_its_label(

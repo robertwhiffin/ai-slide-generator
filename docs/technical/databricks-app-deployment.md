@@ -94,9 +94,10 @@ The distribution splits into two complementary PyPI packages:
 **Dependencies (minimal):**
 ```toml
 dependencies = [
-    "databricks-sdk>=0.20.0",
+    "databricks-sdk>=0.95.0",
     "psycopg2-binary>=2.9.0",
     "pyyaml>=6.0.0",
+    "requests>=2.31.0",
 ]
 ```
 
@@ -261,10 +262,12 @@ Creates all infrastructure and deploys the app:
 
 4. **Create Databricks App**
    - Register app with Apps API
-   - Attach database resource with CAN_CONNECT_AND_CREATE permission
+   - Provisioned Lakebase only: attach the database resource with CAN_CONNECT_AND_CREATE permission
    - Configure user API scopes (sql, genie, catalog tables/schemas/catalogs, serving-endpoints)
 
    - Grant the app's service principal `CAN_MANAGE` on its own app (additive `update_permissions`, never `set_permissions`). The admin sync reads the app's ACL as that service principal and is denied without it. A failure prints a `WARNING` with the fix and does not abort the deploy.
+
+   - Autoscaling Lakebase: the app is created with no database resource. The installer then creates the service principal's Postgres role on the branch, and only after that attaches the branch to the app as the `app_database` resource (see [How Tellr identifies its own requests](#how-tellr-identifies-its-own-requests)).
 
 5. **Setup Database Schema**
    - Create PostgreSQL schema
@@ -638,7 +641,7 @@ header. The header is a JSON object, and the Gateway records it with each reques
 | Key | Value | Meaning |
 |-----|-------|---------|
 | `source` | `tellr` | Always present. |
-| `component` | `generation` | The agents that create and edit a deck, and an admin's check of a model configured for them. |
+| `component` | `generation` | The agents that create and edit a deck, an admin's check of a model configured for them, and an admin's test run of an agent. The two admin calls carry no `entrypoint`, which tells them apart from a deck's turns. |
 | `component` | `title` | Naming a session. |
 | `component` | `export` | PPTX and Google Slides export. |
 | `component` | `image` | Image generation. |
@@ -649,10 +652,17 @@ header. The header is a JSON object, and the Gateway records it with each reques
 an export, has no `entrypoint` key. Each value comes from a fixed list in the code, and any
 other value adds no key, so a tag never carries free text.
 
-**MCP calls.** The MCP calls Tellr's agent tools make as the signed-in user (Genie One and
-other AI Gateway MCP services) send this User-Agent:
-`tellr/<version> python-httpx/<httpx version>`. They carry no request-tags header, because
-the AI Gateway records that header on model routes, not on MCP routes.
+Model calls that do not go through the AI Gateway carry no request tag: the Legacy engine's
+deck calls, the feedback chat and its report, the configuration check and slide
+verification. A chat turn sent through Tellr's MCP server runs on the Legacy engine, so of
+its model calls only the session-title call carries `entrypoint` `mcp`.
+
+**MCP calls.** The MCP calls Tellr's Agent-mode tools make as the signed-in user (Genie One,
+other AI Gateway MCP services, and MCP servers reached through a Unity Catalog connection)
+send this User-Agent: `tellr/<version> python-httpx/<httpx version>`. They carry no
+request-tags header, because the AI Gateway records that header on model routes, not on MCP
+routes. The Legacy engine's MCP tool is not labelled this way: its HTTP requests keep the
+HTTP library's default User-Agent, `python-httpx/<httpx version>`.
 
 **The Lakebase database as an app resource.** On an install that uses autoscaling Lakebase,
 the installer attaches the install's Lakebase branch to the app as a Postgres app resource

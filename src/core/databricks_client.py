@@ -12,7 +12,8 @@ product_version (the installed release, ``src/core/attribution.py``), at the sta
 each request's User-Agent:
 - System client: product="tellr-app-system"
 - User client: product="tellr-app-<hash>", the first 12 hex of the SHA-256 of the
-  user's email local part ("tellr-app-unknown" when the user cannot be looked up)
+  user's email local part (when the user cannot be looked up: the label remembered for
+  the token, else the request's user's, else "tellr-app-unknown")
 
 For Homebrew installations, supports OAuth browser authentication via config file.
 """
@@ -37,6 +38,7 @@ from src.core.attribution import (
     package_version,
     remember_user_product,
     system_product_kwargs,
+    user_product_kwargs,
 )
 from src.core.user_context import get_current_user
 
@@ -476,11 +478,13 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
                 extra={"username": username, "user_hash": user_hash},
             )
         except Exception as e:
-            # If we can't get username, use fallback product name
+            # Without the username, take the label every other site sends for this
+            # token: the one remembered for it, else the request's user, else
+            # ``tellr-app-unknown``. Nothing is remembered from a failed lookup.
             logger.warning(
                 f"create_user_client: couldn't get username for product tracking: {e}"
             )
-            product_name = f"{PRODUCT_NAME_USER_PREFIX}unknown"
+            product_name = user_product_kwargs(token)["product"]
 
         # Stage 2: Create final client with product tracking
         version = _get_package_version()
