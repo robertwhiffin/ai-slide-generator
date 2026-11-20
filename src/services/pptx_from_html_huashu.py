@@ -45,7 +45,8 @@ Slides route its Drive upload, each request of which fails after
 ``DRIVE_HTTP_TIMEOUT_SECONDS`` (drive_uploader.py) of silence. Bounds that
 would defeat this, a wait whose worst case reaches the proxy's 300 s or as
 many places as the worker has threads, are warned about once, when this
-module loads (``sidecar_bounds_warnings``).
+module loads (``sidecar_bounds_warnings``), which the app's startup does in
+every worker (``log_sidecar_bounds``).
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -249,8 +250,30 @@ _sidecar_slots = threading.BoundedSemaphore(_sidecar_cap)
 # export is refused at once (HuashuBusyError).
 _sidecar_admissions = threading.BoundedSemaphore(_sidecar_cap + _sidecar_queue)
 SIDECAR_WAIT_SECONDS = sidecar_wait_seconds()
-for _warning in sidecar_bounds_warnings(_sidecar_cap, _sidecar_queue, SIDECAR_WAIT_SECONDS):
-    logger.warning("%s", _warning)
+
+
+def _warn_about_the_bounds() -> None:
+    """Log each warning ``sidecar_bounds_warnings`` has for this worker's bounds."""
+    for warning in sidecar_bounds_warnings(_sidecar_cap, _sidecar_queue, SIDECAR_WAIT_SECONDS):
+        logger.warning("%s", warning)
+
+
+_warn_about_the_bounds()
+
+
+def log_sidecar_bounds() -> None:
+    """Log this worker's sidecar bounds. The app's startup calls it, in every worker.
+
+    Loading this module has warned already about any bound that defeats what it
+    is for, so with the startup loading it a misconfiguration shows when a
+    worker starts, not on its first export.
+    """
+    logger.info(
+        "[huashu] export sidecars per worker: %d at once, %d more waiting, each up to %gs",
+        _sidecar_cap,
+        _sidecar_queue,
+        SIDECAR_WAIT_SECONDS,
+    )
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
@@ -533,17 +556,16 @@ def _remaining_output(process: subprocess.Popen) -> tuple[bytes, bytes]:
 
 
 def _local_dev_gate() -> bool:
-    """True iff this process is running on a developer machine, not Apps.
+    """Whether this process is one the export may run in, before its prerequisites are checked.
 
-    Hard rules (in priority order):
-      - HUASHU_PIPELINE_ENABLED=1 explicit opt-in. This is what
-        app.yaml.darwish sets so the route works on Databricks Apps
-        (Chromium installed during boot via `npx playwright install
-        chromium`). Wins over the Apps-name check.
-      - DATABRICKS_APP_NAME being set without the opt-in means a
-        deployed Apps container that hasn't installed Chromium —
-        keep disabled to fail fast.
-      - Otherwise allow if ENVIRONMENT=development.
+    In priority order:
+      - ``HUASHU_PIPELINE_ENABLED=1``: yes. The app template sets it on
+        Databricks Apps, whose boot runs the sidecar's ``setup.sh`` to
+        extract its ``node_modules`` and install Chromium.
+      - ``DATABRICKS_APP_NAME`` set without it: no, a deployed app that has
+        not opted in, so it fails fast instead of launching a browser it
+        never installed.
+      - Otherwise yes exactly when ``ENVIRONMENT=development``.
     """
     if os.environ.get("HUASHU_PIPELINE_ENABLED") == "1":
         return True
@@ -571,10 +593,12 @@ def _has_chromium() -> bool:
 
 
 def is_available() -> bool:
-    """Whether the huashu pipeline is ready to use.
+    """Whether the export can run here.
 
-    Returns False on Databricks Apps, when node isn't on PATH, when the
-    sidecar files aren't present, or when Chromium hasn't been installed.
+    It needs ``HUASHU_PIPELINE_ENABLED=1`` (a deployed app, its sidecar set up
+    by ``setup.sh``) or ``ENVIRONMENT=development`` (``_local_dev_gate``), and
+    then node on PATH, the sidecar's ``emit_deck.mjs``, its ``playwright`` and
+    ``pptxgenjs`` modules, and a Playwright Chromium. False until all are there.
     """
     if not _local_dev_gate():
         return False

@@ -760,6 +760,13 @@ class TestAWorkerFullOfExportsStillAnswers:
 # them plus the slack: the sidecar stub, and the app around the upload.
 DRIVE_SILENCE_SECONDS = 1
 DRIVE_ANSWER_SLACK_SECONDS = 4
+# What bounds a Drive request when the export's own timeout does not: the
+# socket timeout googleapiclient's build_http sets by default. The export's
+# thread is waited for this long per request, so it ends before the
+# redirect to the silent server does, whatever the export got wrong.
+LIBRARY_SOCKET_TIMEOUT_SECONDS = 60
+# The hosts the redirect holds: every Google API and account host.
+GOOGLE_DOMAINS = ("googleapis.com", "google.com")
 # A token Credentials take as valid: it expires long after the test, so no refresh is tried.
 FAKE_GOOGLE_TOKEN = {
     "token": "fake-access-token",
@@ -771,45 +778,93 @@ FAKE_GOOGLE_TOKEN = {
 }
 
 
-@pytest.fixture
-def silent_drive(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Google's API hosts replaced by a server that takes each connection and never answers.
+def _is_google(host: object) -> bool:
+    return isinstance(host, str) and any(
+        host == domain or host.endswith("." + domain) for domain in GOOGLE_DOMAINS
+    )
 
-    Every lookup and connection the process makes for a ``*.googleapis.com`` host
-    goes to a local socket that accepts it and never writes, so the real Drive
+
+class _SilentGoogle:
+    """Google's hosts, for one test: a local server that takes each connection and never answers.
+
+    While it is open, every lookup of a Google host (``GOOGLE_DOMAINS``) answers
+    its address and every connection to one is made to it, so the real Drive
     client, from its http object to its TLS handshake, waits on a server that
-    never answers: the Drive that hangs. Nothing reaches the network.
+    never answers: the Drive that hangs. Once it is closed, a lookup of a Google
+    host fails and a connection to one is refused. Either way nothing to a
+    Google host falls through to the network. ``threads`` are the test's threads
+    that may still talk to Google: they must end before it closes.
     """
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", 0))
-    server.listen(16)
-    silent = server.getsockname()
-    lookup = socket.getaddrinfo
-    connect = socket.socket.connect
 
-    def google(host: object) -> bool:
-        return isinstance(host, str) and host.endswith("googleapis.com")
+    def __init__(self) -> None:
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(16)
+        self._address = self._server.getsockname()
+        self._closed = False
+        self.threads: list[threading.Thread] = []
+        self._lookup = socket.getaddrinfo
+        self._connect = socket.socket.connect
+        # socket.socket inherits connect from _socket.socket: undone, it inherits it again.
+        self._own_connect = "connect" in vars(socket.socket)
 
-    def resolve(host, port, *args, **kwargs):
-        if google(host):
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", silent)]
-        return lookup(host, port, *args, **kwargs)
+    def resolve(self, host, port, *args, **kwargs):
+        if not _is_google(host):
+            return self._lookup(host, port, *args, **kwargs)
+        if self._closed:
+            raise socket.gaierror(socket.EAI_NONAME, f"{host}: no Google host in this test")
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", self._address)]
 
-    def connect_silently(self: socket.socket, address: object) -> None:
-        if isinstance(address, tuple) and google(address[0]):
-            address = silent
-        return connect(self, address)
+    def connect(self, sock: socket.socket, address: object) -> None:
+        if isinstance(address, tuple) and _is_google(address[0]):
+            if self._closed:
+                raise ConnectionRefusedError(f"{address[0]}: no Google host in this test")
+            address = self._address
+        return self._connect(sock, address)
 
-    monkeypatch.setattr(socket, "getaddrinfo", resolve)
-    monkeypatch.setattr(socket.socket, "connect", connect_silently)
+    def install(self) -> None:
+        silent = self
+        socket.getaddrinfo = self.resolve
+        socket.socket.connect = lambda sock, address: silent.connect(sock, address)
+
+    def close(self) -> None:
+        self._closed = True
+        self._server.close()
+
+    def uninstall(self) -> None:
+        socket.getaddrinfo = self._lookup
+        if self._own_connect:
+            socket.socket.connect = self._connect
+        else:
+            del socket.socket.connect
+
+
+@pytest.fixture
+def silent_drive() -> Iterator[_SilentGoogle]:
+    """Google's hosts held by a ``_SilentGoogle`` for the test, and torn down in order.
+
+    First the test's threads are waited for, then the server is closed, and only
+    then is the redirect undone: a thread still running then would reach the
+    network, so the redirect stays, refusing every Google host, and the test errs.
+    """
+    silent = _SilentGoogle()
+    silent.install()
     try:
-        yield
+        yield silent
     finally:
-        server.close()
+        for thread in silent.threads:
+            thread.join(timeout=2 * LIBRARY_SOCKET_TIMEOUT_SECONDS + DRIVE_ANSWER_SLACK_SECONDS)
+        running = [thread.name for thread in silent.threads if thread.is_alive()]
+        silent.close()
+        if not running:
+            silent.uninstall()
+    assert not running, (
+        f"{running} still running at teardown: Google's hosts stay refused for this process"
+    )
 
 
 @requires_node
-@pytest.mark.usefixtures("admin_and_db", "silent_drive")
+@pytest.mark.usefixtures("admin_and_db")
 class TestADriveThatNeverAnswers:
     """A Drive request whose server never answers fails, and the export answers 502.
 
@@ -842,9 +897,18 @@ class TestADriveThatNeverAnswers:
         ids=["upload", "replace"],
     )
     def test_the_export_is_answered_502_within_the_timeout(
-        self, existing: str | None, requests: int, google_route: dict
+        self,
+        existing: str | None,
+        requests: int,
+        google_route: dict,
+        silent_drive: _SilentGoogle,
     ) -> None:
-        """A first export uploads (one request); a re-export deletes, then uploads (two)."""
+        """A first export uploads (one request); a re-export deletes, then uploads (two).
+
+        Whatever the export does, its thread ends before the test does: past the
+        bound the test asserts, it is waited for as long as the library's own
+        socket timeout could hold each request.
+        """
         from fastapi.testclient import TestClient
 
         google_route["sessions"].get_google_slides_info.return_value = (
@@ -860,11 +924,18 @@ class TestADriveThatNeverAnswers:
             )
             answer["seconds"] = time.monotonic() - started
 
-        thread = threading.Thread(target=export, daemon=True)
+        thread = threading.Thread(target=export, name="drive-export", daemon=True)
+        silent_drive.threads.append(thread)
         thread.start()
-        thread.join(timeout=bound)
+        try:
+            thread.join(timeout=bound)
+            answered_in_time = not thread.is_alive()
+        finally:
+            thread.join(
+                timeout=requests * LIBRARY_SOCKET_TIMEOUT_SECONDS + DRIVE_ANSWER_SLACK_SECONDS
+            )
 
-        assert not thread.is_alive(), (
+        assert answered_in_time, (
             f"no answer within {bound}s: a Drive request that never answers holds the export"
         )
         response = answer["response"]

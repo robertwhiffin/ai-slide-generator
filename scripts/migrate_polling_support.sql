@@ -1,6 +1,7 @@
 -- Migration: Add polling support for async chat requests
 -- This migration adds the chat_requests table and request_id column to session_messages
--- Required for SSE-to-polling migration to work around Databricks Apps 60s timeout
+-- Required for SSE-to-polling migration, so a long turn never has to fit in one request:
+-- the Databricks Apps proxy ends a request after about 300 s (measured on a plain request)
 --
 -- Run this migration on existing Lakebase instances via Databricks SQL Editor
 -- or during app startup if using automatic migrations

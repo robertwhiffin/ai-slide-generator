@@ -1267,3 +1267,41 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         budget = [line for line in lines if "SIDECAR_WAIT_SECONDS" in line and "300 s" in line]
         threads = [line for line in lines if "SIDECAR_QUEUE" in line and "40 threads" in line]
         assert len(budget) == 1 and len(threads) == 1, result.stderr
+
+    def test_the_app_warns_when_it_starts(self) -> None:
+        """A wait past the proxy's limit shows when a worker starts, before any export runs.
+
+        A fresh interpreter imports the app, says so, then runs its lifespan's
+        startup: the budget warning comes between the two, once.
+        """
+        script = (
+            "import asyncio, logging, sys\n"
+            "logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')\n"
+            "from src.api.main import app, lifespan\n"
+            "logging.getLogger('probe').info('PROBE app imported')\n"
+            "async def start():\n"
+            "    async with lifespan(app):\n"
+            "        logging.getLogger('probe').info('PROBE app started')\n"
+            "asyncio.run(start())\n"
+        )
+        env = {**os.environ, "TELLR_SIDECAR_WAIT_SECONDS": "200", "ENVIRONMENT": "test"}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=MODULE_LOAD_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = result.stderr.splitlines()
+        imported = lines.index("PROBE app imported")
+        started = lines.index("PROBE app started")
+        budget = [
+            index
+            for index, line in enumerate(lines)
+            if "SIDECAR_WAIT_SECONDS=200" in line and "300 s" in line
+        ]
+        assert len(budget) == 1 and imported < budget[0] < started, (
+            f"the budget warning is not one line of the app's startup: {lines}"
+        )
