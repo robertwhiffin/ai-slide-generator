@@ -6,10 +6,12 @@
 // table's own background, radius and shadow as a shape under the table (its
 // border too, in the separated model, where it frames the cells from outside),
 // pushes the table item over it, draws no box of the table's rows, row groups,
-// columns and cells (the item holds their fills and borders), lays each cell's
-// text out as that cell's paragraphs (snapshot_text.mjs layoutCell), and still
-// visits everything the cells hold, so a pill, a Harvey ball or a cell's
-// ::before dot is an item of its own over the table. emit_table.cjs writes it.
+// columns and cells (the item holds their fills and borders), gives each
+// cell's text to collectCellText, which makes it that cell's paragraphs where
+// an a:tc paragraph can hold it (snapshot_text.mjs layoutCell) and overlay
+// text items where not, and still visits everything the cells hold, so a
+// pill, a Harvey ball or a cell's ::before dot is an item of its own over the
+// table. emit_table.cjs writes it.
 //
 // The grid (HTML §4.9.12, the table model). Each row's cells take, in order,
 // the first grid columns no cell from a row above still covers; rowspan
@@ -37,18 +39,18 @@
 // nor Drive sees one cell's line contradicting its neighbour's. Under
 // separate, each cell's border is its own; with no spacing between cells, two
 // that meet put both their borders side by side, one line as wide as both when
-// they are alike (R10l). A cell spanning several of the other side's cells
+// they are alike. A cell spanning several of the other side's cells
 // has one side for all of them, so every edge that a span connects takes the
 // strongest of its winners.
 //
-// Margins (R10i). A cell's content starts where the browser started it: its
+// Margins. A cell's content starts where the browser started it: its
 // padding, plus half the collapsed border on that side (collapse) or its own
 // whole border (separate), plus the distance from its grid line to its box
-// (the half gap a separated table's spacing leaves). snapshot.mjs takes off
-// the room its text needs to keep the browser's lines (fitCellText).
+// (the half gap a separated table's spacing leaves), less the room its text
+// needs to keep the browser's lines (fitCellText).
 //
 // A cell's content stays the cell's own wherever an a:tbl paragraph can hold
-// it. A cell holding block layout (a <div>, a <p>, a float: R10n) keeps the
+// it. A cell holding block layout (a <div>, a <p>, a float) keeps the
 // table native, its fill and borders on its a:tc, and gives its whole content
 // to the walk as overlay items at their measured places (paragraphs null): its
 // lines are blocks of their own, which no a:tc paragraph is. So does a cell
@@ -66,15 +68,15 @@
 // * every part paints as a cell of an a:tbl can: shown, in flow (static, or
 //   relative where gridOf finds it on its grid), untransformed, without a
 //   background image, a shadow or an effect;
-// * its cells do not stand apart (R10a): a separated table whose spacing
+// * its cells do not stand apart: a separated table whose spacing
 //   exceeds SPACING_VISIBLE_PX on either axis has no cell that paints a fill
 //   or a border, and no separated cell that paints rounds its corners;
-// * any two separated borders side by side are the same colour and style (R10l);
+// * any two separated borders side by side are the same colour and style;
 // * its spans can be read and its grid holds at most COLLECTION_ITEM_LIMIT
 //   slots (an [html2pptx] line says when not: slotsOf);
 // * the browser's cell boxes are its grid (gridOf).
 // snapshot.mjs checks the rest before it asks: the table is shown, untouched
-// by any clip (R10j) and unrotated.
+// by any clip and unrotated.
 //
 // /**
 //  * TableLayout = {collapse, item, parts, cells}   (page-side only)
@@ -99,7 +101,7 @@
 //  *   borders    each side's line, the same on the cell across it; a colour
 //  *              written solid, composited over what it paints on, as text
 //  *              colours are (Drive drops line alpha);
-//  *   margin     where its content starts inside its grid cell, px (R10i);
+//  *   margin     where its content starts inside its grid cell, px;
 //  *   font       its own face: what an empty line and a paragraph mark are set in;
 //  *   paragraphs its text (snapshot_text.mjs Paragraph); null when its text is
 //  *              overlay text items instead (layoutCell), and [] when it has none.
@@ -118,7 +120,11 @@
 //   opacityOf        computed style -> its own opacity;
 //   pseudoOf         element -> {before, after, marker} it generates, or null;
 //   rectOf           element -> its border box bounds, {left, top, width, height};
-//   fontOf           (style, scale) -> its own face (snapshot_text.mjs fontOf).
+//   fontOf           (style, scale) -> its own face (snapshot_text.mjs fontOf);
+//   layoutCell       (element, style, walk) -> a cell's CellText (snapshot_text.mjs layoutCell);
+//   collectText      (element, style, paint, seq, walk) -> lays out an element's text as
+//                    overlay text items, as anywhere on the slide (snapshot.mjs);
+//   placeGroups      (groups, paint, seq) -> places inline groups as overlay items (snapshot.mjs).
 function createTableLayout(env) {
   const TEXT_NODE = 3;
   const dom = domAccess();
@@ -135,7 +141,7 @@ function createTableLayout(env) {
     td: 'table-cell',
     th: 'table-cell',
   };
-  // A border-spacing above this on either axis is a gap the eye sees (R10a).
+  // A border-spacing above this on either axis is a gap the eye sees.
   const SPACING_VISIBLE_PX = 0.5;
   // Grid lines that run backwards by under this are in order, and a cell box
   // within this of its grid cell (plus the spacing around it) lies on it:
@@ -307,8 +313,8 @@ function createTableLayout(env) {
   }
 
   // Whether a cell holds inline-level content only, which its paragraphs and
-  // the items over it can draw. A cell that does not holds block layout
-  // (R10n): a block-level child (a <div>, a <p>, a ::before laid out as a
+  // the items over it can draw. A cell that does not holds block layout:
+  // a block-level child (a <div>, a <p>, a ::before laid out as a
   // block) is a block of its own in the cell, and a float moves the lines
   // beside it, which no a:tc paragraph does, so the walk overlays its whole
   // content. The children of an inline box and of a display: contents one are
@@ -687,7 +693,7 @@ function createTableLayout(env) {
     return candidates;
   }
 
-  // The separated borders meeting on one boundary (R10l): each cell's own,
+  // The separated borders meeting on one boundary: each cell's own,
   // and with no spacing two that meet are drawn side by side, as one line as
   // wide as both when they are alike. Undefined when they differ: no one
   // line draws them.
@@ -751,7 +757,7 @@ function createTableLayout(env) {
     return fill.alpha > 0 ? { color: fill.color, alpha: fill.alpha } : null;
   }
 
-  // Whether a separated cell shows anything a gap would reveal (R10a): a fill
+  // Whether a separated cell shows anything a gap would reveal: a fill
   // or a border.
   function cellShows(cell) {
     if (cell.fill) return true;
@@ -902,7 +908,7 @@ function createTableLayout(env) {
         });
       }
     }
-    // Cells that stand apart show their gaps when any of them paints (R10a).
+    // Cells that stand apart show their gaps when any of them paints.
     if (!collapse && !model.adjacent) {
       for (let index = 0; index < model.cells.length; index++) {
         if (model.cells[index].element && cellShows(model.cells[index])) return null;
@@ -936,7 +942,7 @@ function createTableLayout(env) {
   }
 
   // The TableLayout of a table whose grid and borders are read: each cell's
-  // margins (R10i) and the item it is drawn as. `parts` are the elements whose
+  // margins and the item it is drawn as. `parts` are the elements whose
   // boxes it draws, `s` the table's computed style.
   function layoutOf(model, grid, parts, s, frame) {
     const collapse = model.collapse;
@@ -1007,7 +1013,58 @@ function createTableLayout(env) {
     };
   }
 
-  return { collectTable };
+  // A line of text within this of its grid cell's edge still lies in it (layout rounding).
+  const CELL_TEXT_EPSILON_PX = 0.5;
+
+  // A native table cell's text: the cell's own paragraphs when its renderer
+  // can set its lines as the browser did (snapshot_text.mjs layoutCell) and
+  // fitCellText finds them room in the cell; else overlay text items, as any
+  // other block's. A cell holding block layout is overlaid whole,
+  // whatever its first run holds: its own text is an anonymous block beside
+  // its block children, and the walk places each where the browser did. So is
+  // a cell whose text is turned (a vertical header): a turned item over it.
+  // `cell` is its {model, grid, blocks}.
+  function collectCellText(element, s, paint, seq, walk, cell) {
+    if (cell.blocks || walk.turned) {
+      env.collectText(element, s, paint, seq, walk);
+      return;
+    }
+    const text = env.layoutCell(element, s, walk);
+    if (text.native && fitCellText(cell, text)) {
+      cell.model.paragraphs = text.paragraphs();
+      cell.model.align = text.align;
+      cell.model.rtl = text.rtl;
+      return;
+    }
+    env.placeGroups(text.groups(), paint, seq);
+  }
+
+  // Whether a cell's lines lie in its grid cell; if so, makes them the room
+  // past the widest that a renderer needs so as not to wrap one (text.slack),
+  // as far as the margin on the side the alignment grows holds it (both sides
+  // of centred text), down to none. The other side keeps its margin, so the
+  // lines start where the browser started them; a cell its text overflows
+  // gives its text to overlay items instead.
+  function fitCellText(cell, text) {
+    if (!text.extent) return true;
+    const grid = cell.grid;
+    const margin = cell.model.margin;
+    if (text.extent.left < grid.left - CELL_TEXT_EPSILON_PX || text.extent.right > grid.right + CELL_TEXT_EPSILON_PX) return false;
+    const room = grid.right - grid.left - margin.left - margin.right - (text.extent.right - text.extent.left);
+    const deficit = text.slack - room;
+    if (!(deficit > 0)) return true;
+    if (text.align === 'center') {
+      margin.left = Math.max(0, margin.left - deficit / 2);
+      margin.right = Math.max(0, margin.right - deficit / 2);
+    } else if (text.align === 'right') {
+      margin.left = Math.max(0, margin.left - deficit);
+    } else {
+      margin.right = Math.max(0, margin.right - deficit);
+    }
+    return true;
+  }
+
+  return { collectTable, collectCellText };
 }
 
 export const TABLE_SOURCE = createTableLayout.toString();

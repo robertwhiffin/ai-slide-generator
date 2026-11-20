@@ -20,18 +20,18 @@ here — it never runs the preflight at all, so a green suite proved nothing abo
 this path. Everything below therefore drives the REAL sidecar end to end, through
 ``_build``, and measures the .pptx.
 
-THREE measured failure modes, one per read and per poisoning shape:
+THREE failure modes a raw read would have, one per read and per poisoning shape:
 
   * a REJECTED SLIDE — the count read carries no ``.catch()`` and
-    ``page.evaluate`` has no timeout of its own, so a throwing lookup takes the
-    whole export down and the slide never ships.
+    ``page.evaluate`` has no timeout of its own, so a throwing lookup would take
+    the whole export down and the slide would never ship.
   * a STALLED WORKER — a lookup that does not return occupies the renderer's main
-    thread. Nothing in the sidecar bounds it, so the export holds a browser and a
-    worker slot until the Python wrapper's own subprocess timeout kills it.
-  * a STALLED WORKER REACHED BY THE OTHER PROPERTY — the readiness check builds an
-    array with ``Array.from``, which reads ``[Symbol.iterator]`` off the
-    collection. A document that leaves ``querySelectorAll`` alone still gets in
-    this way, which is why closing one read does not close the other.
+    thread. Nothing in the sidecar would bound it, so the export would hold a
+    browser and a sidecar slot until the Python wrapper's own timeout ended it.
+  * a STALLED WORKER REACHED BY THE OTHER PROPERTY — a readiness check that built
+    an array with ``Array.from`` would read ``[Symbol.iterator]`` off the
+    collection. A document that leaves ``querySelectorAll`` alone would still get
+    in this way, which is why closing one read does not close the other.
 
 Each fixture is a PURE ADDITION to ``every_collection_pass`` — one ``<script>`` in
 the head, nothing else touched — so the deck they should export is a deck this

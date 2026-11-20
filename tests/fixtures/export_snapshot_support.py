@@ -431,7 +431,7 @@ def export_documents(
 
 # build_pptx_huashu echoes every sidecar stderr line with this prefix.
 SIDECAR_ECHO_PREFIX = "[huashu-emit] "
-# The lines render_slide.cjs itself logs for each slide (Task 12). A line the
+# The lines render_slide.cjs itself logs for each slide (its checks). A line the
 # slide's page logged reaches stderr as "Browser console: <text>" instead
 # (render_slide.cjs forwardConsole), so slide script cannot pass for either.
 SLIDE_SUMMARY_PREFIX = "[html2pptx] slide summary "
@@ -460,7 +460,7 @@ def teed_stderr() -> Iterator[io.StringIO]:
     """For the block's duration, copy what is written to ``sys.stderr`` into the yielded buffer.
 
     Everything still reaches the ``sys.stderr`` in effect when the block
-    began, so a tee inside the block (the harness's, PLAN-CORRECTIONS C8)
+    began, so a tee inside the block (the harness's ``export_pptx``)
     writes through to it.
     """
     buffer = io.StringIO()
@@ -542,7 +542,7 @@ def text_missing_reports(stderr: str) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Browser measurement (C3): measure.cjs on the sidecar's own Playwright
+# Browser measurement: measure.cjs on the sidecar's own Playwright
 # ---------------------------------------------------------------------------
 
 
@@ -1250,9 +1250,8 @@ def reference_text_loss(
     ``references[i]`` is the rendered text expected of slide ``i`` (0-based):
     a ``browser_text`` reading, or a hand-written one for a slide the deck
     lacks. ``hidden_text[i]``, when given, is that slide's ``hiddenText`` (the
-    slide summary's, PLAN-CORRECTIONS C8), which ``check_text_loss`` takes as
-    its ``hidden_text`` keyword; without it the oracle is called with three
-    arguments, as before Task 12.
+    slide summary's), which ``check_text_loss`` takes as its ``hidden_text``
+    keyword; without it the oracle is called with three arguments.
     """
     harness = fidelity_harness()
     names = [f"slide-{position}" for position in range(1, len(references) + 1)]

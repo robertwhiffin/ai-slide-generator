@@ -32,7 +32,7 @@
 // * a line height up to 1.2 x its largest run's size is a percentage of it
 //   (lineSpacingMultiple, <a:spcPct>), the lines soft breaks in one paragraph.
 //   Never points in <a:lnSpc>: Drive turns them into a percentage of the
-//   natural line height and mis-scales them (RC6);
+//   natural line height and mis-scales them;
 // * a looser line height is single spacing with every line a paragraph of its
 //   own, and the leading beyond single goes before each line after the first
 //   as space before (paraSpaceBefore, <a:spcBef> in points). Above 100% the
@@ -46,9 +46,8 @@
 // <a:pPr> from each of its runs' own options, so every run of a paragraph
 // carries the same spacing.
 //
-// Script lines in PowerPoint (target 'pptx'; task-11 findings r4, measured in
-// PowerPoint). PowerPoint places a line by what it holds, two ways the
-// browser does not:
+// Script lines in PowerPoint (target 'pptx', measured in PowerPoint).
+// PowerPoint places a line by what it holds, two ways the browser does not:
 // * it spaces a later line by its paragraph's spacing alone, so a line whose
 //   box the browser grew (a raised superscript with a line height of its own,
 //   the snapshot's growthPx) opens a paragraph of its own, its growth added
@@ -66,7 +65,7 @@
 // the browser grew takes its growth as space before there too: one with no
 // script run, and the first line of a later paragraph holding one, whose cap
 // keeps the line's own size because Google sets a paragraph's first line by
-// its spacing (task-11 ruling R11j, growthBeforePx; measured in Google,
+// its spacing (growthBeforePx; measured in Google,
 // scripts/export_fidelity/CALIBRATION.md A4).
 //
 // Placement. The snapshot's y is the top of the first line's glyphs. The
@@ -74,7 +73,7 @@
 // sets it by the font's ascent, and spacing below 100% raises it, so the box is
 // raised by firstLineOffsetPx, fitted against both renderers.
 //
-// A turned block (snapshot_text.mjs turnedBlock: rotated text, or text a
+// A turned block (snapshot_text_turned.mjs turnedBlocks: rotated text, or text a
 // vertical writing mode sets sideways) is its root's layout box, grown by its
 // slack and turned about its centre, so that box stays where it is. Its text
 // sits inside it by its insets, written as the box's own (bodyPr lIns, tIns,
@@ -86,9 +85,8 @@
 // slide's.
 
 const { runOptions, xmlText } = require('./emit_typography.cjs');
+const { PT_PER_PX, inches } = require('./units.cjs');
 
-const PX_PER_IN = 96;
-const PT_PER_PX = 0.75;
 const NBSP = '\u00a0';
 const WORD_JOINER = '\u2060';
 // PowerPoint's and Google Slides' single spacing, as a multiple of the font size.
@@ -103,12 +101,8 @@ const FIRST_LINE_C = -1.5;
 // How far Google Slides lowers a line per px its largest written run is
 // larger than the line's other runs, measured with DM Sans in Drive's PDF of
 // the conversion: 5.57 px for 5.8 px at 20 px, 11.13 px for 11.6 px at 40 px
-// (task-11 ruling R11g).
+// (CALIBRATION.md A4).
 const GOOGLE_LINE_GROWTH_PER_PX = 0.96;
-
-function inches(px) {
-  return px / PX_PER_IN;
-}
 
 // firstLineOffsetPx(pct, sizePx, ascentPx) -> how far the box's top sits above
 // the first line's glyph top, in px:
@@ -177,8 +171,8 @@ function scriptCapPx(line, growthPx) {
 // `lineIndex` of its paragraph: what the browser grew it by. For PowerPoint
 // (`forPowerPoint`), every line's. For Google Slides, every line's but that
 // of a line within its paragraph holding a script run, which Google grows by
-// the run's written size instead (scriptCapPx, R11g); so the first line of a
-// later paragraph holding one takes its growth here (R11j), and a deck with
+// the run's written size instead (scriptCapPx); so the first line of a
+// later paragraph holding one takes its growth here, and a deck with
 // no script run is the same for both apps.
 function growthBeforePx(line, lineIndex, forPowerPoint) {
   const growth = Number(line.growthPx) || 0;
@@ -250,8 +244,8 @@ function writtenParagraphs(item, fonts, renderer) {
         current.objects.push({ text: NBSP, options });
         continue;
       }
-      // Google's cap takes the growth of a line within its paragraph, where
-      // R11g measured it; a paragraph's first line keeps its own size there.
+      // Google's cap takes the growth of a line within its paragraph, where it
+      // was measured; a paragraph's first line keeps its own size there.
       const sizing = { target, capPx: scriptCapPx(line, lineIndex > 0 ? line.growthPx : 0) };
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
         const options = itemRunOptions(runs[runIndex], item, fonts, sizing);

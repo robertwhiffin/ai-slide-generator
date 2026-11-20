@@ -457,7 +457,7 @@ class TestExportEndpoint:
 
     @pytest.fixture(autouse=True)
     def _bypass_deck_gate(self, monkeypatch):
-        # SDR-4437 PR-2 (Task 13): these legacy tests post an unfixtured
+        # SDR-4437 PR-2: these legacy tests post an unfixtured
         # session_id to assert the 400/401 credential paths. The new CAN_VIEW
         # deck gate would 404 first ("Session not found"), so no-op it here —
         # never weaken the gate itself; its enforcement is covered by
@@ -487,7 +487,7 @@ class TestExportEndpoint:
 
 
 class TestFromHuashuEndpoint:
-    """The Google Slides route writes its deck for Google Slides (task-11 ruling R11g)."""
+    """The Google Slides route writes its deck for Google Slides (target ``gslides``)."""
 
     def test_the_deck_is_written_for_google_slides(self, test_client, monkeypatch):
         """``/from-huashu`` calls ``build_pptx_huashu(..., target="gslides")``.

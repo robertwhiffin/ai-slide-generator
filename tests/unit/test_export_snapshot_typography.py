@@ -1,6 +1,6 @@
 """Snapshot engine: run typography (spec §3 Text "Runs carry", §5 Emitter "Weights").
 
-Every run the snapshot engine emits carries the browser's typography (RC7):
+Every run the snapshot engine emits carries the browser's typography:
 
 * **Weights.** 400 is the family and 700 is the family plus bold. Every other
   weight of a webfont the page loaded is a weight-named typeface ("DM Sans
@@ -14,8 +14,8 @@ Every run the snapshot engine emits carries the browser's typography (RC7):
   (a DM Mono chip in a DM Sans sentence).
 * **Element style reaches every run**: a heading's weight survives its
   ``<br>`` and its inline children.
-* **Letter spacing** as ``spc``, plus at title sizes Task 4's optical-size
-  delta (task-4-addendum A1); ``text-transform`` applied to the run text;
+* **Letter spacing** as ``spc``, plus at title sizes the optical-size
+  delta (``scripts/export_fidelity/CALIBRATION.md`` A1); ``text-transform`` applied to the run text;
   super- and subscript as a baseline offset; italic, underline and
   strike-through.
 * **Colour is solid and pre-blended**, because Drive drops text alpha: the
@@ -25,21 +25,20 @@ Every run the snapshot engine emits carries the browser's typography (RC7):
   opacity group, then each group, inner to outer, at its opacity over the
   backdrop beneath that group. Gradient text (``background-clip: text``) takes
   the gradient's middle colour, and transparent text is never opaque black.
-* **CJK, emoji and right-to-left text** keep their characters and their order
-  (Review Focus 4).
+* **CJK, emoji and right-to-left text** keep their characters and their order.
 
 Every assertion reads the emitted run XML (``slide_shapes``): ``a:latin`` /
 ``a:ea`` / ``a:cs`` typefaces, ``b``, ``i``, ``u``, ``strike``, ``spc``,
 ``baseline``, the ``srgbClr`` and any ``<a:alpha>``, and the paragraph's ``rtl``.
-Where the brief compares with the browser, the browser's own rendering of the
+Where a test compares with the browser, the browser's own rendering of the
 very same document is read back (``browser_lines``, ``browser_text``,
 ``browser_style``, ``browser_loaded_weights``), and each test first guards the
 fixture's computed style so a failure is never fixture drift. Expected blended
-colours are computed here from the brief's ``blendOver`` formula and the
+colours are computed here from ``blendOver``'s formula and the
 fixture's colours.
 
 Corpus slides come from ``tests/fixtures/export_fidelity`` by prefix
-(PLAN-CORRECTIONS C4): 09 holds the eyebrow, the footnote marker, the DM Mono
+(``corpus_document``): 09 holds the eyebrow, the footnote marker, the DM Mono
 chip and italic text; 13 holds the gradient headline words and a faded
 paragraph. ``emit_typography.cjs``'s pure mapping (``typefaceFor``,
 ``blendOver``) is also pinned in Node, without a browser.
@@ -88,11 +87,11 @@ TYPOGRAPHY_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.c
 
 PT_PER_PX = 0.75
 HUNDREDTHS = 100
-# The brief: superscript is baseline="30000" (1000ths of a percent).
+# A superscript is baseline="30000" (1000ths of a percent).
 SUPERSCRIPT_BASELINE = 30000
-# The brief: spc = round(size x em x 0.75 x 100) +/- 1.
+# spc = round(size x em x 0.75 x 100) +/- 1.
 SPC_TOLERANCE_HUNDREDTHS = 1.0
-# task-4-addendum A1: a run whose width at the browser's automatic optical size
+# CALIBRATION.md A1: a run whose width at the browser's automatic optical size
 # and at the static opsz-14 cut (what PowerPoint and Google Slides draw) differ
 # by more than 0.5% carries an optical-size delta on top of its CSS tracking.
 OPTICAL_SIZE_THRESHOLD = 0.005
@@ -106,7 +105,7 @@ PAPER = "F9F7F4"
 INK = "1B3139"
 OPAQUE_BLACK = "000000"
 
-# Spec §5 Weights, and the brief's WEIGHT_NAMES: 400 and 700 have no name.
+# Spec §5 Weights, and emit_typography.cjs WEIGHT_NAMES: 400 and 700 have no name.
 WEIGHT_NAMES = {
     100: "Thin",
     200: "ExtraLight",
@@ -124,8 +123,8 @@ DM_SANS_WEIGHTS = [400, 500, 600, 700]
 # Custom slides, exported once per module in this order
 # ---------------------------------------------------------------------------
 
-# Weights: a .dk-title (42 px, 600) and DM Sans at 400, 500 and 700, plus the
-# Review Focus 3 stack.
+# Weights: a .dk-title (42 px, 600) and DM Sans at 400, 500 and 700, plus a
+# stack of a generic and a face the page did not load (system-ui, Arial).
 SEMIBOLD_TITLE = "Revenue grew in every segment"
 REGULAR_TEXT = "Regular four hundred"
 MEDIUM_TEXT = "Medium five hundred"
@@ -163,7 +162,7 @@ FAMILIES_SLIDE = (
     + "</div>"
 )
 
-# Element style inherited into runs (RC7, upstream PR #10).
+# Element style inherited into runs (upstream PR #10).
 STACKED_LINES = ("Top", "Bottom")
 ACCENTED_TITLE = "Margin rose to 59%"
 ACCENT_FIGURE = "59%"
@@ -188,7 +187,7 @@ DECORATIONS_SLIDE = (
     "</div>"
 )
 
-# Opacity and alpha (RC7). The slide background is --paper; the cards set their own.
+# Opacity and alpha. The slide background is --paper; the cards set their own.
 NAVY = "1B3139"
 TINT = ("FF5F46", 0.10)  # the .dk-table .hl tint: rgba(255, 95, 70, .10)
 FADED_TEXT = "Faded note"
@@ -226,7 +225,7 @@ GRADIENT_SLIDE = (
     "</div>"
 )
 
-# Review Focus 4.
+# CJK, emoji and right-to-left text.
 CJK_TEXT = "季度收入增长 12% 🎉"
 RTL_TEXT = "مرحبا بالعالم"
 SCRIPTS_SLIDE = (
@@ -236,7 +235,7 @@ SCRIPTS_SLIDE = (
     "</div>"
 )
 
-# Opacity groups that paint their own background (coordinator ruling). The
+# Opacity groups that paint their own background. The
 # faded card is a .5 group whose navy background sits under its white text.
 # The nested case is a translucent card (a .8 group with an opaque white
 # background) holding accent text, inside a faded section (a .5 group with a
@@ -462,7 +461,7 @@ def _box_runs(shape: Shape) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Colour arithmetic: the brief's blendOver, computed here independently
+# Colour arithmetic: blendOver, computed here independently
 # ---------------------------------------------------------------------------
 
 
@@ -476,7 +475,7 @@ def _channels(color: str) -> tuple[int, int, int]:
 
 
 def blend_over(color: str, alpha: float, backdrop: str) -> str:
-    """The brief's ``blendOver(color, alpha, backdrop)``: each channel ``round(c*a + b*(1-a))``."""
+    """``blendOver(color, alpha, backdrop)``: each channel ``round(c*a + b*(1-a))``."""
     return "".join(
         f"{_js_round(channel * alpha + under * (1 - alpha)):02X}"
         for channel, under in zip(_channels(color), _channels(backdrop))
@@ -548,7 +547,7 @@ def _tracked_cut_widths(
     Read with offscreen probes in the same page (``browser_probes``): the
     browser cut at the face's automatic optical size, as the page draws it; the
     export cut at ``font-variation-settings: 'opsz' 14``, the static cut
-    PowerPoint and Google Slides draw (task-4-addendum A1). Both carry the
+    PowerPoint and Google Slides draw (CALIBRATION.md A1). Both carry the
     element's own letter-spacing.
     """
     face = (
@@ -563,7 +562,7 @@ def _tracked_cut_widths(
 
 
 # ---------------------------------------------------------------------------
-# Weights (spec §5 Weights, Review Focus 3)
+# Weights (spec §5 Weights)
 # ---------------------------------------------------------------------------
 
 
@@ -599,7 +598,7 @@ class TestSnapshotRunWeights:
         * 700: ``DM Sans`` plus ``b="1"``, never a "DM Sans Bold" face;
         * 400: ``DM Sans``, not bold.
 
-        A bold flag from 600 up (the Task 2 emitter) turns the semibold title
+        A bold flag from 600 up turns the semibold title
         into a 700 rendering in PowerPoint. The static DM Sans fonts carry the
         weight-named legacy family names, so the named face renders the real
         weight. The guards first pin the computed weight and that the page
@@ -629,7 +628,7 @@ class TestSnapshotRunWeights:
     def test_non_webfont_family_at_600_is_bold_never_weight_named(
         self, typography_pptx: bytes, weights_fonts: dict[str, list[int]]
     ) -> None:
-        """Review Focus 3: ``font-family: system-ui, Arial`` at weight 600.
+        """``font-family: system-ui, Arial`` at weight 600.
 
         ``system-ui`` is skipped, so the family is ``Arial``. Arial is not a
         webfont the page loaded, so the weight goes on the bold flag: every run
@@ -681,7 +680,7 @@ class TestSnapshotRunWeights:
 
 
 # ---------------------------------------------------------------------------
-# Element style inherited into runs, and per-run family (RC7)
+# Element style inherited into runs, and per-run family
 # ---------------------------------------------------------------------------
 
 
@@ -689,7 +688,7 @@ class TestSnapshotRunWeights:
 @requires_huashu_sidecar
 class TestSnapshotRunInheritance:
     def test_heading_weight_survives_its_line_break(self, typography_pptx: bytes) -> None:
-        """RC7, upstream PR #10: ``<h1 style="font-weight:700">Top<br>Bottom</h1>``.
+        """Upstream PR #10: ``<h1 style="font-weight:700">Top<br>Bottom</h1>``.
 
         Both lines are bold ``DM Sans``. The legacy converter dropped an
         element's own bold as soon as it held any inline tag, ``<br>``
@@ -709,7 +708,7 @@ class TestSnapshotRunInheritance:
         )
 
     def test_semibold_heading_reaches_its_coloured_span(self, typography_pptx: bytes) -> None:
-        """RC7: a ``.dk-title`` ``<h2>`` (600) holding ``<span style="color:#FF3621">59%</span>``.
+        """A ``.dk-title`` ``<h2>`` (600) holding ``<span style="color:#FF3621">59%</span>``.
 
         Every run, the span's included, is ``DM Sans SemiBold`` and not bold:
         the heading's weight reaches its inline child. The span's run is
@@ -742,7 +741,7 @@ class TestSnapshotRunInheritance:
         The ``SKU-7`` run is typeface ``DM Mono`` (the chip's ``var(--mono)``)
         while the sentence around it stays ``DM Sans``: the family is per run,
         so mono numerals never turn sans. The chip's padding cuts its line into
-        items of their own (Task 5, coordinator ruling on concern 1), so the
+        items of their own, so the
         chip's run is in its own item and the sentence's are in the items of
         its two lines.
         """
@@ -762,7 +761,7 @@ class TestSnapshotRunInheritance:
 
 
 # ---------------------------------------------------------------------------
-# Tracking, transforms, super/subscript and decorations (RC7)
+# Tracking, transforms, super/subscript and decorations
 # ---------------------------------------------------------------------------
 
 
@@ -794,14 +793,14 @@ class TestSnapshotRunStyle:
         * the ``.dk-title`` (42 px, ``-.01em``) is drawn at the large optical
           size, and the static opsz-14 cut PowerPoint and Google Slides draw is
           about 10% wider (guarded here). So its ``spc`` is its CSS tracking plus
-          the optical-size delta of task-4-addendum A1: (letterSpacingPx +
+          the optical-size delta of CALIBRATION.md A1: (letterSpacingPx +
           (renderedWidth - exportCutWidth) / n) x 0.75 x 100, within 1, about
           -170. renderedWidth is the browser's width of the run, exportCutWidth
           the run's text at ``'opsz' 14`` with its own letter-spacing (a probe
           in the same page), and n its characters.
 
         Every run of the block carries it; a run without ``spc`` is untracked
-        in PowerPoint (eyebrow tracking was lost everywhere, RC7).
+        in PowerPoint.
         """
         document = corpus_document("09")
         style = _guard_style(document, selector, fontSize=f"{size_px}px")
@@ -1038,7 +1037,7 @@ class TestSnapshotRunStyle:
 
 
 # ---------------------------------------------------------------------------
-# Colour: pre-blended opacity and alpha, gradient and transparent text (RC7)
+# Colour: pre-blended opacity and alpha, gradient and transparent text
 # ---------------------------------------------------------------------------
 
 
@@ -1453,7 +1452,7 @@ class TestSnapshotRunColour:
 
 
 # ---------------------------------------------------------------------------
-# CJK, emoji and right-to-left text (Review Focus 4)
+# CJK, emoji and right-to-left text
 # ---------------------------------------------------------------------------
 
 
@@ -1461,7 +1460,7 @@ class TestSnapshotRunColour:
 @requires_huashu_sidecar
 class TestSnapshotRunScripts:
     def test_cjk_and_emoji_text_is_intact_and_in_order(self, typography_pptx: bytes) -> None:
-        """Review Focus 4: a paragraph ``季度收入增长 12% 🎉``.
+        """A paragraph ``季度收入增长 12% 🎉``.
 
         Its box reads exactly that, as the browser renders it, with every
         character in order, and its runs name the CSS family in ``a:latin`` and
@@ -1480,7 +1479,7 @@ class TestSnapshotRunScripts:
         assert not faces, "runs do not name DM Sans for latin and ea:\n  " + "\n  ".join(faces)
 
     def test_rtl_paragraph_is_rtl_with_its_text_intact(self, typography_pptx: bytes) -> None:
-        """Review Focus 4: ``<p dir="rtl">مرحبا بالعالم</p>``.
+        """``<p dir="rtl">مرحبا بالعالم</p>``.
 
         Its one paragraph has ``rtl="1"``, its text reads exactly the source in
         logical order (as the browser renders it), and its runs name the CSS
@@ -1553,11 +1552,11 @@ class TestTypographyModule:
     def test_typeface_for_the_briefs_examples(
         self, family: str, weight: int, loaded: list[int], expected: dict
     ) -> None:
-        """``typefaceFor(family, weight, loadedWeights)`` for the brief's four examples.
+        """``typefaceFor(family, weight, loadedWeights)`` for four kinds of face.
 
         * DM Sans 600, loaded: the ``DM Sans SemiBold`` face, not bold;
         * DM Sans 700: ``DM Sans`` plus bold;
-        * Arial 600, not a loaded webfont: ``Arial`` plus bold (Review Focus 3);
+        * Arial 600, not a loaded webfont: ``Arial`` plus bold, never "Arial SemiBold";
         * Impact 700, a single-weight face: ``Impact``, not bold.
 
         ``bold`` is a boolean either way, never absent.
@@ -1571,7 +1570,7 @@ class TestTypographyModule:
 
     @pytest.mark.parametrize("weight", ALL_WEIGHTS)
     def test_typeface_for_names_every_loaded_weight(self, weight: int) -> None:
-        """Spec §5 Weights, the brief's ``WEIGHT_NAMES``, for a webfont loaded at every weight.
+        """Spec §5 Weights, ``WEIGHT_NAMES``, for a webfont loaded at every weight.
 
         400 is ``DM Sans`` and 700 is ``DM Sans`` plus bold; every other weight
         is ``DM Sans <name>`` (Thin, ExtraLight, Light, Medium, SemiBold,
@@ -1674,7 +1673,7 @@ class TestTypographyModule:
     def test_blend_over(self, color: str, alpha: float, backdrop: str) -> None:
         """``blendOver(color, alpha, backdrop)``: each channel ``round(c*a + b*(1-a))`` as hex.
 
-        The brief's example ``blendOver('1B3139', 0.5, 'F9F7F4')``, plus the
+        The example ``blendOver('1B3139', 0.5, 'F9F7F4')``, plus the
         white-on-navy case and the two ends: alpha 1 is the colour itself and
         alpha 0 is the backdrop.
         """

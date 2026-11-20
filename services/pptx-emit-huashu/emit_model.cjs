@@ -2,9 +2,9 @@
 // Writes one slide model (snapshot.mjs) to a pptxgenjs slide.
 //
 // The model is in CSS px on a 1280x720 slide, which is LAYOUT_WIDE at 96 dpi:
-// inches = px / 96 and points = px * 0.75. Every item is written in the order
-// the model holds it, which is CSS paint order, so the slide's z-order is the
-// screen's.
+// inches = px / 96 and points = px * 0.75 (units.cjs). Every item is written
+// in the order the model holds it, which is CSS paint order, so the slide's
+// z-order is the screen's.
 //
 // Only raster data: pictures are embedded (SDR-4437): from a capture or from the
 // item's own data: src. Anything else is skipped and announced on stderr. Text
@@ -14,9 +14,8 @@
 const { emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
 const { transparencyOf } = require('./emit_typography.cjs');
+const { inches, points } = require('./units.cjs');
 
-const PX_PER_IN = 96;
-const PT_PER_PX = 0.75;
 const RASTER_DATA_URI = /^data:image\/(png|jpe?g|gif);base64,/i;
 
 // pptxgenjs reads a number of 100 or more as EMU rather than inches, so a
@@ -30,14 +29,6 @@ const ONE_EMU_IN_PT = 1 / 12700;
 const SMALLEST_ANGLE_DEG = 1 / 60000;
 
 const DASH_TYPES = { solid: 'solid', dash: 'dash', dot: 'sysDot' };
-
-function inches(px) {
-  return px / PX_PER_IN;
-}
-
-function points(px) {
-  return px * PT_PER_PX;
-}
 
 function withinInchLimit(...values) {
   return values.every((value) => Math.abs(inches(value)) < PPTXGENJS_INCH_LIMIT);

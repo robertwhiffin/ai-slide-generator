@@ -9,7 +9,7 @@ sits inside the line around it (spec §3 Text, *Inline decorations* and
   out (``getClientRects()``), so a chip that wraps is two shapes, one on each
   line, and never one box over both lines;
 * an inline element with no text at all (an empty swatch or status dot) still
-  paints, so it is still a shape (RC8);
+  paints, so it is still a shape;
 * the decorations of a block paint under that block's own text and over every
   block background of their stacking context, as CSS paints inline content
   (CSS 2.1 Appendix E, step 7 after step 4): order key
@@ -18,25 +18,24 @@ sits inside the line around it (spec §3 Text, *Inline decorations* and
 * an atomic inline (an inline ``<svg>`` icon, an ``inline-block`` pill or
   track) splits the line it sits on: the text on each side of it is its own
   single-line text item at its own browser x, so the text after an icon keeps
-  its position instead of sliding left into the icon's gap (RC13);
+  its position instead of sliding left into the icon's gap;
 * so does an inline element whose horizontal padding, border or margin take
-  space (a code chip, a ``<kbd>``), at both its ends (coordinator ruling on
-  Task 5 concern 1): its own text is an item inside its decoration, and the
-  text after it keeps its x;
+  space (a code chip, a ``<kbd>``), at both its ends: its own text is an item
+  inside its decoration, and the text after it keeps its x;
 * a page that lies about an element's client rects cannot hang the export or
   lose the decoration silently: it is read correctly or the loss is announced.
 
 Several checks pin layouts the engine must keep while it does this: every delta
 pill is exactly one rounded shape under a one-line text box (fixture 06), the
-code chip stays on its line and its sentence reads whole (fixture 09, RC13), the
-empty legend swatches are filled shapes (fixture 03, RC8), and each icon
+code chip stays on its line and its sentence reads whole (fixture 09), the
+empty legend swatches are filled shapes (fixture 03), and each icon
 badge's label and value are separate items clear of the icon (fixture 12).
 
 Every assertion reads the emitted slide XML (``slide_shapes``) and holds it
 against the browser's own layout of the very same document: ``browser_rect``,
 ``browser_client_rects`` (one rect per box fragment) and
 ``browser_line_boxes``. Corpus slides are loaded from
-``tests/fixtures/export_fidelity`` by prefix (PLAN-CORRECTIONS C4).
+``tests/fixtures/export_fidelity`` by prefix (``corpus_document``).
 
 An inline ``<svg>`` icon is a capture target (spec §3 Pictures). Its picture
 item is pinned with the captures, so here the icon is located by its browser
@@ -77,12 +76,12 @@ from tests.unit.test_export_collection_iteration_hostile_realm import (
 )
 from tests.unit.test_export_snapshot_hostile_realm import COLLECTION_LOSS_LINE
 
-# Tolerances from the plan's Task 5 Step 1: a decoration's rect matches the
+# Tolerances of the inline decorations: a decoration's rect matches the
 # browser's within 0.5 px, and a chip's top lies within 2 px of its line's
 # text top.
 DECORATION_RECT_TOLERANCE_PX = 0.5
 LINE_TOP_TOLERANCE_PX = 2.0
-# Task 2's placement of left-aligned text: x is the browser's text left within this.
+# The placement of left-aligned text: x is the browser's text left within this.
 TEXT_LEFT_TOLERANCE_PX = 0.5
 # EMU rounding moves an emitted edge by at most 1/19050 px.
 EMU_ROUNDING_PX = 0.01
@@ -98,7 +97,7 @@ PILL_CORNER_ADJ_TOLERANCE = 1000
 CORPUS_PREFIXES = ("03", "06", "09", "12")
 
 # Fixture 06: the "Change" column's delta pills (inline-block .dk-pill), in
-# document order. The up pills are the brief's "▲ 0.30x" pills, filled
+# document order. The up pills are the "▲ 0.30x" ones, filled
 # --good-bg (CDEDE1); the one down pill is filled --bad-bg.
 DELTA_PILLS = ("▲ 0.30x", "▲ 0.32x", "▼ 0.17x", "▲ 2.7x")
 DELTA_PILL = ".dk-pill"
@@ -150,10 +149,10 @@ KEY_SENTENCE_BODY = (
     "</div>"
 )
 # A padded inline element's text and the text after it are placed within this of
-# the browser's x (coordinator ruling on Task 5 concern 1).
+# the browser's x: the element cuts its line.
 PADDED_INLINE_X_TOLERANCE_PX = 1.0
 
-# Insets with text on one side only on their line (Task 5 fix round 1). Under
+# Insets with text on one side only on their line. Under
 # box-decoration-break: slice an inline element's start inset is on the line of
 # its first fragment, before the text after it, and its end inset on the line of
 # its last, after the text before it.
@@ -206,7 +205,7 @@ RTL_CHIP_BODY = (
     '<span id="rtl-after">לפני סוף הרבעון</span></p>'
     "</div>"
 )
-# Fix round 1's tolerances: a left edge within 0.5 px, a centre or right edge within 1 px.
+# Line edge tolerances: a left edge within 0.5 px, a centre or right edge within 1 px.
 LINE_EDGE_TOLERANCE_PX = 0.5
 LINE_CENTRE_TOLERANCE_PX = 1.0
 RTL_EDGE_TOLERANCE_PX = 1.0
@@ -424,8 +423,8 @@ def _assert_reads_as_lines(
 ) -> list[int]:
     """The text items of a paragraph a padded inline element cuts read the browser's lines.
 
-    A padded, bordered or margined inline element cuts every line it is on
-    (coordinator ruling on Task 5 concern 1), so its paragraph is several
+    A padded, bordered or margined inline element cuts every line it is on,
+    so its paragraph is several
     single-line items rather than one box. The items whose vertical middle
     lies in ``area`` (the paragraph's browser rect) must each be one unwrapped
     line lying on exactly one of the browser's ``lines``, and the items on each
@@ -542,17 +541,17 @@ class TestSnapshotInlineDecorations:
     def test_code_chip_stays_on_its_line_and_its_sentence_reads_whole(
         self, corpus_pptx: bytes
     ) -> None:
-        """RC13, fixture 09: the inline code chip "SKU-7" in a list item's sentence.
+        """Fixture 09: the inline code chip "SKU-7" in a list item's sentence.
 
         * The chip is one shape filled ``EEEDE9`` at its browser fragment rect,
           within 0.5 px. It sits on the sentence's first line, "Mix shift
           toward…": its top is within 2 px of that line's text top and its
           vertical middle lies inside that line.
-        * The chip's padding cuts its line (coordinator ruling on Task 5
-          concern 1), so the sentence is several single-line items. They read
-          the browser's lines, and "with SKU-7 now 31% of revenue" across its
-          break with single spaces: the chip was not pulled out of its line,
-          so no gap of two spaces is left ("with  now").
+        * The chip's padding cuts its line, so the sentence is several
+          single-line items. They read the browser's lines, and "with SKU-7
+          now 31% of revenue" across its break with single spaces: the chip
+          was not pulled out of its line, so no gap of two spaces is left
+          ("with  now").
         * The chip's shape precedes every text item of its sentence in the
           spTree.
         """
@@ -605,7 +604,7 @@ class TestSnapshotInlineDecorations:
           under "Ship the" and "before the quarter" too.
         * Both shapes precede every text item of the sentence in the spTree.
         * The chip's text stays on the browser's lines: its padding cuts both
-          lines it is on (coordinator ruling on Task 5 concern 1), and the
+          lines it is on, and the
           sentence's items read the browser's lines.
         """
         document = _document(WRAPPING_CHIP_BODY)
@@ -657,8 +656,7 @@ class TestSnapshotInlineDecorations:
         1. the band's background (step 4, every block background first);
         2. the mark, then the first paragraph's text;
         3. the key, then the second paragraph's text: every item of it, since
-           the key's border and padding cut its line (coordinator ruling on
-           Task 5 concern 1).
+           the key's border and padding cut its line.
 
         A decoration ordered as a block box in tree order paints under the band
         it should cover, and every decoration before the first paragraph's text.
@@ -769,7 +767,7 @@ class TestSnapshotInlineDecorations:
         )
 
     def test_empty_legend_swatches_are_filled_shapes(self, corpus_pptx: bytes) -> None:
-        """RC8, fixture 03: the legend's empty ``span.sw`` swatches (``inline-block``, 14x14).
+        """Fixture 03: the legend's empty ``span.sw`` swatches (``inline-block``, 14x14).
 
         Each swatch has no text and is exactly one shape at its browser rect,
         within 0.5 px, filled the colour the browser paints it. The legend's
@@ -1031,7 +1029,7 @@ def _assert_padded_inline_is_cut(
     after_text: str,
     after_x: float,
 ) -> None:
-    """A padded or bordered inline element cuts its line (coordinator ruling, Task 5 concern 1).
+    """A padded or bordered inline element cuts its line.
 
     * Its decoration is one shape at its browser fragment rect (inset by half
       its border, where the outline runs).
@@ -1100,8 +1098,8 @@ def _assert_padded_inline_is_cut(
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestSnapshotPaddedInlines:
-    """Coordinator ruling on Task 5 concern 1: a padded, bordered or margined inline
-    element is a cut in its line, like an atomic inline.
+    """A padded, bordered or margined inline element is a cut in its line, like an
+    atomic inline.
 
     PowerPoint and Google Slides lay a paragraph's runs out continuously, with no
     room for an inline element's horizontal padding, border or margin, so text
@@ -1222,7 +1220,7 @@ def _text_centre(shape: Shape) -> float:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestSnapshotInsetsAtLineEnds:
-    """Task 5 fix round 1: an inset with text on only one side of it on its line.
+    """An inset with text on only one side of it on its line.
 
     An inline element's start inset (``box-decoration-break: slice``) sits on
     the line of its first fragment, before the text that follows it there, and

@@ -1,4 +1,4 @@
-"""Snapshot engine: the per-slide checks (Task 12).
+"""Snapshot engine: the per-slide checks.
 
 The snapshot engine checks every slide it writes, so text loss is visible in
 the app log and in the export fidelity harness (spec §6):
@@ -26,7 +26,7 @@ the app log and in the export fidelity harness (spec §6):
   ``hiddenText`` (``model.reference.hiddenText``) and ``target`` (the renderer
   the deck is written for). ``captureMs`` is a clock reading: it goes to
   stderr only, so repeated exports stay byte-identical.
-* ``scripts/export_fidelity/run.py`` reads those lines (PLAN-CORRECTIONS C8).
+* ``scripts/export_fidelity/run.py`` reads those lines.
   ``export_pptx`` tees stderr and records the summaries in
   ``summaries{suffix}.json`` beside ``failures{suffix}.json``: one entry per
   document in slide order, null for a slide the sidecar wrote no summary for.
@@ -46,14 +46,14 @@ the app log and in the export fidelity harness (spec §6):
   ``!important`` display rule and a display transition alike.
 * The slide's realm builds the model (with an ``Array.prototype.push`` slide
   script can replace), so Node checks it before any use
-  (``services/pptx-emit-huashu/model_check.cjs``, ruling R12d): a capture or
+  (``services/pptx-emit-huashu/model_check.cjs``): a capture or
   item the snapshot could not have written is dropped, counted in one
   ``[html2pptx] model: …`` line and in the summary's ``modelDrops``, and the
   rest of the slide exports. A real slide's model drops nothing: the shared
   export helpers fail on any such line (``allow_model_drops`` opts out), and
   the harness names each slide that dropped in a ``MODEL DROPS:`` warning.
 
-The hidden words are pinned per case (task-12 addendum): opacity 0 inline,
+The hidden words are pinned per case: opacity 0 inline,
 block and inline-block, nested, a word split over two text nodes, a table
 cell, off-slide text, a zero-width clip, fixture 03's screen-reader-only
 table, and the characters a ``text-overflow: ellipsis`` hides. Text at
@@ -65,7 +65,7 @@ for an ellipsis cut).
 Gating matches the sibling export suites: the Node tests need node; the export
 tests need node, the extracted sidecar ``node_modules`` and a local
 Chrome/Chromium (skipped otherwise). Corpus slides come from
-``tests/fixtures/export_fidelity`` by prefix (PLAN-CORRECTIONS C4).
+``tests/fixtures/export_fidelity`` by prefix (``corpus_document``).
 """
 
 from __future__ import annotations
@@ -127,8 +127,8 @@ EXISTING_SUMMARY_KEYS = (
     "captures",
     "captureFailures",
 )
-# The keys Task 12 adds (the brief's counts, and the addendum's captureMs, hiddenText, target).
-# modelDrops is the model check's count (model_check.cjs, ruling R12d).
+# The keys the checks add to the summary: the item counts, the capture time, the
+# hidden text and the target. modelDrops is the model check's count (model_check.cjs).
 ADDED_SUMMARY_KEYS = (
     "text",
     "shapes",
@@ -139,7 +139,7 @@ ADDED_SUMMARY_KEYS = (
     "target",
     "modelDrops",
 )
-# The brief's `pseudo` count is the existing pseudoElements (task-12 addendum).
+# No `pseudo` key: the pseudo-element count is the existing pseudoElements.
 REPLACED_SUMMARY_KEY = "pseudo"
 
 # Default-ignorable code points (Unicode Default_Ignorable_Code_Point) the
@@ -173,7 +173,7 @@ def _case_document(body: str) -> str:
     return slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
 
 
-# The pinned hiddenText cases (task-12 addendum; Task 6 review). Each hidden
+# The pinned hiddenText cases. Each hidden
 # word appears nowhere visible on its slide, so the harness's bare oracle
 # reports it, which proves the case bites.
 HIDDEN_CASES: dict[str, HiddenCase] = {
@@ -252,7 +252,7 @@ VISIBILITY_HIDDEN_WORDS = ("Invisible", "words")
 # The deck the hidden cases are exported in, in slide order.
 HIDDEN_DECK = (*HIDDEN_CASES, VISIBILITY_HIDDEN)
 
-# A one-line title that text-overflow: ellipsis cuts inside a word (R11e).
+# A one-line title that text-overflow: ellipsis cuts inside a word.
 ELLIPSIS_SELECTOR = "#title"
 ELLIPSIS_TITLE = "Quarterly liquidity overview for every regional segment"
 ELLIPSIS_DOCUMENT = _case_document(
@@ -564,7 +564,7 @@ class TestMissingWords:
         ]
 
     def test_a_word_joiner_after_a_superscript_is_no_difference(self) -> None:
-        """The task-12 addendum's case, verbatim: U+00B9 in the reference, "1" + U+2060 emitted."""
+        """A superscript "1": U+00B9 in the reference, "1" + U+2060 emitted."""
         assert _missing_words("Revenue grew¹", f"Revenue grew1{WORD_JOINER}", "") == []
 
     def test_a_word_joiner_inside_unspaced_text_is_no_difference(self) -> None:
@@ -681,7 +681,7 @@ class TestSlideSummary:
         missing = [key for key in ADDED_SUMMARY_KEYS if key not in summary]
         assert not missing, f"the summary lacks {missing}: {summary}"
         assert REPLACED_SUMMARY_KEY not in summary, (
-            "the brief's `pseudo` count is the existing pseudoElements (task-12 addendum)"
+            "the pseudo-element count is the existing pseudoElements, not a `pseudo` key"
         )
 
     def test_the_counts_are_the_items_the_slide_was_written_with(
@@ -745,7 +745,7 @@ class TestSlideSummary:
         assert _only_summary(counts_gslides_export)["target"] == "gslides"
 
     def test_fixture_03_logs_one_summary_with_its_pictures_and_no_text_loss(self) -> None:
-        """The brief's case: corpus slide 03 alone, its chart and icons captured, nothing lost."""
+        """Corpus slide 03 alone: its chart and icons captured, nothing lost."""
         with pytest.MonkeyPatch.context() as monkeypatch:
             logged = export_logged([corpus_document("03")], monkeypatch=monkeypatch)
         summary = _only_summary(logged)
@@ -897,7 +897,7 @@ class TestHiddenText:
         assert name not in missing, f"{case}: the harness reports {missing[name]} missing"
 
     def test_visibility_hidden_text_is_not_in_the_reference(self, hidden_deck: HiddenDeck) -> None:
-        """GUARD (passes before Task 12): the harness reference never held it."""
+        """GUARD: the harness reference never held it."""
         reference = hidden_deck.out_dir / "truth" / f"{hidden_deck.name(VISIBILITY_HIDDEN)}.txt"
         text = reference.read_text(encoding="utf-8")
         assert not set(VISIBILITY_HIDDEN_WORDS) & set(text.split()), text
@@ -912,7 +912,7 @@ def ellipsis_export() -> Iterator[LoggedExport]:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestEllipsis:
-    """Characters a ``text-overflow: ellipsis`` hides are hidden text, not lost text (R11e)."""
+    """Characters a ``text-overflow: ellipsis`` hides are hidden text, not lost text."""
 
     def test_an_ellipsis_title_logs_no_text_missing(self, ellipsis_export: LoggedExport) -> None:
         _only_summary(ellipsis_export)
@@ -1062,7 +1062,7 @@ class TestHarnessOracle:
     """``check_text_loss`` over decks python-pptx builds, so each case is exact."""
 
     def test_a_deck_one_slide_short_reports_all_of_the_missing_slides_words(self) -> None:
-        """GUARD (passes before Task 12): the reference's second slide has no slide."""
+        """GUARD: the reference's second slide has no slide."""
         pptx = _deck_of_texts([["Alpha Bravo"]])
         assert reference_text_loss(pptx, ["Alpha Bravo", "Charlie Delta"]) == [
             [],
@@ -1070,7 +1070,7 @@ class TestHarnessOracle:
         ]
 
     def test_without_hidden_text_the_oracle_is_unchanged(self) -> None:
-        """GUARD (passes before Task 12): the three-argument call the support helpers make."""
+        """GUARD: the three-argument call the support helpers make."""
         pptx = _deck_of_texts([["Revenue grew"]])
         assert reference_text_loss(pptx, ["Revenue secretword grew"]) == [["secretword"]]
 
@@ -1099,7 +1099,7 @@ class TestHarnessOracle:
         )
 
     def test_a_word_joiner_after_a_superscript_is_no_difference(self) -> None:
-        """The task-12 addendum's case, verbatim, for the harness's ``_normalise_text``."""
+        """A superscript "1" and its word joiner, for the harness's ``_normalise_text``."""
         pptx = _deck_of_texts([[f"Revenue grew1{WORD_JOINER}"]])
         assert reference_text_loss(pptx, ["Revenue grew¹"]) == [[]]
 
@@ -1127,7 +1127,7 @@ class TestHarnessJoinedScript:
 
 
 # ---------------------------------------------------------------------------
-# The harness reads the summaries (PLAN-CORRECTIONS C8)
+# The harness reads the summaries
 # ---------------------------------------------------------------------------
 
 
@@ -1257,7 +1257,7 @@ class TestHarnessExport:
     def test_a_slide_past_the_end_of_the_deck_loses_all_its_words(
         self, harness_deck: HarnessDeck
     ) -> None:
-        """GUARD (passes before Task 12): the reference's fourth slide has none in the deck."""
+        """GUARD: the reference's fourth slide has none in the deck."""
         missing = fidelity_harness().check_text_loss(
             harness_deck.pptx_path, list(harness_deck.names), harness_deck.out_dir
         )
@@ -1694,7 +1694,7 @@ class TestNormalisationSets:
 
 
 # ---------------------------------------------------------------------------
-# The page-built model, validated in Node (ruling R12d)
+# The page-built model, validated in Node
 # ---------------------------------------------------------------------------
 
 MODEL_CHECK_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "model_check.cjs"
@@ -2283,7 +2283,7 @@ class TestCaptureFailureLines:
         assert all(len(line.splitlines()) == 1 for line in logged), logged
 
 
-# The patched-push slide (the round-2 review's probe): every capture object the
+# The patched-push slide: every capture object the
 # snapshot pushes as c0 gets a forged id, and, in the broken forms, a rect that
 # is no numbers, so its capture fails and capture.cjs prints the id.
 FORGED_CAPTURE_FORMS = {
@@ -2356,7 +2356,7 @@ def forged_capture_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Fo
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestForgedCaptureId:
-    """A slide that owns Array.prototype.push forges no line and fails no slide (R12d)."""
+    """A slide that owns Array.prototype.push forges no line and fails no slide."""
 
     def test_no_slide_is_reported_failed(self, forged_capture_deck: ForgedCaptureDeck) -> None:
         """``build_pptx_huashu``'s failures, as export_pptx records them."""

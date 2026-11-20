@@ -9,7 +9,7 @@
 // underline or valign onto every cell that has none, and every option of a
 // cell onto each of its runs whose own value is falsy (bold: false,
 // charSpacing: 0), so every run carries its whole style itself
-// (emit_typography.cjs runOptions) and the table none (Global Constraints).
+// (emit_typography.cjs runOptions) and the table none.
 //
 // Each cell carries:
 // * colspan and rowspan above 1; pptxgenjs writes the hMerge placeholders
@@ -21,8 +21,7 @@
 // * its margins [top, right, bottom, left]. pptxgenjs 3.12 reads all four as
 //   points when the TOP one is 1 or more, and as inches otherwise
 //   (pptxgen.cjs.js:5327): a cell whose top margin is an inch or more passes
-//   all four in points, any other in inches, uncapped, so each keeps its size
-//   (R10b);
+//   all four in points, any other in inches, uncapped, so each keeps its size;
 // * valign, its text's anchor, and align, its paragraphs' alignment;
 // * fontFace and fontSize, its own face. pptxgenjs writes them on each
 //   paragraph's end mark (a:endParaRPr), at the table default of 12 pt when a
@@ -36,20 +35,15 @@
 
 const { textObjects } = require('./emit_text.cjs');
 const { runOptions, transparencyOf } = require('./emit_typography.cjs');
+const { EMU_PER_IN, PT_PER_PX, PX_PER_IN, inches } = require('./units.cjs');
 
-const PX_PER_IN = 96;
-const PT_PER_PX = 0.75;
 // pptxgenjs reads a cell's margins as points from a top margin of this many px (1 in) up.
 const POINT_MARGINS_FROM_PX = PX_PER_IN;
 // pptxgenjs replaces a row height of 0 with an even share of the frame's
 // height, so a grid line pair that meets is written one EMU apart.
-const SMALLEST_SIZE_IN = 1 / 914400;
+const SMALLEST_SIZE_IN = 1 / EMU_PER_IN;
 // pptxgenjs table borders are solid or dashed; a dotted one is drawn dashed.
 const BORDER_TYPES = { solid: 'solid', dash: 'dash', dot: 'dash' };
-
-function inches(px) {
-  return px / PX_PER_IN;
-}
 
 function sizeOf(px) {
   return Math.max(inches(px), SMALLEST_SIZE_IN);

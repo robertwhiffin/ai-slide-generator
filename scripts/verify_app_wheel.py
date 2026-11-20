@@ -56,9 +56,15 @@ SIDECAR_SOURCES = (
     "pseudo.mjs",
     "render_slide.cjs",
     "snapshot.mjs",
+    "snapshot_borders.mjs",
     "snapshot_table.mjs",
     "snapshot_text.mjs",
+    "snapshot_text_ellipsis.mjs",
+    "snapshot_text_markers.mjs",
+    "snapshot_text_metrics.mjs",
+    "snapshot_text_turned.mjs",
     "text_check.cjs",
+    "units.cjs",
 )
 
 MIN_WHEEL_MB = 25

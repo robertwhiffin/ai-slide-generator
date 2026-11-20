@@ -10,7 +10,7 @@
 // weight. A family the page did not load is a font on the viewer's machine,
 // whose weight-named faces may not exist: PowerPoint would swap "Arial
 // SemiBold" for its default font. So that family keeps its own name and is
-// bold from 600 (Review Focus 3). A single-weight face (Impact) is never bold.
+// bold from 600. A single-weight face (Impact) is never bold.
 //
 // The weight named is the face the browser painted with. That is CSS font
 // matching over the weights the page loaded, so 600 with only 400 and 700
@@ -19,7 +19,7 @@
 //
 // Every option lives on the run. pptxgenjs copies a shape option onto any run
 // whose own value is falsy (bold: false, charSpacing: 0), so the text box
-// carries geometry only (Global Constraints).
+// carries geometry only.
 //
 // Tracking is the run's CSS letter-spacing plus its optical-size tracking: the
 // browser draws a variable font with an opsz axis (DM Sans) at the automatic
@@ -39,9 +39,10 @@
 // written size pushes the whole line down (about 0.28 em): written for it, a
 // script run is capped at the size its line should be sized by (sizing.capPx,
 // emit_text.cjs), which keeps the line where the browser has it, the script
-// glyph up to some 20% small (task-11 ruling R11g, measured in both apps).
+// glyph up to some 20% small (measured in both apps; CALIBRATION.md A4).
 
-const PT_PER_PX = 0.75;
+const { PT_PER_PX } = require('./units.cjs');
+
 // The fraction of a superscript or subscript run's size the renderers draw it at,
 // calibrated against PowerPoint and Google Slides (scripts/export_fidelity/CALIBRATION.md).
 const SUPERSCRIPT_SIZE_FACTOR = 0.646;

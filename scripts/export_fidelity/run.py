@@ -169,7 +169,7 @@ def export_pptx(deck: dict, documents: list[Path], out_dir: Path, target: str = 
     The sidecar's stderr, which build_pptx_huashu echoes, is teed: it still
     reaches the ``sys.stderr`` in effect when this is called, and its slide
     summary lines are recorded in summaries.json or summaries-gslides.json
-    (PLAN-CORRECTIONS C8), one entry per document in slide order, null for a
+    (the harness reads them there), one entry per document in slide order, null for a
     slide the export failed. Each slide's speaker notes are its document's
     name, which check_text_loss pairs its reference with. A slide whose model
     Node dropped part of (its summary's modelDrops) exported without that part,
@@ -424,7 +424,7 @@ def check_text_loss(
     its slide's normalised text; a slide the deck lacks loses every word.
 
     ``hidden_text[i]``, when given, is the hidden text of slide ``names[i]``
-    (its slide summary's ``hiddenText``, PLAN-CORRECTIONS C8): the words the
+    (its slide summary's ``hiddenText``): the words the
     page reads but the slide does not show, each whole (opacity 0, a clip, off
     the slide, cut by an ellipsis), which are no loss. A slide the deck lacks
     shows none of its words, so nothing it hides excuses any.
@@ -570,7 +570,8 @@ def main() -> int:
     if args.lo:
         render_with_libreoffice(pptx_path, names, args.out)
     if args.gslides:
-        # The Google Slides export writes its deck for Google (R11g), so the conversion here does too.
+        # The Google Slides export writes its deck for Google (target "gslides"), so the
+        # conversion here does too.
         gslides_path = export_pptx(deck, documents, args.out, target="gslides")
         print("Google Slides:", render_with_google_slides(gslides_path, names, args.out))
     scores = compare(names, args.out)

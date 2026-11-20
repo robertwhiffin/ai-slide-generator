@@ -1,7 +1,7 @@
 """Snapshot engine: visibility, clipping and off-slide content.
 
-The snapshot engine emits only what the browser shows (spec §3 *Visibility*,
-RC10). An element is skipped when it is ``visibility: hidden``, at cumulative
+The snapshot engine emits only what the browser shows (spec §3 *Visibility*).
+An element is skipped when it is ``visibility: hidden``, at cumulative
 opacity 0, entirely outside the slide, or clipped to under 2 px by ``clip``,
 ``clip-path`` or an ``overflow`` ancestor (the visually-hidden pattern). The
 walk carries a clip rect down the tree, starting from the slide rect and
@@ -32,13 +32,13 @@ Every case is anchored in the browser's own layout of the very same document:
 ``browser_line_boxes`` for the lines a clip keeps, and ``browser_hit_id`` (hit
 testing, which honours every clip) to prove that the browser itself hides, or
 shows, what a test says it does. Corpus slides are loaded from
-``tests/fixtures/export_fidelity`` by prefix (PLAN-CORRECTIONS C4).
+``tests/fixtures/export_fidelity`` by prefix (``corpus_document``).
 
 Hidden words and the text-loss oracle: the engine records the words it drops in
-``model.reference.hiddenText``, which is internal to the sidecar. Until the
-``[html2pptx] slide summary`` line carries it (Task 12, PLAN-CORRECTIONS C8)
-this module asserts what is observable: the hidden words are in no exported text
-item, and the harness's oracle reports nothing visible as missing.
+``model.reference.hiddenText``, which the ``[html2pptx] slide summary`` line
+carries as ``hiddenText``. This module asserts what is observable on the deck:
+the hidden words are in no exported text item, and the harness's oracle reports
+nothing visible as missing.
 
 Gating matches the sibling export suites: needs node, the extracted sidecar
 ``node_modules`` and a local Chrome/Chromium (skipped otherwise).
@@ -77,12 +77,12 @@ from tests.unit.test_pptx_from_html_huashu_image_src import PNG_DATA_URI
 
 # The slide the engine exports: 1280x720 CSS px from the top left.
 SLIDE_RECT = {"x": 0.0, "y": 0.0, "w": 1280.0, "h": 720.0}
-# Task 1's box tolerance: an emitted box matches the browser's within 0.5 px.
+# The box tolerance: an emitted box matches the browser's within 0.5 px.
 RECT_TOLERANCE_PX = 0.5
-# Task 2's placement of left-aligned text: x is the browser's text left within this.
+# The placement of left-aligned text: x is the browser's text left within this.
 TEXT_LEFT_TOLERANCE_PX = 0.5
-# A cut line's text is placed within this of the browser's x (coordinator ruling
-# on Task 5 concern 1, which this module applies to hidden words).
+# A cut line's text is placed within this of the browser's x (a padded inline
+# cuts its line, and this module holds hidden words to the same rule).
 CUT_TEXT_X_TOLERANCE_PX = 1.0
 # Spec §3 Visibility: content clipped to under 2 px is not shown.
 MINIMUM_VISIBLE_PX = 2.0
@@ -332,7 +332,7 @@ OFFSTAGE = (
     "</div>"
 )
 OFFSTAGE_CASES = {
-    # The brief's case on the deck's own slide root.
+    # Below the deck's own slide root, which clips.
     "below-root-clips": ("below", SLIDE_ROOTS["root-clips"]),
     # Every side, on a root that does not clip, so only the slide rect can.
     **{
@@ -620,7 +620,7 @@ def _inset(rect: dict, by: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Screen-reader-only content (RC10)
+# Screen-reader-only content
 # ---------------------------------------------------------------------------
 
 
@@ -628,7 +628,7 @@ def _inset(rect: dict, by: float) -> dict:
 @requires_huashu_sidecar
 class TestSnapshotScreenReaderOnly:
     def test_fixture_03_screen_reader_table_is_not_slide_text(self, fixture_03_pptx: bytes) -> None:
-        """RC10: fixture 03's ``.sr-only`` data table ("Year Revenue / FY20 905 / FY24 1,240").
+        """Fixture 03's ``.sr-only`` data table ("Year Revenue / FY20 905 / FY24 1,240").
 
         The browser does not show it: ``clip: rect(0, 0, 0, 0)`` cuts it to
         nothing. A screen reader still reads it, so it is in the page's
@@ -666,8 +666,8 @@ class TestSnapshotScreenReaderOnly:
         ``innerText``, which includes the sr-only table, with the exported text.
         Every word it reports missing from fixture 03 must be one of the
         table's: a clip that also cut the legend, the callout or the footer
-        would show up here. (Once the slide summary carries ``hiddenText``,
-        Task 12, the oracle reports none of the table's words either.)
+        would show up here. (Given the slide summary's ``hiddenText``, the oracle
+        reports none of the table's words either; this check calls it without.)
         """
         missing = text_loss(fixture_03_pptx, [corpus_document("03")])[0]
         visible_losses = [word for word in missing if word not in SR_ONLY_WORDS]
@@ -797,7 +797,7 @@ class TestSnapshotHiddenAndTransparent:
         gap. PowerPoint and Google Slides lay a paragraph's runs out with no
         room for a word that is not there, so a line read as "Revenue grew …"
         would draw "grew" a whole word to the left. The hidden word cuts the
-        line, as an atomic inline does (coordinator ruling on Task 5 concern 1):
+        line, as an atomic inline does (as a padded inline does too):
 
         * "secretword" is not slide text, and the slide's words are exactly
           "Revenue grew twelve percent", each once;
@@ -1098,7 +1098,7 @@ class TestSnapshotOffSlide:
     ) -> None:
         """A filled box (``2B4A57``) with text, a raster picture and an icon, wholly off the slide.
 
-        Below y = 720 (the brief's case) on the deck's slide root, and on every
+        Below y = 720 on the deck's slide root, and on every
         side of a slide root that does not clip its overflow, so only the slide
         rect can remove it. The export succeeds (no failure, the slide is
         written) and the box produces nothing: no ``2B4A57`` fill, none of its

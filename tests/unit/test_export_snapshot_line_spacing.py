@@ -1,13 +1,13 @@
 """Snapshot engine: line spacing, first-line placement and metric calibration.
 
-Spec §3 Text "Spacing" and "Metrics", the plan's Task 4 and its binding
-addendum (``task-4-addendum.md`` A1, A2). The snapshot engine writes text so
+Spec §3 Text "Spacing" and "Metrics", and the calibration record
+(``scripts/export_fidelity/CALIBRATION.md`` A1, A2). The snapshot engine writes text so
 that PowerPoint and Google Slides lay it out as the browser did:
 
-* **Line spacing against the renderers' single spacing (RC6; Task 4 rulings R1,
-  R2).** PowerPoint and Google Slides draw 100% spacing at 1.2 x the font size,
-  whatever the font's metrics (``scripts/export_fidelity/CALIBRATION.md``). In
-  a block the browser laid out on more than one line:
+* **Line spacing against the renderers' single spacing.** PowerPoint and Google
+  Slides draw 100% spacing at 1.2 x the font size, whatever the font's metrics
+  (``scripts/export_fidelity/CALIBRATION.md``). In a block the browser laid out
+  on more than one line:
 
   - a line height up to 1.2 x the size is ``<a:lnSpc><a:spcPct>`` of
     ``cssLineHeight / (1.2 x fontSize)``, the lines soft breaks in one
@@ -74,14 +74,14 @@ constant as ``const NAME = <number>;``: the three ``FIRST_LINE_*`` in
 ``emit_text.cjs``, each script factor once in ``emit_text.cjs`` or
 ``emit_typography.cjs`` (``SUBSCRIPT_SIZE_FACTOR`` exactly when the record
 holds it). ``GOOGLE_LINE_GROWTH_PER_PX`` is how far Google Slides lowers a
-line per px its largest written run exceeds the line's other runs (task-11
-ruling R11g), defined once in ``emit_text.cjs``. The pins fail when the code
+line per px its largest written run exceeds the line's other runs (the deck
+written for Google Slides), defined once in ``emit_text.cjs``. The pins fail when the code
 and the record disagree. The placement
 and script-size tests read the record too, so the constants must also be the
 ones the export applies.
 
 Corpus slides come from ``tests/fixtures/export_fidelity`` by prefix
-(PLAN-CORRECTIONS C4): 01 holds the 64 px cover title (``line-height: 1.08``,
+(``corpus_document``): 01 holds the 64 px cover title (``line-height: 1.08``,
 two lines split by a ``<br>``) and the 13 px eyebrow; 09 holds the footnote
 marker ``<sup>1</sup>``. The custom metrics slide holds the subscript,
 "H<sub>2</sub>O".
@@ -143,7 +143,7 @@ NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
 PT_PER_PX = 0.75
 HUNDREDTHS = 100
-# PowerPoint's and Google Slides' single spacing, as a multiple of the font size (R1).
+# PowerPoint's and Google Slides' single spacing, as a multiple of the font size.
 RENDERER_SINGLE_SPACING_EM = 1.2
 # spcPct = round(cssLineHeight / (1.2 x fontSize) x 100000) +/- 500.
 SPC_PCT_TOLERANCE = 500
@@ -401,7 +401,7 @@ def _recorded_values(name: str) -> list[str]:
     """Every ``NAME = <number>`` line ``CALIBRATION.md`` holds for ``name``, as written."""
     record = CALIBRATION_RECORD.relative_to(REPO_ROOT)
     assert CALIBRATION_RECORD.is_file(), (
-        f"{record} does not exist: Task 4's calibration records the chosen constants there, "
+        f"{record} does not exist: the text calibration records the chosen constants there, "
         f"each on a line of its own as `{name} = <number>`"
     )
     pattern = re.compile(
@@ -503,7 +503,7 @@ class TestCalibratedConstants:
         )
 
     def test_google_line_growth_per_px_is_the_recorded_calibration(self) -> None:
-        """R11g: ``GOOGLE_LINE_GROWTH_PER_PX`` in ``emit_text.cjs`` equals ``CALIBRATION.md``.
+        """``GOOGLE_LINE_GROWTH_PER_PX`` in ``emit_text.cjs`` equals ``CALIBRATION.md``.
 
         The deck written for Google Slides caps a script run at its line's
         size plus the browser's growth of the line over this constant: the px
@@ -550,7 +550,7 @@ class TestCalibratedConstants:
 
 
 # ---------------------------------------------------------------------------
-# Percentage line spacing (RC6, pitfall 6)
+# Percentage line spacing (upstream pitfall 6)
 # ---------------------------------------------------------------------------
 
 
@@ -641,7 +641,7 @@ class TestSnapshotLineSpacing:
         size_px: int,
         line_height: float,
     ) -> None:
-        """A block whose line height is looser than the renderers' single spacing (R2).
+        """A block whose line height is looser than the renderers' single spacing.
 
         * the metrics slide's two-line paragraph, 20 px at ``line-height: 1.45``
           (29 px against 24 px);
@@ -703,14 +703,14 @@ class TestSnapshotLineSpacing:
         )
 
     def test_line_spacing_is_never_exact_points(self, corpus_pptx: bytes) -> None:
-        """RC6: fixture 01's slide expresses line spacing as percentages only.
+        """Fixture 01's slide expresses line spacing as percentages only.
 
         It carries ``<a:lnSpc>`` (the multi-line cover title needs one), every
         ``<a:lnSpc>`` holds an ``<a:spcPct>``, and no ``<a:lnSpc>`` holds an
         ``<a:spcPts>``: Drive converts exact-point line spacing into a
         percentage of the natural line height and mis-scales it (22.5 pt on
-        13.5 pt became 166%). Space before a paragraph is another matter:
-        ruling R2 writes a loosely spaced block's leading beyond single as
+        13.5 pt became 166%). Space before a paragraph is another matter: the
+        engine writes a loosely spaced block's leading beyond single as
         ``<a:spcBef><a:spcPts>``, which both renderers honour, so only
         ``<a:lnSpc>`` is held to percentages.
         """

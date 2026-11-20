@@ -14,7 +14,7 @@
 //      subtree in 'subtree' mode (svg, canvas, video, img), its own box alone
 //      in 'box' mode, with its text transparent so the text and the children
 //      stay native and editable. A box target's own ::before, ::after and
-//      list marker are drawn natively too (ruling R8b), so they are hidden
+//      list marker are drawn natively too, so they are hidden
 //      with the rest. A pseudo-element target is a box target of its own: its
 //      host is hidden like everything else, and of every pseudo-element only
 //      the target shows, its text transparent. A ::marker takes no visibility
@@ -70,7 +70,8 @@ const TARGET_SELECTOR = /^\[data-tellr-(?:capture|pseudo-host)="[a-z0-9]{1,16}"\
 const PSEUDO_ELEMENTS = new Set(['before', 'after', 'marker']);
 
 // Each :not(#…) adds id-level specificity, so these rules beat the deck's own
-// !important rules on classes and elements (Review Focus 5); the trick of
+// !important rules on classes and elements, which would otherwise leak into a
+// capture (a deck rule that makes an unrelated element visible); the trick of
 // SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost.
 const BOOST = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
 

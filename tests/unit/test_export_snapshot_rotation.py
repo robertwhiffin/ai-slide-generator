@@ -11,17 +11,17 @@ item:
   ``offsetHeight`` (times any scale), centred where its bounding rect is
   centred (a rotated rectangle's bounds share its centre), grown along its
   width by the usual slack on the side its alignment grows, with that layout
-  box kept in place (R11f: Google Slides wraps a line at its box's exact width);
+  box kept in place (Google Slides wraps a line at its box's exact width);
 * its ``rot`` is the cumulative angle, normalised to 0-359 and written in
   60000ths of a degree: ``rotate(-90deg)`` is 270 degrees, 16200000;
 * its lines are the element's own, in DOM order, split by ``<br>`` and block
   children. A one-line label is one paragraph with ``wrap="none"``;
-* its runs keep the typography of any other text (Task 3): text-transform,
-  letter spacing as ``spc`` in points, the colour (R11b);
+* its runs keep the typography of any other text: text-transform,
+  letter spacing as ``spc`` in points, the colour;
 * a rotated box that paints a background is a shape AND a text item, both
-  with the same ``rot`` about the same centre, the shape first (R11d).
+  with the same ``rot`` about the same centre, the shape first.
 
-Vertical writing modes (R11a) rotate too. Under ``writing-mode: vertical-rl``
+Vertical writing modes rotate too. Under ``writing-mode: vertical-rl``
 or ``vertical-lr`` the browser sets Latin glyphs sideways, turned 90 degrees
 clockwise, so the text is one item turned 90 degrees on top of the element's
 own angle; ``sideways-lr`` turns them the other way, 270 degrees. Its unrotated
@@ -31,7 +31,7 @@ along its own downward axis, which on the slide points along (-sin, cos) of
 the angle: right to left at 90 degrees. ``vertical-lr`` stacks its lines left to
 right, so with more than one line its paragraph order is reversed.
 
-``text-overflow: ellipsis`` (R11e) exports what the browser shows: the visible
+``text-overflow: ellipsis`` exports what the browser shows: the visible
 characters, then "…". The visible characters come from the screen
 (``browser_ellipsis``), not from Range rects, which report every character
 where it was laid out, hidden or not: three screenshots of the element,
@@ -43,7 +43,7 @@ the style of the line's containing BLOCK, which is what Chrome paints even
 when the cut falls inside a differently styled inline; the screen's own "…"
 colour (``BrowserEllipsis.ellipsis_ink_colour``) proves it for each case. So the
 exported glyphs end where Chrome's do, inside the clip; the item's box keeps
-its usual slack, which may reach past the clip (R11e″). This holds for text
+its usual slack, which may reach past the clip. This holds for text
 items and for a native table's cut cells.
 
 Rotated text in a HOSTILE realm (``hostile_text_nodes``, which replaces every
@@ -123,13 +123,13 @@ from tests.unit.test_export_slide_root_background import FIXTURE_DIR
 from tests.unit.test_export_snapshot_line_spacing import _assert_script_run_size, _script_factor
 from tests.unit.test_export_svg_raster import structural_manifest
 
-# The brief: the unrotated box and its centre agree with the browser within 1 px
+# The unrotated box and its centre agree with the browser within 1 px
 # (offsetWidth and offsetHeight are whole px; the bounds are not).
 GEOMETRY_TOLERANCE_PX = 1.0
 # rot is written in 60000ths of a degree, so a right angle is exact and any
 # other angle is within a 60000th.
 ANGLE_TOLERANCE_DEGREES = 0.01
-# R11f: a turned box keeps the usual width slack (spec §3 Text, Wrapping), at
+# A turned box keeps the usual width slack (spec §3 Text, Wrapping), at
 # most this fraction of its inline length plus this many px.
 SLACK_FRACTION = 0.06
 SLACK_PX = 4.0
@@ -170,7 +170,7 @@ SCREEN_CHANNEL_TOLERANCE = 8
 PT_PER_PX = 0.75
 # spc is written in hundredths of a point: one hundredth either way.
 SPC_TOLERANCE_PT = 0.01
-# task-4-addendum A1: a run whose width at the browser's automatic optical size
+# CALIBRATION.md A1: a run whose width at the browser's automatic optical size
 # and at the static opsz-14 cut differ by more than 0.5% carries an optical-size
 # delta on top of its CSS tracking; within it, spc is the CSS tracking alone.
 OPTICAL_SIZE_THRESHOLD = 0.005
@@ -244,13 +244,13 @@ CELL_WORDS = (
 )
 
 
-# Fix round 1's turned labels: absolutely placed and turned a quarter left.
+# Turned labels, absolutely placed and turned a quarter left.
 TURNED_LABEL = "position:absolute; transform:rotate(-90deg); font-size:16px;"
 SOFT_WRAP_TEXT = "Quarterly revenue by region and product line"
 TURNED_TABLE_CELLS = ("North", "42", "South", "17")
 
 
-# Fix round 2: a turned label (#t) beside its unturned twin (#w), the same
+# A turned label (#t) beside its unturned twin (#w), the same
 # content; a transform moves no layout, so the twin is the turned label's oracle.
 TWIN_ANGLES = {"12": "12deg", "40": "40deg"}
 TWIN_ANGLE_DEGREES = {"12": 12.0, "40": 40.0}
@@ -284,7 +284,7 @@ LATER_SCRIPT_LINES = {
 LATER_LINE_HEIGHT_PX = 29.0
 # A line the browser set this much past its line height grew (snapshot_text.mjs).
 LINE_GROWTH_MIN_PX = 0.5
-# R11h: inline elements a relative position moves off their line. Each: its
+# Inline elements a relative position moves off their line. Each: its
 # paragraph's class, its line (the moved element is #moved), the text of the
 # run it writes, and that run's baseline shift (None: a plain run).
 RELATIVE_LINES = {
@@ -342,7 +342,7 @@ RELATIVE_LINES = {
 # The nudged lines placed from their text: one ▲ moved among plain words, and
 # a whole line moved up and down, by one span or by one span per word.
 NUDGED_LINES = ("nudge", "whole-line-up", "whole-line-down", "whole-line-two-spans")
-# R11k: the relative moves of the nudge cases below.
+# The relative moves of the nudge cases below.
 NUDGE_DOWN = "position:relative; top:4px"
 NUDGE_UP = "position:relative; top:-3px"
 # A 150 px line cut by its ellipsis, all of its text in one nudged span.
@@ -358,7 +358,7 @@ NUDGED_BLOCKS = {
 }
 NUDGED_BLOCK_WORDS = (("Alpha", " one"), ("Gamma", " two"), ("Delta", " three"))
 NUDGED_BLOCK_PITCH_PX = 29.0
-# Important 2 (round 4): script runs at the end of their line, and later lines
+# Script runs at the end of their line, and later lines
 # the browser grew, in a 20 px paragraph (40 px where named) at the left of the
 # slide. Each case: its font size, its line height (None: normal) and its
 # lines. Line 1 leads with #first, line 2 with #second.
@@ -419,7 +419,7 @@ GROWN_LINE_CASES = (
     "sup-mid-line-2",
     "tight-sup-mid-line-2",
 )
-# Minor 2 (round 5): paragraphs with no script run whose later lines the
+# Paragraphs with no script run whose later lines the
 # browser grows, a larger run's own (unitless) line height or the block's
 # strut holding the line beside a larger one down. Each: the block's font size
 # and line height, and its lines (lead word, the lead's own font size or None
@@ -459,7 +459,7 @@ SCRIPT_SIZE_TOLERANCE_PT = 0.05
 BASELINE_UNITS = 100000
 TYPOGRAPHY_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.cjs"
 SLIDE_WIDTH_PX = 1280
-# R11g: a script line's baseline in Google Slides is the browser's within this.
+# A script line's baseline in Google Slides is the browser's within this.
 GOOGLE_BASELINE_TOLERANCE_PX = 1.5
 
 
@@ -578,7 +578,7 @@ SLIDES: dict[str, str] = {
         "ct ellipsis mixed",
     ),
     "ellipsis-cell": _grid(" ".join(CELL_WORDS), "cut ellipsis"),
-    # Fix round 1. The rotation is the parent's: its in-flow child joins its
+    # The rotation is the parent's: its in-flow child joins its
     # text, its positioned child is a turned item of its own.
     "ancestor-block": (
         f'<div class="slide"><div id="parent" style="{TURNED_LABEL} left:300px; top:300px; '
@@ -634,7 +634,7 @@ SLIDES: dict[str, str] = {
         '<div id="twin" style="position:absolute; left:100px; top:500px; font-size:16px; '
         f'width:150px;">{SOFT_WRAP_TEXT}</div></div>'
     ),
-    # Fix round 2. A blank line a <br> opens inside a turned root.
+    # A blank line a <br> opens inside a turned root.
     "leading-br": _twin_pair(
         "-90deg",
         '<div><span id="{prefix}a">Alpha</span></div>'
@@ -665,7 +665,7 @@ SLIDES: dict[str, str] = {
     "superscript-turned": _twin_pair(
         "-90deg", SUPERSCRIPT_LINE, font_size=20, tag="p", extra="margin:0;"
     ),
-    # Fix round 3. A superscript line cut by an ellipsis, and Preflight's sub and sup.
+    # A superscript line cut by an ellipsis, and Preflight's sub and sup.
     "ellipsis-superscript": (
         '<div class="slide"><p id="target" style="position:absolute; left:100px; top:150px; '
         "width:300px; margin:0; font-size:20px; white-space:nowrap; overflow:hidden; "
@@ -688,7 +688,7 @@ SLIDES: dict[str, str] = {
         )
         for script, line in PREFLIGHT_LINES.items()
     },
-    # Fix round 4. R11h: an inline a relative position moves off its line.
+    # An inline a relative position moves off its line.
     **{
         f"relative-{name}": (
             f'<div class="slide"><p id="target" class="{css_class}" style="position:absolute; '
@@ -697,7 +697,7 @@ SLIDES: dict[str, str] = {
         )
         for name, (css_class, line, _, _) in RELATIVE_LINES.items()
     },
-    # R11k: nudged lines cut by an ellipsis, and nudges in a box of three lines.
+    # Nudged lines cut by an ellipsis, and nudges in a box of three lines.
     **{
         f"nudged-ellipsis-{name}": (
             '<div class="slide"><p id="target" style="position:absolute; left:100px; '
@@ -710,7 +710,7 @@ SLIDES: dict[str, str] = {
     **{f"nudged-block-{name}": _nudged_block(moves) for name, moves in NUDGED_BLOCKS.items()},
 }
 
-# R11a: each single-line vertical label, its text and the angle it is turned by.
+# Each single-line vertical label, its text and the angle it is turned by.
 VERTICAL_LABELS = {
     "vertical-rl": ("Revenue ($M)", "vertical-rl", 90.0),
     "vertical-rl-turned": ("Margin (%)", "vertical-rl", 270.0),
@@ -854,7 +854,7 @@ def _assert_turned_box(
 
     The unrotated layout box is ``offsetWidth`` x ``offsetHeight``; under a
     vertical writing mode it is the inline length by the block length,
-    ``offsetHeight`` x ``offsetWidth`` (R11a). R11f: the item's box is that
+    ``offsetHeight`` x ``offsetWidth``. The item's box is that
     box grown along its own inline axis by its slack, which lies on the side
     its alignment grows (right of left-aligned text, left of right-aligned,
     half each side of centred) and is between 0 and 6% + 4 px of the inline
@@ -865,8 +865,8 @@ def _assert_turned_box(
     off the bounds' centre by half the slack.
 
     The alignment is the browser's: the element's computed text-align and
-    direction, which the item's paragraphs must be written with (Minor 7).
-    R11f′: the room on the growth side, its padding plus the box's growth
+    direction, which the item's paragraphs must be written with. The room on
+    the growth side, its padding plus the box's growth
     there, reaches the usual slack, 6% of the content's inline length + 4 px,
     within 1 px; a box that drops the slack has none.
     """
@@ -1122,7 +1122,7 @@ def _shows_colour(colour: tuple[int, int, int] | None, hex_colour: str) -> bool:
 def _assert_block_style_ellipsis(
     item: Shape, cut: BrowserEllipsis, block_colour: str, block_word: str, what: str
 ) -> Run:
-    """The "…" run is in the style of the line's block, as the screen paints it (R11e″).
+    """The "…" run is in the style of the line's block, as the screen paints it.
 
     The screen's "…" is guarded to be ``block_colour``. The run holding the
     "…" then has the style (typeface, size, weight, italic, colour) of the run
@@ -1176,7 +1176,7 @@ class TestRotatedText:
     def test_fixture_13_label_is_one_turned_item_on_its_unrotated_box(
         self, corpus_pptx: bytes
     ) -> None:
-        """Fixture 13 (RC12): the ``rotate(-90deg)`` label "GOVERNED DATA" is ONE text item.
+        """Fixture 13: the ``rotate(-90deg)`` label "GOVERNED DATA" is ONE text item.
 
         * ``rot`` is 270 degrees, 16200000 in PowerPoint units;
         * it is a single line in one paragraph, ``wrap="none"``;
@@ -1203,7 +1203,7 @@ class TestRotatedText:
         _assert_turned_box(label, layout, 270.0, "the fixture 13 label")
 
     def test_fixture_13_label_keeps_its_typography_under_rotation(self, corpus_pptx: bytes) -> None:
-        """R11b, a guard: the turned label keeps Task 3's run rules.
+        """A guard: the turned label keeps the run rules of unturned text.
 
         Its runs read "GOVERNED DATA", upper-cased by ``text-transform`` as the
         browser renders it (``innerText``); each run's letter spacing is the
@@ -1311,7 +1311,7 @@ class TestRotatedText:
     def test_br_lines_of_a_rotated_element_are_its_lines_in_dom_order(
         self, rotation_pptx: bytes
     ) -> None:
-        """R11c: a ``rotate(-90deg)`` "Line one<br>Line two" is one item with two lines.
+        """A ``rotate(-90deg)`` "Line one<br>Line two" is one item with two lines.
 
         The lines are "Line one" then "Line two", in DOM order (a turned box
         stacks them left to right on the slide, as the browser does); its
@@ -1338,7 +1338,7 @@ class TestVerticalWritingModes:
     def test_a_vertical_label_is_one_item_turned_by_its_writing_mode(
         self, rotation_pptx: bytes, name: str
     ) -> None:
-        """R11a: a vertical label is one text item, turned by its writing mode.
+        """A vertical label is one text item, turned by its writing mode.
 
         * ``vertical-rl`` "Revenue ($M)": ``rot`` 90 degrees;
         * ``vertical-rl`` under ``rotate(180deg)`` "Margin (%)": 90 on top of
@@ -1366,7 +1366,7 @@ class TestVerticalWritingModes:
         _assert_one_line(label, text, f"the {name} label")
 
     def test_vertical_lr_stacks_its_lines_left_to_right(self, rotation_pptx: bytes) -> None:
-        """R11a: under ``vertical-lr`` the paragraph order is reversed.
+        """Under ``vertical-lr`` the paragraph order is reversed.
 
         The browser stacks "First column" LEFT of "Second column" (read from
         each line's rect). A box turned 90 degrees stacks its paragraphs right
@@ -1404,7 +1404,7 @@ class TestRotatedBoxWithBackground:
     def test_a_rotated_pill_is_a_shape_and_its_text_turned_alike(
         self, rotation_pptx: bytes
     ) -> None:
-        """R11d: a ``rotate(-8deg)`` pill "NEW" with a background is a shape AND a text item.
+        """A ``rotate(-8deg)`` pill "NEW" with a background is a shape AND a text item.
 
         Both have ``rot`` 352 degrees and are centred on the pill's bounds
         within 1 px; the shape (its FF5F46 fill) comes before the text in
@@ -1443,7 +1443,7 @@ class TestRotatedBoxWithBackground:
 @requires_huashu_sidecar
 class TestEllipsis:
     def test_an_ellipsis_title_exports_what_the_screen_shows(self, rotation_pptx: bytes) -> None:
-        """R11e: a card title cut by ``text-overflow: ellipsis`` reads as Chrome shows it.
+        """A card title cut by ``text-overflow: ellipsis`` reads as Chrome shows it.
 
         The screen (``browser_ellipsis``) shows the title's visible characters,
         cut mid-word, then "…". The exported item reads exactly those characters
@@ -1481,7 +1481,7 @@ class TestEllipsis:
     def test_the_ellipsis_takes_the_blocks_style_not_the_cut_inlines(
         self, rotation_pptx: bytes
     ) -> None:
-        """R11e″: the "…" is in the BLOCK's style even when the cut falls inside a styled span.
+        """The "…" is in the BLOCK's style even when the cut falls inside a styled span.
 
         A blue, bold title holds a red, regular-weight ``<span>``, and the
         ellipsis cuts its line inside the span. Chrome paints the "…" blue and
@@ -1530,7 +1530,7 @@ class TestEllipsis:
     def test_an_ellipsis_cell_exports_what_the_screen_shows_and_stays_native(
         self, rotation_pptx: bytes
     ) -> None:
-        """R11e: a table cell cut by ``text-overflow: ellipsis`` reads as Chrome shows it.
+        """A table cell cut by ``text-overflow: ellipsis`` reads as Chrome shows it.
 
         The table is still one native table on the browser's rect. The cell's
         line (written once: as its ``a:tc``'s text or as one overlay item)
@@ -1574,7 +1574,7 @@ class TestAncestorRotation:
     def test_an_in_flow_child_of_a_rotated_parent_joins_its_turned_item(
         self, rotation_pptx: bytes
     ) -> None:
-        """The brief: the rotation may be an ancestor's. A turned parent's in-flow ``<p>``.
+        """The rotation may be an ancestor's: a turned parent's in-flow ``<p>``.
 
         The ``<p>`` has no transform of its own; its parent is turned by
         ``rotate(-90deg)``. Its text is the parent's ONE turned item: ``rot``
@@ -1599,7 +1599,7 @@ class TestAncestorRotation:
     def test_a_positioned_child_of_a_rotated_parent_is_its_own_turned_item(
         self, rotation_pptx: bytes
     ) -> None:
-        """The brief: an absolutely positioned child of a turned parent is turned with it.
+        """An absolutely positioned child of a turned parent is turned with it.
 
         It paints in a group of its own, so its text is a turned item of its
         own: ``rot`` 270 degrees, one line, on ITS layout box, centred on its
@@ -1624,8 +1624,8 @@ class TestTurnedLineCuts:
     def test_a_chip_cuts_a_turned_line_into_turned_segments(self, rotation_pptx: bytes) -> None:
         """A turned "Status [LIVE] since May" is three turned items, each where the browser has it.
 
-        The inline-block chip leaves a gap in the line, as in unturned text
-        (RC13), so the text on each side of it is a segment of its own:
+        The inline-block chip leaves a gap in the line, as in unturned text,
+        so the text on each side of it is a segment of its own:
         "Status", the chip's own text "LIVE" on its own box, then "since May".
         Each is turned 270 degrees and one line; each segment starts along the
         line where the browser draws its text, within 1 px, and the chip passes
@@ -1653,7 +1653,7 @@ class TestTurnedLineCuts:
     def test_text_after_a_hidden_word_starts_where_the_browser_has_it(
         self, rotation_pptx: bytes
     ) -> None:
-        """A hidden word keeps its room in a turned line too (the Task 5 ruling).
+        """A hidden word keeps its room in a turned line too, as in unturned text.
 
         "Before [secret, visibility: hidden] after" turned 270 degrees: "secret"
         is on no shape, "Before" and "after" are separate turned items, and
@@ -1680,7 +1680,7 @@ class TestRotatedTable:
     def test_each_cell_of_a_rotated_table_is_its_own_turned_item(
         self, rotation_pptx: bytes
     ) -> None:
-        """Minor 4: a ``rotate(-90deg)`` 2x2 table is positioned items, one turned item per cell.
+        """A ``rotate(-90deg)`` 2x2 table is positioned items, one turned item per cell.
 
         No a:tbl turns, so the table is no native table. Each cell's text is a
         turned item of its own, one line, on the cell's layout box, centred on
@@ -1703,7 +1703,7 @@ class TestRotatedTable:
 @requires_huashu_sidecar
 class TestTurnedListMarkers:
     def test_a_rotated_lists_markers_are_items_of_their_own(self, rotation_pptx: bytes) -> None:
-        """Minor 5: a turned list's markers are turned items of their own, as outside markers are.
+        """A turned list's markers are turned items of their own, as outside markers are.
 
         A ``rotate(-90deg)`` ``<ul>``: each "•" is a turned text item of its own,
         lying before its text along the line; the list's text reads "Alpha
@@ -1735,7 +1735,7 @@ class TestTurnedListMarkers:
 @requires_huashu_sidecar
 class TestTurnedLines:
     def test_a_trailing_br_in_a_block_child_adds_no_line(self, rotation_pptx: bytes) -> None:
-        """Minor 6: "Line one<br>" then a block "Line two", turned, is two lines, no blank between.
+        """"Line one<br>" then a block "Line two", turned, is two lines, no blank between.
 
         A <br> that ends its block breaks no further line: the browser shows two
         lines, so the item reads two.
@@ -1753,7 +1753,7 @@ class TestTurnedLines:
     def test_an_aligned_turned_label_keeps_its_alignment_and_layout_box(
         self, rotation_pptx: bytes, name: str, text: str, text_align: str
     ) -> None:
-        """Minor 7: right- and centre-aligned 240 px turned labels.
+        """Right- and centre-aligned 240 px turned labels.
 
         Each item is written with the browser's computed text-align, its slack
         on that alignment's growth side (left for right-aligned text, half each
@@ -1771,7 +1771,7 @@ class TestTurnedLines:
         _assert_turned_box(item, layout, 270.0, f"the {name} label")
 
     def test_a_turned_paragraph_keeps_the_browsers_soft_wraps(self, rotation_pptx: bytes) -> None:
-        """Minor 8: a 150 px paragraph turned 270 degrees wraps where the browser wraps it.
+        """A 150 px paragraph turned 270 degrees wraps where the browser wraps it.
 
         The browser's lines are read from its unturned twin (a turn does not
         change where a line breaks): three of them. The turned item holds those
@@ -1801,7 +1801,7 @@ class TestTurnedLines:
 class TestTurnedBlankLines:
     @pytest.mark.parametrize("name", ["leading-br", "double-br"])
     def test_a_blank_line_a_br_opens_keeps_its_place(self, rotation_pptx: bytes, name: str) -> None:
-        """Round 2, item 1: only the empty line after a run's FINAL <br> paints nothing.
+        """Only the empty line after a run's FINAL <br> paints nothing.
 
         * "leading-br": ``<div>Alpha</div><div><br>Beta</div>``: the second
           block's leading <br> opens an empty line, so Beta is a line further on;
@@ -1829,7 +1829,7 @@ class TestTurnedBlankLines:
         _assert_turned_box(turned[0], _layout(document, "#t"), 270.0, f"the {name} item")
 
     def test_a_vertical_inline_padded_along_its_line_cuts_it(self, rotation_pptx: bytes) -> None:
-        """Round 2, item 2: under vertical-rl an inline's inline sides are its top and bottom.
+        """Under vertical-rl an inline's inline sides are its top and bottom.
 
         "Status [mid, 24 px padding top and bottom] end" in a vertical-rl label:
         the padding takes room along the line, so the line is cut there, and
@@ -1852,7 +1852,7 @@ class TestTurnedBlankLines:
 class TestTurnedPiecesMatchTheirTwins:
     @pytest.mark.parametrize("angle", list(TWIN_ANGLES))
     def test_a_mixed_size_segment_matches_its_twin(self, rotation_pptx: bytes, angle: str) -> None:
-        """Round 2, items 3 and 4: a cut segment of 12 px and 28 px text, turned 12 and 40 degrees.
+        """A cut segment of 12 px and 28 px text, turned 12 and 40 degrees.
 
         Off a quarter turn, a line of runs of different sizes is no one
         rectangle as tall as its largest face. Each run is placed by its own
@@ -1870,7 +1870,7 @@ class TestTurnedPiecesMatchTheirTwins:
 
     @pytest.mark.parametrize("angle", list(TWIN_ANGLES))
     def test_turned_list_markers_match_their_twins(self, rotation_pptx: bytes, angle: str) -> None:
-        """Round 2, item 4: a 24 px ordered list's markers, turned 12 and 40 degrees.
+        """A 24 px ordered list's markers, turned 12 and 40 degrees.
 
         Each "1." and "2." is a turned item of its own that, in its list's frame,
         starts along and across its line and runs as long as its unturned
@@ -1889,7 +1889,7 @@ class TestTurnedPiecesMatchTheirTwins:
 @requires_huashu_sidecar
 class TestSuperscriptLines:
     def test_a_superscript_line_is_placed_from_its_baseline(self, rotation_pptx: bytes) -> None:
-        """Round 2, item 5: "Revenue<sup>1</sup> grew" in 20 px, unturned.
+        """"Revenue<sup>1</sup> grew" in 20 px, unturned.
 
         The raised "1" stands above the line, but the line is where its own
         20 px text is: the box's top is the calibrated first-line offset above
@@ -1914,7 +1914,7 @@ class TestSuperscriptLines:
         _assert_script_run_size(item, script, "super", sup_px, SUPERSCRIPT_SIZE_PX)
 
     def test_a_turned_superscript_line_sits_where_its_twin_does(self, rotation_pptx: bytes) -> None:
-        """Round 2, item 5, turned 270 degrees: the line is placed across by its own text.
+        """The same, turned 270 degrees: the line is placed across by its own text.
 
         In its label's frame, the turned paragraph's text starts across its line
         (its box's top plus its top inset) where its unturned twin's box starts,
@@ -1942,7 +1942,7 @@ class TestSuperscriptLines:
 def _written_script_size_pt(run: dict, sizing: dict | None) -> float:
     """``runOptions(run, {}, sizing).fontSize`` of emit_typography.cjs, in Node.
 
-    ``sizing`` None calls it with two arguments, as every caller did before R11g.
+    ``sizing`` None calls it with two arguments, as a caller with no renderer target does.
     """
     arguments = json.dumps(run) + ", {}" + ("" if sizing is None else ", " + json.dumps(sizing))
     script = (
@@ -1980,7 +1980,7 @@ def _assert_placed_from_its_text(item: Shape, document: str, what: str) -> None:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestScriptRunsPerRenderer:
-    """R11g: a script run's written size, per the renderer the deck is written for.
+    """A script run's written size, per the renderer the deck is written for.
 
     PowerPoint shrinks a superscript or subscript run to about 0.646 of its
     written size and places its line by its other runs, so the run is written
@@ -2069,7 +2069,7 @@ class TestScriptRunsPerRenderer:
     def test_a_later_lines_script_cap_is_its_lines_size_and_growth(
         self, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
-        """R11g, lines after the first: Google grows a script line as the browser did.
+        """Lines after the first: Google grows a script line as the browser did.
 
         "Alpha revenue grew<br>Gamma ..." in 20 px, line-height 29 px, a script
         run on the second line. The browser's own superscript grows that line's
@@ -2140,15 +2140,15 @@ class TestScriptRunsPerRenderer:
         Every part but the slides is identical. Each slide holds the same
         shapes, at the same places, with the same lines and runs, once these
         are taken out:
-        * every script run's size (R11g: capped at its line's for Google);
+        * every script run's size (capped at its line's for Google);
         * in the PowerPoint deck, the word joiner after a script run that ends
-          its line (Important 2);
+          its line (CALIBRATION.md A5);
         * a later line the browser grew within its paragraph: in the PowerPoint
           deck it opens a paragraph with its spacing plus its growth
           (``_second_line_growth``) as space before, where the Google deck
-          places it by its spacing alone (Important 2).
+          places it by its spacing alone (CALIBRATION.md A5).
         The first line of a later paragraph holding a script run carries its
-        growth in both decks (R11j), so it is alike in both but for the script
+        growth in both decks, so it is alike in both but for the script
         run's size. Each case holds a script run, so the decks do differ.
         """
         decks = script_line_decks
@@ -2249,7 +2249,7 @@ class TestScriptRunsInGoogleSlides:
     def test_a_script_line_sits_on_the_browsers_baseline_in_google_slides(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R11g, opt-in (``TELLR_GOOGLE_TESTS=1``, run with ``uv run --with pymupdf``).
+        """Opt-in (``TELLR_GOOGLE_TESTS=1``, run with ``uv run --with pymupdf``).
 
         Written for Google (``target='gslides'``) and converted through Drive,
         in Drive's PDF of the presentation each line's baseline is the
@@ -2263,7 +2263,7 @@ class TestScriptRunsInGoogleSlides:
           high; written for PowerPoint, Preflight's 3.6 px and the subscript's
           6 px low;
         * "Gamma" in 24 px, opening a paragraph of its own on line 2 with a
-          superscript (R11j). Without its growth as space before, Google draws
+          superscript. Without its growth as space before, Google draws
           it 4.69 px high;
         * "Gamma" (20 px) and "Delta" (16 px), the lines a 16 px paragraph at
           line-height 1.6 grows with no script run: without their growth as
@@ -2328,7 +2328,7 @@ class TestScriptLinesPlacedByBaseline:
     def test_an_ellipsis_line_with_a_superscript_is_placed_from_its_text(
         self, rotation_pptx: bytes
     ) -> None:
-        """Round 3, item 2: "Revenue<sup>1</sup> grew in every region…", cut by its ellipsis.
+        """"Revenue<sup>1</sup> grew in every region…", cut by its ellipsis.
 
         The "…" takes the line's own baseline extent, not the superscript's
         raised top, so the line is placed from its 20 px text within 1 px.
@@ -2343,7 +2343,7 @@ class TestScriptLinesPlacedByBaseline:
     def test_a_preflight_script_is_a_baseline_shift(
         self, rotation_pptx: bytes, script: str
     ) -> None:
-        """Round 3, item 3: Tailwind Preflight's ``position: relative`` sub and sup.
+        """Tailwind Preflight's ``position: relative`` sub and sup.
 
         Preflight sets ``vertical-align: baseline`` and moves the script by
         ``top: -0.5em`` (sup) or ``bottom: -0.25em`` (sub). That is a baseline
@@ -2363,7 +2363,7 @@ class TestScriptLinesPlacedByBaseline:
         )
 
     def test_a_preflight_sup_shifts_as_its_vertical_align_twin(self, rotation_pptx: bytes) -> None:
-        """Round 3, item 3: Preflight's sup and the browser's own ``vertical-align: super`` one.
+        """Preflight's sup and the browser's own ``vertical-align: super`` one.
 
         Both "1"s of "Revenue1 grew" in 20 px are written with the same
         baseline shift, within 1 px.
@@ -2385,7 +2385,7 @@ class TestRelativeInlines:
     def test_a_relative_inline_is_a_script_only_when_smaller_or_a_script_element(
         self, rotation_pptx: bytes, name: str
     ) -> None:
-        """R11h: an inline ``position: relative`` moves is a script only when it is one.
+        """An inline ``position: relative`` moves is a script only when it is one.
 
         It is a superscript (or subscript) when its move is at least 0.1 em and
         it is a ``<sub>`` or ``<sup>`` or set smaller than its parent:
@@ -2423,7 +2423,7 @@ class TestRelativeInlines:
     def test_a_nudged_line_is_placed_from_its_own_text(
         self, rotation_pptx: bytes, name: str
     ) -> None:
-        """R11h: a nudged line is placed where the browser draws its text.
+        """A nudged line is placed where the browser draws its text.
 
         The export cannot move one run of a line, so a nudged run stands on the
         line's baseline:
@@ -2447,7 +2447,7 @@ class TestRelativeInlines:
     def test_a_nudged_line_cut_by_an_ellipsis_is_placed_from_its_moved_text(
         self, rotation_pptx: bytes, name: str
     ) -> None:
-        """R11k: a line all of whose text one span moves, cut by its ellipsis.
+        """A line all of whose text one span moves, cut by its ellipsis.
 
         Chrome paints the "…" unmoved, but no run can carry a move, so the
         export draws it with its line; the "…" shares the line's move, so the
@@ -2465,7 +2465,7 @@ class TestRelativeInlines:
     def test_a_nudge_in_a_box_of_three_lines_moves_no_other_line(
         self, rotation_pptx: bytes, name: str
     ) -> None:
-        """R11k: settled or moved is the box's, and growth is read from settled lines.
+        """Settled or moved is the box's, and growth is read from settled lines.
 
         Three 20 px lines at line-height 29 px:
         * one line moved by a span of its own (down 4 px, or up 3 px), the
@@ -2619,7 +2619,7 @@ def _line_spacing_pct(size_px: float, line_height_px: float) -> float:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestScriptLinesInPowerPoint:
-    """Important 2 (round 4): written for PowerPoint, script lines sit where the browser has them.
+    """Written for PowerPoint, script lines sit where the browser has them.
 
     PowerPoint places a line by its runs, two ways the browser does not:
     * it grows a line by a script run's enlarged size (the browser's over the
@@ -2634,8 +2634,8 @@ class TestScriptLinesInPowerPoint:
     the browser grew is a paragraph of its own with its growth as space
     before. Google Slides sizes a line by its script runs' written size, so
     its deck has no word joiner, and within a paragraph a script line's
-    growth is its script run's (R11g); a later paragraph's first line holding
-    one takes its growth as space before there too (R11j).
+    growth is its script run's; a later paragraph's first line holding
+    one takes its growth as space before there too.
     """
 
     @pytest.mark.parametrize("name", LINE_END_CASES)
@@ -2770,11 +2770,12 @@ class TestScriptLinesInPowerPoint:
         later line within its paragraph is placed by its paragraph's spacing
         alone: a loose one (29 px) is a paragraph with the leading beyond single
         before it, a tight one (22 px) a soft break; Google grows a line by
-        what its runs hold (R11g). A later paragraph's first line, which holds
+        what its runs hold. A later paragraph's first line, which holds
         no script run here, has half each paragraph's leading before it (and
         would carry its growth too, as a line with no script run does in both
         decks: ``test_a_deck_with_no_script_runs_is_the_same_for_both_targets``).
-        A later paragraph's first line that holds one is R11j's
+        A later paragraph's first line that holds one takes its growth as space
+        before
         (``test_the_google_slides_deck_gives_a_later_paragraphs_script_line_its_growth``).
         """
         for name, (size, line_height, _) in SCRIPT_LINES.items():
@@ -2806,7 +2807,7 @@ class TestScriptLinesInPowerPoint:
     def test_the_google_slides_deck_gives_a_later_paragraphs_script_line_its_growth(
         self, script_line_decks: dict[str, bytes]
     ) -> None:
-        """R11j: written for Google Slides, a later paragraph's first line holding a script run.
+        """Written for Google Slides, a later paragraph's first line holding a script run.
 
         "Gamma" in 24 px with a superscript opens a paragraph of its own on
         line 2. Google sets a paragraph's first line by the paragraph's
@@ -2882,7 +2883,7 @@ class TestPlainLineGrowth:
     def test_a_later_line_the_browser_grew_has_its_growth_before_it(
         self, plain_growth_pptx: bytes, name: str
     ) -> None:
-        """Round 5, Minor 2: a paragraph with no script run, whose later lines the browser grew.
+        """A paragraph with no script run, whose later lines the browser grew.
 
         Written for PowerPoint, every line of the 16 px paragraph opens a
         paragraph of its own (its spacing is looser than single, or its larger

@@ -1,4 +1,5 @@
-// Pseudo-elements, read-only (ruling R8).
+// Pseudo-elements, read-only: read through the DevTools protocol, never
+// inserted into the page.
 //
 // What a deck paints with ::before and ::after (square bullets, accent bars,
 // timeline dots, step numbers, quote marks) is no element, so the snapshot's

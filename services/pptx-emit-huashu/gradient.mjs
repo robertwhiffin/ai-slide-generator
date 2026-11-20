@@ -1,5 +1,5 @@
-// CSS gradient parsing, shared by every page-side pass that reads a gradient
-// (PLAN-CORRECTIONS C6): preprocess.mjs's slide-root background transfer
+// CSS gradient parsing, shared by every page-side pass that reads a gradient:
+// preprocess.mjs's slide-root background transfer
 // rasterizes a gradient ground with rasterizeGradientToDataURL, and
 // snapshot.mjs takes the colour at the middle of a gradient for the text it
 // paints under (gradient text, a gradient card) with parseLinearGradient. One

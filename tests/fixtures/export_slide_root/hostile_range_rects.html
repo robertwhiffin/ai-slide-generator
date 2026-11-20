@@ -10,18 +10,17 @@
 
          Its shape is deliberately NOT the wrapper shape. body's only child
          carries the slide class, so the slide-root locator resolves on its very
-         first lookup and never reaches the wrapper collection — which is what
-         drives the pass on into the collection consumers DOWNSTREAM of the
-         locator, the ones a hardened locator cannot help:
+         first lookup and never reaches the wrapper collection, so the export
+         goes on to the collection reads DOWNSTREAM of the locator, the ones a
+         hardened locator cannot help:
 
-           .code            a monospace panel with two child <div>s, which is
-                            the only shape that reads element.children (an
-                            HTMLCollection) and then the panel's childNodes.
-           div.prose        bare inline content in a <div>, which is what makes
-                            wrapInlineRunsIn read that div's childNodes. Every
-                            deck reaches this one.
-           <svg>            an inline svg, collected with querySelectorAll.
-           <img> data: svg  an svg data-URI image, collected the same way.
+           .code            a monospace panel with two child <div>s: element
+                            children the snapshot walk visits, each line a
+                            text item of its own.
+           div.prose        bare inline content in a <div>, whose child nodes
+                            the text layout reads. Every deck reaches this one.
+           <svg>            an inline svg, a capture target.
+           <img> data: svg  an svg data-URI image, a capture target too.
 
          All four grounds are the slide's own, so the artifact stays a one-colour
          assertion while exercising four separate collection reads. */

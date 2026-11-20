@@ -2,7 +2,7 @@
  * A busy worker's 429 on the PPTX export: useDeckExport -> api.exportPptxHuashu -> POST
  * /api/export/pptx/editable/huashu/from-html.
  *
- * Contract (task-13a-findings-r4.md, ruling R13a-3): when the worker has no room for another export,
+ * Contract: when the worker has no room for another export,
  * both Chrome export routes answer 429 with `Retry-After: 60` and
  * `{"detail": "Exports are busy right now. Please try again in a minute."}`. The hook shows that
  * detail to the user as it is (an alert) and does NOT fall back to the records pipeline: that fallback

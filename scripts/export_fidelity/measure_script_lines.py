@@ -174,8 +174,8 @@ MID_LINE_2 = f"{FIRST} revenue grew<br>{SECOND} margin<sup>1</sup> held"
 SMALL_SECOND = '<small id="second">Gamma'
 REVENUE = '<span id="first">Revenue</span>'
 REVENUE_UP = f"{REVENUE} grew 12%<sup>1</sup>"
-# Each probe slide, by name. The first nine are the task-11 round-3 re-review's
-# PowerPoint cases (findings r4, Important 2), the next three ruling R11g's.
+# Each probe slide, by name. The first nine are the PowerPoint cases of
+# CALIBRATION.md A5, the next three the Google Slides cases of A4.
 SLIDES: dict[str, ProbeSlide] = {
     "sup-mid-20": _one_line(20, f"{REVENUE}<sup>1</sup> grew", "Revenue", SUP),
     "sup-end-20": _one_line(20, REVENUE_UP, "Revenue", SUP),
@@ -225,7 +225,7 @@ SLIDES: dict[str, ProbeSlide] = {
     # A line-ending superscript in a right-aligned and a centred line.
     "sup-end-right": _one_line(20, REVENUE_UP, "Revenue", SUP, ALIGNED + " text-align:right;"),
     "sup-end-center": _one_line(20, REVENUE_UP, "Revenue", SUP, ALIGNED + " text-align:center;"),
-    # A later paragraph's first line holding a superscript (ruling R11j).
+    # A later paragraph's first line holding a superscript (CALIBRATION.md A4, space before).
     "1.45-24px-run-and-sup-on-line-2": _two_lines(
         "1.45", f"{FIRST} revenue grew<br>{SECOND_24} margin<sup>1</sup> held", 24
     ),
@@ -237,7 +237,7 @@ SLIDES: dict[str, ProbeSlide] = {
         (("Alpha", "#first", 24), ("Gamma", "#second", 20)),
         SUP,
     ),
-    # Same-size relative nudges (ruling R11h): one word among plain ones, a
+    # Same-size relative nudges (CALIBRATION.md A5, Nudges): one word among plain ones, a
     # whole line moved up, and one moved down.
     "nudge-one-word": _one_line(
         20, f'{REVENUE} <span style="position:relative; top:-3px">&#9650;</span> 12% up',
@@ -251,7 +251,7 @@ SLIDES: dict[str, ProbeSlide] = {
         20, f'<span style="position:relative; top:4px">{REVENUE} grew 12%</span>', "Revenue", None
     ),
     # The same nudges in a line cut by its ellipsis, and in a box of three lines
-    # (ruling R11k): one line moved, or every line in one moved span.
+    # (settled or moved per box): one line moved, or every line in one moved span.
     "nudge-ellipsis-down": _one_line(
         20, f'<span style="{DOWN}">{REVENUE} grew strongly this year</span>', "Revenue", None,
         ELLIPSIS_BOX,

@@ -97,7 +97,7 @@ INK_THRESHOLD = 0.5
 MIN_BAND_PX = 2.0
 # The cell's outer edge is left out of its window: a neighbour's antialiasing may touch it.
 WINDOW_INSET_PX = 2.0
-# Acceptance at 1280 px width (the brief).
+# Acceptance at 1280 px width.
 MAX_INK_TOP_ERROR_PX = 2.0
 MAX_PITCH_ERROR_PX = 1.0
 # An outline is a perimeter darker than both the fill and the ground by this much (0..255).
@@ -940,7 +940,7 @@ def spacing_table(renderer: str, rows: list[dict], constants: tuple[float, ...])
 
 
 def _is_brief_probe(row: dict) -> bool:
-    """The brief's probe set: DM Sans and DM Mono (Arial and Georgia are extra)."""
+    """The acceptance probe set: DM Sans and DM Mono (Arial and Georgia are extra)."""
     return row["label"].startswith("DM ")
 
 

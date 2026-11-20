@@ -2,7 +2,7 @@
  * A busy worker's 429 on the Google Slides export: AppLayout's handleExportGoogleSlides ->
  * api.exportToGoogleSlides -> POST /api/export/google-slides/from-huashu.
  *
- * Contract (task-13a-findings-r4.md, ruling R13a-3): when the worker has no room for another export,
+ * Contract: when the worker has no room for another export,
  * both Chrome export routes answer 429 with `Retry-After: 60` and
  * `{"detail": "Exports are busy right now. Please try again in a minute."}`. AppLayout shows that
  * detail as it is, in an error toast, and the export does NOT fall back to the records pipeline: the

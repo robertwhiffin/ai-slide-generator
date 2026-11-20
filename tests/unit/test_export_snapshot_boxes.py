@@ -16,10 +16,10 @@ native shape:
 * shapes follow CSS painting order (z-index, negative z-index, atomic flex
   items, atomic floats), not DOM order;
 * entrance animations are finished before the snapshot, so a fade-in exports
-  its settled, opaque state (Review Focus 2);
-* the page is read as the browser laid it out: none of the legacy
-  preprocess's DOM-mutating passes runs before the snapshot, so a monospace
-  code panel keeps each line's own box (PLAN-CORRECTIONS C1).
+  its settled, opaque state;
+* the page is read as the browser laid it out: nothing that moves layout
+  runs before the snapshot, so a monospace code panel keeps each line's own
+  box.
 
 Every assertion reads the emitted slide XML (``slide_shapes``) and, where the
 geometry matters, compares it with the browser's own layout of the very same
@@ -265,7 +265,7 @@ class TestSnapshotBoxes:
     def test_entrance_animations_export_their_settled_state(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Review Focus 2: a deck that fades content in exports it opaque.
+        """A deck that fades content in exports it opaque.
 
         * ``#fade`` is the plain case, a 1 s fade-in from opacity 0 to 1;
         * ``#late-fade`` is a staggered entrance: the same 1 s fade, delayed past
@@ -301,7 +301,7 @@ class TestSnapshotBoxes:
             )
 
     def test_code_panel_lines_keep_their_own_boxes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """PLAN-CORRECTIONS C1: no layout-mutating preprocess pass runs before the snapshot.
+        """No pass that moves layout runs before the snapshot.
 
         A monospace panel holding one ``<div>`` per code line is exactly what the
         retired converter's preprocess collapsed into a single ``<p>``, taking
@@ -388,10 +388,10 @@ class TestSnapshotPaintOrder:
         The block siblings below are the contrast that makes this observable:
         blocks paint every background first and their inline content after, so
         block B's background comes before block A's inline content. DOM order
-        (today's engine) happens to satisfy the flex half and fails the block half.
+        happens to satisfy the flex half and fails the block half.
 
         The inline content is an ``inline-block`` chip, which paints in the same
-        inline layer as a block's text. Text items arrive in Task 2.
+        inline layer as a block's text.
         """
         chip = "display: inline-block; width: 80px; height: 24px;"
         body = (

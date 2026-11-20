@@ -3,7 +3,7 @@
 A list item's marker ("1.", "4." in a reversed list, "•", "◦", an image) is
 no DOM text, so no Range can measure it, and the engine never counts it by
 hand. It reads each ``::marker`` read-only through the DevTools protocol, as
-it reads ``::before`` and ``::after`` (ruling R9): the protocol lists the
+it reads ``::before`` and ``::after``: the protocol lists the
 marker among the item's pseudo-elements (``pseudoType`` "marker"), its box is
 ``DOM.getBoxModel``'s, and its text is the layout text Chrome rendered for it,
 the list's own ``start``, ``reversed`` and ``value`` numbering included. An
@@ -13,24 +13,23 @@ item whose ``list-style-type`` is ``none``, or whose ``::marker`` has
 How a marker is drawn:
 
 * outside its item (the default), a marker is one single-line text item of
-  its own, in the marker's own computed style (R9a), at the item's place in
+  its own, in the marker's own computed style, at the item's place in
   paint order and before the item's text. Its text is Chrome's marker text with
   its trailing white space trimmed. Left to right it is right-aligned, its
   right edge where the marker's glyphs end (its box's edge less the trailing
   space the box holds, which for a disc, circle or square is none) and its
-  width slack (6% + 4 px) grown to the left; right to left it is the mirror
-  (R9e′);
+  width slack (6% + 4 px) grown to the left; right to left it is the mirror;
 * ``list-style-position: inside`` puts the marker on the item's first line.
   Where the item's text runs straight on from it ("1. " and then the text),
   it is a token of that line: the item's first paragraph starts with it, and
   no item of its own holds it. Where a gap follows it (an inside disc's 20 px
   margin) the line is cut there: the marker is an item of its own and the
-  text keeps its browser x (R9g);
+  text keeps its browser x;
 * an image marker (``list-style-image``) is a picture of its own pixels at its
-  box (R9d), and only one: where its item is a picture of its own box that
+  box, and only one: where its item is a picture of its own box that
   already holds the marker, that picture is the marker's;
 * no paragraph anywhere is a native PowerPoint bullet (``a:buChar``,
-  ``a:buAutoNum``, ``a:buBlip``): markers are only ever items or tokens (R9f).
+  ``a:buAutoNum``, ``a:buBlip``): markers are only ever items or tokens.
 
 A marker outside its item paints outside the item's box, so its colour is
 composited over what the item sits on, never over the item's own background.
@@ -99,7 +98,7 @@ from tests.unit.test_export_svg_raster import structural_manifest
 # Spec §3 Text, Wrapping: every text box gets 6 % plus 4 px of width slack.
 SLACK_FRACTION = 0.06
 SLACK_PX = 4.0
-# The brief's tolerance: a marker's emitted edge is within 3 px of where the
+# The marker tolerance: a marker's emitted edge is within 3 px of where the
 # browser's glyphs end. An emitted edge is the text's advance; the browser's
 # glyphs end a side bearing inside it (measured: 0.7 px for DM Sans's period,
 # 1.8 px for Arial's at 24 px, 1.7 px for the arrow's fallback face).
@@ -111,7 +110,7 @@ PT_PER_PX = 0.75
 # A marker outside its item sits in the list's start padding (40 px by
 # default): a text item there, beside an item that has no marker, is one.
 MARKER_BAND_PX = 40.0
-# R9g: an inside marker joins its line only when the text starts within 1 px
+# An inside marker joins its line only when the text starts within 1 px
 # of where the marker ends; cut from it, the text keeps its browser x within 1 px.
 INSIDE_JOIN_PX = 1.0
 INSIDE_TEXT_TOLERANCE_PX = 1.0
@@ -268,8 +267,8 @@ KINDS_BODY = (
     )
     + "</div>"
 )
-# The lists whose markers' own style differs from their items' (R9a): the
-# ruling's rule verbatim, and a marker in another family, size and style.
+# The lists whose markers' own style differs from their items': a coloured bold
+# marker, and a marker in another family, size and style.
 STYLED_LISTS = ("lm-styled", "lm-restyled")
 STYLED_MARKER = {"color": "rgb(255, 54, 33)", "fontWeight": "700"}
 RESTYLED_MARKER = {"fontFamily": '"DM Mono", monospace', "fontSize": "28px", "fontStyle": "italic"}
@@ -564,7 +563,7 @@ def _items_on(shapes: list[Shape], marker: dict) -> list[int]:
 
 
 def _assert_outside_marker(shapes: list[Shape], marker: dict, what: str) -> int:
-    """A marker outside its item is one single-line text item at its glyphs (R9e′).
+    """A marker outside its item is one single-line text item at its glyphs.
 
     It reads the browser's marker text with the trailing white space trimmed.
     Left to right it is right-aligned, its right edge within 3 px of where the
@@ -981,7 +980,7 @@ class TestUnorderedListMarkers:
             _assert_outside_marker(shapes, marker, f"the {label!r} item's disc")
 
     def test_a_nested_list_is_marked_with_circles(self, kinds: Exported) -> None:
-        """A ``<ul>`` inside an item gets Chrome's second-level marker, "◦" (R9c).
+        """A ``<ul>`` inside an item gets Chrome's second-level marker, "◦".
 
         The outer items read "•" and the nested ones "◦", each at its own
         browser marker, every one an outside marker at its glyphs.
@@ -993,7 +992,7 @@ class TestUnorderedListMarkers:
     def test_custom_marker_content_is_exported_as_the_browser_renders_it(
         self, kinds: Exported
     ) -> None:
-        """``li::marker { content: "→ " }`` exports "→" (R9b).
+        """``li::marker { content: "→ " }`` exports "→".
 
         The text is the browser's rendering of the marker's ``content``, never
         computed by the export: each item's marker reads "→", an outside marker
@@ -1016,10 +1015,10 @@ class TestMarkerStyle:
     def test_a_marker_is_written_in_its_own_computed_style(
         self, kinds: Exported, list_id: str
     ) -> None:
-        """The marker item is in the ``::marker``'s computed style, never its item's (R9a).
+        """The marker item is in the ``::marker``'s computed style, never its item's.
 
-        ``#lm-styled li::marker { color:#FF3621; font-weight:700 }`` is the
-        ruling's rule: its markers are FF3621 and bold. ``#lm-restyled``'s
+        ``#lm-styled li::marker { color:#FF3621; font-weight:700 }``: its markers
+        are FF3621 and bold. ``#lm-restyled``'s
         markers are DM Mono, 28 px (21 pt) and italic. Each marker run carries
         the marker's colour, weight, style, size and family, and each item's
         text keeps its own (the deck's ink, DM Sans, 15 pt, upright, regular).
@@ -1151,7 +1150,7 @@ class TestOutsideMarkerBackdrop:
 @requires_huashu_sidecar
 class TestInsideMarkers:
     def test_an_inside_marker_opens_its_items_first_line(self, kinds: Exported) -> None:
-        """An inside marker the text runs on from is a token of its item's first line (R9g).
+        """An inside marker the text runs on from is a token of its item's first line.
 
         ``list-style-position: inside`` lays the marker out on the item's first
         line, its "1. " running straight into the text (it starts where the
@@ -1223,7 +1222,7 @@ class TestInsideMarkers:
         assert not wrong, "\n".join([*wrong, _describe(shapes)])
 
     def test_an_inside_marker_a_gap_follows_is_cut_from_its_line(self, kinds: Exported) -> None:
-        """An inside disc, which a margin parts from its text, is an item of its own (R9g).
+        """An inside disc, which a margin parts from its text, is an item of its own.
 
         Chrome lays an inside disc out as a 9 px shape and leaves a 20 px
         margin before the item's text, so the text does not run on from the
@@ -1289,7 +1288,7 @@ class TestRightToLeftMarkers:
     def test_a_right_to_left_marker_is_the_mirror_at_its_glyphs_left_edge(
         self, kinds: Exported
     ) -> None:
-        """``<ol dir="rtl">``: the marker is right of its item, left-aligned at its glyphs (R9e′).
+        """``<ol dir="rtl">``: the marker is right of its item, left-aligned at its glyphs.
 
         Chrome puts the trailing space of "1. " on the marker's left, next to
         the item's text. The marker item reads "1.", is left-aligned with its
@@ -1312,7 +1311,7 @@ class TestRightToLeftMarkers:
 @requires_huashu_sidecar
 class TestImageMarkers:
     def test_an_image_marker_is_a_picture_of_its_own_pixels(self, image_markers: Exported) -> None:
-        """``list-style-image: url(data:image/png…)``: each marker a picture at its box (R9d).
+        """``list-style-image: url(data:image/png…)``: each marker a picture at its box.
 
         An image marker has a box and no text. Each is one picture at its
         marker's browser box within 0.5 px, holding the marker's pixels (at
@@ -1405,7 +1404,7 @@ class TestNoMarker:
         The browser generates no marker for its items. Each item's text is one
         text item reading the item alone, nothing is drawn where a marker would
         be, no text item reads as a marker, and no paragraph is a native bullet.
-        Passes before Task 9 too: a guard that the new markers honour
+        A guard that holds whether or not markers are drawn: the markers honour
         ``list-style: none``.
         """
         for item in UNMARKED_ITEMS:
@@ -1431,8 +1430,8 @@ class TestNoMarker:
         """``li::marker { content: none }``: the browser draws no marker, and nor does the export.
 
         The item's text is one text item reading the item alone, and nothing
-        is drawn in the list's start padding beside it. Passes before Task 9
-        too: a guard.
+        is drawn in the list's start padding beside it. A guard that holds
+        whether or not markers are drawn.
         """
         shapes = kinds.shapes
         (label,) = KINDS["lm-silent"].labels
@@ -1446,7 +1445,7 @@ class TestNoMarker:
         ``.dk-list`` is ``list-style: none``, so the browser generates no
         marker: nothing is drawn beside any item where a marker would be, no
         text item reads as a marker, and no paragraph is a native bullet.
-        Passes before Task 9 too: a regression guard on Task 8's bullets.
+        A guard on the slide's pseudo-element bullets, which no marker doubles.
         """
         shapes = fixture_09.shapes
         for number, item in enumerate(fixture_09.geometry["items"], start=1):
@@ -1474,13 +1473,13 @@ class TestNoNativeBullets:
     def test_markers_are_items_or_tokens_never_native_bullets(
         self, slide: str, request: pytest.FixtureRequest
     ) -> None:
-        """No paragraph carries ``a:buChar``, ``a:buAutoNum`` or ``a:buBlip`` (R9f).
+        """No paragraph carries ``a:buChar``, ``a:buAutoNum`` or ``a:buBlip``.
 
         Each text marker the browser renders is on the slide as text on its
         marker (an item of its own, or its item's first-line token), so a deck
         whose markers are native bullets, or are missing, fails. Slides 16 and
         09 and the image slide have no text marker: for them this is a guard
-        that passes before Task 9 too.
+        that holds whether or not markers are drawn.
         """
         exported: Exported = request.getfixturevalue(slide)
         bullets = _native_bullets(exported.pptx)

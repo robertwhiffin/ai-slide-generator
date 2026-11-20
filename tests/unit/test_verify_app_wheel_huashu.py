@@ -87,7 +87,13 @@ def test_the_graph_reaches_the_files_the_page_and_node_sides_compose() -> None:
         "model_check.cjs",
         "text_check.cjs",
         "snapshot_table.mjs",
+        "snapshot_borders.mjs",
+        "snapshot_text_ellipsis.mjs",
+        "snapshot_text_markers.mjs",
+        "snapshot_text_metrics.mjs",
+        "snapshot_text_turned.mjs",
         "emit_table.cjs",
+        "units.cjs",
         "capture.cjs",
     ):
         assert name in loaded, name

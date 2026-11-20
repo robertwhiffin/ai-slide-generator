@@ -13,12 +13,12 @@
 //   4. pseudo-elements   pseudo.mjs: every ::before, ::after and list item
 //                        ::marker, read from Node through the DevTools
 //                        protocol, read-only; nothing is inserted into the
-//                        page for them (ruling R8);
+//                        page for them;
 //   5. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate of what
 //                        step 4 read, which returns the slide model (snapshot.mjs),
 //                        checked in Node before any use (model_check.cjs): the
 //                        slide's realm built it, so what slide script made of it
-//                        is dropped and counted (ruling R12d);
+//                        is dropped and counted;
 //   6. capture           capture.cjs: an element-isolated 2x screenshot of each
 //                        capture target the model names, from the same page;
 //   7. reference         the page's rendered text, read once every capture is
@@ -48,10 +48,7 @@ const { emitSlide, pictureData } = require('./emit_model.cjs');
 const { logJson, oneLine } = require('./log_line.cjs');
 const { checkModel, dropLine } = require('./model_check.cjs');
 const { textLossLine } = require('./text_check.cjs');
-
-const PT_PER_PX = 0.75;
-const PX_PER_IN = 96;
-const EMU_PER_IN = 914400;
+const { EMU_PER_IN, PT_PER_PX, PX_PER_IN } = require('./units.cjs');
 
 // The slide's own size in CSS px. Device scale 2 changes no layout; it makes
 // every screenshot of the page (captures) twice the box.

@@ -4,11 +4,10 @@ The snapshot engine groups the rendered text into text blocks and emits each
 block as one text box (spec §3 Text):
 
 * every flex or grid item is its own block, so a footer's brand line and page
-  number, or an agenda row's number and title, never merge into one paragraph
-  (RC2);
+  number, or an agenda row's number and title, never merge into one paragraph;
 * bare text after a block child, or beside an icon, is its own anonymous block
   and is never dropped (upstream issue #56);
-* text inside an ``<svg>`` is part of the drawing, never slide text (RC3);
+* text inside an ``<svg>`` is part of the drawing, never slide text;
 * the line breaks are the browser's: a title that wraps on screen is one
   paragraph whose second line starts with a soft break (a paragraph of its
   own where the browser grew it, written for PowerPoint), and a one-line label
@@ -24,7 +23,7 @@ Every assertion reads the emitted slide XML (``slide_shapes``). Where the
 geometry or the line breaks matter, it is held against the browser's own
 layout of the very same document (``browser_rect``, ``browser_line_boxes``,
 ``browser_lines``). Corpus slides are loaded from ``tests/fixtures/export_fidelity``
-by prefix (PLAN-CORRECTIONS C4): 02 is the agenda grid, 03 the footer and the
+by prefix (``corpus_document``): 02 is the agenda grid, 03 the footer and the
 SVG chart, 17 the bare-text and icon cases.
 
 Gating matches the sibling export suites: needs node, the extracted sidecar
@@ -69,7 +68,7 @@ SLACK_PX = 4.0
 # EMU rounding moves an emitted edge by at most 1/19050 px; a lower bound on an
 # emitted width needs only this much give.
 EMU_ROUNDING_PX = 0.01
-# Tolerances from the plan's Task 2 Step 1.
+# Tolerances of the text placement.
 TEXT_LEFT_TOLERANCE_PX = 0.5
 ALIGNED_EDGE_TOLERANCE_PX = 1.0
 FOOTER_EDGE_TOLERANCE_PX = 2.0
@@ -106,8 +105,8 @@ BARE_TEXT_START = "Then bare text that follows"
 # Fixture 03's chart: the legend and source line are HTML text; the bar values,
 # axis years and margin labels are SVG <text>. The SVG labels listed here are
 # the ones no HTML text on the slide contains, even as a substring (the
-# visually-hidden data table repeats FY20, 905, FY24 and 1,240, and its
-# visibility belongs to Task 6). Leaked SVG labels glue together with no white
+# visually-hidden data table repeats FY20, 905, FY24 and 1,240; its
+# visibility is test_export_snapshot_visibility.py's). Leaked SVG labels glue together with no white
 # space between them ("905FY20968FY21"), so a leak is found by containment.
 CHART_SVG = "svg.chart-svg"
 CHART_HTML_TEXT = (
@@ -275,7 +274,7 @@ class TestSnapshotTextBlocks:
     def test_footer_brand_and_page_number_are_separate_boxes_clear_of_the_logo(
         self, corpus_pptx: bytes
     ) -> None:
-        """RC2, fixture 03's footer: each flex item is its own text block.
+        """Fixture 03's footer: each flex item is its own text block.
 
         * No text box holds both the brand line and the page number (real decks
           showed "review12 / 15").
@@ -286,10 +285,9 @@ class TestSnapshotTextBlocks:
           grows rightward: its right edge is the footer's right content edge plus
           its slack, within 2 px.
 
-        The plan also lists the logo itself as a picture item. Its source is an
-        SVG ``data:`` URI, which is only embeddable once captures exist (Task 7),
-        so the non-overlap check uses the logo's browser rect, which is where that
-        picture will sit.
+        The logo itself is a picture item, a capture of its SVG ``data:`` URI;
+        the non-overlap check uses the logo's browser rect, which is where that
+        picture sits.
         """
         document = corpus_document("03")
         shapes = _corpus_shapes(corpus_pptx, "03")
@@ -326,7 +324,7 @@ class TestSnapshotTextBlocks:
         )
 
     def test_agenda_number_and_title_are_separate_boxes(self, corpus_pptx: bytes) -> None:
-        """RC2, fixture 02's agenda grid: each grid item is its own text block.
+        """Fixture 02's agenda grid: each grid item is its own text block.
 
         In every row the number ("01") and the title ("Financial position") are
         separate text boxes, the number's box ends left of where the title's
@@ -399,7 +397,7 @@ class TestSnapshotTextBlocks:
             )
 
     def test_svg_chart_text_is_never_slide_text(self, corpus_pptx: bytes) -> None:
-        """RC3, fixture 03: the walk never descends into an ``<svg>`` for text.
+        """Fixture 03: the walk never descends into an ``<svg>`` for text.
 
         The chart's HTML legend and source line are text boxes. None of the SVG's
         own ``<text>`` labels (bar values, axis years, margin labels) appears in
@@ -446,8 +444,8 @@ class TestSnapshotTextLines:
         own, sets it lower than the line height puts it. There, written for
         PowerPoint, the second line opens a paragraph of its own with that
         growth as space before, at the title's 90% spacing, and the marker that
-        ends it is followed by a zero-width word joiner (task-11 findings r4,
-        Important 2), which the lines are read without.
+        ends it is followed by a zero-width word joiner (CALIBRATION.md A5),
+        which the lines are read without.
 
         Two layouts here defeat a line clustering that is not by vertical overlap:
 
@@ -509,7 +507,8 @@ class TestSnapshotTextLines:
         ``sz="975"`` (13 x 0.75 pt), and none is at the default. The run starts
         its line: after a soft break, or, where the block's leading is looser
         than the renderers' single spacing and every line is a paragraph of its
-        own (Task 4, ruling R2), as the first run of a paragraph after the first.
+        own (CALIBRATION.md, spacing encoding), as the first run of a paragraph
+        after the first.
         """
         body = (
             '<div class="slide">'
@@ -645,7 +644,7 @@ class TestSnapshotTextLines:
     def test_source_white_space_collapses_like_the_browser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """RC3's raw white space: ``white-space: normal`` content with source newlines,
+        """Raw white space: ``white-space: normal`` content with source newlines,
         indentation and runs of spaces.
 
         The box reads exactly the browser's collapsed line, and no run carries a
@@ -715,8 +714,8 @@ class TestSnapshotTextPaintOrder:
         """Flex items paint atomically: card A's text box follows card A's background and
         precedes card B's background.
 
-        This is the text variant of the Task 1 chip test. The block siblings below
-        are the contrast that makes "atomic" observable. Blocks paint every
+        This is the text variant of test_export_snapshot_boxes.py's chip test.
+        The block siblings below are the contrast that makes "atomic" observable. Blocks paint every
         background first and their text after, so block B's background comes
         before block A's text. A text box ordered by DOM position satisfies the
         flex half and fails the block half.

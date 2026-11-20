@@ -1,4 +1,4 @@
-"""Snapshot engine: element-isolated 2x captures (Task 7).
+"""Snapshot engine: element-isolated 2x captures.
 
 What cannot be drawn natively becomes a picture, captured from the original,
 untouched page (spec §4). An isolation stylesheet hides every element but the
@@ -9,21 +9,20 @@ variables, webfonts, filters, clipping, opacity) and nothing that merely
 overlaps it. The targets are:
 
 * inline ``<svg>`` (charts, icons, legend markers) and ``<canvas>``, captured
-  with their subtree (RC4: a standalone SVG serialization loses class and
-  variable styles; a script-drawn canvas was missing);
+  with their subtree (a standalone SVG serialization would lose class and
+  variable styles, and a script-drawn canvas its drawing);
 * an ``<img>`` whose source is not a raster ``data:`` image (an SVG logo), or
   that has a ``filter``, a border radius, a ``box-shadow``, ``object-fit``
   cropping or a partial clip. A shadowed image is captured with its rect
   inflated, so the outline is in the picture. A plain raster ``data:`` image is
   embedded as it is;
 * box-only targets, whose own box paints what a shape cannot: a gradient or
-  ``url()`` background (progress fills, Harvey balls: RC8), or ``filter``,
+  ``url()`` background (progress fills, Harvey balls), or ``filter``,
   ``backdrop-filter``, ``mix-blend-mode``, ``clip-path`` or ``mask`` on a
   painted box. Only the box is captured, its text made transparent, so the
   text and the children stay native and editable. An outer shadow inflates the
   rect by ``max(|offset|) + blur + spread``. ``background-clip: text`` is not a
-  box capture (Task 7 addendum C7.2): Task 3 exports gradient text as a solid
-  colour run.
+  box capture: gradient text exports as a solid colour run.
 
 A picture holds all its target paints: an outer shadow grows its rect, and so
 does a ``filter`` blur or drop shadow (2σ past the edge, the reach a shadow's
@@ -33,21 +32,21 @@ colour although its text goes transparent, and an SVG part the slide hides
 stays hidden although the isolation shows the target's whole subtree.
 
 A target that an ``overflow`` ancestor cuts is captured cut, and its picture's
-rect is the target rect intersected with the clip (C7.3). Captured pixels
+rect is the target rect intersected with the clip. Captured pixels
 already carry the target's cumulative opacity, so the picture is shown at the
 browser's opacity, not that opacity twice. Repeated exports of one rendered
-page are byte-identical (C7.4): the determinism test exports it five times,
+page are byte-identical: the determinism test exports it five times,
 three renders each, and pins the corpus deck's fonts, because Google Fonts now
 and then serves another DM Sans file and so another page. A 20-slide chart
-deck exports inside the sidecar's budget (Review Focus 1).
+deck exports well inside the sidecar's 180 s timeout.
 
-Isolation must hold against the deck's own CSS (Review Focus 5): a deck rule
+Isolation must hold against the deck's own CSS: a deck rule
 ``.x { visibility: visible !important }`` loses to the isolation stylesheet's
-id-specificity boost. The brief's literal rule, ``.dk-legend { visibility:
+id-specificity boost. The plain rule ``.dk-legend { visibility:
 visible !important }``, cannot show a leak in fixture 03: the legend lies
 below the chart's rect, and the isolation rule's ``*`` matches the legend's
 spans directly, so they stay hidden whatever ``.dk-legend`` says. Measured
-with the brief's ``isolationCss``: zero leaked pixels even without the boost.
+with an isolation stylesheet that has no boost: zero leaked pixels.
 So the hostile rule here is ``.dk-legend, .dk-legend * { visibility: visible
 !important }`` on a legend moved over the chart; with the boost dropped it
 leaks the legend into the chart picture, and with the boost it does not. A
@@ -74,7 +73,7 @@ browser's own geometry of the very same document (``browser_rect``,
 picture's PNG through the picture's emitted rect and the PNG's size. Expected
 colours are the fixture CSS's (``tests/fixtures/export_fidelity/deck.css``),
 each guarded against drift. Corpus slides are loaded by prefix
-(PLAN-CORRECTIONS C4).
+(``corpus_document``).
 
 Gating matches the sibling export suites: needs node, the extracted sidecar
 ``node_modules`` and a local Chrome/Chromium (skipped otherwise).
@@ -124,13 +123,13 @@ from tests.unit.test_export_collection_iteration_hostile_realm import (
 )
 from tests.unit.test_export_svg_raster import structural_manifest
 
-# Task 1's box tolerance: an emitted rect matches the browser's within 0.5 px.
+# The box tolerance: an emitted rect matches the browser's within 0.5 px.
 RECT_TOLERANCE_PX = 0.5
 # Captures are taken at device scale 2: a picture's PNG is twice its box, give
 # or take the one device pixel a fractional rect rounds to.
 CAPTURE_SCALE = 2
 PNG_SIZE_TOLERANCE_PX = 1
-# The brief's colour tolerance, per channel.
+# The colour tolerance, per channel.
 COLOUR_TOLERANCE = 6
 # A pixel counts as opaque at this alpha or above, and as transparent at or below.
 OPAQUE_ALPHA = 250
@@ -139,8 +138,8 @@ TRANSPARENT_ALPHA = 10
 ALPHA_TOLERANCE = 0.04
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
-# Review Focus 1: a 20-slide chart deck must stay well inside the sidecar's
-# 180 s timeout (SIDECAR_TIMEOUT_SECONDS); the plan's budget on the dev Mac.
+# A 20-slide chart deck must stay well inside the sidecar's 180 s timeout
+# (SIDECAR_TIMEOUT_SECONDS): this is the budget on the dev Mac.
 TIMING_SLIDE_COUNT = 20
 TIMING_BUDGET_SECONDS = 120.0
 
@@ -184,7 +183,7 @@ FOOTER_LOGO = ".dk-footer img"
 BRAND_TEXT = "Meridian Components"
 # Between the line series and its closing chord: where SVG's default black
 # fill would paint an open polyline whose class style ("fill: none") was lost
-# (RC4 "filled black polylines"). A segment is sampled only where the chord
+# ("filled black polylines"). A segment is sampled only where the chord
 # lies this far from it, so the 2.5 px stroke leaves clear room.
 CHORD_GAP_MIN_PX = 6.0
 
@@ -192,7 +191,7 @@ CHORD_GAP_MIN_PX = 6.0
 LEAK = "00FF00"
 LEGEND_OVER_CHART_PX = 120
 HOSTILE_RULES = {
-    # The brief's rule on the legend, extended to its descendants (where its
+    # A visibility rule on the legend, extended to its descendants (where its
     # text is) and with the legend moved over the chart (where a leak lands).
     "legend-forced-visible": (
         f".dk-legend {{ position: relative; top: -{LEGEND_OVER_CHART_PX}px; }}\n"
@@ -383,12 +382,12 @@ HIDPI_BLUE_AT = 0.875
 CHARTJS_CANVAS = "canvas#segChart"
 CHARTJS_MIN_SHARE = {"industrial": 0.10, "automotive": 0.05}
 
-# C7.4 compares repeated exports of one rendered page, so it pins the corpus
-# deck's fonts (export_snapshot_support.pinned_font_css): Google Fonts now and
-# then names another DM Sans file for the deck's @import.
+# The determinism test compares repeated exports of one rendered page, so it
+# pins the corpus deck's fonts (export_snapshot_support.pinned_font_css): Google
+# Fonts now and then names another DM Sans file for the deck's @import.
 
 
-# C7.4: the determinism test makes DETERMINISM_EXPORTS exports, each of the
+# The determinism test makes DETERMINISM_EXPORTS exports, each of the
 # slide DETERMINISM_SLIDES times (every slide renders in its own browser). A
 # GPU rasterization draws one chart in about three a little differently, so
 # one comparison of two single-slide exports misses it in most runs, and 5 of
@@ -558,7 +557,7 @@ def _box_probe_body() -> str:
         # A plain fill: a native shape, never a picture.
         '<div id="probe-plain" style="position: absolute; left: 800px; top: 230px; '
         f'width: 160px; height: 90px; background: #{PLAIN_FILL};"></div>',
-        # Gradient text (C7.2): a solid colour run, never a box capture; on an
+        # Gradient text: a solid colour run, never a box capture; on an
         # inline span (fixture 13's form) and on a whole block.
         '<p style="position: absolute; left: 80px; top: 350px; margin: 0; font-size: 32px; '
         'font-weight: 700;">'
@@ -940,7 +939,7 @@ def _line_points(chart: dict, line: dict) -> list[tuple[float, float]]:
 
 
 # ---------------------------------------------------------------------------
-# The SVG chart (RC4, fixture 03) and its legend marker and footer logo (C7.1)
+# The SVG chart (fixture 03) and its legend marker and footer logo
 # ---------------------------------------------------------------------------
 
 
@@ -1056,7 +1055,7 @@ class TestSnapshotChartCapture:
     def test_legend_marker_is_a_picture_of_its_line(
         self, corpus_export: Callable[[str], bytes], chart_geometry: dict
     ) -> None:
-        """C7.1: the third legend entry's inline ``<svg>`` marker is a picture.
+        """The third legend entry's inline ``<svg>`` marker is a picture.
 
         At its browser rect within 0.5 px, and showing its class-styled line
         (``.chart-svg .line``: ``var(--ink)``) at its centre.
@@ -1074,7 +1073,7 @@ class TestSnapshotChartCapture:
     def test_footer_logo_is_a_picture_beside_the_brand_text(
         self, corpus_export: Callable[[str], bytes], chart_geometry: dict
     ) -> None:
-        """C7.1: the footer logo (an SVG ``data:`` ``<img>``) is a picture at its browser rect.
+        """The footer logo (an SVG ``data:`` ``<img>``) is a picture at its browser rect.
 
         Within 0.5 px, its PNG 2x the box and holding the logo's own colours
         (its ``FF3621`` mark and ``1B3139`` wordmark), and the brand text box
@@ -1098,7 +1097,7 @@ class TestSnapshotChartCapture:
 
 
 # ---------------------------------------------------------------------------
-# Isolation (Review Focus 5)
+# Isolation
 # ---------------------------------------------------------------------------
 
 
@@ -1116,7 +1115,7 @@ class TestSnapshotCaptureIsolation:
 
         * ``legend-forced-visible``: ``.dk-legend, .dk-legend * { visibility:
           visible !important }`` with the legend moved 120 px up, over the
-          chart (the brief's ``.dk-legend`` rule alone leaks nothing even
+          chart (the plain ``.dk-legend`` rule alone leaks nothing even
           without the boost: see the module docstring);
         * ``ground-forced``: ``html > body { background: … !important }``;
         * ``pseudo-forced-visible``: a ``body .slide .dk-legend::after`` box fixed
@@ -1346,7 +1345,7 @@ class TestSnapshotCaptureIsolation:
 
 
 # ---------------------------------------------------------------------------
-# Harvey balls (RC8, fixture 04)
+# Harvey balls (fixture 04)
 # ---------------------------------------------------------------------------
 
 
@@ -1417,7 +1416,7 @@ class TestSnapshotHarveyBalls:
 
 
 # ---------------------------------------------------------------------------
-# Progress fills and icons (RC8, C7.1, fixture 12)
+# Progress fills and icons (fixture 12)
 # ---------------------------------------------------------------------------
 
 
@@ -1486,7 +1485,7 @@ class TestSnapshotProgressAndIcons:
     def test_inline_icons_are_pictures_left_of_their_labels(
         self, corpus_export: Callable[[str], bytes], progress_geometry: dict
     ) -> None:
-        """C7.1: each inline icon is a picture at its rect, left of its label's text item.
+        """Each inline icon is a picture at its rect, left of its label's text item.
 
         The icons stroke in ``currentColor``, set to ``var(--accent)`` on the
         ``<svg>`` itself, so each picture holds ``FF5F46`` strokes and no
@@ -1509,7 +1508,7 @@ class TestSnapshotProgressAndIcons:
 
 
 # ---------------------------------------------------------------------------
-# Gradient text (C7.2), the filtered logo, and the canvas and hidden graphic
+# Gradient text, the filtered logo, and the canvas and hidden graphic
 # ---------------------------------------------------------------------------
 
 
@@ -1519,7 +1518,7 @@ class TestSnapshotCorpusPictures:
     def test_gradient_text_is_not_a_box_capture(
         self, corpus_export: Callable[[str], bytes]
     ) -> None:
-        """C7.2: fixture 13's ``.dk-gradtext`` (``background-clip: text``) makes no picture.
+        """Fixture 13's ``.dk-gradtext`` (``background-clip: text``) makes no picture.
 
         Captures run on the slide (its footer logo is a picture), yet no
         picture meets any fragment of the gradient text: a box capture would
@@ -1708,7 +1707,7 @@ class TestSnapshotCorpusPictures:
 
 
 # ---------------------------------------------------------------------------
-# A target its overflow ancestor cuts (C7.3)
+# A target its overflow ancestor cuts
 # ---------------------------------------------------------------------------
 
 
@@ -1862,7 +1861,7 @@ class TestSnapshotBoxOnlyCapture:
         """Beside the box captures, a plain fill stays a native shape and gradient text a text run.
 
         The plain ``8A4FFF`` box is a native shape at its rect, and no picture
-        meets it. ``background-clip: text`` (C7.2) is no box capture, on an
+        meets it. ``background-clip: text`` is no box capture, on an
         inline span or on a whole block: no picture meets either's words, and
         both are text items.
         """
@@ -2214,7 +2213,7 @@ class TestSnapshotCaptureOutput:
         ), f"the faded chart's colour is {_show(pixel)}, not #{ACCENT_2}"
 
     def test_repeated_exports_are_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """C7.4: repeated exports of fixture 03, captures included, are byte-identical.
+        """Repeated exports of fixture 03, captures included, are byte-identical.
 
         Every export is of the same rendered page: fixture 03 on the corpus
         deck, its CSS and Chart.js scripts, with the deck's fonts pinned (the
@@ -2273,12 +2272,12 @@ class TestSnapshotCaptureOutput:
     def test_twenty_chart_slides_export_within_budget(
         self, record_property: Callable[[str, object], None], chart_geometry: dict
     ) -> None:
-        """Review Focus 1: 20 copies of fixture 03, one chart capture each, export in under 120 s.
+        """20 copies of fixture 03, one chart capture each, export in under 120 s.
 
-        The sidecar's timeout is 180 s; the plan's budget on the dev Mac is
-        120 s. The time is recorded as ``export_seconds`` (``record_property``),
-        and every slide holds its chart's picture, so the time is that of a
-        deck that really captured its charts.
+        The sidecar's timeout is 180 s; the budget on the dev Mac is 120 s.
+        The time is recorded as ``export_seconds`` (``record_property``), and
+        every slide holds its chart's picture, so the time is that of a deck
+        that really captured its charts.
         """
         start = time.monotonic()
         with pytest.MonkeyPatch.context() as monkeypatch:

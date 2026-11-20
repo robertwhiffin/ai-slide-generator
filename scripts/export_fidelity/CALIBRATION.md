@@ -26,14 +26,14 @@ superscript one (A2 below). `GOOGLE_LINE_GROWTH_PER_PX` is A4's.
 
 ## The rules these constants serve
 
-**Single spacing is 1.2 x the font size (ruling R1).** PowerPoint and Google Slides draw 100%
+**Single spacing is 1.2 x the font size.** PowerPoint and Google Slides draw 100%
 line spacing at 1.2 x the font size, whatever the font's own metrics. DM Sans and DM Mono have
 hhea, typo and win metrics of 1.302 to 1.322 em, and Arial and Georgia 1.09 to 1.15, and all four
 measured at 1.2 em. The browser's `line-height: normal` is the font's metrics (83 px for DM Sans
 at 64 px). Written as a percentage of that natural height, as first planned, every line came out
 about 8% short: up to 8.5 px per line pair at 64 px in PowerPoint, 8.2 px in Google.
 
-**Spacing encoding (ruling R2, option C).** In a block the browser laid out on more than one line:
+**Spacing encoding.** In a block the browser laid out on more than one line:
 
 - a line height up to 1.2 x the paragraph's largest run is `<a:lnSpc><a:spcPct>` of
   `cssLineHeight / (1.2 x fontSize)` (90% for the corpus titles at 1.08), with the lines as soft
@@ -75,7 +75,7 @@ probes. Among those, these values have the lowest RMS of the ones checked (0.79 
 
 Google Slides: https://docs.google.com/presentation/d/1XS2dxYxfkzb0C9hEzaWOho8dwzPO4SZ1MJF1Pk6aGYw/edit
 
-The brief's probe set is DM Sans and DM Mono at 13, 16, 20, 32, 42 and 64 px, each at
+The acceptance probe set is DM Sans and DM Mono at 13, 16, 20, 32, 42 and 64 px, each at
 line-heights `normal`, 1.08, 1.3, 1.45 and 1.6, on one line and on three. That is 120 probes. The
 deck adds Arial and Georgia at 42 px, 20 more.
 
@@ -304,11 +304,11 @@ at the browser's size over it. With it applied, the rendered size over the brows
 `calibrate_text.py` converts, as the Google Slides export does). Each probe here is a line of
 script runs alone (`<sup>HH</sup>`), which that target does not cap, so the column is Google's own
 shrink, the same in either deck. On a line with other text the target caps a script run at its
-line's size, plus the browser's growth of the line over `GOOGLE_LINE_GROWTH_PER_PX` (A4; task-11
-ruling R11g), because Google sizes the whole line by the run's written size. Google then sets
+line's size, plus the browser's growth of the line over `GOOGLE_LINE_GROWTH_PER_PX` (A4),
+because Google sizes the whole line by the run's written size. Google then sets
 the line on the browser's baseline (+0.52 px at 20 px, +1.05 px at 40 px) and draws the script
 glyph at **0.800** of the browser's size on a line the browser did not grow. Placement wins over
-glyph size there: an accepted Google Slides trade-off (ruling R11i).
+glyph size there: an accepted Google Slides trade-off.
 
 ## A3: render checks
 
@@ -346,11 +346,11 @@ line's drop is the difference of the two baselines:
 | 20 px | 5.80 | 5.57 | 0.960 |
 | 40 px | 11.60 | 11.14 | 0.960 |
 
-R11g's first measurement, on 2026-11-18, read 5.57 and 11.13 px. The value is DM Sans's: another
+The first measurement, on 2026-11-18, read 5.57 and 11.13 px. The value is DM Sans's: another
 face's ascent ratio moves it by a few percent, a fraction of a px per line. With it, the deck for
 Google places a superscript's later line −0.56 px from the browser's (20 px, line-height 29 px).
 
-**Space before, where the cap writes no growth (ruling R11j).** Google sets a paragraph's first
+**Space before, where the cap writes no growth.** Google sets a paragraph's first
 line by the paragraph's spacing, and the cap keeps a script run on it at the line's own size, so
 its excess grows nothing there. A line with no script run has no cap at all. Both take the
 browser's growth of the line as space before instead, as the deck for PowerPoint does
@@ -382,8 +382,8 @@ the two apps' spacing between paragraphs of different sizes, which no growth cha
 
 ## A5: script lines in PowerPoint
 
-PowerPoint places a line holding a script run by its other runs, with two exceptions (task-11
-findings r4, Important 2):
+PowerPoint places a line holding a script run by its other runs, with two
+exceptions:
 
 - it grows the line by the script run's enlarged size (the browser's over
   `SUPERSCRIPT_SIZE_FACTOR`) when that run ends the line, and only then. So the deck for
@@ -396,12 +396,12 @@ findings r4, Important 2):
   growth added to its space before.
 
 Baseline offsets in PowerPoint of the deck for PowerPoint (`measure_script_lines.py
---powerpoint`, 2026-11-19), against the engine before these two rules. The first nine are the
-re-review's cases; all are DM Sans at 20 px unless named:
+--powerpoint`, 2026-11-19), against the engine before these two rules. The first nine are its
+PowerPoint cases; all are DM Sans at 20 px unless named:
 
 | case | before: line 1 | before: line 2 | now: line 1 | now: line 2 |
 |---|---|---|---|---|
-| one line, superscript inside it (R11g's case) | +0.06 | - | +0.06 | - |
+| one line, superscript inside it (the A4 case) | +0.06 | - | +0.06 | - |
 | one line, superscript at its end | +5.18 | - | +0.06 | - |
 | one line at 40 px, superscript at its end | +10.67 | - | +0.11 | - |
 | one line, subscript at its end | +5.36 | - | -0.08 | - |
@@ -423,7 +423,7 @@ place (−2.85 px and −1.42 px, as before).
 
 The growth rule covers lines with no script run too: a larger run's own unitless line height,
 or the block's strut beside a larger line, puts a later line lower than its spacing. The
-re-review's probes (16 px paragraphs; each line after the first; before = the engine before the
+probes (16 px paragraphs; each line after the first; before = the engine before the
 growth rule):
 
 | paragraph | before | now |
@@ -432,7 +432,7 @@ growth rule):
 | line-height 1.6, a 20 px run on line 2 | −4.35, −7.35, −6.07 | −0.19, −0.63, +0.65 |
 | line-height 26 px, a 20 px run on line 2 | −1.76, −3.76, −2.88 | −1.76, −0.88, −0.32 |
 
-**Nudges** (rulings R11h and R11k). A same-size `position: relative` move is no script: the run
+**Nudges.** A same-size `position: relative` move is no script: the run
 stays plain, and since no run carries a move, it stands on its line's baseline. Whether a box
 settles or moves is the box's: where every word of the whole box shares one move, the box is
 placed where it is moved; in any other box each nudged word settles on its line's baseline (a
@@ -440,7 +440,7 @@ line all of it moved is then drawn off by its own move, and no line after it mov
 spacing are always read from the settled lines, so a move is never growth. A "…" shares the
 move of the words of its line (20 px, line-height 29 px for three lines):
 
-| case | as a script (R11h's base) | every nudge settled (r4) | per line (r5) | per box (now) |
+| case | as a script | every nudge settled | settled or moved per line | per box (the engine) |
 |---|---|---|---|---|
 | "Revenue ▲ 12% up", the ▲ up 3 px | +0.12 | +0.12 | +0.12 | +0.12 |
 | the whole line up 3 px | +1.20 | +3.12 | −0.08 | −0.08 |

@@ -86,14 +86,15 @@ import { blendOver } from './emit_typography.cjs';
 import { GRADIENT_SOURCE } from './gradient.mjs';
 import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
 import { PSEUDO_HOST_ATTRIBUTE } from './pseudo.mjs';
+import { BORDERS_SOURCE } from './snapshot_borders.mjs';
 import { TABLE_SOURCE } from './snapshot_table.mjs';
 import { TEXT_SOURCE } from './snapshot_text.mjs';
 
 // Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
-// GRADIENT_SOURCE, TEXT_SOURCE, TABLE_SOURCE and blendOver: queryOne, queryAll,
-// elementChildrenOf, domAccess, reportCollectionLoss, the two limits,
-// splitTopLevelCommas, parseLinearGradient, createTextLayout, createTableLayout
-// and blendOver are its free names. It is
+// GRADIENT_SOURCE, BORDERS_SOURCE, TEXT_SOURCE, TABLE_SOURCE and blendOver:
+// queryOne, queryAll, elementChildrenOf, domAccess, reportCollectionLoss, the
+// two limits, splitTopLevelCommas, parseLinearGradient, createBorders,
+// createTextLayout, createTableLayout and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
 // from here arrives in `config`, and what pseudo.mjs read of the page's
 // pseudo-elements in `pseudoData` (PseudoData).
@@ -1017,271 +1018,19 @@ async function snapshotPage(config, pseudoData) {
   }
 
   // ─── borders and rings ───────────────────────────────────────────────
-  // A border that is the same on all four sides is the shape's outline. A
-  // border that differs between sides is a line per painted side (pushSideLines).
-  // A spread-only box-shadow is an outline ring (spreadRings).
-  const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
-
-  // The dash a border style paints with: dashed and dotted keep theirs, and
-  // every other style that paints (solid, double, groove, ridge, inset,
-  // outset) is drawn solid.
-  function borderDash(style) {
-    return style === 'dashed' ? 'dash' : style === 'dotted' ? 'dot' : 'solid';
-  }
-
-  function uniformBorder(s, opacity, scale) {
-    const width = parseFloat(s.borderTopWidth) || 0;
-    const style = s.borderTopStyle;
-    const colour = s.borderTopColor;
-    if (!(width > 0) || style === 'none' || style === 'hidden') return null;
-    for (let index = 1; index < SIDES.length; index++) {
-      const side = SIDES[index];
-      if (Math.abs((parseFloat(s['border' + side + 'Width']) || 0) - width) > 0.01 ||
-          s['border' + side + 'Style'] !== style || s['border' + side + 'Color'] !== colour) {
-        return null;
-      }
-    }
-    const painted = paintedColour(colour, opacity);
-    if (!painted) return null;
-    return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash: borderDash(style) };
-  }
-
-  // A border that is no single outline, side by side: {widths, painted}.
-  //   widths   every side's width in slide px, by side name: 0 where its style
-  //            paints nothing or `slice` takes it off. They shape the corners;
-  //   painted  {side, color, alpha, widthPx, dash} for each side with a width
-  //            and a colour that shows, in Top, Right, Bottom, Left order.
-  // `slice` ({Left, Right} booleans, or null) names the sides that
-  // box-decoration-break: slice takes off one fragment of an inline box (sliceOf).
-  function sideBorders(s, opacity, scale, slice) {
-    const widths = {};
-    const painted = [];
-    for (let index = 0; index < SIDES.length; index++) {
-      const side = SIDES[index];
-      const style = s['border' + side + 'Style'];
-      const off = style === 'none' || style === 'hidden' || Boolean(slice && slice[side]);
-      const width = off ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * scale;
-      widths[side] = width;
-      if (!(width > 0)) continue;
-      const colour = paintedColour(s['border' + side + 'Color'], opacity);
-      if (colour) painted.push({ side, color: colour.color, alpha: colour.alpha, widthPx: width, dash: borderDash(style) });
-    }
-    return { widths, painted };
-  }
-
-  // The outer layers of a computed box-shadow, in order: {colourText,
-  // offsetX, offsetY, blur, spread}, lengths in the element's own px. Chrome
-  // writes each layer colour first, then offset-x, offset-y, blur, spread.
-  // Layers split at top-level commas (GRADIENT_SOURCE): the commas inside
-  // rgba(...) separate nothing. An inset layer paints inside the box, so it is
-  // no outer layer.
-  function outerShadowLayers(value) {
-    const outer = [];
-    if (!value || value === 'none') return outer;
-    const layers = splitTopLevelCommas(value);
-    for (let index = 0; index < layers.length; index++) {
-      const layer = layers[index];
-      if (/\binset\b/.test(layer)) continue;
-      const functional = /^[a-z-]+\([^)]*\)/i.exec(layer);
-      const colourText = functional ? functional[0] : layer.split(/\s+/)[0];
-      const lengths = (layer.slice(colourText.length).match(/-?[\d.]+(?:e[-+]?\d+)?px/g) || []).map(parseFloat);
-      outer.push({
-        colourText,
-        offsetX: lengths[0] || 0,
-        offsetY: lengths[1] || 0,
-        blur: lengths[2] || 0,
-        spread: lengths[3] || 0,
-      });
-    }
-    return outer;
-  }
-
-  // The first painted outer shadow (PowerPoint keeps one per shape). A spread
-  // with no blur or offset is an outline ring, not a shadow. The direction is
-  // screen-fixed, because the emitted shadow does not rotate with its shape.
-  function outerShadow(value, opacity, box) {
-    const layers = outerShadowLayers(value);
-    for (let index = 0; index < layers.length; index++) {
-      const layer = layers[index];
-      const painted = paintedColour(layer.colourText, opacity);
-      if (!painted) continue;
-      const offsetX = layer.offsetX;
-      const offsetY = layer.offsetY;
-      const blur = layer.blur;
-      if (layer.spread !== 0 && blur === 0 && offsetX === 0 && offsetY === 0) continue;
-      return {
-        color: painted.color,
-        alpha: painted.alpha,
-        blurPx: blur * box.scale,
-        offsetPx: Math.hypot(offsetX, offsetY) * box.scale,
-        angle: normalisedAngle(Math.atan2(offsetY, offsetX) * 180 / Math.PI + (box.rotate || 0)),
-      };
-    }
-    return null;
-  }
-
-  // The spread-only layers of a computed box-shadow, in the order listed,
-  // which is top first: a layer with no offset and no blur paints a ring as
-  // wide as its spread around the border box. Each is the outline it draws,
-  // {color, alpha, widthPx, dash: 'solid'}. A spread of 0 or less paints
-  // nothing outside the box.
-  function spreadRings(value, opacity, box) {
-    const rings = [];
-    const layers = outerShadowLayers(value);
-    for (let index = 0; index < layers.length; index++) {
-      const layer = layers[index];
-      if (!(layer.spread > 0) || layer.blur !== 0 || layer.offsetX !== 0 || layer.offsetY !== 0) continue;
-      const painted = paintedColour(layer.colourText, opacity);
-      if (painted) rings.push({ color: painted.color, alpha: painted.alpha, widthPx: layer.spread * box.scale, dash: 'solid' });
-    }
-    return rings;
-  }
-
-  // The corner radius of a ring's centre line, for a border box corner of
-  // `radius` and a ring as wide as `spread`. The spread shadow's corner is the
-  // border radius plus the spread, the spread first scaled by 1 + (r - 1)^3
-  // where r = radius / spread is under 1 (CSS Backgrounds 3, box-shadow), so a
-  // square corner stays square; the ring runs half way between the two.
-  function ringRadius(radius, spread) {
-    if (!(radius > 0)) return 0;
-    const ratio = radius / spread;
-    const outer = radius + (ratio < 1 ? spread * (1 + Math.pow(ratio - 1, 3)) : spread);
-    return (radius + outer) / 2;
-  }
-
-  // background-clip: text paints the background inside the glyphs only, where
-  // the text's own colour carries it (textColour), so it fills no box.
-  function clipsToText(s) {
-    return /\btext\b/.test(String(s.backgroundClip || '')) || /\btext\b/.test(String(s.webkitBackgroundClip || ''));
-  }
-
-  // Whether an element's box paints anything emitBox draws: a fill, a border,
-  // an outer shadow or a ring, at its cumulative opacity. Its geometry changes
-  // none of them, so an untransformed unit box stands in for it.
-  const UNIT_BOX = { scale: 1, rotate: null };
-  function paintsBox(s, opacity) {
-    return Boolean((!clipsToText(s) && paintedColour(s.backgroundColor, opacity)) ||
-      uniformBorder(s, opacity, UNIT_BOX.scale) || outerShadow(s.boxShadow, opacity, UNIT_BOX) ||
-      spreadRings(s.boxShadow, opacity, UNIT_BOX).length ||
-      sideBorders(s, opacity, UNIT_BOX.scale, null).painted.length);
-  }
-
-  // A painted box becomes shapes and lines, cut to its clip, in the order CSS
-  // paints a box (CSS 2.1 Appendix E: its shadows under its background, its
-  // border over it):
-  // * every spread-only ring but the one that is the box's outline, each an
-  //   unfilled shape of its own, the last listed lowest;
-  // * the box's own shape: its background colour and outer shadow, outlined
-  //   by its uniform border or, with none, by its first ring (ringedShape);
-  // * a border that differs between sides, over the fill (pushSideLines).
-  // The slide root's ground is the slide background (BG_TRANSFER put it on
-  // body), so its fill, shadow and rings are never painted a second time here.
-  // `slice` is sideBorders': the sides a fragment of an inline box loses.
-  // `withoutBorder` leaves the border out: a collapsed native table's border
-  // is its grid's outer edges (snapshot_table.mjs).
-  function emitBox(s, box, opacity, order, isSlideRoot, clip, slice, withoutBorder) {
-    const fill = isSlideRoot || clipsToText(s) ? null : paintedColour(s.backgroundColor, opacity);
-    const sliced = Boolean(slice && (slice.Left || slice.Right));
-    let line = sliced || withoutBorder ? null : uniformBorder(s, opacity, box.scale);
-    const shadow = isSlideRoot ? null : outerShadow(s.boxShadow, opacity, box);
-    const rings = isSlideRoot ? [] : spreadRings(s.boxShadow, opacity, box);
-    const sides = line || withoutBorder ? null : sideBorders(s, opacity, box.scale, slice);
-    if (!fill && !line && !shadow && !rings.length && !(sides && sides.painted.length)) return;
-    const corners = cornerShape(s, box);
-    // The stroke centred on a bordered shape's edge needs a shape left inside the border box.
-    if (line && !(box.w - line.widthPx > 0 && box.h - line.widthPx > 0)) line = null;
-    const outlineRing = !line && rings.length ? rings[0] : null;
-    for (let index = rings.length - 1; index >= (outlineRing ? 1 : 0); index--) {
-      pushBoxShape(ringedShape(box, corners, null, rings[index], null, order), clip);
-    }
-    if (fill || line || shadow || outlineRing) {
-      pushBoxShape(outlineRing
-        ? ringedShape(box, corners, fill, outlineRing, shadow, order)
-        : borderedShape(box, corners, fill, line, shadow, order), clip);
-    }
-    if (sides) pushSideLines(box, sides, order, clip);
-  }
-
-  // The shape of a box outlined by `line` (or null), which CSS paints inside
-  // the border box: the stroke is centred on the shape's edge, so the shape is
-  // inset by half the width, its corner radius with it.
-  function borderedShape(box, corners, fill, line, shadow, order) {
-    const inset = line ? line.widthPx / 2 : 0;
-    return boxShape(box, corners, inset, corners.radius - inset, { fill, line, shadow, order, extent: box });
-  }
-
-  // The shape of a box outlined by `ring`, which paints outside the border
-  // box: grown by half the spread, its corner radius to the ring's centre
-  // line. What it paints reaches the ring's outer edge.
-  function ringedShape(box, corners, fill, ring, shadow, order) {
-    const half = ring.widthPx / 2;
-    const extent = { x: box.x - ring.widthPx, y: box.y - ring.widthPx, w: box.w + 2 * ring.widthPx, h: box.h + 2 * ring.widthPx, rotate: box.rotate };
-    return boxShape(box, corners, -half, ringRadius(corners.radius, ring.widthPx), { fill, line: ring, shadow, order, extent });
-  }
-
-  // `box` moved in by `inset` on every side (out, for a negative one), with
-  // the corner geometry and `radius` it keeps. `paint` is {fill, line, shadow,
-  // order, extent}: extent is the box whose bounds a clip is held against.
-  function boxShape(box, corners, inset, radius, paint) {
-    const w = box.w - 2 * inset;
-    const h = box.h - 2 * inset;
-    let geometry = corners.geometry;
-    let cornerRadius = 0;
-    if (geometry === 'roundRect') {
-      cornerRadius = Math.min(radius, Math.min(w, h) / 2);
-      if (!(cornerRadius > 0)) geometry = 'rect';
-    }
-    return {
-      order: paint.order,
-      x: box.x + inset,
-      y: box.y + inset,
-      w,
-      h,
-      geometry,
-      radius: geometry === 'roundRect' ? cornerRadius : 0,
-      fill: paint.fill,
-      line: paint.line,
-      shadow: paint.shadow,
-      rotate: box.rotate,
-      extent: paint.extent,
-    };
-  }
-
-  // A shape cut to its clip: whole when the clip cuts nothing it paints (its
-  // extent), the part shown of a plain rect, or else the part shown of its
-  // outline (pushClippedShape). Nothing when the clip hides it.
-  function pushBoxShape(shape, clip) {
-    const shown = shownPart(boundsOf(shape.extent), clip);
-    if (!shown) return;
-    if (!shown.cut) {
-      pushShape(shape);
-    } else if (shape.geometry === 'rect' && !shape.rotate && !shape.line) {
-      // A plain rect the clip cuts is the rect it shows (no line, so no inset).
-      pushShape({
-        ...shape,
-        x: shown.left,
-        y: shown.top,
-        w: shown.right - shown.left,
-        h: shown.bottom - shown.top,
-      });
-    } else {
-      pushClippedShape(shape, clip);
-    }
-  }
-
-  // The sides box-decoration-break: slice takes off one fragment of an inline
-  // box: its inline start on every fragment but the first, its inline end on
-  // every fragment but the last. Null for a box in one fragment, or one that
-  // clones its decoration onto each.
-  function sliceOf(decoration, fragment) {
-    const count = decoration.boxes.length;
-    const s = decoration.style;
-    const mode = String(s.boxDecorationBreak || s.webkitBoxDecorationBreak || 'slice');
-    if (count < 2 || mode === 'clone') return null;
-    const notFirst = fragment > 0;
-    const notLast = fragment < count - 1;
-    return s.direction === 'rtl' ? { Left: notLast, Right: notFirst } : { Left: notFirst, Right: notLast };
-  }
+  // What a painted box draws beyond its fill (snapshot_borders.mjs): its
+  // border as an outline or a line per side, its outline rings and its outer
+  // shadow, each a shape or a line pushed here.
+  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf } = createBorders({
+    paintedColour,
+    normalisedAngle,
+    cornerShape,
+    shownPart,
+    boundsOf,
+    pushShape,
+    pushClippedShape,
+    pushSideLines,
+  });
 
   // ─── side lines ──────────────────────────────────────────────────────
   // Each painted side of a border that differs between sides is one line item
@@ -1645,7 +1394,7 @@ async function snapshotPage(config, pseudoData) {
   //            everything it holds, its own box included;
   //   box      an element whose own box paints what no shape can (capturesBox):
   //            its box alone, its text, children and own ::before, ::after
-  //            and list marker staying native (ruling R8b). The picture
+  //            and list marker staying native. The picture
   //            replaces its native box (fill, outline and shadow). A
   //            pseudo-element's box is captured the same way, on its own, and
   //            so is one whose content is an image (an icon bullet), its
@@ -1655,7 +1404,7 @@ async function snapshotPage(config, pseudoData) {
   //            paints an image (emitMarker), through its item.
   // The picture is what the target's clip shows of all it paints: its bounds,
   // grown by the reach of its outer shadow and filter (paintReach), cut to the
-  // clip (C7.3). Its pixels already carry the target's cumulative opacity, so
+  // clip. Its pixels already carry the target's cumulative opacity, so
   // its alpha is 1. Its rect is axis-aligned, so a turned target is drawn
   // turned in it, with no rotation.
   //   captureTargets: {element, capture, hidden: Element[]}, in capture order.
@@ -1664,8 +1413,8 @@ async function snapshotPage(config, pseudoData) {
 
   // The background layers a shape cannot paint: a gradient of any kind, or a
   // url() image. background-clip: text gives them to the glyphs instead, where
-  // the run's solid colour carries them (Task 3), so gradient text is never a
-  // box capture: it would paint a gradient rectangle under its words (C7.2).
+  // the run's solid colour carries them (snapshot_text.mjs), so gradient text is
+  // never a box capture: it would paint a gradient rectangle under its words.
   function paintsBackgroundImage(s) {
     return !clipsToText(s) && /(?:gradient|url)\(/i.test(String(s.backgroundImage || ''));
   }
@@ -2040,7 +1789,7 @@ async function snapshotPage(config, pseudoData) {
   // (snapshot_text.mjs turnedBlocks): the root's unrotated layout box from the
   // walk's frame (boxGeometry), turned by the text's angle about the centre it
   // shares with the root's bounds, holding the root's lines, and grown by the
-  // slack its padding cannot hold with that layout box kept in place (R11f).
+  // slack its padding cannot hold with that layout box kept in place.
   // A turn root is an element whose text is turned (its frame's cumulative
   // angle, plus the turn of its writing mode, writingTurn) and that does not
   // paint with the turned text around it: it has a paint group of its own
@@ -2234,11 +1983,12 @@ async function snapshotPage(config, pseudoData) {
   // A <table> the slide shows whole, laid out as a grid an a:tbl can draw
   // (snapshot_table.mjs collectTable), is one table item over its own box: the
   // walk then draws no box of its parts and gives each cell's text to the cell
-  // (collectCellText), and visits everything the cells hold as anywhere else,
-  // so a pill, a picture or a cell's ::before is an item of its own over the
-  // table: the inline content of the table's context paints after its own box.
+  // (snapshot_table.mjs collectCellText), and visits everything the cells hold
+  // as anywhere else, so a pill, a picture or a cell's ::before is an item of
+  // its own over the table: the inline content of the table's context paints
+  // after its own box.
   // Any other table is positioned items, as every slide box is drawn: one an
-  // a:tbl cannot draw, and one a clip cuts (R10j), which items are cut to and
+  // a:tbl cannot draw, and one a clip cuts, which items are cut to and
   // an a:tbl cannot be; a table the clip hides shows nothing either way.
   //   tableParts: part element -> {cell: {model: TableCell, grid} | null}
   const tableParts = new Map();
@@ -2252,9 +2002,10 @@ async function snapshotPage(config, pseudoData) {
     pseudoOf: (element) => pseudoHosts.get(element) || null,
     rectOf,
     fontOf: textLayout.fontOf,
+    layoutCell: textLayout.layoutCell,
+    collectText,
+    placeGroups,
   });
-  // A line of text within this of its grid cell's edge still lies in it (layout rounding).
-  const CELL_TEXT_EPSILON_PX = 0.5;
 
   // The TableLayout of a <table> drawn as a native table, its parts now owned
   // by it, or null. `box` is its border box, `clips` its clipsOf, `walk`
@@ -2276,54 +2027,6 @@ async function snapshotPage(config, pseudoData) {
   function pushTable(layout, order) {
     items.push({ ...layout.item, id: nextItemId++, order });
     stats.tables++;
-  }
-
-  // A native table cell's text: the cell's own paragraphs when its renderer
-  // can set its lines as the browser did (snapshot_text.mjs layoutCell) and
-  // fitCellText finds them room in the cell; else overlay text items, as any
-  // other block's. A cell holding block layout (R10n) is overlaid whole,
-  // whatever its first run holds: its own text is an anonymous block beside
-  // its block children, and the walk places each where the browser did. So is
-  // a cell whose text is turned (a vertical header): a turned item over it.
-  // `cell` is its {model, grid, blocks}.
-  function collectCellText(element, s, paint, seq, walk, cell) {
-    if (cell.blocks || walk.turned) {
-      collectText(element, s, paint, seq, walk);
-      return;
-    }
-    const text = textLayout.layoutCell(element, s, walk);
-    if (text.native && fitCellText(cell, text)) {
-      cell.model.paragraphs = text.paragraphs();
-      cell.model.align = text.align;
-      cell.model.rtl = text.rtl;
-      return;
-    }
-    placeGroups(text.groups(), paint, seq);
-  }
-
-  // Whether a cell's lines lie in its grid cell; if so, makes them the room
-  // past the widest that a renderer needs so as not to wrap one (text.slack),
-  // as far as the margin on the side the alignment grows holds it (both sides
-  // of centred text), down to none. The other side keeps its margin, so the
-  // lines start where the browser started them; a cell its text overflows
-  // gives its text to overlay items instead.
-  function fitCellText(cell, text) {
-    if (!text.extent) return true;
-    const grid = cell.grid;
-    const margin = cell.model.margin;
-    if (text.extent.left < grid.left - CELL_TEXT_EPSILON_PX || text.extent.right > grid.right + CELL_TEXT_EPSILON_PX) return false;
-    const room = grid.right - grid.left - margin.left - margin.right - (text.extent.right - text.extent.left);
-    const deficit = text.slack - room;
-    if (!(deficit > 0)) return true;
-    if (text.align === 'center') {
-      margin.left = Math.max(0, margin.left - deficit / 2);
-      margin.right = Math.max(0, margin.right - deficit / 2);
-    } else if (text.align === 'right') {
-      margin.left = Math.max(0, margin.left - deficit);
-    } else {
-      margin.right = Math.max(0, margin.right - deficit);
-    }
-    return true;
   }
 
   // The walk is about to visit an element at `depth`, so every open subtree at
@@ -2454,7 +2157,7 @@ async function snapshotPage(config, pseudoData) {
     // background (emitMarker): its backdrop is what the item sits on.
     emitMarker(element, place.paint, seq, { ...inline, backdrop: groupInside(state.backdrop, s) }, picture);
     // A table part holds no text but its cells' (snapshot_table.mjs readStructure).
-    if (part && part.cell) collectCellText(element, s, place.paint, seq, inline, part.cell);
+    if (part && part.cell) tableLayout.collectCellText(element, s, place.paint, seq, inline, part.cell);
     else if (!part) collectText(element, s, place.paint, seq, inline);
     pushChildren(element, {
       ctx: place.ctx,
@@ -2555,6 +2258,7 @@ export const SNAPSHOT_SOURCE = `
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
+${BORDERS_SOURCE}
 ${TEXT_SOURCE}
 ${TABLE_SOURCE}
 ${blendOver.toString()}

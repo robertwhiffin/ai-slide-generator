@@ -692,7 +692,7 @@ def export_google_slides_from_huashu(
             title=title,
             slides_html=slides_html,
             bypass_validation=True,
-            # Written for Google Slides' own placement (R11g: script runs).
+            # Written for Google Slides' own placement of script runs.
             target="gslides",
         )
     except HuashuBusyError as exc:
