@@ -17,7 +17,9 @@ See tests/unit/test_deploy_postgres_resource.py for the helper itself.
 import inspect
 from unittest.mock import MagicMock
 
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service.apps import App, AppsAPI
+from databricks.sdk.service.postgres import Role, RoleRoleStatus
 
 from scripts import deploy_local
 from tests.unit.test_deploy_local_schema_setup_sp_only import (
@@ -167,9 +169,22 @@ def test_a_failed_attach_warns_and_the_fork_create_still_deploys(monkeypatch, ca
     """The real attach, refused by the workspace: the dev deploy still ships."""
     _patch_common(monkeypatch, _BRANCH_CFG)
     deployed: list[str] = []
+    fork_branch = f"projects/{PROJECT}/branches/{FORK_BRANCH}"
     ws = MagicMock()
-    ws.apps.get.return_value = App(name=FORK_APP, description="AI Slide Generator")
-    ws.apps.update.side_effect = RuntimeError("postgres app resources are not enabled")
+    ws.apps.get.return_value = App(
+        name=FORK_APP,
+        description="AI Slide Generator",
+        service_principal_client_id="sp-client-id",
+    )
+
+    def _list_roles(parent, page_size=None, page_token=None):
+        # The SP's role, on the fork's own branch only (role setup just made it).
+        if parent != fork_branch:
+            raise NotFound(f"Branch {parent} does not exist")
+        return iter([Role(status=RoleRoleStatus(postgres_role="sp-client-id"))])
+
+    ws.postgres.list_roles.side_effect = _list_roles
+    ws.apps.create_update.side_effect = RuntimeError("postgres app resources are not enabled")
     monkeypatch.setattr(deploy_local, "_get_workspace_client", lambda profile=None: ws)
     monkeypatch.setattr(
         deploy_local,
@@ -181,12 +196,15 @@ def test_a_failed_attach_warns_and_the_fork_create_still_deploys(monkeypatch, ca
         env="devloop", profile="p", from_pypi="0.3.11.dev4", instance="spfix"
     )
 
-    ws.apps.update.assert_called_once()  # the attach WAS attempted
-    call = ws.apps.update.call_args
-    sent = inspect.signature(AppsAPI.update).bind(None, *call.args, **call.kwargs).arguments["app"]
+    ws.apps.create_update.assert_called_once()  # the attach WAS attempted
+    call = ws.apps.create_update.call_args
+    bound = inspect.signature(AppsAPI.create_update).bind(None, *call.args, **call.kwargs)
+    assert bound.arguments["update_mask"] == "resources"
+    sent = bound.arguments["app"]
     assert [r.postgres.branch for r in sent.resources if r.postgres is not None] == [
-        f"projects/{PROJECT}/branches/{FORK_BRANCH}"
+        fork_branch
     ]
+    ws.apps.update.assert_not_called()
     assert deployed == ["deploy"]
     assert result["status"] == "created"
     out = capsys.readouterr().out
