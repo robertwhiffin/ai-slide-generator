@@ -35,6 +35,14 @@ const require = createRequire(import.meta.url);
 // failure's message can carry text the slide's page threw.
 const { logJson, oneLine } = require('./log_line.cjs');
 
+// A SIGTERM (pptx_from_html_huashu.py run_sidecar_process, on a timeout) ends
+// node through its exit path, where Playwright's exit handler kills every
+// browser it launched: each runs detached, in a process group of its own,
+// which no signal to this process's group reaches. Exiting at once is the
+// point: Playwright's own SIGTERM handler only closes the browsers gracefully
+// and leaves node running, which a hung slide can outlast.
+process.on('SIGTERM', () => process.exit(143));
+
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);

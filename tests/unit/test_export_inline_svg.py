@@ -29,7 +29,7 @@ from unittest import mock
 import pytest
 
 from src.services import pptx_from_html_huashu
-from tests.fixtures.export_snapshot_support import slide_shapes
+from tests.fixtures.export_snapshot_support import build_pptx_guarded, slide_shapes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_inline_svg"
@@ -81,9 +81,7 @@ class TestInlineSvgExport:
             {"html": _fixture_html("slide_banner.html"), "notes": "banner"},
             {"html": _fixture_html("slide_text_control.html"), "notes": "control"},
         ]
-        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-            "Inline SVG deck", slides, bypass_validation=True
-        )
+        pptx, failures = build_pptx_guarded("Inline SVG deck", slides, bypass_validation=True)
         assert failures == [], f"huashu rejected slides: {failures}"
         assert pptx, "huashu produced no pptx bytes"
 

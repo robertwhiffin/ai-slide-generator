@@ -50,6 +50,7 @@ from src.api.routes.export import build_slide_html
 from src.domain.slide_deck import SlideDeck
 from src.services import pptx_from_html_huashu
 from src.utils.html_utils import find_slide_roots
+from tests.fixtures.export_snapshot_support import build_pptx_guarded
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
     GROUND,
@@ -145,11 +146,9 @@ def _chain_document(depth: int, *, inner_sibling: str = "", extra_css: str = "")
 
 
 def _build_html(monkeypatch: pytest.MonkeyPatch, html: str) -> bytes:
-    """Export one in-memory slide document through the real huashu pipeline."""
+    """Export one in-memory slide document through the real huashu pipeline, its model whole."""
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-    pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-        "slide root depth", [{"html": html}]
-    )
+    pptx, failures = build_pptx_guarded("slide root depth", [{"html": html}])
     assert failures == [], f"huashu rejected the deck: {failures}"
     assert pptx, "huashu produced no pptx bytes"
     return pptx
@@ -427,9 +426,7 @@ class TestChromiumParserNestingLimit:
         is emitted by the preprocess pass, which runs first either way.
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        pptx_from_html_huashu.build_pptx_huashu(
-            "slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}]
-        )
+        build_pptx_guarded("slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr, (
@@ -450,7 +447,7 @@ class TestChromiumParserNestingLimit:
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
         html = (FIXTURE_DIR / "rootless.html").read_text(encoding="utf-8")
-        pptx_from_html_huashu.build_pptx_huashu("slide root depth", [{"html": html}])
+        build_pptx_guarded("slide root depth", [{"html": html}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr

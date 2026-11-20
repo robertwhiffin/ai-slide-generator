@@ -37,7 +37,11 @@ from unittest import mock
 import pytest
 
 from src.services import pptx_from_html_huashu
-from tests.fixtures.export_snapshot_support import export_documents
+from tests.fixtures.export_snapshot_support import (
+    export_documents,
+    export_logged,
+    slide_summaries,
+)
 
 # 1x1 transparent PNG.
 PNG_B64 = (
@@ -104,9 +108,13 @@ class TestHuashuImageSrc:
         bg.write_bytes(BG_CANARY)
         html = _slide_html(img.as_uri(), body_bg=f'url("{bg.as_uri()}")')
 
-        pptx, failures = export_documents([html], monkeypatch=monkeypatch, title="t")
+        logged = export_logged([html], monkeypatch=monkeypatch)
+        pptx, failures = logged.pptx, logged.failures
 
         assert failures == [], failures
+        # Nothing was read from the files: no picture written, none captured.
+        (summary,) = slide_summaries(logged.stderr)
+        assert (summary["captures"], summary["pictures"]) == (0, 0), summary
         leaked = [
             n for n, blob in _zip_entries(pptx).items()
             if IMG_CANARY in blob or BG_CANARY in blob

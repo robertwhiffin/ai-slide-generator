@@ -279,6 +279,21 @@ def assert_no_model_drops(stderr: str) -> None:
     )
 
 
+def build_pptx_guarded(
+    title: str, slides_html: list[dict], **options: object
+) -> tuple[bytes, list[dict]]:
+    """``build_pptx_huashu`` exactly as called, with the zero-drop guard over what it printed.
+
+    For a test that keeps its own call (its own validation, notes, or a
+    timeout it set): the sidecar's stderr is teed and still reaches the
+    real stderr, so ``capfd`` and ``capsys`` see it as before.
+    """
+    with teed_stderr() as buffer:
+        exported = pptx_from_html_huashu.build_pptx_huashu(title, slides_html, **options)
+    assert_no_model_drops(buffer.getvalue())
+    return exported
+
+
 def _export_documents(
     documents: list[str],
     *,

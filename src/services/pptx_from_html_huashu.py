@@ -14,10 +14,16 @@ runs the sidecar's ``setup.sh`` to install them) or ``ENVIRONMENT=development``.
 Until then the export routes answer 503, and the frontend's Google Slides
 export falls back to the records pipeline.
 
-Timeout. The sidecar runs as the leader of its own process group, so a run
-past ``SIDECAR_TIMEOUT_SECONDS`` is killed whole: node and every Chromium it
-launched. Killing node alone would leave its browser running with no parent,
-holding its memory until the app restarts.
+Timeout. A run past ``SIDECAR_TIMEOUT_SECONDS`` must end node and every
+Chromium it launched: killed alone, node would leave its browser running with
+no parent, holding its memory until the app restarts. Playwright launches each
+browser ``detached``, the leader of a process group of its own, and kills those
+groups from node's exit handler, so no signal to node's group reaches a
+browser. ``run_sidecar_process`` therefore sends SIGTERM to the sidecar's own
+group first, which emit_deck.mjs answers with ``process.exit(143)``, so node
+leaves through that exit path, and SIGKILLs the group only after a grace
+period, as a backstop. The admin routes that run probe_launch.mjs and the
+Playwright installer use the same helper.
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -131,44 +137,110 @@ class HuashuExportError(RuntimeError):
     """Raised when the huashu sidecar cannot run at all (setup, timeout)."""
 
 
-def _kill_process_group(process: subprocess.Popen) -> None:
-    """SIGKILL every process in the sidecar's group: node and the Chromium it launched.
+# How long a sidecar told to stop (SIGTERM) has to end before it is killed
+# (SIGKILL), and the bound on each wait for it after that: node ends through
+# its exit path within it, where Playwright kills the browsers it launched.
+SIDECAR_TERM_GRACE_SECONDS = 5
 
-    Called before ``process`` is reaped, so its id (the group's) is still its own.
+
+def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
+    """Send ``sig`` to the process group ``process`` leads, else to ``process`` itself.
+
+    The group's id is the process's own (``start_new_session``). A group that
+    cannot be found while the process still runs (it was started in another
+    session) gets the signal on the process alone.
     """
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, sig)
     except ProcessLookupError:
-        pass  # every process of the group has exited already
+        if process.poll() is None:
+            try:
+                process.send_signal(sig)
+            except ProcessLookupError:
+                pass  # it exited between the poll and the signal
 
 
-def _run_sidecar(command: list[str], payload: bytes) -> subprocess.CompletedProcess:
-    """Run the sidecar with ``payload`` on stdin, bounded by ``SIDECAR_TIMEOUT_SECONDS``.
+def _end_process_group(process: subprocess.Popen) -> None:
+    """Stop the sidecar's process group, never waiting on it for long.
 
-    The sidecar starts a new session, so it leads a process group of its own,
-    which the browsers Playwright launches for it join. A run past the timeout,
-    or interrupted, is killed as that whole group, so no Chromium is left
-    running without its node; the timeout is raised as ``HuashuExportError``.
+    SIGTERM first: the sidecar's node scripts answer it with process.exit(143)
+    (emit_deck.mjs, probe_launch.mjs), and Playwright's exit handler then
+    SIGKILLs the group of every browser it launched. Playwright launches each
+    browser ``detached``, the leader of a group of its own, so no signal to the
+    sidecar's group reaches a browser: only node's exit path does. Then, after
+    ``SIDECAR_TERM_GRACE_SECONDS``, SIGKILL to whatever of the group remains: a
+    node that could not exit, or a child it started in its own group.
     """
-    with subprocess.Popen(
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_process_group(process, signal.SIGKILL)
+    try:
+        process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning("sidecar pid %s did not exit after SIGKILL", process.pid)
+
+
+def run_sidecar_process(
+    command: list[str],
+    *,
+    input: bytes,
+    timeout: float,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a sidecar node script on ``input``, its output captured, bounded by ``timeout``.
+
+    ``env`` defaults to ``sidecar_subprocess_env()``, never the app's own
+    environment. The script starts a new session, so it leads a process group
+    of its own. A run past ``timeout``, or interrupted, is ended with
+    ``_end_process_group`` (SIGTERM, then SIGKILL after the grace period) and
+    ``subprocess.TimeoutExpired`` is raised with what it printed. After any
+    exit, a failing one included, the group is swept with SIGKILL, so no child
+    it started in its own group outlives it. No wait is unbounded: the run
+    returns within ``timeout`` plus three grace periods.
+    """
+    process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=sidecar_subprocess_env(),
+        cwd=cwd,
+        env=sidecar_subprocess_env() if env is None else env,
         start_new_session=True,
-    ) as process:
+    )
+    try:
         try:
-            stdout, stderr = process.communicate(payload, timeout=SIDECAR_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as e:
-            _kill_process_group(process)
-            raise HuashuExportError(
-                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
-            ) from e
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired as timed_out:
+            _end_process_group(process)
+            stdout, stderr = _remaining_output(process)
+            raise subprocess.TimeoutExpired(
+                command, timeout, output=stdout, stderr=stderr
+            ) from timed_out
         except BaseException:
-            _kill_process_group(process)
+            _end_process_group(process)
             raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        _signal_process_group(process, signal.SIGKILL)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream:
+                stream.close()
+
+
+def _remaining_output(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What an ended sidecar printed, read for at most ``SIDECAR_TERM_GRACE_SECONDS``.
+
+    A process outside its group (a detached browser) can still hold its
+    pipes open, so the read is bounded; past it, the output is given up.
+    """
+    try:
+        return process.communicate(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        return b"", b""
 
 
 def _local_dev_gate() -> bool:
@@ -269,9 +341,11 @@ def build_pptx_huashu(
         raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
     if not is_available():
         raise HuashuExportError(
-            "huashu pipeline not available (local dev only; needs node, "
-            "playwright, sharp, and `npx playwright install chromium` to "
-            "have run in services/pptx-emit-huashu/)"
+            "huashu pipeline not available: it needs HUASHU_PIPELINE_ENABLED=1 "
+            "(Databricks Apps, whose boot runs the sidecar's setup.sh) or "
+            "ENVIRONMENT=development, node on PATH, the sidecar's node_modules "
+            "(playwright, pptxgenjs) and a Playwright Chromium "
+            "(`npx playwright install chromium` in services/pptx-emit-huashu/)"
         )
 
     payload_bytes = json.dumps({
@@ -289,7 +363,12 @@ def build_pptx_huashu(
             "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
             " ".join(cmd), len(slides_html), len(payload_bytes),
         )
-        result = _run_sidecar(cmd, payload_bytes)
+        try:
+            result = run_sidecar_process(cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as e:
+            raise HuashuExportError(
+                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
+            ) from e
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees

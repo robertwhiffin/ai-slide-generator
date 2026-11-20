@@ -3,7 +3,9 @@
 //
 //   1. load and settle   networkidle, every font face the text asks for loaded
 //                        (pageFontsSettled), the canvas wait, then every
-//                        animation finished, so a fade-in exports settled;
+//                        animation finished, so a fade-in exports settled, and
+//                        the fonts waited for again: an animation's end state
+//                        can set text in a face nothing had asked for;
 //   2. preprocess        PREPROCESS_SOURCE (preprocess.mjs): the slide root's
 //                        ground onto body, nothing that moves layout;
 //   3. validate          body overflow, the layout's size and text too near
@@ -74,8 +76,9 @@ const MIN_BOTTOM_MARGIN_IN = 0.5;
 // ─── page-side reads ───────────────────────────────────────────────────
 // Each runs in the page after DOM_ACCESS_SOURCE, whose helpers (queryAll,
 // queryOne) and limits are their free names, and after the constants it is
-// composed with. They are stringified, so they close over nothing here. Slide script has already run in this page by the
-// time any of them fires, so none of them walks the DOM any other way.
+// composed with. They are stringified, so they close over nothing here. Slide
+// script has already run in this page by the time any of them fires, so none
+// of them walks the DOM any other way.
 
 function pageCanvasCount() {
   return queryAll('canvas').length;
@@ -527,6 +530,9 @@ async function renderSlide(htmlFile, pres, options = {}) {
       // The background transfer writes body's inline style, which starts any
       // transition a deck declares on it; finish that too before reading.
       await finishAnimations(page, sources);
+      // A finished animation can set text in a face nothing had asked for yet
+      // (its end state's font-family or weight), which loads only now.
+      await waitForFonts(page, sources);
       bodyDimensions = await readBodyDimensions(page, sources);
       // Read from the settled page the snapshot reads, just before it.
       pseudoData = await sources.readPseudoElements(page);

@@ -81,7 +81,6 @@ export const DOM_ACCESS_SOURCE = `
       // Document's and Element's lookups are DISTINCT function objects, so both are captured.
       const docQuery = realm.Document.prototype.querySelector;
       const docQueryAll = realm.Document.prototype.querySelectorAll;
-      const elQuery = realm.Element.prototype.querySelector;
       const elQueryAll = realm.Element.prototype.querySelectorAll;
       // An element's box fragments. Even through the pristine method the DOMRectList and its DOMRects
       // are the page realm's objects, whose length, item and rect getters page script can replace, so those are captured too.
@@ -124,7 +123,6 @@ export const DOM_ACCESS_SOURCE = `
           typeof renderedText.get !== 'function' ||
           typeof docQuery !== 'function' ||
           typeof docQueryAll !== 'function' ||
-          typeof elQuery !== 'function' ||
           typeof elQueryAll !== 'function' ||
           typeof clientRects !== 'function' ||
           typeof rectListLength.get !== 'function' ||
@@ -159,7 +157,6 @@ export const DOM_ACCESS_SOURCE = `
         // The receiver stays this realm's document; a native lookup with an explicit receiver works across realms.
         documentQuerySelector: (selector) => docQuery.call(document, selector),
         documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
-        elementQuerySelector: (el, selector) => elQuery.call(el, selector),
         elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),
         clientRects: (el) => clientRects.call(el),
         rectListLength: (list) => rectListLength.get.call(list),
@@ -250,7 +247,6 @@ export const DOM_ACCESS_SOURCE = `
     innerText: (el) => el.innerText,
     documentQuerySelector: (selector) => document.querySelector(selector),
     documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
-    elementQuerySelector: (el, selector) => el.querySelector(selector),
     elementQuerySelectorAll: (el, selector) => el.querySelectorAll(selector),
     clientRects: (el) => el.getClientRects(),
     rectListLength: (list) => list.length,

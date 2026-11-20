@@ -60,6 +60,7 @@ from unittest import mock
 import pytest
 
 from src.services import pptx_from_html_huashu, pptx_from_records
+from tests.fixtures.export_snapshot_support import build_pptx_guarded
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_svg_raster"
@@ -239,9 +240,7 @@ class TestHuashuEmitter:
     def _build(self, monkeypatch: pytest.MonkeyPatch, fixture: str, title: str) -> bytes:
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
         html = (FIXTURE_DIR / fixture).read_text(encoding="utf-8")
-        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-            title, [{"html": html, "notes": "p5"}]
-        )
+        pptx, failures = build_pptx_guarded(title, [{"html": html, "notes": "p5"}])
         assert failures == [], f"huashu rejected the fixture slide: {failures}"
         assert pptx, "huashu produced no pptx bytes"
         return pptx

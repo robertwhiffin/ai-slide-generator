@@ -1058,6 +1058,13 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
 # or local dev. Surfaced as an export mode in the frontend modal.
 
 
+# How long the admin diagnostics below may run their node scripts. Each runs
+# through run_sidecar_process, so a run past it is ended with every process it
+# started, the browser or installer children included.
+HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS = 300
+HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS = 60
+
+
 @router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_available() -> dict:
     """Tell the frontend whether the huashu pipeline is available.
@@ -1135,7 +1142,11 @@ async def export_pptx_huashu_install_chromium() -> dict:
     import subprocess
     from pathlib import Path
 
-    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+    from src.services.pptx_from_html_huashu import (
+        SIDECAR_DIR,
+        run_sidecar_process,
+        sidecar_subprocess_env,
+    )
 
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
@@ -1144,12 +1155,11 @@ async def export_pptx_huashu_install_chromium() -> dict:
         logger.warning("huashu install-chromium: playwright cli not found at %s", cli)
         return {"ok": False, "error": "playwright cli not found"}
     try:
-        result = subprocess.run(
+        result = run_sidecar_process(
             ["node", str(cli), "install", "chromium"],
+            input=b"",
+            timeout=HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS,
             cwd=str(SIDECAR_DIR),
-            capture_output=True,
-            timeout=300,
-            check=False,
             env=env,
         )
         logger.info(
@@ -1182,7 +1192,11 @@ async def export_pptx_huashu_probe_launch() -> dict:
     import subprocess
     from pathlib import Path
 
-    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+    from src.services.pptx_from_html_huashu import (
+        SIDECAR_DIR,
+        run_sidecar_process,
+        sidecar_subprocess_env,
+    )
 
     probe_js = SIDECAR_DIR / "probe_launch.mjs"
     if not probe_js.exists():
@@ -1192,12 +1206,11 @@ async def export_pptx_huashu_probe_launch() -> dict:
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
     try:
-        result = subprocess.run(
+        result = run_sidecar_process(
             ["node", str(probe_js)],
+            input=b"",
+            timeout=HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS,
             cwd=str(SIDECAR_DIR),
-            capture_output=True,
-            timeout=60,
-            check=False,
             env=env,
         )
         logger.info(
@@ -1241,10 +1254,11 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         raise HTTPException(
             status_code=503,
             detail=(
-                "huashu pipeline not available — local dev only. Ensure "
-                "ENVIRONMENT=development is set, services/pptx-emit-huashu/ "
-                "has node_modules installed, and `npx playwright install "
-                "chromium` has been run."
+                "huashu pipeline not available. It runs on Databricks Apps "
+                "with HUASHU_PIPELINE_ENABLED=1 once the boot's setup.sh has "
+                "installed the sidecar, or locally with ENVIRONMENT=development, "
+                "services/pptx-emit-huashu/ node_modules installed and "
+                "`npx playwright install chromium` run."
             ),
         )
 

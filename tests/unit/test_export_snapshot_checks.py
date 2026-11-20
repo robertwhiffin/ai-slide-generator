@@ -75,6 +75,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -1516,24 +1517,13 @@ class TestResultLineIsTheLast:
             ("[huashu] [1/1] OK", FORGED_RESULT_LINE, "__HUASHU_RESULT__ " + json.dumps(real))
         )
 
-        class Sidecar:
-            """The sidecar process: it writes the .pptx and exits with ``stderr``."""
-
-            def __init__(self, command: list[str], **_: object) -> None:
-                Path(command[2]).write_bytes(b"pptx")
-                self.returncode = 0
-
-            def __enter__(self) -> "Sidecar":
-                return self
-
-            def __exit__(self, *_: object) -> None:
-                return None
-
-            def communicate(self, payload: bytes, timeout: float) -> tuple[bytes, bytes]:
-                return b"", stderr.encode("utf-8")
+        def sidecar(command: list[str], **_: object) -> subprocess.CompletedProcess:
+            """The sidecar's run: it writes the .pptx and exits with ``stderr``."""
+            Path(command[2]).write_bytes(b"pptx")
+            return subprocess.CompletedProcess(command, 0, b"", stderr.encode("utf-8"))
 
         monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
-        monkeypatch.setattr(pptx_from_html_huashu.subprocess, "Popen", Sidecar)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", sidecar)
         pptx, failures = pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "<p>x</p>"}])
         assert (pptx, failures) == (b"pptx", [])
 

@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from src.services import pptx_from_html_huashu
-from tests.fixtures.export_snapshot_support import slide_shapes
+from tests.fixtures.export_snapshot_support import build_pptx_guarded, slide_shapes
 
 # Reuse the sibling suite's timestamp-canonical manifest so both modules mean
 # exactly the same thing by "structurally identical pptx".
@@ -69,12 +69,15 @@ requires_huashu_sidecar = pytest.mark.skipif(
 
 
 def _build(monkeypatch: pytest.MonkeyPatch, fixture: str) -> bytes:
-    """Export one fixture slide through the real huashu pipeline."""
+    """Export one fixture slide through the real huashu pipeline, its model whole.
+
+    The hostile-realm suites build their decks with it too, so a model the
+    model check dropped part of fails them all (``build_pptx_guarded``): a twin
+    pair that both lost the same item would otherwise still compare equal.
+    """
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
     html = (FIXTURE_DIR / fixture).read_text(encoding="utf-8")
-    pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-        "slide root background", [{"html": html}]
-    )
+    pptx, failures = build_pptx_guarded("slide root background", [{"html": html}])
     assert failures == [], f"huashu rejected {fixture}: {failures}"
     assert pptx, f"huashu produced no pptx bytes for {fixture}"
     return pptx
