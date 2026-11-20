@@ -44,6 +44,7 @@ from src.api.services.session_manager import (
     GenerationRefusedError,
     get_session_manager,
 )
+from src.core.attribution import set_entrypoint
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -275,6 +276,7 @@ async def _enter_turn_or_tool_error(
     and turns each refusal into a tool error with its user-facing copy. Anything
     unmapped propagates to the calling tool's own ``except Exception``.
     """
+    set_entrypoint("mcp")
     try:
         entered: EnteredTurn = await enter_chat_turn(
             session_id=session_id,

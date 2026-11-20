@@ -135,6 +135,65 @@ def reset_model_call_stop_checks():
     reset_stop_checks()
 
 
+@pytest.fixture(autouse=True)
+def clear_package_version_cache():
+    """Forget the cached app version before and after each test.
+
+    ``attribution.package_version`` looks the version up once per process, and
+    tests fake an installed wheel by patching ``importlib.metadata.version``
+    process-wide.  A version cached under one test's patch would otherwise label
+    every SDK client and Gateway request in the tests after it, in that worker.
+    """
+    from src.core.attribution import package_version
+
+    package_version.cache_clear()
+    yield
+    package_version.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def forget_remembered_user_products():
+    """Forget every token's remembered product name before and after each test.
+
+    ``attribution`` keeps one process-wide map from a token's SHA-256 to its
+    user's product name, filled whenever a user client is built.  Tests reuse
+    fixed tokens for different users, and some fill the map to its cap, so a
+    label remembered under one test would name the user in the tests after it,
+    in that worker.
+    """
+    from src.core import attribution
+
+    attribution._token_products.clear()
+    yield
+    attribution._token_products.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_entrypoint_outside_a_turn():
+    """Fail a test that starts, or leaves, the test's own context marked with an entrypoint.
+
+    ``attribution.set_entrypoint`` marks a chat turn (``app`` or ``mcp``) in a ContextVar,
+    and every Gateway tag built in that context carries it.  A turn marks its own request's
+    context, which the job queue copies; one marked in the test's context instead (by the
+    test, or by code run at import) would tag the Gateway requests of every test after it,
+    in that worker.  The leaking test fails, and the mark is cleared so the next one starts
+    clean.
+    """
+    from src.core import attribution
+
+    assert attribution.get_entrypoint() is None, (
+        "this test started in a context marked with an entrypoint"
+    )
+    yield
+    left = attribution.get_entrypoint()
+    if left is not None:
+        attribution._entrypoint_var.set(None)
+        pytest.fail(
+            f"this test left the entrypoint {left!r} in its own context: mark it inside a "
+            "copied context (contextvars.copy_context().run), as a turn does"
+        )
+
+
 @pytest.fixture
 def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).

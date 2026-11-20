@@ -776,7 +776,10 @@ def test_a_500_through_the_default_client_is_sent_exactly_once(ig, mock_ws, monk
     assert exc.value.status_code == 500
     assert len(ws.requests) == 1
     assert ws.requests[0].url.path == GATEWAY_RESPONSES_PATH
-    assert ws.requests[0].headers.get_list(TAG_HEADER) == ['{"source": "tellr"}']
+    # The production client names its feature: the ``image`` component.
+    assert [json.loads(tags) for tags in ws.requests[0].headers.get_list(TAG_HEADER)] == [
+        {"source": "tellr", "component": "image"}
+    ]
 
 
 # ---------------------------------------------------------------------------

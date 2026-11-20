@@ -356,7 +356,7 @@ class HtmlToGoogleSlidesConverter:
             from src.core.databricks_client import get_databricks_client
             self.ws_client = get_databricks_client()
 
-        self.llm_client = gateway_openai_client(self.ws_client)
+        self.llm_client = gateway_openai_client(self.ws_client, component="export")
         self.auth = google_auth or GoogleSlidesAuth()
         self.SYSTEM_PROMPT = DEFAULT_GSLIDES_SYSTEM_PROMPT
         self.USER_PROMPT = DEFAULT_GSLIDES_USER_PROMPT

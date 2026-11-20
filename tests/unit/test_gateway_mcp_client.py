@@ -62,6 +62,7 @@ from databricks.sdk.errors import NotFound, PermissionDenied
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, TextContent, Tool
 
+from src.core.attribution import package_version
 from src.domain.gateway_service_name import (
     validate_service_name as domain_validate_service_name,
 )
@@ -1155,7 +1156,15 @@ def test_default_factory_builds_a_pat_workspace_client_in_the_timed_worker(
         client.list_tools()
 
     assert info.value.kind == "unavailable"
-    assert [kwargs for kwargs, _ in built] == [{"host": HOST, "token": TOKEN, "auth_type": "pat"}]
+    assert [kwargs for kwargs, _ in built] == [
+        {
+            "host": HOST,
+            "token": TOKEN,
+            "auth_type": "pat",
+            "product": "tellr-app-unknown",
+            "product_version": package_version(),
+        }
+    ]
     assert built[0][1] is not threading.main_thread()
 
 
@@ -1417,14 +1426,20 @@ def _record_construction(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any
 def test_build_user_mcp_client_builds_with_keywords_against_the_service_path(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """T1.3: ``WorkspaceClient(host=, token=, auth_type="pat")`` and
-    ``Sub(server_url=, workspace_client=)``, keywords only."""
+    """T1.3: ``WorkspaceClient(host=, token=, auth_type="pat", product=, product_version=)``
+    and ``Sub(server_url=, workspace_client=)``, keywords only."""
     record, fake_ws, fake_mcp = _record_construction(monkeypatch)
 
     client = build_user_mcp_client(HOST, TOKEN, _service_path("a.b.c"))
 
     assert isinstance(client, fake_mcp)
-    assert record["ws"] == {"host": HOST, "token": TOKEN, "auth_type": "pat"}
+    assert record["ws"] == {
+        "host": HOST,
+        "token": TOKEN,
+        "auth_type": "pat",
+        "product": "tellr-app-unknown",
+        "product_version": package_version(),
+    }
     assert set(record["mcp"]) == {"server_url", "workspace_client"}
     assert record["mcp"]["server_url"] == f"{HOST}/ai-gateway/mcp-services/a.b.c"
     assert isinstance(record["mcp"]["workspace_client"], fake_ws)
@@ -1445,7 +1460,13 @@ def test_genie_one_surface_is_unchanged(monkeypatch: pytest.MonkeyPatch):
     client = genie_one._build_mcp_client(HOST, TOKEN)
 
     assert isinstance(client, fake_mcp)
-    assert record["ws"] == {"host": HOST, "token": TOKEN, "auth_type": "pat"}
+    assert record["ws"] == {
+        "host": HOST,
+        "token": TOKEN,
+        "auth_type": "pat",
+        "product": "tellr-app-unknown",
+        "product_version": package_version(),
+    }
     assert record["mcp"]["server_url"] == f"{HOST}{genie_one.GENIE_ONE_SERVICE_PATH}"
     assert isinstance(record["mcp"]["workspace_client"], fake_ws)
     # T1.3: Genie One stays on the base's sync call_tool.

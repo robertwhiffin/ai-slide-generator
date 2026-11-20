@@ -45,6 +45,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.core.attribution import set_entrypoint
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -1084,6 +1085,7 @@ async def submit_chat_async(
         ) from e
     new_session_id = request.session_id if created else None
 
+    set_entrypoint("app")
     try:
         entered = await enter_chat_turn(
             session_id=request.session_id,

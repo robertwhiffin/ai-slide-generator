@@ -646,15 +646,15 @@ class TestBuildSessionTitleModel:
             "use_ai_gateway": True,
             "max_tokens": 50,
             "workspace_client": sp_client,
-            "extra_params": {"extra_headers": gateway_request_headers()},
+            "extra_params": {"extra_headers": gateway_request_headers("title")},
         }]
         # ws2a follow-up A: newer Claude models 400 on sampling parameters.
         for sampling in ("temperature", "top_p", "top_k"):
             assert sampling not in constructed[0]
 
     def test_title_model_sends_the_tellr_tag_and_user_agent(self, monkeypatch):
-        """Title calls are attributable to Tellr in ``system.ai_gateway.usage``;
-        the headers ride as headers only, never in the JSON body."""
+        """Title calls are attributable to Tellr in ``system.ai_gateway.usage``, as the
+        ``title`` component; the headers ride as headers only, never in the JSON body."""
         import json
 
         import httpx
@@ -685,10 +685,14 @@ class TestBuildSessionTitleModel:
         assert len(workspace.requests) == 1
         request = workspace.requests[0]
         expected_ua = gateway_request_headers()["User-Agent"]
-        assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
+        sent_tags = request.headers.get_list("databricks-ai-gateway-request-tags")
+        assert [json.loads(tags) for tags in sent_tags] == [
+            {"source": "tellr", "component": "title"}
+        ]
         assert request.headers.get_list("user-agent") == [expected_ua]
         sent = json.loads(request.content)
         assert "extra_headers" not in sent and "extra_params" not in sent
+        assert "component" not in sent and "source" not in sent
 
     def test_both_chat_service_title_sites_use_the_helper(self):
         import inspect

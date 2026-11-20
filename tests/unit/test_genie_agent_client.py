@@ -46,6 +46,7 @@ from databricks.sdk.service.dashboards import (
     GenieStartConversationResponse,
 )
 
+from src.core.attribution import package_version
 from src.services.agent_tools import genie_agent, mcp_transport
 from src.services.agent_tools.genie_agent import (
     GENIE_AGENT_MAX_QUESTIONS,
@@ -824,6 +825,8 @@ def test_the_default_genie_is_built_once_as_the_user(monkeypatch: pytest.MonkeyP
             "auth_type": "pat",
             "http_timeout_seconds": genie_agent._CALL_TIMEOUT_SECONDS,
             "retry_timeout_seconds": genie_agent._CALL_TIMEOUT_SECONDS,
+            "product": "tellr-app-unknown",
+            "product_version": package_version(),
         }
     ]
     assert [(set(kwargs), on_worker) for kwargs, on_worker in built] == [({"config"}, True)]

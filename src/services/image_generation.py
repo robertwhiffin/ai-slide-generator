@@ -451,7 +451,7 @@ class ImageGenerationError(RuntimeError):
 
 def default_client() -> Any:
     """Gateway client with no SDK retries (a retry would be a second paid generation)."""
-    return gateway_openai_client(get_system_client(), max_retries=0)
+    return gateway_openai_client(get_system_client(), component="image", max_retries=0)
 
 
 def _usage_dict(usage: Any) -> dict | None:

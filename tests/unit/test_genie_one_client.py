@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from src.core.attribution import package_version
 from src.services.agent_tools.genie_one import (
     GENIE_ONE_SERVICE_PATH,
     GENIE_ONE_SOURCE,
@@ -820,7 +821,13 @@ def test_default_call_tool_url_identity_and_hung_call_timeout(monkeypatch: pytes
 
     assert elapsed < 2.0
     assert str(info.value).startswith("Genie One did not respond within")
-    assert record["ws"] == {"host": HOST, "token": TOKEN, "auth_type": "pat"}
+    assert record["ws"] == {
+        "host": HOST,
+        "token": TOKEN,
+        "auth_type": "pat",
+        "product": "tellr-app-unknown",
+        "product_version": package_version(),
+    }
     # Final fix (M8): built inside the call's worker thread, so the timeout covers it.
     assert record["ws_thread"] is not threading.main_thread()
     assert record["mcp"]["server_url"] == f"{HOST}/ai-gateway/mcp-services/system.ai.genie_one_mcp"

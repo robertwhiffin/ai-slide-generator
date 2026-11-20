@@ -22,6 +22,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import Field, create_model
 
 from src.api.schemas.agent_config import MCPTool
+from src.core.attribution import user_product_kwargs
 from src.core.databricks_client import get_user_client
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,9 @@ def _call_mcp_in_clean_thread(
 
     try:
         # Create a fresh workspace client in this thread
-        ws_client = WorkspaceClient(host=host, token=token, auth_type="pat")
+        ws_client = WorkspaceClient(
+            host=host, token=token, auth_type="pat", **user_product_kwargs(token)
+        )
 
         mcp_client = DatabricksMCPClient(
             server_url=server_url,
@@ -132,7 +135,9 @@ def _list_mcp_in_clean_thread(
         return []
 
     try:
-        ws_client = WorkspaceClient(host=host, token=token, auth_type="pat")
+        ws_client = WorkspaceClient(
+            host=host, token=token, auth_type="pat", **user_product_kwargs(token)
+        )
 
         mcp_client = DatabricksMCPClient(
             server_url=server_url,

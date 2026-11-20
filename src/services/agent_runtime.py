@@ -563,7 +563,7 @@ class DatabricksModelAdapter:
         # Workstream 2a: every graph model call goes through Unity AI Gateway
         # ({host}/ai-gateway/mlflow/v1), tagged source=tellr.  There is no
         # /serving-endpoints fallback.
-        return gateway_chat_model(**kwargs)
+        return gateway_chat_model(component="generation", **kwargs)
 
     @staticmethod
     def _default_client_factory() -> Any:

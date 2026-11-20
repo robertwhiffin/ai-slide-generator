@@ -109,6 +109,7 @@ def build_session_title_model():
     from src.services.gateway_clients import gateway_chat_model
 
     return gateway_chat_model(
+        component="title",
         model=SESSION_TITLE_MODEL,
         max_tokens=50,
         workspace_client=get_system_client(),

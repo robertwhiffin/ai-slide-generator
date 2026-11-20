@@ -96,6 +96,17 @@ class UserBearerAuth(httpx.Auth):
             await response.aread()
 
 
+def mcp_http_headers() -> dict[str, str]:
+    """Headers of Tellr's MCP HTTP client.
+
+    The User-Agent only: the AI Gateway records the request-tags header on model
+    routes, not on MCP routes.
+    """
+    from src.core.attribution import mcp_user_agent
+
+    return {"User-Agent": mcp_user_agent()}
+
+
 def build_user_mcp_client(host: str, token: str, service_path: str) -> Any:
     """A ``DatabricksMCPClient`` for one Gateway service, as the user owning ``host`` and ``token``.
 
@@ -106,6 +117,8 @@ def build_user_mcp_client(host: str, token: str, service_path: str) -> Any:
     from databricks_mcp import DatabricksMCPClient
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client
+
+    from src.core.attribution import user_product_kwargs
 
     class _UserMCPClient(DatabricksMCPClient):
         """``DatabricksMCPClient`` with :class:`UserBearerAuth` in place of its OAuth provider.
@@ -120,6 +133,7 @@ def build_user_mcp_client(host: str, token: str, service_path: str) -> Any:
                 auth=UserBearerAuth(self.client),
                 timeout=httpx.Timeout(30, read=300),
                 follow_redirects=True,
+                headers=mcp_http_headers(),
             ) as http_client:
                 async with streamable_http_client(self.server_url, http_client=http_client) as (
                     read_stream,
@@ -144,7 +158,9 @@ def build_user_mcp_client(host: str, token: str, service_path: str) -> Any:
 
             return await self._session_run(operation)
 
-    workspace_client = WorkspaceClient(host=host, token=token, auth_type="pat")
+    workspace_client = WorkspaceClient(
+        host=host, token=token, auth_type="pat", **user_product_kwargs(token)
+    )
     return _UserMCPClient(server_url=f"{host}{service_path}", workspace_client=workspace_client)
 
 

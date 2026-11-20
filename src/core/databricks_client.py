@@ -7,9 +7,13 @@ This module provides two types of WorkspaceClient:
 
 The user client is set per-request via middleware and stored in a ContextVar.
 
-Both client types set product tracking headers for API call attribution:
-- System client: product="tellr-app-system", product_version from package
-- User client: product="tellr-app-{hashed_user_id}"
+Both client types name a product for API call attribution. The SDK sends it, with
+product_version (the installed release, ``src/core/attribution.py``), at the start of
+each request's User-Agent:
+- System client: product="tellr-app-system"
+- User client: product="tellr-app-<hash>", the first 12 hex of the SHA-256 of the
+  user's email local part (when the user cannot be looked up: the label remembered for
+  the token, else the request's user's, else "tellr-app-unknown")
 
 For Homebrew installations, supports OAuth browser authentication via config file.
 """
@@ -27,6 +31,15 @@ import yaml
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.iam import User
 
+from src.core.attribution import (
+    PRODUCT_NAME_SYSTEM,
+    PRODUCT_NAME_USER_PREFIX,
+    hash_username,
+    package_version,
+    remember_user_product,
+    system_product_kwargs,
+    user_product_kwargs,
+)
 from src.core.user_context import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -44,59 +57,32 @@ _user_client_cache_lock = threading.Lock()
 _user_client_key_locks: dict[str, threading.Lock] = {}
 
 # =============================================================================
-# Product Tracking Constants
+# Product Tracking
 # =============================================================================
-
-PRODUCT_NAME_SYSTEM = "tellr-app-system"
-PRODUCT_NAME_USER_PREFIX = "tellr-app-"
+# The product names, the version and the username hash live in
+# ``src.core.attribution``; PRODUCT_NAME_SYSTEM and PRODUCT_NAME_USER_PREFIX are
+# imported from there above.
 
 
 def _get_package_version() -> str:
     """
     Get the package version for product tracking.
 
-    Tries setuptools_scm generated _version.py first, falls back to __init__.py.
-
-    Returns:
-        Version string (e.g., "0.1.0" or "0.1.0.dev0")
+    The installed ``databricks-tellr-app`` wheel's version, else the source
+    tree's: ``attribution.package_version``, the one cached lookup the Gateway
+    User-Agent also reports.
     """
-    try:
-        # Try setuptools_scm generated version first (available after build)
-        from src._version import version
-
-        return version
-    except ImportError:
-        pass
-
-    try:
-        # Fall back to __init__.py version
-        from src import __version__
-
-        return __version__
-    except ImportError:
-        pass
-
-    # Ultimate fallback
-    return "unknown"
+    return package_version()
 
 
 def _hash_username(username: str) -> str:
     """
     Create a short hash of the username for product tracking.
 
-    Extracts the local part from email addresses (before @) before hashing.
-    Uses first 12 characters of SHA-256 hash for a balance of
-    uniqueness and readability in logs/metrics.
-
-    Args:
-        username: User's email (e.g., "john.doe@company.com") or plain username
-
-    Returns:
-        12-character hex hash string
+    ``attribution.hash_username``: the first 12 hex of the SHA-256 of the
+    email's local part (the whole name when there is no ``@``).
     """
-    # Extract local part from email address
-    local_part = username.split("@")[0] if "@" in username else username
-    return hashlib.sha256(local_part.encode()).hexdigest()[:12]
+    return hash_username(username)
 
 
 # =============================================================================
@@ -429,8 +415,11 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
     the Databricks Apps proxy.
 
     Uses a two-stage creation process:
-    1. Create initial client to fetch the username
-    2. Recreate client with product tracking using hashed username
+    1. Create initial client to fetch the username, labelled as the app
+       (``tellr-app-system``) since the user is not known yet
+    2. Recreate client with product tracking using hashed username, and
+       remember that label for the token (``attribution.remember_user_product``)
+       so clients built from the same token in a worker thread carry it too
 
     Args:
         token: User's access token from request headers
@@ -470,6 +459,7 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
             host=host,
             token=token,
             auth_type="pat",
+            **system_product_kwargs(),
         )
 
         # Get username for product tracking (and, for the caller, the identity)
@@ -479,16 +469,22 @@ def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
             username = current_user.user_name or "unknown"
             user_hash = _hash_username(username)
             product_name = f"{PRODUCT_NAME_USER_PREFIX}{user_hash}"
+            # Only a resolved user is remembered: the fallback below must never
+            # replace a label already known for this token (``/Me`` is rate-limited,
+            # and a failed lookup is retried on the next request).
+            remember_user_product(token, product_name)
             logger.info(
                 "create_user_client: got username for product tracking",
                 extra={"username": username, "user_hash": user_hash},
             )
         except Exception as e:
-            # If we can't get username, use fallback product name
+            # Without the username, take the label every other site sends for this
+            # token: the one remembered for it, else the request's user, else
+            # ``tellr-app-unknown``. Nothing is remembered from a failed lookup.
             logger.warning(
                 f"create_user_client: couldn't get username for product tracking: {e}"
             )
-            product_name = f"{PRODUCT_NAME_USER_PREFIX}unknown"
+            product_name = user_product_kwargs(token)["product"]
 
         # Stage 2: Create final client with product tracking
         version = _get_package_version()

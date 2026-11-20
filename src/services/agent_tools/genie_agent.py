@@ -24,6 +24,7 @@ from databricks.sdk.config import Config
 from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
 from pydantic import BaseModel, Field
 
+from src.core.attribution import user_product_kwargs
 from src.core.scope_errors import is_missing_scope_error, mentions_missing_scope, scopes_grant
 from src.services.agent_tools.genie_one import (
     GENIE_AGENT_SOURCE_PREFIX,
@@ -146,6 +147,7 @@ class GenieAgentClient:
                         auth_type="pat",
                         http_timeout_seconds=_CALL_TIMEOUT_SECONDS,
                         retry_timeout_seconds=_CALL_TIMEOUT_SECONDS,
+                        **user_product_kwargs(self._token),
                     )
                     self._genie_obj = WorkspaceClient(config=config).genie
             return self._genie_obj
