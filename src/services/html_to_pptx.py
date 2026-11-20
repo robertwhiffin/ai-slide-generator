@@ -73,7 +73,7 @@ class HtmlToPptxConverterV3:
             self.ws_client = get_databricks_client()
 
         # Initialize OpenAI-compatible client for LLM calls through Unity AI Gateway
-        self.llm_client = gateway_openai_client(self.ws_client)
+        self.llm_client = gateway_openai_client(self.ws_client, component="export")
         
         # Load default prompts
         self.SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT

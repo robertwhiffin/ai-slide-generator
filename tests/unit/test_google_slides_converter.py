@@ -358,17 +358,18 @@ def test_extract_text_takes_only_the_text_block_of_a_gateway_thinking_reply():
 
 
 def test_google_slides_converter_defaults_to_the_gateway_model_and_client(monkeypatch):
+    """The client is built for the ``export`` component, and for nothing else."""
     sentinel_client = object()
     seen = []
     monkeypatch.setattr("src.services.html_to_google_slides.gateway_openai_client",
-                        lambda ws: seen.append(ws) or sentinel_client)
+                        lambda ws, **kwargs: seen.append((ws, kwargs)) or sentinel_client)
     workspace = object()
 
     converter = HtmlToGoogleSlidesConverter(workspace_client=workspace, google_auth=object())
 
     assert converter.model_endpoint == "system.ai.claude-sonnet-4-5"
     assert converter.llm_client is sentinel_client
-    assert seen == [workspace]
+    assert seen == [(workspace, {"component": "export"})]
 
 
 def test_google_slides_codegen_call_sends_no_sampling_parameters():

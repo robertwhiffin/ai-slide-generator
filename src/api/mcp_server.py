@@ -26,6 +26,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from src.api.mcp_auth import MCPAuthError, mcp_auth_scope
 from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
+from src.core.attribution import set_entrypoint
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -249,6 +250,7 @@ async def enqueue_create_job(
             request_id=request_id,
         )
 
+        set_entrypoint("mcp")
         await enqueue_job(
             request_id,
             {

@@ -168,6 +168,36 @@ def forget_remembered_user_products():
     attribution._token_products.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_entrypoint_outside_a_turn():
+    """Fail a test that starts, or leaves, the test's own context marked with an entrypoint.
+
+    ``attribution.set_entrypoint`` marks a chat turn (``app`` or ``mcp``) in a ContextVar,
+    and every Gateway tag built in that context carries it.  A turn marks its own request's
+    context, which the job queue copies; one marked in the test's context instead (by the
+    test, or by code run at import) would tag the Gateway requests of every test after it,
+    in that worker.  The leaking test fails, and the mark is cleared so the next one starts
+    clean.  Before ``attribution`` has a ``get_entrypoint`` there is nothing to leak.
+    """
+    from src.core import attribution
+
+    get_entrypoint = getattr(attribution, "get_entrypoint", None)
+    if get_entrypoint is None:
+        yield
+        return
+    assert get_entrypoint() is None, "this test started in a context marked with an entrypoint"
+    yield
+    left = get_entrypoint()
+    if left is not None:
+        entrypoint_var = getattr(attribution, "_entrypoint_var", None)
+        if entrypoint_var is not None:
+            entrypoint_var.set(None)
+        pytest.fail(
+            f"this test left the entrypoint {left!r} in its own context: mark it inside a "
+            "copied context (contextvars.copy_context().run), as a turn does"
+        )
+
+
 @pytest.fixture
 def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).

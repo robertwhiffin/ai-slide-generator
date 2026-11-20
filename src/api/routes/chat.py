@@ -44,6 +44,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
     get_session_manager,
 )
+from src.core.attribution import set_entrypoint
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -955,6 +956,7 @@ async def submit_chat_async(
                 raise _EngineRaceError()
 
             # Queue for processing
+            set_entrypoint("app")
             await enqueue_job(
                 request_id,
                 {

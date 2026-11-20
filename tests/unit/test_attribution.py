@@ -1,5 +1,6 @@
 """The labels Tellr puts on its own requests: product, version, never content."""
 
+import contextvars
 import hashlib
 import re
 import socket
@@ -492,3 +493,155 @@ def test_mcp_user_agent_leads_with_tellr(monkeypatch):
 
     monkeypatch.setattr(attribution.metadata, "version", _installed("9.9.9"))
     assert attribution.mcp_user_agent() == f"tellr/9.9.9 python-httpx/{httpx.__version__}"
+
+
+# ---------------------------------------------------------------------------
+# The turn's entrypoint: how a chat turn reached Tellr (its UI, or its MCP server)
+# ---------------------------------------------------------------------------
+
+#: Spelled out: a test that read them from ``ENTRYPOINTS`` would follow a changed list.
+ALL_ENTRYPOINTS = ("app", "mcp")
+
+
+class _Impostor(str):
+    """Free text posing as an allowed name: its hash and its equality are the name's.
+
+    ``impostor in frozenset({name})`` is ``True``, yet ``json.dumps`` writes its own
+    text, so a membership test alone would let that text into a label.
+    """
+
+    def __new__(cls, text: str, posing_as: str) -> "_Impostor":
+        impostor = super().__new__(cls, text)
+        impostor.posing_as = posing_as
+        return impostor
+
+    def __hash__(self) -> int:
+        return hash(self.posing_as)
+
+    def __eq__(self, other: object) -> bool:
+        return other == self.posing_as
+
+    def __ne__(self, other: object) -> bool:
+        return other != self.posing_as
+
+
+#: Values a turn's entrypoint must never be: each is ignored, and none raises.
+OFF_LIST_ENTRYPOINTS = [
+    pytest.param("cron", id="unknown-name"),
+    pytest.param("App", id="wrong-case"),
+    pytest.param("MCP", id="upper-case"),
+    pytest.param(" app", id="leading-space"),
+    pytest.param("mcp\n", id="trailing-newline"),
+    pytest.param("", id="empty"),
+    pytest.param("a prompt someone typed", id="free-text"),
+    pytest.param("app,mcp", id="two-names"),
+    pytest.param(None, id="none"),
+    pytest.param(1, id="int"),
+    pytest.param(True, id="bool"),
+    pytest.param(b"app", id="bytes"),
+    pytest.param(UserString("app"), id="str-like"),
+    pytest.param(["app"], id="unhashable-list"),
+    pytest.param({"entrypoint": "mcp"}, id="unhashable-dict"),
+]
+
+
+def test_the_entrypoints_are_exactly_app_and_mcp():
+    assert attribution.ENTRYPOINTS == frozenset(ALL_ENTRYPOINTS)
+    assert type(attribution.ENTRYPOINTS) is frozenset
+
+
+def test_entrypoint_is_unset_by_default_and_ignores_values_off_the_list():
+    """A value off the list changes nothing: it neither sets nor clears the turn's value."""
+    seen = []
+
+    def turn():
+        seen.append(attribution.get_entrypoint())
+        attribution.set_entrypoint("cron")
+        seen.append(attribution.get_entrypoint())
+        attribution.set_entrypoint("mcp")
+        seen.append(attribution.get_entrypoint())
+        attribution.set_entrypoint("cron")
+        seen.append(attribution.get_entrypoint())
+        attribution.set_entrypoint("app")
+        seen.append(attribution.get_entrypoint())
+
+    contextvars.copy_context().run(turn)
+
+    assert seen == [None, None, "mcp", "mcp", "app"]
+    assert attribution.get_entrypoint() is None
+
+
+@pytest.mark.parametrize("value", OFF_LIST_ENTRYPOINTS)
+def test_an_entrypoint_off_the_list_is_ignored_and_never_raises(value):
+    """A label never fails a request: an unhashable value, or a ``str`` stand-in equal to
+    ``"app"``, is ignored like any other value off the list (only a ``str`` counts)."""
+
+    def turn():
+        attribution.set_entrypoint(value)
+        before = attribution.get_entrypoint()
+        attribution.set_entrypoint("mcp")
+        attribution.set_entrypoint(value)
+        return before, attribution.get_entrypoint()
+
+    assert contextvars.copy_context().run(turn) == (None, "mcp")
+
+
+@pytest.mark.parametrize("posing_as", ALL_ENTRYPOINTS)
+def test_free_text_posing_as_an_entrypoint_is_never_kept(posing_as):
+    impostor = _Impostor("a prompt someone typed", posing_as)
+    assert impostor in frozenset(ALL_ENTRYPOINTS)  # precondition: it fools a membership test
+
+    def turn():
+        attribution.set_entrypoint(impostor)
+        return attribution.get_entrypoint()
+
+    kept = contextvars.copy_context().run(turn)
+
+    assert kept is None or (type(kept) is str and kept == posing_as), (
+        f"the entrypoint kept {kept!r}, a {type(kept).__name__}"
+    )
+
+
+def test_a_turns_entrypoint_stays_in_its_own_context():
+    """Each turn marks its entrypoint in its own context (a request's task, the job's copy
+    of it): no other turn, not one started later, and not the code around it, sees it."""
+    turn = contextvars.copy_context()
+    sibling = contextvars.copy_context()
+
+    turn.run(attribution.set_entrypoint, "mcp")
+    later = contextvars.copy_context()
+
+    assert turn.run(attribution.get_entrypoint) == "mcp"
+    assert sibling.run(attribution.get_entrypoint) is None
+    assert later.run(attribution.get_entrypoint) is None
+    assert attribution.get_entrypoint() is None
+
+
+def test_a_turns_entrypoint_reaches_a_thread_only_through_a_copied_context():
+    """The chat service copies the job's context for its graph and title threads: such a
+    thread sees the turn's entrypoint, and what it sets stays in its copy.  A bare thread
+    starts with none, as for every ContextVar."""
+    seen = {}
+
+    def turn():
+        attribution.set_entrypoint("app")
+
+        def bare():
+            seen["bare thread"] = attribution.get_entrypoint()
+
+        def copied():
+            seen["copied context"] = attribution.get_entrypoint()
+            attribution.set_entrypoint("mcp")
+
+        thread = threading.Thread(target=bare)
+        thread.start()
+        thread.join()
+        context = contextvars.copy_context()
+        thread = threading.Thread(target=lambda: context.run(copied))
+        thread.start()
+        thread.join()
+        seen["spawner, after"] = attribution.get_entrypoint()
+
+    contextvars.copy_context().run(turn)
+
+    assert seen == {"bare thread": None, "copied context": "app", "spawner, after": "app"}

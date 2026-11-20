@@ -1,17 +1,24 @@
 """The labels Tellr puts on its own requests.
 
-A label is a product name, a version or one of a fixed list of feature names.
-Nothing here ever carries a prompt, deck content, user text or a customer name.
+A label is a product name, a version or a value from a fixed list.  Nothing here
+ever carries a prompt, deck content, user text or a customer name.  The Gateway tag
+(``src/services/gateway_clients.py``) carries ``"source": "tellr"``, an optional
+``component`` from ``gateway_clients.COMPONENTS`` and an optional ``entrypoint``
+from :data:`ENTRYPOINTS`; a value off its list adds no key.
 The version lookup (``package_version``, and so ``system_product_kwargs``) returns
-a fallback instead of raising: a label must never be the reason a request or a
-deploy fails.  A user's product name is remembered under a SHA-256 of their token,
-never the token itself, so a client built in a worker thread can still be labelled.
+a fallback instead of raising, and a value off a list is ignored rather than raising:
+a label must never be the reason a request or a deploy fails.  A user's product name
+is remembered under a SHA-256 of their token, never the token itself, so a client
+built in a worker thread can still be labelled.  A chat turn's entrypoint lives in a
+ContextVar: only the turn's own context, and the copies of it that the job queue and
+the chat service take, can see it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import threading
+from contextvars import ContextVar
 from functools import lru_cache
 from importlib import metadata
 from typing import Final
@@ -128,3 +135,26 @@ def mcp_user_agent() -> str:
     import httpx
 
     return f"tellr/{package_version()} python-httpx/{httpx.__version__}"
+
+
+#: How a chat turn reached Tellr: its own UI, or its MCP server.
+ENTRYPOINTS: Final[frozenset[str]] = frozenset({"app", "mcp"})
+#: The chat turn's entrypoint, ``None`` outside a turn.  Each enqueue site sets it in
+#: its request's own context just before ``enqueue_job``, which copies that context
+#: for the worker, so every Gateway client built for the turn reads it.
+_entrypoint_var: ContextVar[str | None] = ContextVar("tellr_entrypoint", default=None)
+
+
+def set_entrypoint(value: str) -> None:
+    """Mark the current context's chat turn; a value off the list is ignored.
+
+    Only a plain ``str`` in :data:`ENTRYPOINTS` counts.  Any other value, an unhashable
+    value or a ``str`` stand-in included, changes nothing and never raises.
+    """
+    if type(value) is str and value in ENTRYPOINTS:
+        _entrypoint_var.set(value)
+
+
+def get_entrypoint() -> str | None:
+    """The current context's chat-turn entrypoint, or ``None`` outside a turn."""
+    return _entrypoint_var.get()

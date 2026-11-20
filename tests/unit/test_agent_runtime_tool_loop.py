@@ -1292,8 +1292,15 @@ def test_the_real_provider_client_accepts_the_tools_and_the_tool_result_history(
     assert second["messages"][2]["content"] == "42 rows"
 
 
+def _sent_tags(request: httpx.Request) -> list[dict[str, Any]]:
+    """Every tag header ``request`` carries, parsed (one, on a tagged request)."""
+    values = request.headers.get_list("databricks-ai-gateway-request-tags")
+    return [json.loads(tags) for tags in values]
+
+
 def test_every_tool_loop_round_carries_the_tellr_tag(monkeypatch):
-    """Each round re-invokes the bound model; none may lose Tellr's Gateway attribution."""
+    """Each round re-invokes the bound model; none may lose Tellr's Gateway attribution,
+    the ``generation`` component included."""
     from src.services.gateway_clients import gateway_request_headers
     from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
 
@@ -1317,12 +1324,69 @@ def test_every_tool_loop_round_carries_the_tellr_tag(monkeypatch):
     assert len(workspace.requests) == 2
     expected_ua = gateway_request_headers()["User-Agent"]
     for request in workspace.requests:
-        assert request.headers.get_list("databricks-ai-gateway-request-tags") == [
-            '{"source": "tellr"}'
-        ]
+        assert _sent_tags(request) == [{"source": "tellr", "component": "generation"}]
         assert request.headers.get_list("user-agent") == [expected_ua]
         sent = json.loads(request.content)
         assert "extra_headers" not in sent and "extra_params" not in sent
+        assert "component" not in sent and "source" not in sent
+
+
+def test_every_kind_of_tool_loop_round_carries_the_generation_component(monkeypatch):
+    """Four rounds, one of each kind the loop runs: a tool call that runs (and spends the
+    budget of one), a call refused because the budget is spent, a prose reply that is
+    nudged, and the schema call.  Each re-invokes the one bound model, and each request
+    carries one tag header naming the ``generation`` component, and no tag in its body."""
+    from src.services.gateway_clients import gateway_request_headers
+    from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
+
+    prose = {
+        "id": "mock",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "mock",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "I will answer in prose."},
+            }
+        ],
+    }
+    install_mock_gateway_transport(monkeypatch)
+    workspace = _scripted_gateway_workspace(
+        [
+            _completion("lookup", {"question": "sales by region"}, "call_ran"),
+            _completion("lookup", {"question": "sales by month"}, "call_refused"),
+            prose,
+            _completion(SCHEMA_NAME, OUTPUT, "call_final"),
+        ]
+    )
+    tool = RecordingTool(results=("42 rows",))
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
+
+    result = adapter.invoke_with_tools(
+        agent_key="data_analyst",
+        configuration=CONFIGURATION,
+        schema=SCHEMA,
+        prompt=PROMPT,
+        toolset=_toolset(tool, max_calls=1),
+    )
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert [run.args for run in tool.runs] == [LookupArgs(question="sales by region")]
+    assert len(workspace.requests) == 4
+    expected_ua = gateway_request_headers()["User-Agent"]
+    bodies = [json.loads(request.content) for request in workspace.requests]
+    # Each round's history ends as that kind of round left it.
+    assert bodies[1]["messages"][-1] == {"role": "user", "content": BUDGET_TEXT}
+    assert bodies[2]["messages"][-1]["tool_call_id"] == "call_refused"
+    assert bodies[3]["messages"][-1] == {"role": "user", "content": NUDGE_TEXT}
+    tag_fields = {"source", "component", "entrypoint", "extra_headers", "extra_params"}
+    for request, sent in zip(workspace.requests, bodies):
+        assert _sent_tags(request) == [{"source": "tellr", "component": "generation"}]
+        assert request.headers.get_list("user-agent") == [expected_ua]
+        assert not tag_fields & set(sent)
+        assert b"ai-gateway-request-tags" not in request.content.lower()
 
 
 def test_the_real_provider_client_sends_a_malformed_call_back_so_it_is_answered(monkeypatch):
