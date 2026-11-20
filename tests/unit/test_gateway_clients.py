@@ -410,20 +410,21 @@ _NOT_CALLED = "<referenced, not called>"
 def _builder_uses(source: str) -> list[tuple[str, object]]:
     """``(builder, component)`` for each use of a Gateway builder in ``source``, in order.
 
-    A use is a call (by the builder's name, an import alias, or ``module.<builder>``) or
-    any other reference to one, such as ``functools.partial(gateway_openai_client, ws)``,
-    which hides its component from this reader (``_NOT_CALLED``).  The component is the
-    literal passed as ``component=``; a ``**`` splat is not one.  Comments and prose are
-    not uses.
+    A use is a call (by the builder's own name however it was imported, absolute,
+    relative or ``*``; by an import alias; or as ``module.<builder>``) or any other
+    reference to one, such as ``functools.partial(gateway_openai_client, ws)``, which hides
+    its component from this reader (``_NOT_CALLED``).  The component is the literal passed
+    as ``component=``; a ``**`` splat is not one.  Comments and prose are not uses.
     """
     tree = ast.parse(source)
-    local_names = {
-        alias.asname or alias.name: alias.name
+    local_names = {name: name for name in _BUILDERS}
+    local_names.update(
+        (alias.asname or alias.name, alias.name)
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module == "src.services.gateway_clients"
         for alias in node.names
         if alias.name in _BUILDERS
-    }
+    )
 
     def builder_named(node: ast.AST) -> str | None:
         if isinstance(node, ast.Name):
@@ -480,6 +481,23 @@ def test_builder_reader_follows_aliases_attributes_and_bare_references():
     assert _builder_uses(source) == [
         ("gateway_openai_client", _NO_COMPONENT),
         ("gateway_chat_model", "generation"),
+        ("gateway_openai_client", _NOT_CALLED),
+    ]
+
+
+def test_builder_reader_sees_a_builder_however_its_name_was_imported():
+    """A relative or ``*`` import names no module this reader can match, so the builder's
+    own name is recognised wherever it appears."""
+    source = (
+        "from .gateway_clients import gateway_chat_model\n"
+        "from src.services.gateway_clients import *\n"
+        "gateway_chat_model(model=m)\n"
+        'gateway_openai_client(ws, component="export")\n'
+        "factory = gateway_openai_client\n"
+    )
+    assert _builder_uses(source) == [
+        ("gateway_chat_model", _NO_COMPONENT),
+        ("gateway_openai_client", "export"),
         ("gateway_openai_client", _NOT_CALLED),
     ]
 
@@ -568,6 +586,36 @@ def test_free_text_posing_as_an_entrypoint_never_reaches_the_tag(posing_as):
     )
 
 
+#: Free text posing as each entrypoint, as a value held in the turn's context.
+_IMPOSTOR_ENTRYPOINTS = [
+    pytest.param(_Impostor("a prompt someone typed", name), id=f"impostor-{name}")
+    for name in ALL_ENTRYPOINTS
+]
+
+
+@pytest.mark.parametrize("value", [*OFF_LIST_ENTRYPOINTS, *_IMPOSTOR_ENTRYPOINTS])
+def test_the_tag_checks_the_entrypoint_it_reads_itself(value):
+    """``_request_tags`` checks the value it reads, not only ``set_entrypoint`` the value it
+    writes: one put straight into the ContextVar, past that filter, adds no key and never
+    raises."""
+
+    def turn():
+        attribution._entrypoint_var.set(value)
+        return gateway_request_headers("generation")[REQUEST_TAGS_HEADER]
+
+    raw = contextvars.copy_context().run(turn)
+
+    assert json.loads(raw) == {"source": "tellr", "component": "generation"}
+
+
+def test_the_tag_is_sent_as_exactly_this_text():
+    """The header's text, not only its parsed value: ``source``, ``component`` and
+    ``entrypoint`` in that order, with ``json.dumps``' default separators."""
+    raw = _in_a_turn("mcp", lambda: gateway_request_headers("generation")[REQUEST_TAGS_HEADER])
+
+    assert raw == '{"source": "tellr", "component": "generation", "entrypoint": "mcp"}'
+
+
 @pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS)
 def test_clients_built_in_a_turn_send_its_entrypoint_beside_their_component(
     monkeypatch, entrypoint
@@ -594,11 +642,6 @@ def test_clients_built_in_a_turn_send_its_entrypoint_beside_their_component(
 # --- through the real job queue: enqueue site -> enqueue_job -> worker -> model call ---
 
 _TURN_MESSAGE = "build me a deck about eider ducks"
-
-
-def _entrypoint_here():
-    """This context's entrypoint (``None`` while ``attribution`` has no ``get_entrypoint``)."""
-    return getattr(attribution, "get_entrypoint", lambda: None)()
 
 
 def _title_tags(entrypoint) -> dict:
@@ -766,13 +809,13 @@ def _run_turns(*sends) -> list:
     async def main():
         for send in sends:
             await asyncio.create_task(send())
-        seen = [_entrypoint_here()]
+        seen = [attribution.get_entrypoint()]
         runner = asyncio.create_task(job_queue.worker())
         await asyncio.wait_for(job_queue.job_queue.join(), timeout=30)
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
-        seen.append(_entrypoint_here())
+        seen.append(attribution.get_entrypoint())
         return seen
 
     return asyncio.run(main())
@@ -921,6 +964,74 @@ def test_an_agent_decks_turn_from_the_app_tags_its_graph_and_title_calls(
     assert outer == [None, None]
 
 
+@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS)
+def test_a_legacy_decks_turn_tags_its_title_call_through_the_real_chat_service(
+    real_job_queue, monkeypatch, entrypoint
+):
+    """The Legacy (monolith) limb of the REAL chat service, reached from the real enqueue
+    site through the real worker.  It is the only place ``mcp`` reaches the Gateway today:
+    an MCP job runs the Legacy engine, whose deck calls build no Gateway client, so the
+    turn's first-message title call is its one tagged request.  The limb makes that call on
+    its own title thread, started in a copy of the job's context, so it carries the turn's
+    entrypoint beside the ``title`` component.  Only the service's stores and its agent are
+    stubbed; the agent returns no HTML, so no deck is saved."""
+    from src.api.services.chat_service import ChatService
+
+    workspace = _text_workspace(monkeypatch)
+    calling_threads = []
+    answer = workspace._handle
+
+    def handle(request):
+        calling_threads.append(threading.current_thread().name)
+        return answer(request)
+
+    workspace._handle = handle
+    monkeypatch.setattr("src.core.databricks_client.get_system_client", lambda: workspace)
+
+    agent = MagicMock()
+    agent.generate_slides_streaming.return_value = {"html": "", "metadata": {}}
+    service = ChatService.__new__(ChatService)
+    service._deck_cache = {}
+    service._cache_lock = threading.Lock()
+    service._get_or_load_deck = MagicMock(return_value=None)
+    service._build_agent_for_session = MagicMock(
+        return_value=(agent, {"genie_conversation_id": None}, None)
+    )
+    service._persist_genie_conversation_ids = MagicMock()
+    service._substitute_images_for_response = MagicMock(
+        side_effect=lambda deck, raw_html=None, *, session_id: (deck, raw_html)
+    )
+    service_manager = MagicMock()
+    service_manager.get_session.return_value = {"message_count": 1, "genie_conversation_id": None}
+    monkeypatch.setattr(
+        "src.api.services.chat_service.get_session_manager", lambda: service_manager
+    )
+    monkeypatch.setattr("src.core.settings_db.get_settings", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("src.api.services.chat_service.get_chat_service", lambda: service)
+    if entrypoint == "app":
+        submit, session_id = _app_route(monkeypatch, deck_mode="legacy"), "s-app"
+    else:
+        submit, session_id = _mcp_tool(monkeypatch), "s-mcp"
+    request_id = f"req-legacy-{entrypoint}"
+
+    outer = _run_turns(submit(request_id))
+
+    real_job_queue.manager.update_chat_request_status.assert_any_call(request_id, "completed")
+    # The monolith limb ran the turn: it built its agent and ran it once.
+    service._build_agent_for_session.assert_called_once()
+    agent.generate_slides_streaming.assert_called_once()
+    assert len(workspace.requests) == 1, workspace.requests
+    _assert_sent_with_tags(
+        workspace.requests[0], {"source": "tellr", "component": "title", "entrypoint": entrypoint}
+    )
+    # Sent from the limb's own title thread, not from the chat-job thread the job runs on.
+    assert len(calling_threads) == 1, calling_threads
+    assert not calling_threads[0].startswith("chat-job"), calling_threads
+    # ``run_title_gen`` ran to its end: the session took the model's title.
+    service_manager.rename_session.assert_called_once_with(session_id, "ok")
+    assert outer == [None, None]
+
+
 # --- the two enqueue sites mark their entrypoint before enqueueing ---
 
 
@@ -1036,7 +1147,9 @@ def test_the_enqueue_reader_counts_only_a_set_on_every_path_before_the_call(sour
 def test_both_enqueue_sites_mark_their_entrypoint_before_enqueueing():
     """``enqueue_job`` copies the context it is called in, so a job carries an entrypoint only
     if it was set on every path to the call, in the same function, before it.  These two
-    are the only places in ``src`` a chat turn is enqueued, and each marks only its own."""
+    are the only places in ``src`` a chat turn is enqueued or marked, and each marks only
+    its own: a mark anywhere else (in the chat service, say) would relabel the turns that
+    pass through it."""
     src = Path(__file__).resolve().parents[2] / "src"
     sites = sorted(
         path.relative_to(src).as_posix()
@@ -1047,6 +1160,13 @@ def test_both_enqueue_sites_mark_their_entrypoint_before_enqueueing():
         )
     )
     assert sites == ["api/mcp_server.py", "api/routes/chat.py"]
+    # Calls only: ``core/attribution.py`` defines ``set_entrypoint`` and calls it nowhere.
+    markers = {
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if _set_entrypoint_literals(path.read_text())
+    }
+    assert markers == {"api/routes/chat.py", "api/mcp_server.py"}
 
     for relative, value in (("api/routes/chat.py", "app"), ("api/mcp_server.py", "mcp")):
         source = (src / relative).read_text()

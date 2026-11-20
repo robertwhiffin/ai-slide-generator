@@ -177,21 +177,17 @@ def no_entrypoint_outside_a_turn():
     context, which the job queue copies; one marked in the test's context instead (by the
     test, or by code run at import) would tag the Gateway requests of every test after it,
     in that worker.  The leaking test fails, and the mark is cleared so the next one starts
-    clean.  Before ``attribution`` has a ``get_entrypoint`` there is nothing to leak.
+    clean.
     """
     from src.core import attribution
 
-    get_entrypoint = getattr(attribution, "get_entrypoint", None)
-    if get_entrypoint is None:
-        yield
-        return
-    assert get_entrypoint() is None, "this test started in a context marked with an entrypoint"
+    assert attribution.get_entrypoint() is None, (
+        "this test started in a context marked with an entrypoint"
+    )
     yield
-    left = get_entrypoint()
+    left = attribution.get_entrypoint()
     if left is not None:
-        entrypoint_var = getattr(attribution, "_entrypoint_var", None)
-        if entrypoint_var is not None:
-            entrypoint_var.set(None)
+        attribution._entrypoint_var.set(None)
         pytest.fail(
             f"this test left the entrypoint {left!r} in its own context: mark it inside a "
             "copied context (contextvars.copy_context().run), as a turn does"
