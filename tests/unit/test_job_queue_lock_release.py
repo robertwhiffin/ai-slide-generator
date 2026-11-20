@@ -8,10 +8,10 @@ sent their next message.  It would then free the NEXT turn's lock.
 The fix splits by engine:
 * a **graph** job releases with its ``request_id``, so a lock now owned by a newer
   request is left alone;
-* a **monolith** job (every MCP job: ``mcp_server.py`` acquires the lock and never
-  binds a request id, and its payload carries no ``engine_mode`` key) keeps today's
-  unconditional release.  A matched release there would never fire, and the lock
-  would leak.
+* a **monolith** job (a Legacy deck's turn, or a payload with no ``engine_mode``
+  key, such as the old MCP enqueue's, which acquired the lock and never bound a
+  request id) keeps today's unconditional release.  A matched release on an
+  unbound lock would never fire, and the lock would leak.
 
 These drive the real ``process_chat_request`` with a REAL ``SessionManager`` over
 a file-backed SQLite schema (``create_all`` + ``_run_migrations``).  The schema is
@@ -174,7 +174,7 @@ def _monolith_payload(sid: str, shape: str) -> dict:
     }
     if shape == "explicit":
         payload["engine_mode"] = "monolith"
-    else:  # mcp_server.py's enqueue payload: no engine_mode key, MCP's own `mode`
+    else:  # the old MCP enqueue payload: no engine_mode key, its own `mode` flag
         payload["mode"] = "generate"
         payload["correlation_id"] = "corr-1"
     return payload
@@ -241,7 +241,8 @@ async def test_graph_job_releases_its_own_lock(env):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shape", ["explicit", "mcp"], ids=["engine_mode=monolith", "mcp-payload"])
 async def test_monolith_job_releases_unbound_lock(env, shape):
-    """An MCP-style job: acquired, never bound.  Freed after the job, as today."""
+    """A job whose lock was acquired but never bound (as the old MCP enqueue left
+    it).  Freed after the job, as today."""
     e, chat = env
     sid = e.new_session()
     e.new_request(sid, "r-mcp")

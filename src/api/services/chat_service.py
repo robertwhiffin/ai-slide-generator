@@ -1949,7 +1949,9 @@ class ChatService:
 
         Yields:
             Every ``StreamEvent`` the graph emits, then ``COMPLETE`` carrying
-            the deck, then ``SESSION_TITLE`` when a title was generated.
+            the deck and ``metadata`` (``engine_mode`` and the turn's
+            ``architect_intent``, ``None`` when the graph returned no state),
+            then ``SESSION_TITLE`` when a title was generated.
         """
         from src.services.graph.builder import invoke_graph
 
@@ -1958,6 +1960,9 @@ class ChatService:
         event_queue: queue.Queue = queue.Queue()
         error_container: Dict[str, Exception] = {}
         title_container: Dict[str, str] = {}
+        # invoke_graph's final state, kept per call (never on self) so the
+        # COMPLETE event can carry the architect's intent.
+        state_container: Dict[str, Any] = {}
 
         # Capture context BEFORE starting thread to preserve user auth
         ctx = contextvars.copy_context()
@@ -1988,7 +1993,7 @@ class ChatService:
         def run_graph():
             """Run the graph in a separate thread, pushing events to the queue."""
             try:
-                invoke_graph(
+                state_container["state"] = invoke_graph(
                     session_id,
                     {"architect_message": message, "stage_slide": stage_slide},
                     emitter=event_queue,
@@ -2212,7 +2217,12 @@ class ChatService:
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
             slides=self.get_slides(session_id),
-            metadata={"engine_mode": "graph"},
+            metadata={
+                "engine_mode": "graph",
+                "architect_intent": (state_container.get("state") or {}).get(
+                    "architect_intent"
+                ),
+            },
         )
 
         logger.info(

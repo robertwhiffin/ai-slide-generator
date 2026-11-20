@@ -6,9 +6,14 @@ tests/integration/test_mcp_endpoint.py (added in Task 11).
 """
 
 import base64
+import copy
+import inspect
 import json
-from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+import re
+import threading
+from contextlib import ExitStack, contextmanager
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,7 +22,21 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.api.mcp_auth import MCPIdentity
+from src.api.routes import chat as chat_routes
+from src.api.routes.chat import (
+    EngineModeUnresolvedError,
+    EngineRaceError,
+    EnteredTurn,
+    SessionBusyError,
+)
+from src.api.schemas.agent_config import GenieOneTool
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    GenerationRefusedError,
+    SessionNotFoundError,
+)
 from src.core.database import Base
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 
 
 @pytest.fixture
@@ -71,30 +90,221 @@ def _make_synthetic_design_system(session, name, assets):
     return design_system
 
 
-def _render_mcp_deck_with_scope(session, deck, design_system_id):
-    from src.api.mcp_server import _render_deck_response
+# ---- MCP response shapes (links first; a JSON item, then the preview) ------
+#
+# Item 1's key orders are a contract: a truncating client (Genie One keeps the
+# first 180 KB of a tool result) must meet the links first. Asserted with
+# ``list(payload) == [...]``, since dict equality ignores order.
 
-    @contextmanager
-    def fake_db_session():
-        yield session
+_BASE = "https://t.example"
 
-    session_manager = MagicMock()
-    agent_config = (
-        {"design_system_id": design_system_id}
-        if design_system_id is not None
-        else {}
+_LINK_KEYS = ["deck_url", "deck_view_url"]
+_SUBMIT_KEYS = [*_LINK_KEYS, "session_id", "request_id", "status"]
+_PROGRESS_KEYS = [*_SUBMIT_KEYS, "progress"]
+_FAILED_KEYS = [*_SUBMIT_KEYS, "error"]
+_READY_KEY_ORDER = [
+    *_SUBMIT_KEYS,
+    "title",
+    "slide_count",
+    "preview",
+    "reply",
+    "deck_changed",
+    "replacement_info",
+    "metadata",
+]
+_GET_DECK_KEYS = [*_LINK_KEYS, "session_id", "title", "slide_count", "preview"]
+_PREVIEW_KEYS = ["included", "slides_shown", "slides_total", "images_hidden", "note"]
+#: Gone from every response (the deck twice over, and the turn transcript).
+_REMOVED_KEYS = ("deck", "html_document", "messages")
+
+#: Preview copy, verbatim from the Global Constraints (lowercase tellr). Literals,
+#: never the module's constants, so a changed constant goes red.
+_STRIP_COPY = "preview — open the full deck in tellr"
+_IMAGE_NOTICE_COPY = "image not shown in preview, see full deck in tellr"
+_NOTE_TAIL = "(standard fonts, images not shown). Open the full deck in tellr."
+_NO_SLIDES_NOTE = "This deck has no slides yet. Open it in tellr."
+#: UTF-8 bytes of item 1 text + item 2 text, the whole tool result.
+_RESULT_BUDGET_BYTES = 150_000
+
+
+def _links(session_id, base=_BASE):
+    """The two links, as literals (``_deck_links`` is tested against these)."""
+    return {
+        "deck_url": f"{base}/sessions/{session_id}/edit",
+        "deck_view_url": f"{base}/sessions/{session_id}/view",
+    }
+
+
+def _result_bytes(reply):
+    """What goes on the wire for ``reply``: every content item's UTF-8 bytes."""
+    return sum(len(item.text.encode("utf-8")) for item in reply.to_content())
+
+
+def _assert_two_items(reply):
+    """``to_content()`` is item 1 (the payload as JSON) then item 2 (the preview,
+    raw). Item 1 is exactly ``json.dumps(payload, ensure_ascii=False, indent=2,
+    default=str)``; item 2 is ``preview_html`` byte for byte."""
+    items = reply.to_content()
+    assert [item.type for item in items] == ["text", "text"]
+    assert items[0].text == json.dumps(
+        reply.payload, ensure_ascii=False, indent=2, default=str
     )
-    session_manager.get_session.return_value = {"agent_config": agent_config}
+    assert list(json.loads(items[0].text))[:2] == _LINK_KEYS
+    assert items[1].text == reply.preview_html
+    assert items[1].text.startswith("<!doctype html>")
+    return items
 
-    with patch("src.api.mcp_server.get_db_session", fake_db_session), patch(
-        "src.api.services.session_manager.get_session_manager",
-        return_value=session_manager,
-    ):
-        return _render_deck_response(
-            deck,
-            {"session_id": "synthetic-session", "title": "Synthetic Deck"},
-            "",
+
+def _assert_one_item(reply):
+    """No preview: one JSON item, links first."""
+    assert reply.preview_html is None
+    items = reply.to_content()
+    assert [item.type for item in items] == ["text"]
+    assert items[0].text == json.dumps(
+        reply.payload, ensure_ascii=False, indent=2, default=str
+    )
+    assert list(json.loads(items[0].text))[:2] == _LINK_KEYS
+    return items
+
+
+def _forbidden(target):
+    def _raise(*_args, **_kwargs):
+        raise AssertionError(f"the MCP deck path called {target}")
+
+    return _raise
+
+
+#: Every way to read image-library or design-system bytes for embedding. The
+#: preview never looks an ``{{image:…}}`` handle up and never embeds base64, so
+#: the MCP deck path calls none of these (S3). The ``src.api.mcp_server`` names
+#: cover a module-top import of the old substituters.
+_IMAGE_BYTE_READERS = (
+    ("src.utils.image_utils.substitute_deck_dict_images", False),
+    ("src.utils.image_utils.substitute_image_placeholders", False),
+    ("src.utils.ds_asset_utils.substitute_deck_dict_ds_assets", False),
+    ("src.services.image_service.get_image_base64", False),
+    ("src.services.design_system_service.get_asset_base64", False),
+    ("src.services.design_system_service.get_assets_base64", False),
+    ("src.api.mcp_server.substitute_deck_dict_images", True),
+    ("src.api.mcp_server.substitute_deck_dict_ds_assets", True),
+)
+
+
+@contextmanager
+def _image_bytes_never_read():
+    """Any call that would read image bytes fails the test."""
+    with ExitStack() as stack:
+        for target, create in _IMAGE_BYTE_READERS:
+            stack.enter_context(
+                patch(target, side_effect=_forbidden(target), create=create)
+            )
+        yield
+
+
+@contextmanager
+def _deck_read_env(identity, sm, *, base_url=_BASE, db=None, job_entry=None):
+    """Patch what ``_get_deck_impl`` / ``_get_deck_status_impl`` reach.
+
+    ``sm`` answers the tool's session-manager calls AND the design-system scope
+    lookup (``resolve_active_design_system_id`` reads
+    ``src.api.services.session_manager.get_session_manager``, C27), so the
+    ``agent_config`` in ``sm.get_session``'s answer sets the scope. ``db``, when
+    given, is what ``get_db_session`` yields. ``job_entry`` is the in-memory job
+    (None: popped, so the DB row decides). Any image-byte read fails the test.
+    """
+    with ExitStack() as stack:
+        auth_scope = stack.enter_context(patch("src.api.mcp_server.mcp_auth_scope"))
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc = stack.enter_context(patch("src.api.mcp_server.permission_service"))
+        perm_svc.can_view_deck.return_value = True
+        stack.enter_context(
+            patch("src.api.mcp_server.get_session_manager", return_value=sm)
         )
+        stack.enter_context(
+            patch(
+                "src.api.services.session_manager.get_session_manager",
+                return_value=sm,
+            )
+        )
+        stack.enter_context(
+            patch("src.api.mcp_server._public_app_url", return_value=base_url)
+        )
+        stack.enter_context(
+            patch("src.api.mcp_server.get_job_status", return_value=job_entry)
+        )
+        if db is not None:
+
+            @contextmanager
+            def fake_db_session():
+                yield db
+
+            stack.enter_context(
+                patch("src.api.mcp_server.get_db_session", fake_db_session)
+            )
+        stack.enter_context(_image_bytes_never_read())
+        yield
+
+
+def _deck_session_manager(deck, *, session_id="sess-1", title="Q3 Pitch",
+                          design_system_id=None):
+    """A session manager holding one deck. ``design_system_id`` is the session's
+    active design system (None: no scope)."""
+    agent_config = (
+        {"design_system_id": design_system_id} if design_system_id is not None else {}
+    )
+    sm = MagicMock()
+    sm.get_session.return_value = {
+        "session_id": session_id,
+        "title": title,
+        "agent_config": agent_config,
+    }
+    sm.get_slide_deck.return_value = deck
+    return sm
+
+
+async def _get_deck_reply(identity, deck, *, session_id="sess-1", title="Q3 Pitch",
+                          base_url=_BASE, db=None, design_system_id=None):
+    """``_get_deck_impl`` over one stored deck."""
+    from src.api import mcp_server
+
+    sm = _deck_session_manager(
+        deck, session_id=session_id, title=title, design_system_id=design_system_id
+    )
+    with _deck_read_env(identity, sm, base_url=base_url, db=db):
+        return await mcp_server._get_deck_impl(request=MagicMock(), session_id=session_id)
+
+
+async def _preview_with_scope(identity, db, deck, design_system_id):
+    """``get_deck``'s reply for ``deck`` on a session scoped to ``design_system_id``,
+    reading design-system assets from ``db`` (C27)."""
+    return await _get_deck_reply(
+        identity,
+        deck,
+        session_id="synthetic-session",
+        title="Synthetic Deck",
+        base_url="",
+        db=db,
+        design_system_id=design_system_id,
+    )
+
+
+def _slide_html(marker, body=""):
+    return f'<div class="slide"><h1>{marker}</h1><p>{body}</p></div>'
+
+
+def _deck_of(markers, *, body="", css="", title="Q3 Pitch", external_scripts=()):
+    return {
+        "title": title,
+        "slides": [{"html": _slide_html(m, body), "scripts": ""} for m in markers],
+        "css": css,
+        "external_scripts": list(external_scripts),
+        "head_meta": {},
+    }
+
+
+def _markers(count):
+    return [f"MK-S{n:02d}" for n in range(1, count + 1)]
 
 
 # ---- create_deck --------------------------------------------------------
@@ -108,7 +318,13 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-777", engine_mode="graph"),
+         ) as enter:
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -117,17 +333,10 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
 
-        async def _fake_enqueue(**kwargs):
-            return "req-777"
-
-        enqueue.side_effect = _fake_enqueue
-
         result = await mcp_server._create_deck_impl(
             request=fake_request,
             prompt="make a deck about Q3",
-            num_slides=7,
             slide_style_id=4,
-            deck_prompt_id=2,
             correlation_id="vibe-xyz",
         )
 
@@ -137,16 +346,16 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         agent_config = create_kwargs["agent_config"]
         assert agent_config["tools"] == []
         assert agent_config["slide_style_id"] == 4
-        assert agent_config["deck_prompt_id"] == 2
-        assert agent_config["num_slides"] == 7
 
-        enqueue.assert_called_once()
-        assert enqueue.call_args.kwargs["session_id"] == "sess-123"
-        assert enqueue.call_args.kwargs["prompt"] == "make a deck about Q3"
-        assert enqueue.call_args.kwargs["mode"] == "generate"
-        assert enqueue.call_args.kwargs["correlation_id"] == "vibe-xyz"
+        enter.assert_awaited_once()
+        assert enter.await_args.kwargs["session_id"] == "sess-123"
+        assert enter.await_args.kwargs["message"] == "make a deck about Q3"
+        assert enter.await_args.kwargs["extra_payload"] == {"correlation_id": "vibe-xyz"}
 
+        assert list(result) == _SUBMIT_KEYS
         assert result == {
+            "deck_url": "https://t.example/sessions/sess-123/edit",
+            "deck_view_url": "https://t.example/sessions/sess-123/view",
             "session_id": "sess-123",
             "request_id": "req-777",
             "status": "pending",
@@ -169,7 +378,12 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -179,11 +393,6 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
         get_sm.return_value = sm
 
         get_default.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -207,7 +416,12 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -215,11 +429,6 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
         sm = MagicMock()
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -246,7 +455,12 @@ async def test_create_deck_defaults_to_org_default_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -256,11 +470,6 @@ async def test_create_deck_defaults_to_org_default_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="a deck about widgets"
@@ -278,7 +487,12 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -286,11 +500,6 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", design_system_id=8
@@ -312,7 +521,12 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -321,11 +535,6 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
         get_default_ds.return_value = 5
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", slide_style_id=9
@@ -347,7 +556,12 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -357,11 +571,6 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(request=fake_request, prompt="deck")
 
@@ -382,7 +591,12 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -392,11 +606,6 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = 102
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -423,7 +632,12 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
          patch("src.api.mcp_server.get_default_template_id", return_value=None), \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -433,11 +647,6 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = None  # no such template
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         with caplog.at_level(logging.WARNING):
             result = await mcp_server._create_deck_impl(
@@ -469,7 +678,12 @@ async def test_create_deck_pins_the_design_systems_default_template(
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=resolved), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -477,11 +691,6 @@ async def test_create_deck_pins_the_design_systems_default_template(
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name=template_name
@@ -503,7 +712,12 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=102), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -511,11 +725,6 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -537,7 +746,12 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -547,11 +761,6 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         result = await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -802,29 +1011,6 @@ async def test_create_deck_rejects_injection_prompt(fake_request, identity):
 
 
 @pytest.mark.asyncio
-async def test_create_deck_rejects_num_slides_out_of_range(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope:
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=0,
-            )
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=51,
-            )
-
-
-@pytest.mark.asyncio
 async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
     from src.api import mcp_server
     from src.api.mcp_auth import MCPAuthError
@@ -841,6 +1027,467 @@ async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
         assert "auth" in str(exc.value).lower() or "credentials" in str(exc.value).lower()
 
 
+# ---- create_deck: an Agent deck, entered through enter_chat_turn ---------
+#
+# create_deck creates a deck_mode="agent" session seeded with the app's new-deck
+# tool defaults, then enters its first turn through ``_enter_turn_or_tool_error``.
+# That helper calls the async chat route's ``enter_chat_turn`` and maps each of
+# Enter's refusals to MCP error copy; anything it does not map propagates.
+
+#: The MCP error copy, verbatim from the plan's Global Constraints. These are
+#: literals, never the module's constants, so a typo in a constant goes red.
+_LEGACY_DECK_COPY = (
+    "This deck was made in Legacy mode and can't be edited over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_SESSION_BUSY_COPY = "This deck is busy with another request. Try again when it finishes."
+_DECK_LOCKED_COPY = "This deck is locked by {name}."
+_NO_GRAPH_RELEASE_COPY = (
+    "Tellr can't generate decks right now: no active Graph Release. "
+    "An admin needs to publish one."
+)
+_UNAVAILABLE_COPY = "Tellr is temporarily unavailable. Please retry."
+#: The async route's copy, which MCP reuses (``ENGINE_RACE_DETAIL`` and
+#: ``_GENERATION_REFUSED_DETAILS``).
+_ENGINE_RACE_COPY = "This deck changed while you sent your message. Try again."
+_RESTORE_PENDING_COPY = (
+    "This deck is still being restored after a failed generation. Try again in a minute."
+)
+_ARC_REVIEW_BUSY_COPY = (
+    "This deck is being updated in the background. Try again in a few seconds."
+)
+
+
+def _recording_session_manager(session_id="sess-123", *, create_error=None):
+    """A session manager whose ``create_session`` records a deep copy of each call.
+
+    The copy is taken at call time, so a config mutated after the session was
+    created can't pass for the config the session was created with.
+    """
+    sm = MagicMock()
+    sm.created = []
+
+    def _create_session(*args, **kwargs):
+        sm.created.append((args, copy.deepcopy(kwargs)))
+        if create_error is not None:
+            raise create_error
+        return {"session_id": session_id}
+
+    sm.create_session.side_effect = _create_session
+    return sm
+
+
+@contextmanager
+def _agent_create_deck_env(identity, session_manager, *, genie_one_default, request_id="req-777"):
+    """Patch what ``_create_deck_impl`` reaches, as the tests above patch it.
+
+    The style-source defaults are None, so the stored ``agent_config`` holds only
+    what the call itself put there. Genie One's admin default is patched where
+    the new-deck tool defaults read it (``src.api.routes.chat``). The public app
+    URL is ``_BASE``, so the returned links are absolute.
+    """
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=None), \
+         patch("src.api.mcp_server.get_default_slide_style_id", return_value=None), \
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE), \
+         patch(
+             "src.api.routes.chat.get_genie_one_default",
+             return_value=genie_one_default,
+         ), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id=request_id, engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        yield enter
+
+
+@pytest.mark.asyncio
+async def test_create_deck_creates_an_agent_deck_and_enters_it(fake_request, identity):
+    from src.api import mcp_server
+
+    # Whitespace and a slide count included: the prompt reaches Enter untouched.
+    prompt = "  Make a deck about Q3 revenue by region.\nUse 6 slides.  "
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt=prompt, correlation_id="vibe-xyz"
+        )
+
+    assert sm.created == [
+        (
+            (),
+            {
+                "created_by": "alice@example.com",
+                "agent_config": {"tools": []},
+                "deck_mode": "agent",
+            },
+        )
+    ]
+    enter.assert_awaited_once_with(
+        session_id="sess-123",
+        message=prompt,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "vibe-xyz"},
+    )
+    assert list(result) == _SUBMIT_KEYS
+    assert result == {
+        **_links("sess-123"),
+        "session_id": "sess-123",
+        "request_id": "req-777",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_returns_links_first(fake_request, identity):
+    """The session exists the moment create_deck returns, so its links come back at
+    once, first (a truncating client meets them before anything else). The values
+    are ``_deck_links``'s for the new session and the public app URL."""
+    from src.api import mcp_server
+    from src.api.mcp_server import _deck_links
+
+    sm = _recording_session_manager("sess-links-1")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False, request_id="req-l1"):
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a deck about churn"
+        )
+
+    assert isinstance(result, dict)
+    assert list(result)[:2] == ["deck_url", "deck_view_url"]
+    assert list(result) == _SUBMIT_KEYS
+    assert {key: result[key] for key in _LINK_KEYS} == _deck_links("sess-links-1", _BASE)
+    assert result["deck_url"] == "https://t.example/sessions/sess-links-1/edit"
+    assert result["deck_view_url"] == "https://t.example/sessions/sess-links-1/view"
+    assert (result["session_id"], result["request_id"], result["status"]) == (
+        "sess-links-1",
+        "req-l1",
+        "pending",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_deck_answers_an_agent_deck_refusal_with_its_copy(
+    fake_request, identity
+):
+    """create_deck enters through the refusal mapper: a refusal from Enter reaches
+    the caller as its copy, not as "Internal error"."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        enter.side_effect = EngineModeUnresolvedError()
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    enter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_genie_one_when_the_admin_default_is_on(
+    fake_request, identity
+):
+    from src.api import mcp_server
+
+    sm = _recording_session_manager()
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=True):
+        await mcp_server._create_deck_impl(request=fake_request, prompt="a deck about churn")
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": [GenieOneTool().model_dump()]}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_no_tools_for_a_token_less_caller(fake_request):
+    """A forwarded-identity caller has no token to run Genie One with, so the admin
+    default is not applied. The deck is still created and entered."""
+    from src.api import mcp_server
+
+    token_less = MCPIdentity(
+        user_id="user-abc",
+        user_name="alice@example.com",
+        token=None,
+        source="x-forwarded-identity",
+    )
+    sm = _recording_session_manager("sess-tokenless")
+
+    with _agent_create_deck_env(
+        token_less, sm, genie_one_default=True, request_id="req-tokenless-3"
+    ) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a deck about churn"
+        )
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": []}
+    enter.assert_awaited_once()
+    assert list(result) == _SUBMIT_KEYS
+    assert result == {
+        **_links("sess-tokenless"),
+        "session_id": "sess-tokenless",
+        "request_id": "req-tokenless-3",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_no_longer_stores_num_slides_or_deck_prompt_id(
+    fake_request, identity
+):
+    """Both parameters are gone. A slide count belongs in the prompt, and the deck
+    prompt no longer reaches an Agent deck."""
+    from src.api import mcp_server
+
+    for fn in (mcp_server._create_deck_impl, mcp_server.create_deck):
+        params = inspect.signature(fn).parameters
+        assert "num_slides" not in params, fn.__name__
+        assert "deck_prompt_id" not in params, fn.__name__
+    assert list(inspect.signature(mcp_server.create_deck).parameters) == [
+        "ctx",
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    ]
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "create_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    }
+
+    sm = _recording_session_manager()
+    with _agent_create_deck_env(identity, sm, genie_one_default=False):
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a 4-slide deck about churn", slide_style_id=4
+        )
+
+    [(_, create_kwargs)] = sm.created
+    agent_config = create_kwargs["agent_config"]
+    assert "num_slides" not in agent_config
+    assert "deck_prompt_id" not in agent_config
+    assert agent_config == {"tools": [], "slide_style_id": 4}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_maps_a_missing_graph_release_to_a_tool_error(
+    fake_request, identity
+):
+    """An Agent deck pins the active Graph Release when it is created. With none
+    published, create_session refuses, and the caller gets the copy (not
+    "Internal error"). Nothing is entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager(create_error=ActiveGraphReleaseUnavailableError())
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _NO_GRAPH_RELEASE_COPY
+    assert str(exc.value) == mcp_server.MCP_NO_GRAPH_RELEASE_ERROR
+    assert len(sm.created) == 1
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+
+
+# ---- _enter_turn_or_tool_error ------------------------------------------
+#
+# Each case: the error Enter raises, the app URL the deck link is built on, the
+# exact copy (from the literals above), the same copy built from the module's own
+# constant (so both the text and the constant it comes from are pinned), and the
+# holders whose display name is looked up.
+
+_REFUSAL_CASES = [
+    pytest.param(
+        SessionBusyError,
+        "https://tellr.example",
+        _SESSION_BUSY_COPY,
+        lambda m: m.MCP_SESSION_BUSY_ERROR,
+        [],
+        id="session-busy",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(
+            GenerationRefusedError.GENERATION_IN_FLIGHT, holder="bob@example.com"
+        ),
+        "https://tellr.example",
+        "This deck is locked by Bob.",
+        lambda m: m.MCP_DECK_LOCKED_ERROR.format(name="Bob"),
+        ["bob@example.com"],
+        id="generation-in-flight",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING),
+        "https://tellr.example",
+        _RESTORE_PENDING_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.RESTORE_PENDING
+        ],
+        [],
+        id="restore-pending",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.ARC_REVIEW_IN_FLIGHT),
+        "https://tellr.example",
+        _ARC_REVIEW_BUSY_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.ARC_REVIEW_IN_FLIGHT
+        ],
+        [],
+        id="arc-review-in-flight",
+    ),
+    pytest.param(
+        EngineRaceError,
+        "https://tellr.example",
+        _ENGINE_RACE_COPY,
+        lambda m: m.MCP_ENGINE_RACE_ERROR,
+        [],
+        id="engine-race",
+    ),
+    pytest.param(
+        EngineModeUnresolvedError,
+        "https://tellr.example",
+        _UNAVAILABLE_COPY,
+        lambda m: m.MCP_UNAVAILABLE_ERROR,
+        [],
+        id="engine-mode-unresolved",
+    ),
+    pytest.param(
+        ActiveGraphReleaseUnavailableError,
+        "https://tellr.example",
+        _NO_GRAPH_RELEASE_COPY,
+        lambda m: m.MCP_NO_GRAPH_RELEASE_ERROR,
+        [],
+        id="no-active-graph-release",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "https://tellr.example",
+        _LEGACY_DECK_COPY.format(deck_url="https://tellr.example/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(
+            deck_url="https://tellr.example/sessions/sess-9/edit"
+        ),
+        [],
+        id="legacy-deck-absolute-url",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "",
+        _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(deck_url="/sessions/sess-9/edit"),
+        [],
+        id="legacy-deck-relative-url",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_error", "app_url", "expected_copy", "copy_from_constant", "resolved_holders"),
+    _REFUSAL_CASES,
+)
+async def test_enter_turn_maps_every_refusal_to_its_copy(
+    make_error, app_url, expected_copy, copy_from_constant, resolved_holders
+):
+    from unittest.mock import call
+
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ) as enter, patch(
+        "src.api.mcp_server.resolve_display_name", return_value="Bob"
+    ) as resolve, patch("src.api.mcp_server._public_app_url", return_value=app_url):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert str(exc.value) == expected_copy
+    assert str(exc.value) == copy_from_constant(mcp_server)
+    enter.assert_awaited_once()
+    # Only a live generation's holder is looked up, and it is the holder Enter named.
+    assert resolve.call_args_list == [call(holder) for holder in resolved_holders]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # requested_deck_mode="agent" can't meet a deck locked to agent, so only
+        # "legacy" has copy; any other locked mode is not a refusal MCP maps.
+        pytest.param(lambda: DeckModeLockedError("agent"), id="deck-mode-locked-not-legacy"),
+        pytest.param(lambda: SessionNotFoundError("sess-9"), id="session-not-found"),
+        pytest.param(lambda: RuntimeError("queue exploded"), id="unmapped-error"),
+    ],
+)
+async def test_enter_turn_maps_every_refusal_and_nothing_else(make_error):
+    """What the mapping doesn't name propagates unchanged, to the tool's own
+    ``except Exception`` ("Internal error")."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ), patch("src.api.mcp_server.resolve_display_name", return_value="Bob"), patch(
+        "src.api.mcp_server._public_app_url", return_value=""
+    ):
+        with pytest.raises(type(error)) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert exc.value is error
+    assert not isinstance(exc.value, MCPToolError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correlation_id", ["corr-5", None])
+async def test_enter_turn_enters_the_agent_deck_turn_and_returns_its_request_id(
+    correlation_id,
+):
+    from src.api import mcp_server
+
+    with patch(
+        "src.api.mcp_server.enter_chat_turn",
+        new_callable=AsyncMock,
+        return_value=EnteredTurn(request_id="req-success-91", engine_mode="graph"),
+    ) as enter:
+        request_id = await mcp_server._enter_turn_or_tool_error(
+            session_id="sess-9", message="Add a churn slide", correlation_id=correlation_id
+        )
+
+    assert request_id == "req-success-91"
+    enter.assert_awaited_once_with(
+        session_id="sess-9",
+        message="Add a churn slide",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": correlation_id},
+    )
+
+
 # ---- get_deck_status ----------------------------------------------------
 
 
@@ -851,7 +1498,8 @@ async def test_get_deck_status_returns_pending_shape(fake_request, identity):
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_job_status") as get_status, \
-         patch("src.api.mcp_server.permission_service") as perm_svc:
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -865,19 +1513,173 @@ async def test_get_deck_status_returns_pending_shape(fake_request, identity):
             request_id="req-1",
         )
 
-        assert result == {
+        assert list(result.payload) == _PROGRESS_KEYS
+        assert result.payload == {
+            **_links("sess-1"),
             "session_id": "sess-1",
             "request_id": "req-1",
             "status": "pending",
             "progress": None,
         }
+        _assert_one_item(result)
 
 
 @pytest.mark.asyncio
-async def test_get_deck_status_returns_ready_with_full_deck(fake_request, identity):
+async def test_pending_status_returns_links_first(fake_request, identity):
+    """A pending poll carries the links first, with no preview. With no public app
+    URL they are relative, exactly as ``_deck_links`` builds them."""
+    from src.api import mcp_server
+    from src.api.mcp_server import McpToolReply, _deck_links
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status") as get_status, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server._public_app_url", return_value=""):
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+        get_status.return_value = {"status": "pending", "progress": {"step": "queued"}}
+
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request, session_id="sess-p", request_id="req-p"
+        )
+
+    assert isinstance(result, McpToolReply)
+    assert list(result.payload)[:2] == ["deck_url", "deck_view_url"]
+    assert list(result.payload) == _PROGRESS_KEYS
+    assert result.payload == {
+        "deck_url": "/sessions/sess-p/edit",
+        "deck_view_url": "/sessions/sess-p/view",
+        "session_id": "sess-p",
+        "request_id": "req-p",
+        "status": "pending",
+        "progress": {"step": "queued"},
+    }
+    assert {key: result.payload[key] for key in _LINK_KEYS} == _deck_links("sess-p", "")
+    [item] = _assert_one_item(result)
+    assert list(json.loads(item.text)) == _PROGRESS_KEYS
+
+
+def test_deck_links_builds_absolute_and_relative_links():
+    """``_deck_links`` is the one writer of both links: under the public app URL,
+    or relative when there is none."""
+    from src.api.mcp_server import _deck_links
+
+    absolute = _deck_links("sess-9", "https://t.example")
+    assert list(absolute) == ["deck_url", "deck_view_url"]
+    assert absolute == {
+        "deck_url": "https://t.example/sessions/sess-9/edit",
+        "deck_view_url": "https://t.example/sessions/sess-9/view",
+    }
+
+    relative = _deck_links("sess-9", "")
+    assert list(relative) == ["deck_url", "deck_view_url"]
+    assert relative == {
+        "deck_url": "/sessions/sess-9/edit",
+        "deck_view_url": "/sessions/sess-9/view",
+    }
+
+
+def _db_row(status, **fields):
+    return {
+        "request_id": "r",
+        "session_id": 42,  # integer PK, as the real session_manager returns
+        "status": status,
+        "error_message": None,
+        "created_at": "2026-11-18T09:00:00",
+        "completed_at": None,
+        "result": None,
+        **fields,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_entry", "db_row", "expected_tail"),
+    [
+        pytest.param(
+            {"status": "pending"}, None,
+            {"status": "pending", "progress": None}, id="memory-pending",
+        ),
+        pytest.param(
+            {"status": "running", "progress": {"slides": 2}}, None,
+            {"status": "running", "progress": {"slides": 2}}, id="memory-running",
+        ),
+        pytest.param(
+            {"status": "failed", "error": "MK-TIMEOUT"}, None,
+            {"status": "failed", "error": "MK-TIMEOUT"}, id="memory-failed",
+        ),
+        pytest.param(
+            None, _db_row("pending"),
+            {"status": "pending", "progress": None}, id="db-pending",
+        ),
+        pytest.param(
+            None, _db_row("running"),
+            {"status": "running", "progress": None}, id="db-running",
+        ),
+        pytest.param(
+            None, _db_row("cancelled"),
+            {"status": "failed", "error": "This generation was stopped in Tellr. "
+             "The deck is unchanged."}, id="db-stopped",
+        ),
+        pytest.param(
+            None,
+            _db_row(
+                "cancelled",
+                error_message="MK-RESTORE-PENDING",
+                rollback_outcome="restore_failed",
+            ),
+            {"status": "failed", "error": "MK-RESTORE-PENDING"}, id="db-restore-failed",
+        ),
+        pytest.param(
+            None, _db_row("error", error_message="MK-WORKER-DIED"),
+            {"status": "failed", "error": "MK-WORKER-DIED"}, id="db-error",
+        ),
+        pytest.param(
+            None, _db_row("mystery"),
+            {"status": "failed", "error": "Unknown job status: 'mystery'"},
+            id="db-unknown-status",
+        ),
+    ],
+)
+async def test_every_non_ready_status_returns_links_first(
+    fake_request, identity, job_entry, db_row, expected_tail
+):
+    """Every pending, running and failed form of the poll: one JSON item whose
+    first keys are the deck's two links, then the fields it always had."""
+    from src.api import mcp_server
+
+    sm = MagicMock()
+    sm.get_chat_request.return_value = db_row
+    sm.get_session_id_for_request.return_value = "s"
+
+    with _deck_read_env(identity, sm, job_entry=job_entry):
+        result = await mcp_server._get_deck_status_impl(
+            request=fake_request, session_id="s", request_id="r"
+        )
+
+    expected_keys = _PROGRESS_KEYS if "progress" in expected_tail else _FAILED_KEYS
+    assert list(result.payload) == expected_keys
+    assert result.payload == {
+        "deck_url": "https://t.example/sessions/s/edit",
+        "deck_view_url": "https://t.example/sessions/s/view",
+        "session_id": "s",
+        "request_id": "r",
+        **expected_tail,
+    }
+    _assert_one_item(result)
+    # No deck read for a turn that is not ready.
+    sm.get_slide_deck.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_deck_status_returns_ready_with_links_and_preview(fake_request, identity):
     """DB ready path: worker finished and popped the in-memory job, so the
     MCP tool reads the completed ``chat_request`` row and re-fetches the
-    deck via ``SessionManager.get_slide_deck``."""
+    deck via ``SessionManager.get_slide_deck``. Item 1 carries the links first and
+    a ``preview`` summary; item 2 is the preview page. The structured deck, the
+    full HTML document and the transcript are gone."""
     from src.api import mcp_server
 
     fake_session = {"session_id": "sess-1", "title": "Q3 Pitch"}
@@ -923,45 +1725,54 @@ async def test_get_deck_status_returns_ready_with_full_deck(fake_request, identi
         },
     ]
 
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_job_status", return_value=None), \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+    sm = MagicMock()
+    sm.get_chat_request.return_value = fake_chat_request
+    sm.get_session_id_for_request.return_value = "sess-1"
+    sm.get_slide_deck.return_value = fake_deck
+    sm.get_session.return_value = fake_session
+    sm.get_messages_for_request.return_value = fake_turn_messages
 
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_view_deck.return_value = True
-
-        sm = MagicMock()
-        sm.get_chat_request.return_value = fake_chat_request
-        sm.get_session_id_for_request.return_value = "sess-1"
-        sm.get_slide_deck.return_value = fake_deck
-        sm.get_session.return_value = fake_session
-        sm.get_messages_for_request.return_value = fake_turn_messages
-        get_sm.return_value = sm
-
-        result = await mcp_server._get_deck_status_impl(
+    with _deck_read_env(identity, sm):
+        reply = await mcp_server._get_deck_status_impl(
             request=fake_request,
             session_id="sess-1",
             request_id="req-1",
         )
 
-        assert result["status"] == "ready"
-        assert result["session_id"] == "sess-1"
-        assert result["slide_count"] == 1
-        assert result["title"] == "Q3 Pitch"
-        assert "deck" in result and "slides" in result["deck"]
-        assert result["html_document"].lower().startswith("<!doctype")
-        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
-        assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
-        assert result["replacement_info"] is None
-        assert result["metadata"]["latency_ms"] == 10000
-        assert result["metadata"]["experiment_url"] == "https://mlflow.example/exp/123"
-        # Messages come from the DB turn transcript, not from the job dict.
-        assert len(result["messages"]) == 2
-        assert result["messages"][0]["role"] == "user"
-        assert result["messages"][0]["content"] == "make Q3 deck"
+    result = reply.payload
+    assert list(result) == _READY_KEY_ORDER
+    for removed in _REMOVED_KEYS:
+        assert removed not in result
+    assert result["status"] == "ready"
+    assert result["session_id"] == "sess-1"
+    assert result["request_id"] == "req-1"
+    assert result["slide_count"] == 1
+    assert result["title"] == "Q3 Pitch"
+    assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+    assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+    assert result["replacement_info"] is None
+    assert result["metadata"]["latency_ms"] == 10000
+    assert result["metadata"]["experiment_url"] == "https://mlflow.example/exp/123"
+    # The transcript's rows still decide ``reply``: none is an llm_response here.
+    assert result["reply"] is None
+    assert list(result["preview"]) == _PREVIEW_KEYS
+    assert result["preview"] == {
+        "included": True,
+        "slides_shown": 1,
+        "slides_total": 1,
+        "images_hidden": 0,
+        "note": f"Showing all 1 slide as a preview {_NOTE_TAIL}",
+    }
+
+    _assert_two_items(reply)
+    page = reply.preview_html
+    assert _STRIP_COPY in page
+    assert '<a href="https://t.example/sessions/sess-1/edit"' in page
+    assert "<div class='slide'>A</div>" in page
+    # External scripts (the Chart.js CDN tag) stay.
+    assert '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>' in page
+    # The transcript is not in item 1 any more.
+    assert "make Q3 deck" not in reply.to_content()[0].text
 
 
 @pytest.mark.asyncio
@@ -990,8 +1801,10 @@ async def test_get_deck_status_returns_failed_with_error(fake_request, identity)
             request_id="req-1",
         )
 
-        assert result["status"] == "failed"
-        assert "10 minutes" in result["error"]
+        assert list(result.payload) == _FAILED_KEYS
+        assert result.payload["status"] == "failed"
+        assert "10 minutes" in result.payload["error"]
+        _assert_one_item(result)
 
 
 @pytest.mark.asyncio
@@ -1054,7 +1867,8 @@ async def test_get_deck_status_falls_back_to_db_when_job_popped_from_memory(
          patch("src.api.mcp_server.get_job_status", return_value=None) as get_status, \
          patch("src.api.mcp_server.permission_service") as perm_svc, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"), \
+         _image_bytes_never_read():
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -1099,12 +1913,17 @@ async def test_get_deck_status_falls_back_to_db_when_job_popped_from_memory(
         # read from session.get_session output.
         sm.get_slide_deck.assert_called_once_with("sess-1")
 
-        assert result["status"] == "ready"
-        assert result["slide_count"] == 1
-        assert "deck" in result
-        assert result["html_document"].lower().startswith("<!doctype")
-        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
-        assert result["metadata"]["latency_ms"] == 15000
+        payload = result.payload
+        assert list(payload) == _READY_KEY_ORDER
+        assert payload["status"] == "ready"
+        assert payload["slide_count"] == 1
+        assert payload["reply"] is None
+        assert payload["preview"]["included"] is True
+        assert payload["deck_url"] == "https://t.example/sessions/sess-1/edit"
+        assert payload["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+        assert payload["metadata"]["latency_ms"] == 15000
+        _assert_two_items(result)
+        assert "<div class='slide'>A</div>" in result.preview_html
 
 
 # ---- get_deck_status: clarification turns (WG2-01) ----------------------
@@ -1149,16 +1968,23 @@ _UNCHANGED_DECK = {
 }
 
 
+_ONE_SLIDE = object()  # sentinel: the stored deck is ``_UNCHANGED_DECK``
+
+
 async def _ready_status(fake_request, identity, *, result_metadata, replacement_info,
-                        turn_messages):
+                        turn_messages, deck=_ONE_SLIDE, base_url=_BASE, db=None,
+                        design_system_id=None):
     """Drive the ready path of ``_get_deck_status_impl`` over one stored worker result.
 
     ``result["metadata"]`` is the COMPLETE StreamEvent's metadata copied verbatim by
     ``job_queue.process_chat_request``, so passing chat_service's own dict here is the
-    real inter-layer contract, not a restatement of it.
+    real inter-layer contract, not a restatement of it. ``deck`` is what
+    ``get_slide_deck`` answers (default: ``_UNCHANGED_DECK``, one slide; ``None``: no
+    deck stored yet). Any image-byte read fails the test.
     """
     from src.api import mcp_server
 
+    deck = copy.deepcopy(_UNCHANGED_DECK if deck is _ONE_SLIDE else deck)
     chat_request = {
         "request_id": "req-1",
         "session_id": 42,  # integer PK, as the real session_manager returns
@@ -1167,7 +1993,7 @@ async def _ready_status(fake_request, identity, *, result_metadata, replacement_
         "created_at": "2026-04-22T12:00:00",
         "completed_at": "2026-04-22T12:00:01",
         "result": {
-            "slides": _UNCHANGED_DECK["slides"],
+            "slides": (deck or {}).get("slides"),
             "raw_html": "<html>...</html>",
             "replacement_info": replacement_info,
             "experiment_url": None,
@@ -1176,24 +2002,12 @@ async def _ready_status(fake_request, identity, *, result_metadata, replacement_
         },
     }
 
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_job_status", return_value=None), \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+    sm = _deck_session_manager(deck, design_system_id=design_system_id)
+    sm.get_chat_request.return_value = chat_request
+    sm.get_session_id_for_request.return_value = "sess-1"
+    sm.get_messages_for_request.return_value = turn_messages
 
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_view_deck.return_value = True
-
-        sm = MagicMock()
-        sm.get_chat_request.return_value = chat_request
-        sm.get_session_id_for_request.return_value = "sess-1"
-        sm.get_slide_deck.return_value = _UNCHANGED_DECK
-        sm.get_session.return_value = {"session_id": "sess-1", "title": "Q3 Pitch"}
-        sm.get_messages_for_request.return_value = turn_messages
-        get_sm.return_value = sm
-
+    with _deck_read_env(identity, sm, base_url=base_url, db=db):
         return await mcp_server._get_deck_status_impl(
             request=fake_request,
             session_id="sess-1",
@@ -1270,7 +2084,7 @@ async def _applied_edit_status(fake_request, identity):
 async def test_get_deck_status_flags_a_clarification_turn(fake_request, identity):
     """The fix. chat_service sets ``clarification_needed`` on the turn it declines to
     apply; the tool must pass that on rather than drop it while rebuilding metadata."""
-    result = await _clarification_status(fake_request, identity)
+    result = (await _clarification_status(fake_request, identity)).payload
 
     assert result["metadata"]["clarification_needed"] is True
     # `status` is deliberately NOT redefined — existing clients read it and a
@@ -1282,7 +2096,7 @@ async def test_get_deck_status_flags_a_clarification_turn(fake_request, identity
 async def test_get_deck_status_surfaces_the_clarification_question(fake_request, identity):
     """A client that must act on the clarification needs the QUESTION, not just a
     boolean, and it should not have to re-derive it by filtering the transcript."""
-    result = await _clarification_status(fake_request, identity)
+    result = (await _clarification_status(fake_request, identity)).payload
 
     assert result["metadata"]["clarification"] == _RC10_CLARIFICATION_TEXT
 
@@ -1294,8 +2108,8 @@ async def test_a_clarification_is_distinguishable_from_an_applied_edit(
     """The finding itself. Both turns are genuinely "ready", and both can carry a null
     replacement_info, so neither of those fields separates them — a client reading only
     the documented response must still be able to tell that nothing was applied."""
-    clarified = await _clarification_status(fake_request, identity)
-    applied = await _applied_edit_status(fake_request, identity)
+    clarified = (await _clarification_status(fake_request, identity)).payload
+    applied = (await _applied_edit_status(fake_request, identity)).payload
 
     # Pin WHY the extra field is needed: status alone cannot tell these apart.
     assert clarified["status"] == applied["status"] == "ready"
@@ -1308,7 +2122,7 @@ async def test_a_clarification_is_distinguishable_from_an_applied_edit(
 async def test_an_applied_edit_still_reports_exactly_as_it_did(fake_request, identity):
     """The other half: adding the signal must not disturb the success case. Every field
     a client reads today keeps its value, and the new flag reads falsey."""
-    result = await _applied_edit_status(fake_request, identity)
+    result = (await _applied_edit_status(fake_request, identity)).payload
 
     assert result["status"] == "ready"
     assert result["replacement_info"] == {"replaced": [2], "count": 1}
@@ -1325,126 +2139,577 @@ async def test_both_clarification_kinds_are_reported_the_same_way(fake_request, 
     """chat_service raises two different clarifications, in a streaming and a sync twin
     each, and all four attach the same ``{"clarification_needed": True}``. The reporting
     fix is therefore one lookup, and it must not be specific to RC10's wording."""
-    result = await _clarification_status(
-        fake_request, identity, text=_AMBIGUOUS_INTENT_CLARIFICATION_TEXT
-    )
+    result = (
+        await _clarification_status(
+            fake_request, identity, text=_AMBIGUOUS_INTENT_CLARIFICATION_TEXT
+        )
+    ).payload
 
     assert result["metadata"]["clarification_needed"] is True
     assert result["metadata"]["clarification"] == _AMBIGUOUS_INTENT_CLARIFICATION_TEXT
 
 
-# ---- edit_deck ----------------------------------------------------------
+# ---- get_deck_status: Agent turns, reply, deck_changed, stopped turns ----
+#
+# An Agent (graph) turn's COMPLETE metadata is exactly
+# ``{"engine_mode": "graph", "architect_intent": <intent or None>}`` (chat_service's
+# graph COMPLETE), which job_queue copies verbatim into ``result["metadata"]``. It
+# carries no replacement_info, counters or experiment URL. A turn stored before intents
+# were recorded has ``{"engine_mode": "graph"}`` only, and a Legacy (monolith) result
+# has no ``engine_mode`` at all.
+#
+# The architect speaks in ``role="assistant", message_type="llm_response"`` rows, and on
+# a graph turn only the architect does. The data analyst's answer, the deck reviewer's
+# advisory, Gateway notices and tool progress are assistant ``info`` / ``tool_call``
+# rows, and they can come AFTER the architect's reply. A turn that fetched data first
+# has two architect rows, and its second pass's intent is the turn's.
+
+#: Every top-level key of a ready payload: the order is ``_READY_KEY_ORDER``. No
+#: ``deck``, ``html_document`` or ``messages`` (``reply`` is still derived from the
+#: turn's rows; only the transcript key went).
+_READY_KEYS = frozenset(_READY_KEY_ORDER)
+
+#: The Global Constraints copy, restated so that a changed constant also turns red.
+_STOPPED_COPY = "This generation was stopped in Tellr. The deck is unchanged."
+
+_STARTER_REPLY = (
+    "Here's a starter deck: five slides on Q3 revenue. You could explore next: "
+    "a split by region, or a slide on the Q4 forecast."
+)
+_REVIEWER_ADVISORY = "Deck review: slide 4's chart has no axis labels."
+_GATEWAY_NOTICE = "Glean couldn't be reached, so this turn carried on without it."
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_submits_with_slide_context(fake_request, identity):
-    from src.api import mcp_server
+def _turn(*rows):
+    """A turn's persisted rows, in order, from ``(role, message_type, content)``."""
+    return [
+        {
+            "id": n,
+            "role": role,
+            "content": content,
+            "message_type": message_type,
+            "created_at": f"2026-11-18T09:00:{n:02d}",
+            "metadata": None,
+        }
+        for n, (role, message_type, content) in enumerate(rows, start=1)
+    ]
 
-    # session_manager.get_slide_deck returns the deck dict
-    fake_deck = {
-        "title": "x",
-        "slides": [
-            {"html": "<div class='slide'>0</div>", "scripts": ""},
-            {"html": "<div class='slide'>1</div>", "scripts": ""},
-            {"html": "<div class='slide'>2</div>", "scripts": ""},
-        ],
-        "css": "",
-        "external_scripts": [],
-        "head_meta": {},
+
+def _graph_metadata(intent):
+    """The graph COMPLETE's metadata for a turn whose (final) intent is ``intent``."""
+    return {"engine_mode": "graph", "architect_intent": intent}
+
+
+async def _agent_status(fake_request, identity, *, result_metadata, turn):
+    return await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=result_metadata,
+        replacement_info=None,  # the graph's COMPLETE carries none
+        turn_messages=turn,
+    )
+
+
+def _agent_turn_metadata(*, clarification_needed, clarification):
+    """A graph turn's reported ``metadata``: the pass-through fields as today (the
+    graph's COMPLETE leaves the counters and experiment URL empty) and the pair."""
+    return {
+        "tool_calls": None,
+        "latency_ms": None,
+        "experiment_url": None,
+        "session_title": "Q3 Pitch",
+        "clarification_needed": clarification_needed,
+        "clarification": clarification,
     }
 
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-1"
 
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        sm = MagicMock()
-        sm.get_slide_deck.return_value = fake_deck
-        get_sm.return_value = sm
-
-        result = await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make slide 2 more exciting",
-            slide_indices=[1],
-        )
-
-        enqueue.assert_called_once()
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["session_id"] == "sess-1"
-        assert kwargs["prompt"] == "make slide 2 more exciting"
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"]["indices"] == [1]
-        assert kwargs["slide_context"]["slide_htmls"] == ["<div class='slide'>1</div>"]
-
-        assert result == {
-            "session_id": "sess-1",
-            "request_id": "req-edit-1",
-            "status": "pending",
-        }
+def _assert_ready_payload(reply, *, replacement_info=None):
+    """Everything in a ready reply except ``reply``, ``deck_changed`` and ``metadata``,
+    which each test asserts whole: item 1's keys in order, the links, the ``preview``
+    summary of the one-slide deck, and item 2 (the preview page). A ready turn
+    carries the preview whether or not it changed the deck."""
+    result = reply.payload
+    assert set(result) == _READY_KEYS
+    assert list(result) == _READY_KEY_ORDER
+    for removed in _REMOVED_KEYS:
+        assert removed not in result
+    assert result["status"] == "ready"
+    assert result["session_id"] == "sess-1"
+    assert result["request_id"] == "req-1"
+    assert result["slide_count"] == 1
+    assert result["title"] == "Q3 Pitch"
+    assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+    assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+    assert result["replacement_info"] == replacement_info
+    assert list(result["preview"]) == _PREVIEW_KEYS
+    assert result["preview"] == {
+        "included": True,
+        "slides_shown": 1,
+        "slides_total": 1,
+        "images_hidden": 0,
+        "note": f"Showing all 1 slide as a preview {_NOTE_TAIL}",
+    }
+    _assert_two_items(reply)
+    assert _STRIP_COPY in reply.preview_html
+    assert "<div class='slide'>A</div>" in reply.preview_html
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_submits_without_slide_context_when_indices_omitted(
-    fake_request, identity
+async def _db_terminal_status(
+    fake_request, identity, *, db_status, error_message, **row_fields
 ):
+    """Poll request ``r`` of deck ``s`` after the worker dropped its in-memory entry,
+    with the DB row ended ``db_status``. ``row_fields`` adds further
+    ``get_chat_request`` keys (e.g. ``rollback_outcome``). The public app URL is
+    ``_BASE``."""
     from src.api import mcp_server
 
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-2"
+    chat_request = {
+        "request_id": "r",
+        "session_id": 42,  # integer PK, as the real session_manager returns
+        "status": db_status,
+        "error_message": error_message,
+        "created_at": "2026-11-18T09:00:00",
+        "completed_at": "2026-11-18T09:00:05",
+        "result": None,
+        **row_fields,
+    }
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status", return_value=None), \
          patch("src.api.mcp_server.permission_service") as perm_svc, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
+        perm_svc.can_view_deck.return_value = True
 
         sm = MagicMock()
-        # If slide_indices is omitted, get_slide_deck should NOT be called
-        sm.get_slide_deck.return_value = None
+        sm.get_chat_request.return_value = chat_request
+        sm.get_session_id_for_request.return_value = "s"
         get_sm.return_value = sm
 
-        await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make it more exciting",
+        return await mcp_server._get_deck_status_impl(
+            request=fake_request, session_id="s", request_id="r"
         )
 
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"] is None
+
+class TestGetDeckStatusReportsAgentTurns:
+    """``reply``, ``deck_changed`` and stopped turns.
+
+    A class whose name says "status", so ``-k status`` selects every test here,
+    including those whose own names don't.
+    """
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_build_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        status = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("build"), turn=turn
+        )
+        result = status.payload
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_edit_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        """An edit changes the deck too. Its reply is the architect's row although
+        assistant rows follow it: the deck reviewer speaks last, in an ``info`` row."""
+        reply = "Done: slide 2's title is larger, and nothing else moved."
+        turn = _turn(
+            ("user", "user_query", "On slide 2, make the title bigger"),
+            ("assistant", "tool_call", "Searching Glean for the brand guide"),
+            ("assistant", "llm_response", reply),
+            ("assistant", "info", _REVIEWER_ADVISORY),
+        )
+
+        status = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("edit"), turn=turn
+        )
+        result = status.payload
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("intent", "query", "reply"),
+        [
+            (
+                "discuss",
+                "Does the arc of this deck hold up?",
+                "Mostly. Should slide 3's revenue be split by region or by product?",
+            ),
+            (
+                "confirm_design_contract",
+                "Use the Databricks brand",
+                "I'd restyle the deck in the Databricks brand: navy grounds and Inter "
+                "type. Shall I go ahead?",
+            ),
+        ],
+        ids=["discuss", "confirm_design_contract"],
+    )
+    async def test_status_of_an_agent_discussion_reports_an_unchanged_deck(
+        self, fake_request, identity, intent, query, reply
+    ):
+        """Nothing is built on these turns. The stored metadata has no
+        ``clarification_needed`` key, so the flag comes from the intent, and the
+        question is the architect's reply: a graph turn writes no ``clarification``
+        row."""
+        turn = _turn(
+            ("user", "user_query", query),
+            ("assistant", "tool_call", "Searching Glean for the Q3 plan"),
+            ("assistant", "llm_response", reply),
+        )
+        result_metadata = _graph_metadata(intent)
+        assert "clarification_needed" not in result_metadata
+
+        status = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+        result = status.payload
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=reply
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result_metadata",
+        [
+            pytest.param({"engine_mode": "graph"}, id="stored-before-intents"),
+            pytest.param(_graph_metadata(None), id="graph-returned-no-intent"),
+        ],
+    )
+    async def test_status_of_an_agent_turn_with_no_intent_reports_an_unchanged_deck(
+        self, fake_request, identity, result_metadata
+    ):
+        """Pre-pass Ruling 2. With no intent to go on, a graph turn reports an unchanged
+        deck and its reply as the question. It is still a graph turn: it does not fall
+        back to the Legacy rule, which would read ``deck_changed`` as True."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        status = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+        result = status.payload
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=_STARTER_REPLY
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("final_intent", "final_reply", "after_reply", "deck_changed"),
+        [
+            pytest.param(
+                "build",
+                "Built it: five slides on Q3 revenue, led by EMEA.",
+                [("assistant", "info", _REVIEWER_ADVISORY)],
+                True,
+                id="then-build",
+            ),
+            pytest.param(
+                "discuss",
+                "EMEA led Q3 with 41% of revenue. Want a slide on why?",
+                [],
+                False,
+                id="then-discuss",
+            ),
+        ],
+    )
+    async def test_reply_is_the_last_architect_message_of_the_turn(
+        self, fake_request, identity, final_intent, final_reply, after_reply, deck_changed
+    ):
+        """An ``ask_data`` turn runs the architect twice. It asks for data and says
+        so, the data analyst answers in an ``info`` row, and the architect's second
+        pass answers the user and sets the turn's intent. The reply is that second
+        architect row: not the first one, not the analyst's answer, and not the
+        reviewer's advisory that follows a build."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue by region"),
+            ("assistant", "llm_response", "Let me fetch the Q3 numbers from Genie One."),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue by region"),
+            ("assistant", "info", "Q3 revenue by region: EMEA 41%, AMER 38%, APJ 21%."),
+            ("assistant", "llm_response", final_reply),
+            *after_reply,
+        )
+
+        status = await _agent_status(
+            fake_request,
+            identity,
+            result_metadata=_graph_metadata(final_intent),
+            turn=turn,
+        )
+        result = status.payload
+
+        assert result["reply"] == final_reply
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed,
+            clarification=None if deck_changed else final_reply,
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("intent", "deck_changed"), [("build", True), ("discuss", False)])
+    async def test_status_of_an_agent_turn_without_an_architect_message_reports_no_reply(
+        self, fake_request, identity, intent, deck_changed
+    ):
+        """``reply`` is null when the architect said nothing this turn. The other
+        assistant rows are not a reply, so there is no question to report either."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+        )
+
+        status = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata(intent), turn=turn
+        )
+        result = status.payload
+
+        assert result["reply"] is None
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed, clarification=None
+        )
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_turn_reports_failed_with_the_stopped_copy(
+        self, fake_request, identity
+    ):
+        """Review Focus 2. A stop in the Tellr app ends the request ``cancelled``
+        (``cancel_chat`` writes no error message), and the worker drops the in-memory
+        entry. The poll terminates as ``failed`` with the stopped copy, never
+        "Unknown job status"."""
+        from src.api import mcp_server
+
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="cancelled", error_message=None
+        )
+
+        assert list(result.payload) == _FAILED_KEYS
+        assert result.payload == {
+            "deck_url": "https://t.example/sessions/s/edit",
+            "deck_view_url": "https://t.example/sessions/s/view",
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": mcp_server.MCP_STOPPED_ERROR,
+        }
+        assert result.payload["error"] == _STOPPED_COPY
+        _assert_one_item(result)
+
+    @pytest.mark.asyncio
+    async def test_a_stop_whose_restore_failed_reports_the_restore_pending_copy(
+        self, fake_request, identity
+    ):
+        """Review M1. A stop whose restore failed ends the request ``cancelled``
+        with ``rollback_outcome="restore_failed"`` and the restore-pending copy
+        (``generation_rollback._record_restore_failed``). The deck may still hold
+        the turn's changes and stays locked until a retry restores it, so the poll
+        reports that copy, never "The deck is unchanged"."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=_RESTORE_PENDING_COPY,
+            rollback_outcome="restore_failed",
+        )
+
+        assert list(result.payload) == _FAILED_KEYS
+        assert result.payload == {
+            "deck_url": "https://t.example/sessions/s/edit",
+            "deck_view_url": "https://t.example/sessions/s/view",
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _RESTORE_PENDING_COPY,
+        }
+        _assert_one_item(result)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rollback_outcome",
+        ["rolled_back", None],
+        ids=["rolled-back", "no-outcome"],
+    )
+    async def test_a_rolled_back_stop_keeps_the_stopped_copy(
+        self, fake_request, identity, rollback_outcome
+    ):
+        """Review M1, the converse: only ``restore_failed`` swaps the copy. A normal
+        stop's real row (``rolled_back``, no error message; also what a retry that
+        restored the deck leaves) and a row with no outcome report the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=None,
+            rollback_outcome=rollback_outcome,
+        )
+
+        assert list(result.payload) == _FAILED_KEYS
+        assert result.payload == {
+            "deck_url": "https://t.example/sessions/s/edit",
+            "deck_view_url": "https://t.example/sessions/s/view",
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _STOPPED_COPY,
+        }
+        _assert_one_item(result)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error_message", "reported"),
+        [
+            (
+                "Generation exceeded maximum duration (10 minutes)",
+                "Generation exceeded maximum duration (10 minutes)",
+            ),
+            (None, "Generation failed"),
+        ],
+        ids=["timeout", "no-error-message"],
+    )
+    async def test_status_of_an_errored_turn_still_reports_its_own_error(
+        self, fake_request, identity, error_message, reported
+    ):
+        """C16. A timeout, an orphan sweep and a worker failure all end the request
+        ``error``. Only a stop writes ``cancelled``, so only a stop gets the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="error", error_message=error_message
+        )
+
+        assert list(result.payload) == _FAILED_KEYS
+        assert result.payload == {
+            "deck_url": "https://t.example/sessions/s/edit",
+            "deck_view_url": "https://t.example/sessions/s/view",
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": reported,
+        }
+        _assert_one_item(result)
+
+    @pytest.mark.asyncio
+    async def test_a_pre_existing_legacy_result_reports_as_before_plus_the_new_keys(
+        self, fake_request, identity
+    ):
+        """Review Focus 5. A Legacy MCP turn's stored result has no ``engine_mode``.
+        It reports what it reported before, field for field, plus ``reply`` (the
+        same rule as an Agent turn; neither transcript has an ``llm_response`` row)
+        and ``deck_changed = not clarification_needed``."""
+        clarified_reply = await _clarification_status(fake_request, identity)
+        applied_reply = await _applied_edit_status(fake_request, identity)
+        clarified, applied = clarified_reply.payload, applied_reply.payload
+
+        assert clarified["reply"] is None
+        assert clarified["deck_changed"] is False
+        assert clarified["metadata"] == {
+            "tool_calls": 0,
+            "latency_ms": 1300,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": True,
+            "clarification": _RC10_CLARIFICATION_TEXT,
+        }
+        _assert_ready_payload(clarified_reply)
+
+        assert applied["reply"] is None
+        assert applied["deck_changed"] is True
+        assert applied["metadata"] == {
+            "tool_calls": 3,
+            "latency_ms": 41000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(
+            applied_reply, replacement_info={"replaced": [2], "count": 1}
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_legacy_turn_reports_its_last_llm_response_as_the_reply(
+        self, fake_request, identity
+    ):
+        """Legacy turns write ``llm_response`` rows too (the monolith's LLM output),
+        so the same rule gives them a reply. Everything else is computed as before: no
+        clarification, so the deck changed, with or without a replacement_info."""
+        final = "Here are three slides on Q3 revenue, one per region."
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", "Let me pull the Q3 numbers first."),
+            ("assistant", "tool_call", "Calling query_genie_space"),
+            ("tool", "tool_result", "| region | revenue |\n| EMEA | 41% |"),
+            ("assistant", "llm_response", final),
+        )
+
+        status = await _ready_status(
+            fake_request,
+            identity,
+            result_metadata={"tool_calls": 1, "latency_ms": 22000},
+            replacement_info=None,
+            turn_messages=turn,
+        )
+        result = status.payload
+
+        assert result["reply"] == final
+        assert result["deck_changed"] is True
+        assert result["metadata"] == {
+            "tool_calls": 1,
+            "latency_ms": 22000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(status)
+
+    @pytest.mark.asyncio
+    async def test_the_status_tool_description_names_reply_and_deck_changed(self):
+        """What MCP clients read in tools/list points them at the new fields."""
+        from src.api import mcp_server
+
+        [tool] = [
+            t for t in await mcp_server.mcp.list_tools() if t.name == "get_deck_status"
+        ]
+        assert re.search(r"\breply\b", tool.description)
+        assert re.search(r"\bdeck_changed\b", tool.description)
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_rejects_non_contiguous_indices(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        with pytest.raises(MCPToolError) as exc:
-            await mcp_server._edit_deck_impl(
-                request=fake_request,
-                session_id="sess-1",
-                instruction="edit",
-                slide_indices=[0, 2],  # not contiguous
-            )
-        assert "contiguous" in str(exc.value).lower()
+# ---- edit_deck ----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1467,128 +2732,679 @@ async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
             )
 
 
+# ---- edit_deck: owner-only, Agent-only, entered through enter_chat_turn ---
+#
+# edit_deck enters an Agent turn on the caller's own Agent deck through
+# ``_enter_turn_or_tool_error``, with the instruction verbatim (a change or a
+# question for the architect; slides are named by number in the text, so there
+# is no ``slide_indices``). Before Enter, after the edit-permission check,
+# ``_require_agent_deck_owner`` refuses, in this order: a deck the caller doesn't
+# own (or their contributor session on someone's deck), a Legacy deck, and a
+# deck someone else's live generation holds. A refusal enters nothing.
+
+#: Literal copy, as for create_deck above: never the module's constants.
+_OWNER_ONLY_COPY = (
+    "Only the deck's owner can edit it over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_EDIT_DENIED_COPY = "Deck not found or you do not have permission to edit it"
+
+#: The only session-manager calls the owner gate makes. Both are reads.
+_EDIT_GATE_READS = {"get_session", "live_generation_holder"}
+
+#: What the patched display-name lookup answers (else the email, as SCIM's does).
+_EDIT_DISPLAY_NAMES = {"bob@example.com": "Bob", "carol@example.com": "Carol"}
+
+
+def _edit_deck_session_manager(
+    *,
+    created_by="alice@example.com",
+    is_contributor_session=False,
+    live_holder=None,
+    idle_holder=None,
+):
+    """A session manager that knows one deck, ``sess-1``.
+
+    ``live_generation_holder`` answers ``live_holder`` only for a
+    ``live_only=True`` lookup (the app route's). Without it, it answers
+    ``idle_holder``: an idle contributor's heartbeat lock, which never blocks
+    the owner.
+    """
+    sm = MagicMock()
+
+    def _get_session(session_id):
+        if session_id != "sess-1":
+            raise SessionNotFoundError(session_id)
+        return {
+            "session_id": "sess-1",
+            "created_by": created_by,
+            "is_contributor_session": is_contributor_session,
+        }
+
+    def _live_generation_holder(session_id, *, live_only=False):
+        if session_id != "sess-1":
+            return None
+        return live_holder if live_only else idle_holder
+
+    sm.get_session.side_effect = _get_session
+    sm.live_generation_holder.side_effect = _live_generation_holder
+    return sm
+
+
+@contextmanager
+def _edit_deck_env(identity, session_manager, *, engine="graph", can_edit=True):
+    """Patch what ``_edit_deck_impl`` reaches.
+
+    ``engine`` is what the engine resolver answers for ``sess-1`` (a missing
+    session resolves to "monolith", as the real resolver's does), or an
+    exception for it to raise. The public app URL is empty, so deck links are
+    relative. Display names come from ``_EDIT_DISPLAY_NAMES``.
+    """
+
+    def _resolve_engine(session_id):
+        if isinstance(engine, BaseException):
+            raise engine
+        return engine if session_id == "sess-1" else "monolith"
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch(
+             "src.api.mcp_server.resolve_engine_mode_or_unavailable",
+             side_effect=_resolve_engine,
+         ) as resolve_engine, \
+         patch(
+             "src.api.mcp_server.resolve_display_name",
+             side_effect=lambda email: _EDIT_DISPLAY_NAMES.get(email, email),
+         ) as resolve_name, \
+         patch("src.api.mcp_server._public_app_url", return_value=""), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-edit-1", engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = can_edit
+        yield enter, resolve_engine, resolve_name
+
+
+def _assert_nothing_entered(enter, session_manager):
+    """No turn was entered, and the session manager was only read by the gate."""
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+    made = {name for name, _args, _kwargs in session_manager.mock_calls}
+    assert made <= _EDIT_GATE_READS, session_manager.mock_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "On slides 1 and 4, shorten the titles",
+        # Surrounding whitespace and a newline: the instruction reaches Enter untouched.
+        "  On slides 1 and 4, shorten the titles.\nLeave slide 2 alone.  \n",
+    ],
+    ids=["plain", "whitespace-and-newline"],
+)
+async def test_edit_deck_enters_an_agent_turn_with_the_instruction_verbatim(
+    fake_request, identity, instruction
+):
+    from src.api import mcp_server
+
+    # An idle contributor's heartbeat lock doesn't block the owner; only a live
+    # generation does.
+    sm = _edit_deck_session_manager(idle_holder="carol@example.com")
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction=instruction,
+            correlation_id="corr-edit-7",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message=instruction,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "corr-edit-7"},
+    )
+    assert list(result) == _SUBMIT_KEYS
+    assert result == {
+        "deck_url": "/sessions/sess-1/edit",
+        "deck_view_url": "/sessions/sess-1/view",
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    # edit_deck itself only reads; Enter does the writing.
+    assert {name for name, _a, _k in sm.mock_calls} <= _EDIT_GATE_READS, sm.mock_calls
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_a_legacy_deck_and_writes_nothing(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm, engine="monolith") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-1/edit")
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    # The engine check comes before the live-generation check.
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_by", "is_contributor_session"),
+    [
+        ("bob@example.com", False),
+        # The caller's own contributor session on someone else's deck.
+        ("alice@example.com", True),
+    ],
+    ids=["someone-elses-deck", "callers-contributor-session"],
+)
+async def test_edit_deck_refuses_a_collaborator(
+    fake_request, identity, created_by, is_contributor_session
+):
+    """Edit permission isn't enough: only the deck's owner edits it over MCP. The
+    deck is an Agent deck, so the refusal is the owner check's alone."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(
+        created_by=created_by, is_contributor_session=is_contributor_session
+    )
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _OWNER_ONLY_COPY.format(deck_url="/sessions/sess-1/edit")
+    _assert_nothing_entered(enter, sm)
+    # The owner check is the first: neither the engine nor the holder is consulted.
+    resolve_engine.assert_not_called()
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_the_owner_while_someone_else_generates(
+    fake_request, identity
+):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(live_holder="bob@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == "This deck is locked by Bob."
+    assert str(exc.value) == _DECK_LOCKED_COPY.format(name="Bob")
+    resolve_name.assert_called_once_with("bob@example.com")
+    _assert_nothing_entered(enter, sm)
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_proceeds_while_the_owner_holds_the_generation(
+    fake_request, identity
+):
+    """The owner's own live generation doesn't refuse the call here; Enter's
+    session lock decides."""
+    from src.api import mcp_server
+
+    sm = _edit_deck_session_manager(live_holder="alice@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert list(result) == _SUBMIT_KEYS
+    assert result == {
+        "deck_url": "/sessions/sess-1/edit",
+        "deck_view_url": "/sessions/sess-1/view",
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_returns_links_first(fake_request, identity):
+    """An edit hands back the same deck's links at once, first, under the public app
+    URL: ``_deck_links``'s values for the edited session."""
+    from src.api import mcp_server
+    from src.api.mcp_server import _deck_links
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm), patch(
+        "src.api.mcp_server._public_app_url", return_value="https://t.example"
+    ):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    assert isinstance(result, dict)
+    assert list(result)[:2] == ["deck_url", "deck_view_url"]
+    assert list(result) == _SUBMIT_KEYS
+    assert {key: result[key] for key in _LINK_KEYS} == _deck_links(
+        "sess-1", "https://t.example"
+    )
+    assert result == {
+        "deck_url": "https://t.example/sessions/sess-1/edit",
+        "deck_view_url": "https://t.example/sessions/sess-1/view",
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_answers_an_engine_lookup_failure_as_unavailable(
+    fake_request, identity
+):
+    """The engine resolver fails closed when it can't read the database. The
+    caller gets the unavailable copy, not "Internal error", and nothing is
+    entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+    )
+
+    sm = _edit_deck_session_manager()
+    failure = PersistedConfigurationUnavailableError(code="lakebase_unavailable")
+
+    with _edit_deck_env(identity, sm, engine=failure) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+                correlation_id="corr-edit-8",
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_checks_edit_permission_before_ownership(fake_request, identity):
+    """A caller without edit permission gets the not-found-or-denied copy, never
+    the owner-only copy with its deck link, and the owner gate never runs."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(created_by="bob@example.com")
+
+    with _edit_deck_env(identity, sm, can_edit=False) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _EDIT_DENIED_COPY
+    assert sm.mock_calls == []
+    resolve_engine.assert_not_called()
+    enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_runs_the_owner_gate_off_the_event_loop(fake_request, identity):
+    """Review M2. The owner gate reads the database and, on a locked deck, may call
+    SCIM for the holder's name, so it runs in a worker thread (as the app route's
+    gate does), never on the event loop. Enter follows it."""
+    from src.api import mcp_server
+
+    loop_thread = threading.get_ident()
+    gate_calls = []
+
+    def _recording_gate(session_id, user_name):
+        gate_calls.append((threading.get_ident(), session_id, user_name))
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, _name), patch(
+        "src.api.mcp_server._require_agent_deck_owner", side_effect=_recording_gate
+    ):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    [(gate_thread, session_id, user_name)] = gate_calls
+    assert gate_thread != loop_thread
+    assert (session_id, user_name) == ("sess-1", "alice@example.com")
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert list(result) == _SUBMIT_KEYS
+    assert result == {
+        "deck_url": "/sessions/sess-1/edit",
+        "deck_view_url": "/sessions/sess-1/view",
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_takes_no_slide_indices():
+    """``slide_indices`` is gone: slides are named by number in the instruction.
+    A call that still sends it succeeds through FastMCP (which drops undeclared
+    arguments; see the integration test), so this pins the removal itself."""
+    from src.api import mcp_server
+
+    tool_params = inspect.signature(mcp_server.edit_deck).parameters
+    assert list(tool_params) == ["ctx", "session_id", "instruction", "correlation_id"]
+    assert tool_params["correlation_id"].default is None
+    assert "slide_indices" not in inspect.signature(mcp_server._edit_deck_impl).parameters
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "edit_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "session_id",
+        "instruction",
+        "correlation_id",
+    }
+    assert set(tool.inputSchema["required"]) == {"session_id", "instruction"}
+
+
 # ---- get_deck -----------------------------------------------------------
 
 
-def test_mcp_deck_response_substitutes_all_design_system_assets(mcp_asset_session):
-    """MCP structured data, deck CSS, and standalone HTML embed owned assets."""
+def _svg(marker, *, pad=0):
+    """A small SVG logo whose ``<title>`` carries ``marker``. Percent-encoding leaves
+    the marker readable, so any inlined copy of this SVG shows it."""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+        f"<title>{marker}</title>"
+        '<rect width="10" height="10" fill="#FF3621"/>'
+        + (f"<desc>{'p' * pad}</desc>" if pad else "")
+        + "</svg>"
+    )
+
+
+def _handle(asset_id):
+    return f"{{{{ds-asset:{asset_id}}}}}"
+
+
+def _assert_svg_absent(page, svg_text):
+    """None of an SVG asset's forms reached the preview: raw, base64 or URL-encoded."""
+    from src.utils.preview_images import svg_data_uri
+
+    assert svg_text not in page
+    assert base64.b64encode(svg_text.encode()).decode() not in page
+    assert svg_data_uri(svg_text) not in page
+
+
+def _small_svg_reads(spy):
+    """``(db, ids, design_system_id, max_bytes)`` of every ``get_small_svg_assets`` call."""
+    from src.services import design_system_service
+
+    signature = inspect.signature(design_system_service.get_small_svg_assets)
+    reads = []
+    for call in spy.call_args_list:
+        bound = signature.bind(*call.args, **call.kwargs).arguments
+        reads.append(
+            (
+                bound["db"],
+                {int(i) for i in bound["asset_ids"]},
+                bound["design_system_id"],
+                bound["max_bytes"],
+            )
+        )
+    return reads
+
+
+@pytest.mark.asyncio
+async def test_preview_inlines_scoped_small_svg_and_drops_fonts(
+    mcp_asset_session, identity
+):
+    """The session's own design system: a small SVG logo is inlined as URL-encoded
+    text (never base64); the embedded font face is dropped for a Google Fonts import
+    and its bytes are never read; a raster asset and an SVG over the 10 KB cap get the
+    notice. The asset read is scoped to the session's design system, capped at
+    10 KB, and never asks for the font."""
+    from src.services import design_system_service
+    from src.utils.preview_images import svg_data_uri
+
+    logo_svg = _svg("MK-LOGO-SCOPED")
+    big_svg = _svg("MK-LOGO-BIG", pad=11_000)
     design_system = _make_synthetic_design_system(
         mcp_asset_session,
         "Synthetic Aurora System",
         [
             ("synthetic-typeface.ttf", "font/ttf", b"tiny-font", "font"),
             ("synthetic-mark.png", "image/png", b"tiny-image", "logo"),
+            ("synthetic-logo.svg", "image/svg+xml", logo_svg.encode(), "logo"),
+            ("synthetic-big.svg", "image/svg+xml", big_svg.encode(), "logo"),
         ],
     )
-    font_asset, image_asset = design_system.assets
-    font_placeholder = f"{{{{ds-asset:{font_asset.id}}}}}"
-    image_placeholder = f"{{{{ds-asset:{image_asset.id}}}}}"
+    font_asset, image_asset, logo_asset, big_asset = design_system.assets
     deck = {
         "title": "Synthetic Deck",
         "slides": [
             {
-                "html": f'<div class="slide"><img src="{image_placeholder}"></div>',
+                "html": (
+                    '<div class="slide">'
+                    f'<img class="logo" src="{_handle(logo_asset.id)}">'
+                    f'<img class="mark" src="{_handle(image_asset.id)}">'
+                    f'<img class="big" src="{_handle(big_asset.id)}">'
+                    "</div>"
+                ),
                 "scripts": "",
             }
         ],
         "css": (
             "@font-face { font-family: 'Synthetic Sans'; "
-            f"src: url('{font_placeholder}') format('truetype'); }}"
+            f"src: url('{_handle(font_asset.id)}') format('truetype'); }}"
+            ".slide { font-family: 'Synthetic Sans', system-ui; }"
         ),
         "external_scripts": [],
         "head_meta": {},
     }
 
-    result = _render_mcp_deck_with_scope(
-        mcp_asset_session, deck, design_system.id
-    )
+    with patch(
+        "src.services.design_system_service.get_small_svg_assets",
+        wraps=design_system_service.get_small_svg_assets,
+    ) as get_small_svg_assets:
+        reply = await _preview_with_scope(
+            identity, mcp_asset_session, deck, design_system.id
+        )
 
-    assert "{{ds-asset:" not in json.dumps(result["deck"]["slides"])
-    assert "{{ds-asset:" not in result["deck"]["css"]
-    assert "{{ds-asset:" not in result["html_document"]
-    assert base64.b64encode(b"tiny-font").decode() in result["deck"]["css"]
-    assert base64.b64encode(b"tiny-image").decode() in result["deck"]["slides"][0]["html"]
+    page = reply.preview_html
+    assert page is not None
+    # The scoped small SVG, as URL-encoded text.
+    assert svg_data_uri(logo_svg) in page
+    assert "data:image/svg+xml," in page
+    # No base64 and no handle anywhere; no font or raster bytes.
+    assert "base64" not in page
+    assert "{{ds-asset:" not in page
+    assert base64.b64encode(b"tiny-font").decode() not in page
+    assert "tiny-font" not in page
+    assert base64.b64encode(b"tiny-image").decode() not in page
+    _assert_svg_absent(page, big_svg)
+    assert "MK-LOGO-BIG" not in page
+    # The font face is gone; a Google Fonts import asks for its family instead.
+    assert "@font-face" not in page
+    assert "fonts.googleapis.com" in page and "Synthetic+Sans" in page
+    # The raster and the over-cap SVG show the notice.
+    assert page.count(f'alt="{_IMAGE_NOTICE_COPY}"') == 2
+    assert reply.payload["preview"]["images_hidden"] == 2
+
+    reads = _small_svg_reads(get_small_svg_assets)
+    assert reads, "the scoped SVG must be read through get_small_svg_assets"
+    for db, ids, design_system_id, max_bytes in reads:
+        assert db is mcp_asset_session
+        assert design_system_id == design_system.id
+        assert max_bytes == 10_240
+        assert font_asset.id not in ids, "a font asset is never fetched"
+        assert logo_asset.id in ids
 
 
-def test_mcp_deck_response_does_not_substitute_foreign_design_system_asset(
-    mcp_asset_session,
+@pytest.mark.asyncio
+async def test_preview_does_not_resolve_foreign_design_system_asset(
+    mcp_asset_session, identity
 ):
-    """A system A asset stays inert when the session is scoped to system B."""
+    """A system A SVG stays out of a preview whose session is scoped to system B: its
+    handle (in the slide and in the css) is hidden, and none of A's bytes, in any
+    encoding, reach the page. The read is scoped to B."""
     from src.services import design_system_service
 
+    foreign_svg = _svg("MK-LOGO-FOREIGN")
     system_a = _make_synthetic_design_system(
         mcp_asset_session,
         "Synthetic Meridian System A",
-        [("private-a.png", "image/png", b"system-a-bytes", "logo")],
+        [("private-a.svg", "image/svg+xml", foreign_svg.encode(), "logo")],
     )
     system_b = _make_synthetic_design_system(
         mcp_asset_session,
         "Synthetic Meridian System B",
-        [("public-b.png", "image/png", b"system-b-bytes", "logo")],
+        [("public-b.svg", "image/svg+xml", _svg("MK-LOGO-B").encode(), "logo")],
     )
     foreign_asset = system_a.assets[0]
-    placeholder = f"{{{{ds-asset:{foreign_asset.id}}}}}"
-    deck = {
-        "slides": [{"html": f'<div class="slide"><img src="{placeholder}"></div>'}],
-        "css": "",
-    }
-
-    with patch(
-        "src.services.design_system_service.get_asset_base64",
-        wraps=design_system_service.get_asset_base64,
-    ) as get_asset_base64:
-        result = _render_mcp_deck_with_scope(
-            mcp_asset_session, deck, system_b.id
-        )
-
-    get_asset_base64.assert_called_once_with(
-        mcp_asset_session,
-        foreign_asset.id,
-        design_system_id=system_b.id,
-    )
-    assert placeholder in result["deck"]["slides"][0]["html"]
-    assert placeholder in result["html_document"]
-    assert base64.b64encode(b"system-a-bytes").decode() not in result["html_document"]
-
-
-def test_mcp_deck_response_without_design_system_fails_closed(mcp_asset_session):
-    """A session with no design system resolves nothing and still renders."""
-    from src.services import design_system_service
-
-    design_system = _make_synthetic_design_system(
-        mcp_asset_session,
-        "Synthetic No-Scope System",
-        [("unscoped.png", "image/png", b"unscoped-bytes", "logo")],
-    )
-    asset = design_system.assets[0]
-    placeholder = f"{{{{ds-asset:{asset.id}}}}}"
+    placeholder = _handle(foreign_asset.id)
     deck = {
         "slides": [{"html": f'<div class="slide"><img src="{placeholder}"></div>'}],
         "css": f".slide {{ background-image: url('{placeholder}'); }}",
     }
 
     with patch(
-        "src.services.design_system_service.get_asset_base64",
-        wraps=design_system_service.get_asset_base64,
-    ) as get_asset_base64:
-        result = _render_mcp_deck_with_scope(mcp_asset_session, deck, None)
+        "src.services.design_system_service.get_small_svg_assets",
+        wraps=design_system_service.get_small_svg_assets,
+    ) as get_small_svg_assets:
+        reply = await _preview_with_scope(identity, mcp_asset_session, deck, system_b.id)
 
-    assert get_asset_base64.call_count == 2
-    assert all(
-        call.kwargs == {"design_system_id": None}
-        for call in get_asset_base64.call_args_list
+    page = reply.preview_html
+    assert page is not None
+    _assert_svg_absent(page, foreign_svg)
+    assert "MK-LOGO-FOREIGN" not in page
+    assert "MK-LOGO-B" not in page
+    assert "{{ds-asset:" not in page
+    assert "base64" not in page
+    assert f'alt="{_IMAGE_NOTICE_COPY}"' in page
+    assert reply.payload["preview"]["images_hidden"] == 2
+
+    reads = _small_svg_reads(get_small_svg_assets)
+    assert reads
+    assert all(read[2] == system_b.id for read in reads)
+
+
+@pytest.mark.asyncio
+async def test_preview_without_design_system_resolves_nothing(
+    mcp_asset_session, identity
+):
+    """A session with no design system inlines no asset (fail-closed): the handles in
+    the slide and the css are hidden, the SVG's bytes never appear, and the preview
+    still renders."""
+    from src.services import design_system_service
+
+    svg_text = _svg("MK-LOGO-UNSCOPED")
+    design_system = _make_synthetic_design_system(
+        mcp_asset_session,
+        "Synthetic No-Scope System",
+        [("unscoped.svg", "image/svg+xml", svg_text.encode(), "logo")],
     )
-    assert placeholder in result["deck"]["slides"][0]["html"]
-    assert placeholder in result["deck"]["css"]
-    assert placeholder in result["html_document"]
-    assert base64.b64encode(b"unscoped-bytes").decode() not in result["html_document"]
+    placeholder = _handle(design_system.assets[0].id)
+    deck = {
+        "slides": [{"html": f'<div class="slide"><img src="{placeholder}">MK-BODY</div>'}],
+        "css": f".slide {{ background-image: url('{placeholder}'); }}",
+    }
+
+    with patch(
+        "src.services.design_system_service.get_small_svg_assets",
+        wraps=design_system_service.get_small_svg_assets,
+    ) as get_small_svg_assets:
+        reply = await _preview_with_scope(identity, mcp_asset_session, deck, None)
+
+    page = reply.preview_html
+    assert page is not None
+    assert "MK-BODY" in page
+    _assert_svg_absent(page, svg_text)
+    assert "MK-LOGO-UNSCOPED" not in page
+    assert "{{ds-asset:" not in page
+    assert f'alt="{_IMAGE_NOTICE_COPY}"' in page
+    assert reply.payload["preview"]["images_hidden"] == 2
+    assert all(read[2] is None for read in _small_svg_reads(get_small_svg_assets))
+
+
+@pytest.mark.asyncio
+async def test_preview_replaces_image_library_handles_without_reading_them(identity):
+    """``{{image:…}}`` handles are never looked up (no image-library read, no privacy
+    guard path; every byte reader fails this test): the ``<img>`` shows the notice
+    in its own box, and a css background drops its url but keeps the rest."""
+    deck = _deck_of([])
+    deck["slides"] = [
+        {
+            "html": (
+                '<div class="slide"><img src="{{image:tok-A_1}}" width="200" '
+                'height="100">MK-BODY</div>'
+            ),
+            "scripts": "",
+        }
+    ]
+    deck["css"] = ".slide{background-image:url('{{image:tok-B_2}}');color:#123456}"
+
+    reply = await _get_deck_reply(identity, deck)
+
+    page = reply.preview_html
+    assert page is not None
+    assert "MK-BODY" in page
+    assert "{{image:" not in page
+    assert "base64" not in page
+    assert f'alt="{_IMAGE_NOTICE_COPY}"' in page
+    assert 'width="200"' in page and 'height="100"' in page
+    assert "background-image:none" in page
+    assert "#123456" in page
+    assert reply.payload["preview"]["images_hidden"] == 2
 
 
 @pytest.mark.asyncio
 async def test_get_deck_returns_deck_without_job(fake_request, identity):
-    from src.api import mcp_server
-
-    fake_session = {"session_id": "sess-1", "title": "Existing Deck"}
+    """get_deck: item 1 is the links, the session id, title, slide count and the
+    ``preview`` summary, in that order; item 2 is the preview page. Nothing tied to
+    a job or a turn, and neither the structured deck nor the full HTML document."""
     fake_deck = {
         "title": "Existing Deck",
         "slides": [{"html": "<div class='slide'>1</div>", "scripts": ""}],
@@ -1597,35 +3413,573 @@ async def test_get_deck_returns_deck_without_job(fake_request, identity):
         "head_meta": {},
     }
 
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server._public_app_url", return_value="https://t.example"):
+    reply = await _get_deck_reply(identity, fake_deck, title="Existing Deck")
 
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_view_deck.return_value = True
+    result = reply.payload
+    assert list(result) == _GET_DECK_KEYS
+    assert result == {
+        "deck_url": "https://t.example/sessions/sess-1/edit",
+        "deck_view_url": "https://t.example/sessions/sess-1/view",
+        "session_id": "sess-1",
+        "title": "Existing Deck",
+        "slide_count": 1,
+        "preview": {
+            "included": True,
+            "slides_shown": 1,
+            "slides_total": 1,
+            "images_hidden": 0,
+            "note": f"Showing all 1 slide as a preview {_NOTE_TAIL}",
+        },
+    }
+    assert list(result["preview"]) == _PREVIEW_KEYS
+    # Fields tied to a job/turn are absent, and so is the old deck payload.
+    for absent_key in (
+        "status",
+        "request_id",
+        "reply",
+        "deck_changed",
+        "replacement_info",
+        "metadata",
+        *_REMOVED_KEYS,
+    ):
+        assert absent_key not in result
 
-        sm = MagicMock()
-        sm.get_session.return_value = fake_session
-        sm.get_slide_deck.return_value = fake_deck
-        get_sm.return_value = sm
+    _assert_two_items(reply)
+    page = reply.preview_html
+    assert _STRIP_COPY in page
+    assert '<a href="https://t.example/sessions/sess-1/edit"' in page
+    assert "<div class='slide'>1</div>" in page
+    assert '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>' in page
 
-        result = await mcp_server._get_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(None, id="no-deck-yet"),
+        pytest.param({"title": "Q3 Pitch", "slides": [], "css": ".x{a:b}"}, id="no-slides"),
+    ],
+)
+async def test_get_deck_of_empty_deck_has_one_item(identity, stored):
+    """Nothing to preview: one JSON item (links first), no HTML, and a note saying
+    so. ``preview.included`` is False."""
+    reply = await _get_deck_reply(identity, stored)
+
+    assert reply.preview_html is None
+    [item] = _assert_one_item(reply)
+    assert len(reply.to_content()) == 1
+    assert reply.payload["preview"]["included"] is False
+    assert list(reply.payload) == _GET_DECK_KEYS
+    assert reply.payload == {
+        **_links("sess-1"),
+        "session_id": "sess-1",
+        "title": "Q3 Pitch",
+        "slide_count": 0,
+        "preview": {
+            "included": False,
+            "slides_shown": 0,
+            "slides_total": 0,
+            "images_hidden": 0,
+            "note": _NO_SLIDES_NOTE,
+        },
+    }
+    assert "<!doctype" not in item.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_deck_too_large_to_preview_has_one_item(identity):
+    """Not even the first slide fits the budget: item 2 is omitted, the result stays
+    within 150 000 bytes, and the note says the deck is too large to preview.
+    ``slide_count`` is still the deck's."""
+    deck = _deck_of(["MK-HUGE", "MK-NEXT"], body="z" * 160_000)
+
+    reply = await _get_deck_reply(identity, deck)
+
+    assert reply.preview_html is None
+    _assert_one_item(reply)
+    assert _result_bytes(reply) <= _RESULT_BUDGET_BYTES
+    assert list(reply.payload) == _GET_DECK_KEYS
+    assert reply.payload["slide_count"] == 2
+    assert reply.payload["preview"] == {
+        "included": False,
+        "slides_shown": 0,
+        "slides_total": 2,
+        "images_hidden": 0,
+        "note": "This deck is too large to preview here. Open the full deck in tellr.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(None, id="no-deck-yet"),
+        pytest.param({"title": "Q3 Pitch", "slides": []}, id="no-slides"),
+    ],
+)
+async def test_ready_status_of_a_deck_with_no_slides_has_one_item(
+    fake_request, identity, stored
+):
+    """Review Focus: a create turn on which the architect asked a question first
+    leaves a deck with no slides. The ready poll is one JSON item in the ready key
+    order, with the question as ``reply`` and a no-slides ``preview``."""
+    question = "Who is this deck for: the board or the sales team?"
+    reply = await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=_graph_metadata("discuss"),
+        replacement_info=None,
+        turn_messages=_turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", question),
+        ),
+        deck=stored,
+    )
+
+    assert reply.preview_html is None
+    _assert_one_item(reply)
+    payload = reply.payload
+    assert list(payload) == _READY_KEY_ORDER
+    assert payload["slide_count"] == 0
+    assert payload["preview"] == {
+        "included": False,
+        "slides_shown": 0,
+        "slides_total": 0,
+        "images_hidden": 0,
+        "note": _NO_SLIDES_NOTE,
+    }
+    assert payload["reply"] == question
+    assert payload["deck_changed"] is False
+    assert {key: payload[key] for key in _LINK_KEYS} == _links("sess-1")
+
+
+@pytest.mark.asyncio
+async def test_ready_status_includes_preview_even_when_deck_unchanged(
+    fake_request, identity
+):
+    """MCP is stateless: Tellr cannot know whether the caller still holds an earlier
+    preview, so a turn that answered instead of editing carries it too."""
+    answer = "Slide 2 leads with EMEA because it is 41% of Q3 revenue."
+    reply = await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=_graph_metadata("discuss"),
+        replacement_info=None,
+        turn_messages=_turn(
+            ("user", "user_query", "Why does slide 2 lead with EMEA?"),
+            ("assistant", "llm_response", answer),
+        ),
+        deck=_deck_of(["MK-ONE", "MK-TWO"]),
+    )
+
+    payload = reply.payload
+    assert payload["deck_changed"] is False
+    assert payload["reply"] == answer
+    assert reply.preview_html is not None
+    _assert_two_items(reply)
+    assert payload["preview"] == {
+        "included": True,
+        "slides_shown": 2,
+        "slides_total": 2,
+        "images_hidden": 0,
+        "note": f"Showing all 2 slides as a preview {_NOTE_TAIL}",
+    }
+    assert "<h1>MK-ONE</h1>" in reply.preview_html
+    assert "<h1>MK-TWO</h1>" in reply.preview_html
+
+
+async def _reply_for(tool, fake_request, identity, deck, *, reply_text=None,
+                     session_title="Q3 Pitch"):
+    """The ready ``get_deck_status`` or the ``get_deck`` reply for ``deck``."""
+    if tool == "get_deck":
+        return await _get_deck_reply(identity, deck, title=session_title)
+    return await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=_graph_metadata("build"),
+        replacement_info=None,
+        turn_messages=_turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", reply_text or _STARTER_REPLY),
+        ),
+        deck=deck,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+@pytest.mark.parametrize(
+    ("total", "notice"),
+    [
+        (12, "2 more slides — see full deck in tellr"),
+        (11, "1 more slide — see full deck in tellr"),
+    ],
+    ids=["twelve-slides", "eleven-slides"],
+)
+async def test_a_deck_over_ten_slides_previews_ten_and_counts_them_all(
+    fake_request, identity, tool, total, notice
+):
+    """At most 10 slides are shown. ``slide_count`` and ``preview.slides_total`` are
+    the deck's own count; the page ends with the "N more slides" notice, linked to
+    the deck."""
+    reply = await _reply_for(tool, fake_request, identity, _deck_of(_markers(total)))
+
+    payload = reply.payload
+    assert payload["slide_count"] == total
+    assert payload["preview"] == {
+        "included": True,
+        "slides_shown": 10,
+        "slides_total": total,
+        "images_hidden": 0,
+        "note": f"Showing 10 of {total} slides as a preview {_NOTE_TAIL}",
+    }
+    [_, page_item] = _assert_two_items(reply)
+    page = page_item.text
+    assert notice in page
+    assert page.count("see full deck in tellr") == 1
+    assert page.count('<a href="https://t.example/sessions/sess-1/edit"') == 2
+    assert "<h1>MK-S01</h1>" in page and "<h1>MK-S10</h1>" in page
+    for hidden in _markers(total)[10:]:
+        assert f"<h1>{hidden}</h1>" not in page
+
+
+@pytest.mark.asyncio
+async def test_whole_result_under_budget(identity):
+    """A deck of 10 slides × 40 KB of text: the whole tool result (both items'
+    UTF-8 bytes) stays within 150 000, the links lead item 1, and the preview
+    holds the 3 whole slides that fit, then the "7 more slides" notice."""
+    deck = _deck_of(_markers(10), body="x" * 40_000)
+
+    reply = await _get_deck_reply(identity, deck)
+
+    assert _result_bytes(reply) <= _RESULT_BUDGET_BYTES
+    [item1, item2] = _assert_two_items(reply)
+    assert list(json.loads(item1.text))[:2] == _LINK_KEYS
+    assert json.loads(item1.text)["deck_url"] == "https://t.example/sessions/sess-1/edit"
+    assert reply.payload["slide_count"] == 10
+    assert reply.payload["preview"]["included"] is True
+    assert reply.payload["preview"]["slides_shown"] == 3
+    assert reply.payload["preview"]["slides_total"] == 10
+    assert "7 more slides — see full deck in tellr" in item2.text
+    assert "<h1>MK-S03</h1>" in item2.text and "<h1>MK-S04</h1>" not in item2.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_whole_result_under_budget_counts_item_one_in_utf8_bytes(
+    fake_request, identity, tool
+):
+    """Item 1 counts against the 150 000-byte budget in UTF-8 bytes, so a long
+    non-ASCII ``reply`` (status) or title (get_deck) shrinks the preview. 15 000
+    '€' are 15 000 characters but 45 000 bytes (item 1 is ``ensure_ascii=False``,
+    so they travel raw, not as \\u escapes). Twelve 12 KB slides: 8 fit beside
+    that item 1; ignoring item 1, or counting it in characters, fits 10 and crosses
+    the budget."""
+    long_text = "€" * 15_000
+    deck = _deck_of(_markers(12), body="y" * 12_000)
+    if tool == "get_deck":
+        reply = await _reply_for(
+            tool, fake_request, identity, deck, session_title=long_text
+        )
+    else:
+        reply = await _reply_for(tool, fake_request, identity, deck, reply_text=long_text)
+
+    [item1, item2] = _assert_two_items(reply)
+    assert long_text in item1.text
+    assert _result_bytes(reply) <= _RESULT_BUDGET_BYTES
+    preview = reply.payload["preview"]
+    assert preview["included"] is True
+    assert preview["slides_shown"] == 8
+    assert preview["slides_total"] == 12
+    assert reply.payload["slide_count"] == 12
+    assert "4 more slides — see full deck in tellr" in item2.text
+
+
+#: The note a reply carries when its preview could not be built (final review I2).
+_PREVIEW_UNAVAILABLE_NOTE = "A preview is not available for this deck. Open the full deck in tellr."
+
+
+def _assert_links_without_preview(reply, tool, slide_count):
+    """The reply a failed preview leaves: one JSON item, links first, in the tool's key
+    order, with ``preview.included`` false and the unavailable note."""
+    [item] = _assert_one_item(reply)
+    payload = json.loads(item.text)
+    assert list(payload) == (_GET_DECK_KEYS if tool == "get_deck" else _READY_KEY_ORDER)
+    assert {key: payload[key] for key in _LINK_KEYS} == _links("sess-1")
+    assert payload["slide_count"] == slide_count
+    assert payload["preview"] == {
+        "included": False,
+        "slides_shown": 0,
+        "slides_total": slide_count,
+        "images_hidden": 0,
+        "note": _PREVIEW_UNAVAILABLE_NOTE,
+    }
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_a_preview_that_fails_to_build_still_returns_the_links(fake_request, identity, tool):
+    """Spec anti-goal "losing the links in any shape of response": when building the
+    preview raises, the ready poll and get_deck still answer, links first, with no
+    preview item (a caller polling a finished deck must not see a failure)."""
+    deck = _deck_of(_markers(3))
+    with patch(
+        "src.api.mcp_server.build_deck_preview",
+        side_effect=RuntimeError("preview exploded"),
+    ):
+        reply = await _reply_for(tool, fake_request, identity, deck)
+
+    payload = _assert_links_without_preview(reply, tool, 3)
+    assert payload["title"] == "Q3 Pitch"
+    if tool == "get_deck_status":
+        assert payload["status"] == "ready"
+        assert payload["reply"] == _STARTER_REPLY
+
+
+@pytest.mark.asyncio
+async def test_a_failed_design_system_svg_read_still_returns_the_links(identity):
+    """The SVG read is part of the preview: a database error there costs the preview,
+    not the reply."""
+    slide = {"html": '<div class="slide"><img src="{{ds-asset:4}}"></div>', "scripts": ""}
+    deck = {**_deck_of([]), "slides": [slide]}
+    with patch(
+        "src.api.mcp_server.design_system_service.get_small_svg_assets",
+        side_effect=RuntimeError("database went away"),
+    ) as read:
+        reply = await _get_deck_reply(identity, deck, db=MagicMock(), design_system_id=5)
+
+    assert read.call_count == 1
+    _assert_links_without_preview(reply, "get_deck", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_css_nested_twelve_hundred_deep_still_returns_the_links(fake_request, identity, tool):
+    """Real input, nothing patched: css nested past Python's recursion limit used to
+    raise RecursionError out of the css scanners and turn the reply into a link-less
+    tool error."""
+    deck = _deck_of(_markers(2), css="@media a{" * 1200 + ".slide{color:red}" + "}" * 1200)
+
+    reply = await _reply_for(tool, fake_request, identity, deck)
+
+    items = reply.to_content()
+    payload = json.loads(items[0].text)
+    assert list(payload)[:2] == _LINK_KEYS
+    assert {key: payload[key] for key in _LINK_KEYS} == _links("sess-1")
+    assert payload["slide_count"] == 2
+    assert payload["preview"]["slides_total"] == 2
+
+
+def test_the_item_one_placeholder_note_is_at_least_as_long_as_every_preview_note():
+    """Item 1 is sized with ``_LONGEST_PREVIEW_NOTE`` before the preview exists; a
+    longer real note would push the whole result past the budget by the difference."""
+    from src.api import mcp_server
+    from src.services import mcp_deck_preview
+
+    def build(deck, max_html_bytes):
+        return mcp_deck_preview.build_deck_preview(
+            deck, title=None, deck_url="/d", svg_assets={}, max_html_bytes=max_html_bytes
         )
 
-        assert result["session_id"] == "sess-1"
-        assert result["slide_count"] == 1
-        assert result["title"] == "Existing Deck"
-        assert "deck" in result
-        assert result["html_document"].lower().startswith("<!doctype")
-        assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
-        assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
-        # Fields tied to a job/turn are absent
-        for absent_key in ("status", "request_id", "messages", "replacement_info", "metadata"):
-            assert absent_key not in result
+    notes = {
+        "no slides": build({"slides": []}, 150_000).note,
+        "too large": build(_deck_of(["MK-ONE"]), 10).note,
+        "one slide": build(_deck_of(["MK-ONE"]), 150_000).note,
+        "all, 6 digits": mcp_deck_preview._note(999_999, 999_999),
+        "some, 6 digits": mcp_deck_preview._note(999_998, 999_999),
+        "unavailable": mcp_server._PREVIEW_UNAVAILABLE_NOTE,
+    }
+    assert notes["unavailable"] == _PREVIEW_UNAVAILABLE_NOTE
+    longest = len(mcp_server._LONGEST_PREVIEW_NOTE.encode("utf-8"))
+    for name, note in notes.items():
+        assert len(note.encode("utf-8")) <= longest, name
+
+
+@pytest.mark.asyncio
+async def test_a_ready_poll_serialises_a_datetime_in_its_payload(fake_request, identity):
+    """Item 1 is written with ``default=str``: a ``datetime`` inside
+    ``replacement_info`` reaches the caller as its string, and never crashes the poll."""
+    when = datetime(2026, 11, 18, 9, 0, 5)
+    reply = await _ready_status(
+        fake_request,
+        identity,
+        result_metadata={"tool_calls": 1, "latency_ms": 900},
+        replacement_info={"replaced": [1], "count": 1, "at": when},
+        turn_messages=_applied_edit_turn(),
+    )
+
+    assert reply.payload["replacement_info"] == {"replaced": [1], "count": 1, "at": when}
+    [item1, _] = _assert_two_items(reply)
+    assert json.loads(item1.text)["replacement_info"] == {
+        "replaced": [1],
+        "count": 1,
+        "at": "2026-11-18 09:00:05",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ready_status_preview_numbers_slide_tokens(fake_request, identity):
+    """The ready poll's preview is built after slide-number tokens are substituted
+    (get_deck's is pinned in test_slide_number_token_boundaries.py)."""
+    tokens = "{{slide:number}} / {{slide:count}}"
+    deck = _deck_of([])
+    deck["slides"] = [
+        {"html": f'<div class="slide"><h1>MK-P{n}</h1><span>{tokens}</span></div>'}
+        for n in (1, 2)
+    ]
+
+    reply = await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=_graph_metadata("build"),
+        replacement_info=None,
+        turn_messages=_turn(("assistant", "llm_response", "Done.")),
+        deck=deck,
+    )
+
+    page = reply.preview_html
+    assert (
+        '<h1>MK-P2</h1><span><span data-tellr-slide="number">2</span> / '
+        '<span data-tellr-slide="count">2</span></span>'
+    ) in page
+    assert "{{slide:" not in page
+
+
+def test_mcp_tool_reply_to_content_writes_json_then_the_preview_verbatim():
+    """Item 1 is ``json.dumps(payload, ensure_ascii=False, indent=2, default=str)``:
+    keys in insertion order, non-ASCII raw, a datetime as its string. Item 2 is the
+    preview exactly as given: not JSON-escaped, not altered. No preview, no item 2."""
+    from mcp.types import TextContent
+
+    from src.api.mcp_server import McpToolReply
+
+    payload = {
+        "deck_url": "/sessions/s/edit",
+        "title": "Résumé — Q3 €",
+        "replacement_info": {"at": datetime(2026, 11, 18, 9, 0, 5)},
+    }
+    page = '<!doctype html>\n<p class="x">"quoted" & <b>raw</b> — é \\ end</p>\n'
+
+    items = McpToolReply(payload, page).to_content()
+
+    assert all(isinstance(item, TextContent) for item in items)
+    assert [item.type for item in items] == ["text", "text"]
+    assert items[0].text == (
+        "{\n"
+        '  "deck_url": "/sessions/s/edit",\n'
+        '  "title": "Résumé — Q3 €",\n'
+        '  "replacement_info": {\n'
+        '    "at": "2026-11-18 09:00:05"\n'
+        "  }\n"
+        "}"
+    )
+    assert items[1].text == page
+
+    only = McpToolReply(payload)
+    assert only.preview_html is None
+    assert [item.text for item in only.to_content()] == [items[0].text]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_the_deck_tools_return_their_reply_content_through_fastmcp(
+    fake_request, identity, tool
+):
+    """Through FastMCP's own ``call_tool``, each deck tool returns exactly its
+    reply's ``to_content()`` items (no structured copy: a structured result would
+    come back as a ``(content, structured)`` pair)."""
+    from src.api import mcp_server
+
+    deck = _deck_of(["MK-ONE", "MK-TWO"])
+    sm = _deck_session_manager(deck)
+    sm.get_chat_request.return_value = {
+        "request_id": "req-1",
+        "session_id": 42,
+        "status": "completed",
+        "error_message": None,
+        "result": {"metadata": _graph_metadata("build"), "session_title": "Q3 Pitch"},
+    }
+    sm.get_session_id_for_request.return_value = "sess-1"
+    sm.get_messages_for_request.return_value = _turn(("assistant", "llm_response", "Done."))
+    arguments = {"session_id": "sess-1"}
+    if tool == "get_deck_status":
+        arguments["request_id"] = "req-1"
+
+    with _deck_read_env(identity, sm), patch(
+        "src.api.mcp_server._request_from_context", return_value=fake_request
+    ):
+        through_fastmcp = await mcp_server.mcp.call_tool(tool, arguments)
+        impl = (
+            mcp_server._get_deck_impl
+            if tool == "get_deck"
+            else mcp_server._get_deck_status_impl
+        )
+        direct = await impl(request=fake_request, **arguments)
+
+    assert isinstance(through_fastmcp, list), type(through_fastmcp)
+    assert [(item.type, item.text) for item in through_fastmcp] == [
+        (item.type, item.text) for item in direct.to_content()
+    ]
+    assert len(through_fastmcp) == 2
+    assert list(json.loads(through_fastmcp[0].text))[:2] == _LINK_KEYS
+    assert through_fastmcp[1].text.startswith("<!doctype html>")
+
+
+@pytest.mark.asyncio
+async def test_deck_tools_have_no_output_schema():
+    """No tool advertises an output schema, so FastMCP never adds a
+    ``structuredContent`` copy of the payload (or of the preview) to a result."""
+    from src.api import mcp_server
+
+    tools = {tool.name: tool for tool in await mcp_server.mcp.list_tools()}
+    assert set(tools) == {"create_deck", "edit_deck", "get_deck_status", "get_deck"}
+    for name, tool in tools.items():
+        assert tool.outputSchema is None, name
+
+
+#: The old wording, which described the full deck payload.
+_OLD_DECK_WORDING = ("structured slide data", "standalone html document", "html_document")
+
+
+def _tells_the_caller_to_show_deck_url(description):
+    """Some sentence names ``deck_url`` and tells the caller to show it."""
+    sentences = re.split(r"(?<=[.!?])\s+", description)
+    return any(
+        re.search(r"\bdeck_url\b", sentence) and re.search(r"\bshow\b", sentence, re.I)
+        for sentence in sentences
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["get_deck_status", "get_deck"])
+async def test_the_deck_tool_descriptions_describe_the_preview_and_deck_url(name):
+    """The reading tools say the HTML is a preview (standard fonts, images not shown,
+    at most 10 slides), that the full deck is at ``deck_url``, and to show
+    ``deck_url`` to the user (one sentence names it and says show). The old
+    full-payload wording is gone."""
+    from src.api import mcp_server
+
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == name]
+    description = tool.description
+    for old in _OLD_DECK_WORDING:
+        assert old not in description.lower(), old
+    assert re.search(r"\bpreview\b", description, re.I)
+    assert re.search(r"\b10\b", description)
+    assert re.search(r"\bfonts?\b", description, re.I)
+    assert re.search(r"\bimages?\b", description, re.I)
+    assert _tells_the_caller_to_show_deck_url(description)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["create_deck", "edit_deck"])
+async def test_the_submit_tool_descriptions_say_to_show_deck_url(name):
+    """create_deck and edit_deck return ``deck_url`` at once; their descriptions tell
+    the caller to show it (one sentence names it and says show)."""
+    from src.api import mcp_server
+
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == name]
+    assert _tells_the_caller_to_show_deck_url(tool.description)
 
 
 @pytest.mark.asyncio
@@ -1679,112 +4033,3 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
-
-
-# ---- create_deck: an MCP deck is stored legacy at creation --------------------
-#
-# MCP stays on the monolith (the graph's one-shot path is not built), so
-# create_deck creates its session with deck_mode="legacy": unpinned, and locked
-# to legacy from creation, so a later browser turn on it runs on the monolith
-# too.  The mode lives in the column, so every prompt -- create_deck's first one
-# included -- is persisted exactly as the caller sent it; the old
-# USE LEGACY MODE prepend is gone.  The manager here is a MagicMock: that a
-# legacy deck_mode is never pinned, whatever graph_capable says, is
-# SessionManager's pin rule, covered in test_deck_mode_resolution.py.
-
-# A literal, not the constant: the phrase constants are deleted in Task 6.
-_OLD_LEGACY_PHRASE = "USE LEGACY MODE"
-
-
-async def _drive_enqueue_create_job(*, mode, message_count):
-    from unittest.mock import AsyncMock
-
-    from src.api import mcp_server
-
-    sm = MagicMock()
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": message_count}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="mcp@example.com"):
-        request_id = await mcp_server.enqueue_create_job(
-            session_id="sess-1", prompt="make a deck about Q3", mode=mode
-        )
-    assert request_id == "req-1"
-    persisted = sm.add_message.call_args.kwargs["content"]
-    payload = enqueue.await_args.args[1]
-    return persisted, payload
-
-
-@pytest.mark.asyncio
-async def test_mcp_create_deck_is_legacy_unpinned_and_persists_the_prompt_verbatim(
-    fake_request, identity
-):
-    """The whole create_deck path, through the real enqueue_create_job: the
-    session is created legacy (so unpinned), and its first message is the
-    caller's prompt, unchanged."""
-    from unittest.mock import AsyncMock
-
-    prompt = "make a deck about Q3 revenue by region"
-    sm = MagicMock()
-    sm.create_session.return_value = {"session_id": "sess-legacy"}
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": 0}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="alice@example.com"):
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        result = await _create_deck_impl(
-            request=fake_request, prompt=prompt, slide_style_id=4
-        )
-
-    assert result == {
-        "session_id": "sess-legacy",
-        "request_id": "req-1",
-        "status": "pending",
-    }
-    sm.create_session.assert_called_once()
-    create_kwargs = sm.create_session.call_args.kwargs
-    assert (create_kwargs.get("deck_mode"), create_kwargs.get("graph_capable")) == (
-        "legacy",
-        False,
-    )
-    sm.add_message.assert_called_once()
-    saved = sm.add_message.call_args.kwargs
-    assert (saved["session_id"], saved["role"], saved["content"]) == (
-        "sess-legacy",
-        "user",
-        prompt,
-    )
-    assert _OLD_LEGACY_PHRASE not in saved["content"]
-    payload = enqueue.await_args.args[1]
-    assert (payload["message"], payload["is_first_message"]) == (prompt, True)
-    assert "engine_mode" not in payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "message_count"),
-    [("generate", 0), ("edit", 0), ("edit", 3), ("generate", 2)],
-    ids=["create-deck-first-message", "edit-on-empty-deck", "edit", "generate-not-first"],
-)
-async def test_every_enqueued_prompt_is_persisted_verbatim(mode, message_count):
-    """No prompt is altered, create_deck's first message included (it used to
-    get the opt-out prepended).  The first-message flag still reaches the
-    worker, and the payload still carries no engine key."""
-    persisted, payload = await _drive_enqueue_create_job(
-        mode=mode, message_count=message_count
-    )
-
-    assert persisted == "make a deck about Q3"
-    assert _OLD_LEGACY_PHRASE not in persisted
-    assert payload["message"] == "make a deck about Q3"
-    assert payload["is_first_message"] is (message_count == 0)
-    assert "engine_mode" not in payload

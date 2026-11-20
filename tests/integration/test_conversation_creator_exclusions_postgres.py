@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from src.api import mcp_server
 from src.api.routes.tour import _phase1_create_session
 from src.api.services.session_manager import SessionManager, SessionNotFoundError
 from src.database.models.graph_configuration import GraphRelease
@@ -148,46 +146,3 @@ def test_tour_spells_true_and_persists_the_active_pin(postgres_engine):
     assert _pin(factory, result["session_id"]) == active_id
     # The pin and the engine agree: the stored mode selects the graph.
     assert _deck_mode(factory, result["session_id"]) == "agent"
-
-
-@pytest.mark.asyncio
-async def test_mcp_spells_false_and_persists_a_null_pin(postgres_engine):
-    """Omitting the MCP exclusion makes a later default change silently pin tool decks.
-
-    MCP is still excluded: it stays on the monolith, so it creates its deck
-    with Deck Mode ``legacy``, stored at creation, which agrees with the null
-    pin.  (Its first message is persisted verbatim: see
-    tests/unit/test_mcp_server.py.)
-    """
-    factory = _factory_with_active_release(postgres_engine)
-    recorder = _RecordingManager(SessionManager())
-
-    @contextlib.contextmanager
-    def auth_scope(_request):
-        yield SimpleNamespace(user_name="mcp@example.com", source="test-token")
-
-    with patch(
-        "src.api.services.session_manager.get_db_session", _database_context(factory)
-    ), patch.object(
-        mcp_server, "get_session_manager", return_value=recorder
-    ), patch.object(
-        mcp_server, "mcp_auth_scope", auth_scope
-    ), patch.object(
-        mcp_server, "get_default_design_system_id", return_value=None
-    ), patch.object(
-        mcp_server, "get_default_slide_style_id", return_value=None
-    ), patch.object(
-        mcp_server, "enqueue_create_job", new_callable=AsyncMock, return_value="req-1"
-    ), patch(
-        "src.api.services.session_manager.lock_active_graph_release",
-        side_effect=_lock_tripwire,
-    ):
-        result = await mcp_server._create_deck_impl(
-            request=SimpleNamespace(),
-            prompt="make a non-graph deck",
-        )
-
-    assert recorder.create_kwargs[0]["graph_capable"] is False
-    assert recorder.create_kwargs[0].get("deck_mode") == "legacy"
-    assert _pin(factory, result["session_id"]) is None
-    assert _deck_mode(factory, result["session_id"]) == "legacy"
