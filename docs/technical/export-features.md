@@ -4,8 +4,8 @@
 
 The AI Slide Generator supports exporting slide decks in three formats, plus the deck spec as Markdown:
 - **PDF**: Client-side generation using browser APIs
-- **PPTX**: Server-side render of the deck HTML via the huashu pipeline — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
-- **Google Slides**: Synchronous server-side export — the rendered PPTX is uploaded to Drive, which converts it to native editable Slides
+- **PPTX**: Server-side render of the deck HTML by the snapshot engine (the `services/pptx-emit-huashu/` sidecar) — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
+- **Google Slides**: Synchronous server-side export — the same engine writes a deck for Google Slides, which is uploaded to Drive, which converts it to native editable Slides
 - **Deck spec (Markdown)**: client-side, from the Spec view — see *Deck spec as Markdown*.
 
 All export options are accessible through a unified dropdown menu in the slide panel (PDF, PPTX, Google Slides); the deck spec exports via a separate button in the Spec view header.
@@ -14,9 +14,9 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 | Route | Status | Notes |
 |---|---|---|
-| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML |
+| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML by the snapshot engine (below) |
 | `POST /api/export/pptx/editable/from-records` | **Live — fallback** | DOM-walker records → pptxgenjs. Fires on a `503` **or** when the error text indicates the pipeline is unavailable or installing — not status-code-only |
-| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; uploads the rendered PPTX to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
+| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; renders the deck for Google Slides (`target="gslides"`) and uploads it to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
 | `POST /api/export/google-slides/from-records` | **Live — fallback** | The Google equivalent of the records fallback |
 | `POST /api/export/pptx/editable/from-images` | Live, unreachable | Rasterised path, reached only when `fontMode === 'screenshot'`, which no UI surface passes |
 | `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, and **no caller exists in this repository's frontend** |
@@ -24,13 +24,45 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 PDF export is client-side and is not a route.
 
-**Table fidelity differs by route.** The huashu path emits **positioned text boxes and no `<a:tbl>`** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result is positionally faithful but not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx`, and its prompt uses `add_table`, so it *can* produce a native `<a:tbl>` — though being model-generated, that is not guaranteed per run. Treat the huashu flattening as current behaviour and a known limitation; nothing in the code establishes noneditable tables as a permanent product contract.
+**Table fidelity differs by route.** The snapshot engine writes a `<table>` the browser laid out as a plain grid as **one native, editable table** (`<a:tbl>`): the browser's own column widths and row heights, spans, fills, collapsed borders (resolved as CSS collapses them and written on both cells of each edge, which Drive keeps) and cell margins. A table no `<a:tbl>` can draw becomes editable positioned items instead (see *What the export trades away* below). The records fallback's DOM walker produces no records for `<td>`/`<th>`, so on that path cells are flattened into absolutely-positioned elements: faithful in position, not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx` with `add_table`, so it *can* produce a native table, though not reliably per run.
 
 **A deck's leading webfont `@import` must stay first in its stylesheet.** `@import` is only valid at the top of a stylesheet, so anything prepended to the deck's CSS discards it and the export silently falls back to a system font. The Python `build_slide_html` builder achieves this by emitting the deck's CSS in its **own** `<style>` element. `buildStandaloneDeckDocument` instead concatenates deck and wrapper CSS into a single `<style>`, and remains correct only because the deck's CSS is placed first within it.
 
 **No universal `* { box-sizing }` rule is applied** by either export builder, so slide content keeps the browser default. The resets that do exist are narrower than "scoped to `html, body`" — the Python builder's shell reset omits `box-sizing` entirely, and the preview host applies `box-sizing: border-box` to the host's direct child rather than to the document shell. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 
-**Known export limitations.** Inline background pills (used for agenda badges) are centred against their resolved ancestor, so badges on a wide list can land away from their item. `<code>` chips do not receive their pill background. The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
+**Known export limitations.** The PowerPoint and Google Slides exports trade a few things away on purpose (*What the export trades away*, below). The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
+
+## The snapshot engine (PowerPoint and Google Slides)
+
+Both live server-side routes run `build_pptx_huashu` (`src/services/pptx_from_html_huashu.py`), which runs the Node sidecar `services/pptx-emit-huashu/emit_deck.mjs` over the deck's slide documents (`build_slide_html`). For each slide, `render_slide.cjs` loads the complete document in headless Chromium (Playwright, 1280×720, device scale 2) and takes it through five stages:
+
+1. **Load and settle.** Network idle; every font face the text asks for loaded (`pageFontsSettled`); every `<canvas>` given a drawing buffer (`waitForCanvases`, for Chart.js); then every CSS animation and transition finished, so a deck that fades content in exports its settled, opaque state; then the fonts again, for text an animation's end state set.
+2. **The slide root's ground.** `preprocess.mjs` moves the slide root's background onto `<body>`, which becomes the slide background. Nothing that moves layout runs: the page is read as the browser laid it out.
+3. **Snapshot.** Each `::before`, `::after` and list `::marker` is read through the Chrome DevTools Protocol (`pseudo.mjs`): Chrome's own text, box and counters, read-only, with nothing inserted into the page. Then one read-only `page.evaluate` (`snapshot.mjs`, with `snapshot_borders.mjs`, `snapshot_text*.mjs` and `snapshot_table.mjs`) turns the page into a slide model: shapes, lines, text blocks with the browser's line breaks and runs, native tables, and picture targets, in CSS paint order. The slide's own script built the realm the model was made in, so Node validates the model before any use (`model_check.cjs`): an item it could not have written (a forged capture id, non-finite geometry, an unknown kind, an empty table grid) is dropped and counted (`modelDrops` in the slide summary), and the rest exports.
+4. **Capture.** What PowerPoint and Slides cannot draw natively (gradients, background images, filters, inline SVG, canvas, images that are not raster `data:`) is an element-isolated 2× screenshot of the original page (`capture.cjs`); the element's text, children and pseudo-elements stay native.
+5. **Emit.** `emit_model.cjs` writes the model to a pptxgenjs slide (`emit_text.cjs`, `emit_table.cjs`, `emit_typography.cjs`, `units.cjs`): typefaces named by weight for the webfonts the page loaded, line spacing written against the renderers' single spacing of 1.2 × the font size (a percentage up to it, space before each line above it), colours pre-blended against their backdrop, pictures from `data:` only (SDR-4437).
+
+Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line when a word of the page's rendered text is in no exported item, and always one `[html2pptx] slide summary {json}` line (item counts, captures, `hiddenText`, `target`, `modelDrops`). The wrapper echoes them into the app log, and the export-fidelity harness reads them ([Export Fidelity Harness](export-fidelity-harness.md)).
+
+**Renderer target.** `build_pptx_huashu(..., target=...)` names the app the deck is written for: `"pptx"` (PowerPoint, the download) or `"gslides"` (the Google Slides route). The two place a few constructs apart, all on lines that hold a superscript or subscript run, so only those are written differently; a deck with no script run is byte-identical for both targets. The measurements are in `scripts/export_fidelity/CALIBRATION.md` (A2, A4, A5).
+
+**Determinism.** Identical rendered pages give byte-identical `.pptx` files, apart from the timestamps in `docProps/core.xml`: item and capture ids are sequence numbers in document order. Two exports of the same deck can still differ slightly when the page itself differs: **live Google Fonts responses vary**. Google now and then serves a different DM Sans binary for the same `@import` (measured: 4 of 40 fresh loads), whose glyph widths differ by a fraction of a px, so text widths in the export move with it. The variance is external to the engine; the tests pin the corpus's fonts (`pinned_font_css`) to compare exports byte for byte.
+
+**Time and limits.**
+- A slide takes about 1.5 s on a dev Mac (measured 2026-11-20: 1 slide 1.5 s, 5 slides 6.4 s, 17 slides 25.0 s; one browser per slide). That is about 8% slower than the converter it replaced (1.47 against 1.36 s per slide, same corpus, Chrome channel and Playwright).
+- One sidecar run is bounded by `SIDECAR_TIMEOUT_SECONDS`, 180 s, as before: decks of more than about 120 slides time out. A timed-out sidecar is ended with every Chromium it launched (`run_sidecar_process`).
+- Each worker process runs at most `TELLR_SIDECAR_CONCURRENCY` sidecars at once (default 1; a node and Chromium tree takes about 790 MB). At most `TELLR_SIDECAR_QUEUE` more exports (default 15) wait for a slot, each for up to `TELLR_SIDECAR_WAIT_SECONDS` (default 60 s). An export past either bound is answered **429**, `Retry-After: 60`, "Exports are busy right now. Please try again in a minute.", which the UI shows as it is (no fallback). Waiting exports hold threads of the worker's threadpool (40), so the queue keeps the rest free for every other request.
+- The Databricks Apps proxy ends a request after about **300 s** (measured on 2026-11-20: requests of 30 to 185 s returned 200, one of 310 s got 502 at 300.4 s). With the defaults, the slowest route, Google Slides, answers within it: 60 s of waiting, the 180 s run, and the Drive upload, whose every request fails after 60 s without an answer (`DRIVE_HTTP_TIMEOUT_SECONDS`), a 502 "Drive upload failed". Bounds set past these limits are warned about in the log when the app starts.
+
+### What the export trades away
+
+These are deliberate, each the closest a slide can come in an editable file:
+- **Line breaks are the UI's.** Each line is the browser's line: a block of one line is written `wrap="none"`, and every box carries a little width slack, so a slightly wider font in PowerPoint or Slides never re-wraps a line. Editing a line does not re-flow the lines after it, as it would in a text box typed from scratch.
+- **Tables are native, with exceptions.** A table becomes editable positioned items (cell boxes as shapes, cell text as text boxes) when no `<a:tbl>` can draw it: card tables (`border-collapse: separate` with visible spacing and painted cells), a table a clip cuts part of, the outer table of a nested pair, and overlapping row and column spans.
+- **A sentence with chips is several boxes.** An inline element with padding, a border or a margin (a chip, a `<kbd>`) cuts its line, so each piece is a text box of its own at the browser's exact position.
+- **Charts are pictures.** A chart's SVG or canvas is a high-resolution picture; titles, legends and labels written in HTML stay editable text.
+- **Google Slides superscripts are a little small.** In the deck written for Google Slides, a superscript or subscript on a line the browser did not grow is drawn at 0.8 of its browser size, so the line itself sits where the browser has it.
+- **The Google export is its own variant.** The Google Slides route writes a deck for Google Slides (`target="gslides"`), not the PowerPoint download, so the two files can differ on lines with script runs.
 
 ## User Guide
 
@@ -50,8 +82,9 @@ PDF export is client-side and is not a route.
 
 3. **Export as PowerPoint**
    - Click "Export as PowerPoint"
-   - The primary path sends only `session_id` to the **synchronous** huashu route and downloads the returned PPTX blob — there is no job/poll cycle
+   - The primary path sends only `session_id` to the **synchronous** snapshot-engine route and downloads the returned PPTX blob — there is no job/poll cycle
    - If that pipeline is unavailable on the deployment (HTTP 503, or an error naming the pipeline as unavailable or still installing), the UI extracts DOM records client-side and retries through the records fallback
+   - If the worker is busy (HTTP 429, see *Time and limits*), the UI shows "Exports are busy right now. Please try again in a minute." and does not fall back
    - A PPTX file will be downloaded automatically when complete
    - Filename format: `{slide_deck_title}_{timestamp}.pptx`
 
@@ -224,36 +257,32 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 ### Google Slides Export (Server-Side)
 
 **Location:**
-- `src/api/routes/google_slides.py` — API endpoints (auth + export)
+- `src/api/routes/google_slides.py` — API endpoints (auth + export); `_upload_session_deck` is the one Drive upload both export routes share
 - `src/api/routes/admin.py` — Google credential management endpoints (upload, status, delete)
 - `src/services/google_slides_auth.py` — OAuth2 flow and token management
-- `src/services/html_to_google_slides.py` — LLM-powered converter
+- `src/services/pptx_from_html_huashu.py` — the snapshot engine's wrapper (`target="gslides"`)
+- `src/services/drive_uploader.py` — the Drive upload, which converts the PPTX to Slides
+- `src/services/html_to_google_slides.py` — the legacy LLM converter (no UI caller)
 
 **Technology Stack:**
-- Google Slides API + Google Drive API: Creates and populates presentations
+- Google Drive API: uploads the PPTX with `mimeType=application/vnd.google-apps.presentation`, which converts it to a native Slides presentation
 - `google-auth-oauthlib`: OAuth2 authorization flow
 - Fernet encryption (`cryptography`): Encrypts credentials and tokens at rest
-- LLM (Databricks Claude Sonnet 4.5): Generates Python code that calls the Slides API
 
 **Process:**
 1. Admin uploads `credentials.json` globally (one-time setup)
 2. User authorizes via Google OAuth popup (one-time per user)
 3. User clicks "Export to Google Slides"
-4. Frontend calls `POST /api/export/google-slides` to initiate export
-5. Backend validates auth, fetches slides, builds HTML, and enqueues a background job; returns `job_id` immediately
-6. Background worker builds authenticated API clients from encrypted DB records
-7. Creates a blank presentation via Slides API
-8. For each slide, LLM generates Python code to populate the slide via `batchUpdate`; progress is updated after each slide
-9. Code is sanitized and executed server-side
-10. Frontend polls `GET /api/export/google-slides/poll/{job_id}` for status and progress
-11. When `status` is `completed`, the response includes `presentation_id` and `presentation_url`
+4. Frontend calls `POST /api/export/google-slides/from-huashu` with the `session_id`
+5. Backend checks the user may view the deck and is authorized, builds each slide's HTML, and runs the snapshot engine for Google Slides (`build_pptx_huashu(..., bypass_validation=True, target="gslides")`)
+6. The PPTX is uploaded to Drive (a re-export replaces the session's earlier presentation), which converts it; every Drive request is bounded by `DRIVE_HTTP_TIMEOUT_SECONDS`
+7. The response carries `presentation_id`, `presentation_url`, `total_slides`, `succeeded` and `failures`, in one synchronous round-trip
+8. On a 503 (the sidecar not installed on the deployment) the frontend falls back to `/from-records`; on a 429 it shows the busy message
 
 **Features:**
-- Produces editable Google Slides (not static images)
+- Produces editable Google Slides (not static images), from the same snapshot of the page as the PowerPoint export
 - Global credential storage (encrypted)
 - Per-user OAuth tokens (multi-user safe)
-- LLM-powered layout with retry and fallback
-- Chart images uploaded to Google Drive and embedded
 - Stale token/credential auto-cleanup
 
 **Configuration:**
@@ -264,14 +293,14 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 **Limitations:**
 - Requires Google Cloud project setup
 - Requires user interaction for initial OAuth consent
-- Processing time: 5–15 seconds per slide (similar to PPTX)
-- Requires LLM API access (Databricks endpoint)
+- Processing time: about 1.5 s per slide for the render, plus the Drive upload (4–20 s measured)
 
 For full technical details, see [Google Slides Integration](./google-slides-integration.md).
 
-## Positioning Constraints
+## Positioning Constraints (legacy LLM path)
 
-The PPTX converter uses strict positioning constraints to prevent overlapping elements:
+The legacy LLM converter (`html_to_pptx.py`) prompts with strict positioning constraints to prevent overlapping elements. The snapshot engine needs none: it writes every item where the browser drew it.
+
 
 - **Slide dimensions**: 10" wide × 7.5" tall
 - **Safe bounds**: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
@@ -288,7 +317,11 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 - Chart.js visualizations are captured via canvas
 - Charts appear exactly as they do in the browser
 
-### PPTX Export
+### PPTX and Google Slides Export (snapshot engine)
+
+A chart's `<svg>` or `<canvas>` is captured server-side from the rendered page, after the export has waited for every canvas to be drawn and every animation to finish: a 2× picture at the chart's place. Its HTML title, legend and labels stay editable text. Nothing is captured in the browser tab, which may be closed or hidden while the export runs.
+
+### PPTX Export (legacy LLM path)
 
 **Chart Images (client-side capture)**:
 - Charts are captured as base64 PNG images in the browser before export
@@ -381,7 +414,21 @@ The field `template_section_index` is omitted: it is a 0-based machine index int
 **Problem**: First slide content trimmed
 - **Solution**: The implementation includes special handling for the first slide with additional wait time and canvas cropping logic.
 
-### PPTX Export Issues
+### PPTX and Google Slides Export Issues (snapshot engine)
+
+**Problem**: "Exports are busy right now. Please try again in a minute." (HTTP 429)
+- **Solution**: The worker already runs its sidecars and holds its full queue (`TELLR_SIDECAR_CONCURRENCY`, `TELLR_SIDECAR_QUEUE`), or the export waited `TELLR_SIDECAR_WAIT_SECONDS` for a slot. Retry after a minute; for sustained load, raise the concurrency within the memory the app has (about 790 MB per sidecar).
+
+**Problem**: The export falls back to the records pipeline ("Falling back to records pipeline (slower)…")
+- **Solution**: The sidecar is not available on this deployment (HTTP 503): it needs `HUASHU_PIPELINE_ENABLED=1`, node, the sidecar's `node_modules` and a Playwright Chromium, which the app's boot installs with `setup.sh`. Until that finishes, the fallback is expected.
+
+**Problem**: "Drive upload failed" (HTTP 502)
+- **Solution**: Drive refused the upload or did not answer within `DRIVE_HTTP_TIMEOUT_SECONDS`. The deck was rendered; the app log names the Drive error.
+
+**Problem**: A slide is missing text, or `MODEL DROPS` appears in the harness
+- **Solution**: Read the slide's `[html2pptx] text missing:` and `slide summary` lines in the app log: `modelDrops` counts model items that failed validation and were left out.
+
+### PPTX Export Issues (legacy LLM path)
 
 **Problem**: Export fails with "No slide deck available"
 - **Solution**: Ensure you have generated slides before attempting export. The export requires an active slide deck.
@@ -423,8 +470,7 @@ The field `template_section_index` is omitted: it is a 0-based machine index int
 2. **For PPTX Export**:
    - Use when you need editable PowerPoint files
    - Best for presentations that need further editing
-   - Ensure charts are fully rendered before exporting (wait for animations to complete)
-   - Keep the browser tab active during export for reliable chart capture
+   - The export renders the deck server-side and waits for charts and animations itself; the browser tab can be left
 
 3. **Chart Considerations**:
    - PDF: Charts are images (not editable)
@@ -442,13 +488,13 @@ Potential improvements for export features:
 - [ ] Compression options for PDF
 - [ ] Export quality presets (high/medium/low)
 - [x] Persistent job storage (survive server restarts) - **Implemented** (DB-backed ExportJob model)
-- [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, LLM code-gen)
-- [x] Google Slides async export with progress polling - **Implemented** (`POST` returns job_id, `GET .../poll/{job_id}` for status)
+- [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, the snapshot engine's deck converted by Drive)
 
 ## Related Documentation
 
 - [Backend Overview](../technical/backend-overview.md) - Backend architecture
 - [Frontend Overview](../technical/frontend-overview.md) - Frontend architecture
 - [Slide Parser & Script Management](../technical/slide-parser-and-script-management.md) - How slides are structured
-- [Google Slides Integration](../technical/google-slides-integration.md) - OAuth2 flow, encryption, LLM converter
+- [Google Slides Integration](../technical/google-slides-integration.md) - OAuth2 flow, encryption, the Drive conversion
+- [Export Fidelity Harness](../technical/export-fidelity-harness.md) - Measuring the exports against the UI in PowerPoint and Google Slides
 

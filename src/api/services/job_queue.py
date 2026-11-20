@@ -1,8 +1,9 @@
 """In-memory job queue for async chat processing.
 
 This module provides a background worker that processes chat requests
-asynchronously, enabling polling-based streaming to work around
-Databricks Apps' 60-second reverse proxy timeout.
+asynchronously, enabling polling-based streaming, so a long turn never has to
+fit in one request: Databricks Apps' reverse proxy ends a request after about
+300 seconds (measured on a plain request).
 """
 
 import asyncio

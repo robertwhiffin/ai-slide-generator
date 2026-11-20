@@ -111,12 +111,12 @@ cause hits PowerPoint and Google Slides alike.
 | `wrap="none"` | **No**, text still wraps | Keep browser line breaks explicitly and give boxes width slack |
 | Typeface `DM Sans SemiBold` / `DM Sans Medium` | **Yes**, as weight 600 / 500 | Write non-400/700 weights into the typeface name. The static DM Sans fonts carry these legacy family names (name ID 1), so PowerPoint resolves them too |
 | `spc` (letter spacing) | Yes | Write `charSpacing` |
-| Exact line spacing (`spcPts`) | Converted to % of the natural line height | Write percentage spacing relative to the font's natural line height |
+| Exact line spacing (`spcPts`) | Converted to % of the natural line height | Write percentage spacing, of the renderers' single spacing (1.2 × the font size, as built: see §3 Spacing) |
 | Text alpha | **No** | Pre-blend text colour against its backdrop |
 | Fill transparency | Yes | Keep fill transparency |
 | `ellipse` preset | Yes | Use it for circles |
 | Superscript run | Yes | Use superscript and subscript run options |
-| Native table (`a:tbl`) | Yes: geometry, fills, margins, weights and alignment exact. Two borders were missing in the probe, but those were cells the probe itself gave no top border: a neighbour's `noFill` edge contradicted the line | Use native tables; resolve shared edges the way CSS collapses borders and write the winner on **both** cells (re-verified through Drive in plan Task 10) |
+| Native table (`a:tbl`) | Yes: geometry, fills, margins, weights, alignment and per-cell borders. The two borders missing in the probe were edges the probe wrote on one cell only, against a neighbour's `noFill`. Written on both cells, every collapsed edge survives: converted through Drive, the balance-sheet fixture's total-row lines and a collapse test deck's edges are the browser's colour (and width) in every column (`test_export_snapshot_tables.py`, opt-in Google test) | Use native tables; resolve shared edges the way CSS collapses borders and write the winner on **both** cells |
 
 ## Prior art: huashu-design upstream
 
@@ -227,7 +227,8 @@ the owner's call and outside this spec.
 - The owner reviews this spec and then the plan before implementation. After that, the work
   runs autonomously through implementation, tests and the dev deploy. **(decided)**
 - The dev build is deployed with the repo's `deploy-tellr-dev` skill to a `devloop`
-  instance on the FEVM dev workspace, and kept for at least a week. **(decided)**
+  instance on the FEVM dev workspace, and kept for at least 2 months from its deploy date.
+  **(decided)**
 - DM Sans and DM Mono are installed on the dev Mac, and the harness may drive PowerPoint.
   **(decided)**
 
@@ -237,11 +238,15 @@ the owner's call and outside this spec.
 
 ```
 build_slide_html ─▶ emit_deck.mjs ─▶ render_slide.cjs (per slide)
-                                       1. load + settle (networkidle, fonts.ready, canvas wait)
+                                       1. load + settle (networkidle, every font face loaded,
+                                          canvas wait, animations finished)
                                        2. preprocess.mjs   layout-neutral only (§2)
-                                       3. snapshot.mjs     read-only extraction → slide model (§3)
+                                       3. pseudo.mjs       ::before/::after/::marker via CDP (§2)
+                                          snapshot.mjs     read-only extraction → slide model (§3),
+                                          model_check.cjs  validated in Node (§3)
                                        4. capture          element-isolated screenshots (§4)
-                                       5. emit_model.cjs   slide model → pptxgenjs (§5)
+                                       5. emit_model.cjs   slide model → pptxgenjs (§5),
+                                                           for the renderer target (§3)
                                        6. checks           text-loss + summary line (§6)
 ```
 
@@ -259,14 +264,15 @@ Kept: `transferSlideRootBackground` and its `bgTransferred` result, the pristine
 accessors, and bounded iteration. All of these are pinned by the slide-root and
 hostile-realm tests.
 
-Added: **pseudo-element materialization.**
-- Every `::before` or `::after` whose `content` is not `none` becomes a real
-  `<span data-tellr-pseudo>` with the pseudo-element's full computed style.
-- The pseudo itself is switched off by one injected rule scoped to a marker attribute.
-- The span has the same computed style in the same place, so layout should not move. This
-  is **checked, not assumed**: every element's rect is recorded before and compared after.
-  If anything moved by more than 0.5 px, the materialization is reverted for that slide and
-  `[preprocess] pseudo materialization moved layout; reverted` is logged.
+**Pseudo-elements are read, not materialized** (as built). Inserting a span for each
+`::before` and `::after` shifts structural selectors (`:nth-child`, `:first-child`), which
+restyled real decks, so nothing is inserted. `pseudo.mjs` reads every `::before`,
+`::after` and list `::marker` from Node through the Chrome DevTools Protocol, read-only:
+its box (`DOM.getBoxModel`), its rendered text, counters included, from the layout
+(`DOMSnapshot`), and its computed style. Hosts are tied to page elements by a
+layout-neutral marker attribute. A pseudo-element's items take its host's paint order:
+`::before` as the host's first child, `::after` as its last. One that needs a picture (a
+gradient, an image) is captured by isolating `[host]::before` or `::after`.
 
 Removed:
 - `flattenMonospaceCodeBlocks`, `wrapBareTextInDivs`, `replaceBackgroundImageWithImg`;
@@ -334,10 +340,15 @@ block (upstream issue #56). Each block becomes one text box.
   PowerPoint honours, and natural spacing. Every box also gets width slack, because Drive
   ignores `wrap="none"`. The slack is 6% plus 4 px, extended in the direction its
   alignment allows.
-- **Spacing.** Multi-line spacing is a percentage of the font's natural line height,
-  measured in-page with a `line-height: normal` probe. Vertical anchor is `top`. The
-  first-line offset for each spacing value is calibrated against PowerPoint and Google
-  Slides renders of a probe deck and pinned by a test.
+- **Spacing.** PowerPoint and Google Slides draw 100% spacing at 1.2 × the font size,
+  whatever the font's metrics, so a multi-line block's spacing is written against that
+  (as built; `scripts/export_fidelity/CALIBRATION.md`). A line height up to 1.2 × the
+  paragraph's largest run is a percentage of it (`<a:spcPct>`), the lines soft breaks in
+  one paragraph. A looser line height is single spacing with every line a paragraph of its
+  own, and the leading beyond single as space before each line after the first
+  (`<a:spcBef>`), where the two renderers agree. Vertical anchor is `top`. The first-line
+  offset is calibrated against PowerPoint and Google Slides renders of a probe deck and
+  pinned by a test.
 - **Runs** carry:
   - font: family (the first face in the stack the document loaded), weight, italic, size;
   - colour, pre-blended against the resolved backdrop for any alpha or opacity;
@@ -347,18 +358,42 @@ block (upstream issue #56). Each block becomes one text box.
   `background-clip:text` falls back to the gradient's middle stop as a solid colour.
 - **Inline decorations.** Inline elements with a background, border or padding (pills,
   chips, `<mark>`, `<kbd>`) emit a shape at each of their per-line fragment rects, under
-  the text. The text stays in its sentence.
+  the text. An inline element whose horizontal margin, border and padding take space is a
+  segment boundary, as an atomic inline is: its line is cut at both its ends, its own text
+  is a segment inside its decoration, and the text after it keeps its exact x. So a
+  sentence with a chip in it exports as several single-line boxes, each where the browser
+  drew it (as built).
 - **Inline boxes.** Inline atomic boxes (inline images, inline SVGs, `inline-block`s) split
   the line into segments, so the text after them keeps its exact x position.
 
 **Lists.**
-- `list-style-type` other than `none` emits its marker (`•`, `1.`, `a.` and so on) as its
-  own text item at the marker's position.
-- `list-style:none` emits none.
-- `<ol>` numbering, including `start` and `reversed`, follows the browser.
+- Each list item's `::marker` is read through the DevTools protocol (§2), so its text
+  (`•`, `1.`, `a.` and so on), its box and its own computed style are Chrome's, numbering
+  (`start`, `reversed`) included.
+- A marker outside its item is a single-line text item of its own, where its glyphs end.
+  An inside marker is a token of its item's first line when the text runs straight on
+  from it, and a segment of its own when a gap follows it.
+- `list-style-image` is a picture at the marker's box. `list-style:none` emits none. No
+  paragraph is ever a native PowerPoint bullet.
 
-**Rotated text.** Text under a rotation emits the unrotated box (from
-`offsetWidth/Height`), the angle, and browser line breaks.
+**Rotated text.** Text under a rotation, or set sideways by a vertical writing mode,
+emits the unrotated box (from `offsetWidth/Height`), the angle, and browser line breaks.
+
+**Model validation** (as built). The model is built in the slide's own realm, whose
+script may have replaced the page's built-ins, so Node checks it before any use
+(`model_check.cjs`): capture ids `c<n>` and unique, finite numeric geometry, known item
+kinds, image items that reference a capture that exists, a table grid of at least one row
+and one column. An invalid item is dropped and counted in the slide summary's
+`modelDrops`; the rest of the slide exports.
+
+**Renderer target** (as built). PowerPoint and Google Slides place a few constructs
+differently, all on lines that hold a superscript or subscript run: the size of a script
+run, a word joiner after a script run that ends its line (PowerPoint only), and a later
+line's growth as space before. `build_pptx_huashu(..., target=...)` names the app the deck
+is for: `"pptx"` (the download) or `"gslides"` (the Google Slides route). Only those
+constructs branch, so a deck with no script run is byte-identical for both targets. In the
+Google deck a script glyph on a line the browser did not grow is drawn at 0.8 of its size,
+an accepted trade-off: the line sits where the browser has it.
 
 **Pictures.** These become capture targets:
 - `<img>` (`data:` only), `<canvas>`, `<video>` posters and inline `<svg>`;
@@ -421,14 +456,15 @@ Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Dr
   is compared with the emitted text. Anything missing is logged as
   `[html2pptx] text missing: …` on stderr, so text loss is visible in the app log.
 - One `[html2pptx]` summary line per slide on stderr: item counts per kind, captures taken
-  and failed, and whether pseudo materialization reverted.
+  and failed, the pseudo-elements read, the slide's hidden text, the renderer target and
+  `modelDrops`.
 
 ### 7. Error handling
 
 - **A capture fails.** Log `[html2pptx] capture failed: <marker> <reason>`, omit the
   item, keep the slide.
-- **The pseudo-materialization check fails.** Revert, log, continue. The pseudo content
-  is then missing on that slide, and the log says so.
+- **A model item fails validation.** Drop it, count it in `modelDrops`, export the rest
+  of the slide.
 - **The snapshot throws.** The slide is reported in `failures`, as today, so the
   partial-export toast names it.
 - **Hostile slide script.** Termination is guaranteed by the bounded collections and walk
@@ -493,7 +529,7 @@ Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Dr
 - **Dev deploy.** A `.devN` built from `feat/export-revamp` is published to PyPI and deployed to
   a dedicated `devloop` instance. There, fresh decks (balance sheet, scorecards, charts,
   timelines, architecture) are generated and exported to both formats, then checked by the
-  owner by hand. The app is kept for at least a week.
+  owner by hand. The app is kept for at least 2 months from its deploy date.
 
 ## Left to the builder
 

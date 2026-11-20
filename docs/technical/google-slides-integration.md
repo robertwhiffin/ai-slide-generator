@@ -12,7 +12,7 @@ Key design decisions:
 - **Global credentials** — A single `credentials.json` is stored app-wide in the `google_global_credentials` table, encrypted at rest. Admins upload via the `/admin` page.
 - **Per-user tokens** — OAuth tokens are scoped to `user_identity` only. Each user authorizes once; tokens are stored in `google_oauth_tokens`.
 - **DB-backed storage** — No files on disk; all secrets live in PostgreSQL/Lakebase, encrypted with Fernet symmetric encryption.
-- **HTML → PPTX → Drive auto-convert** — The export does **not** call the Google Slides API to build slides object-by-object. It renders the deck's HTML to a `.pptx` and uploads that file to Drive with `mimeType=application/vnd.google-apps.presentation`, so Google converts it to a native Slides presentation. This gives coordinate-faithful layout (positions come straight from the rendered DOM) for free.
+- **HTML → PPTX → Drive auto-convert** — The export does **not** call the Google Slides API to build slides object-by-object. It renders the deck's HTML to a `.pptx` and uploads that file to Drive with `mimeType=application/vnd.google-apps.presentation`, so Google converts it to a native Slides presentation. Layout is coordinate-faithful: the snapshot engine writes every item where the browser drew it.
 
 > **Historical note.** An earlier design used an LLM to generate Python that
 > called `slides.batchUpdate()` object-by-object (`src/services/html_to_google_slides.py`,
@@ -44,16 +44,17 @@ Frontend (SlidePanel → "Export to Google Slides")   ← the export
   │
   ├─ POST /api/export/google-slides/from-huashu     (primary path)
   │      └─ backend fetches deck HTML from session storage
-  │      └─ build_pptx_huashu() → spawns Node sidecar (emit_deck.mjs)
-  │            └─ per slide: Playwright renders HTML in Chromium (1280×720)
-  │                          → preprocess.mjs mutates DOM → html2pptx.js walks
-  │                            the rendered DOM → pptxgenjs assembles one .pptx
+  │      └─ build_pptx_huashu(target="gslides") → spawns Node sidecar (emit_deck.mjs)
+  │            └─ per slide (render_slide.cjs): Playwright loads the HTML in
+  │                 Chromium (1280×720) and settles it → the slide root's ground
+  │                 moves onto body → the page is read as laid out, read-only
+  │                 (snapshot) → pictures captured → pptxgenjs writes the slide
   │      └─ upload_pptx_as_slides()  → Drive upload, mimeType=…google-apps.presentation
   │                          → Google auto-converts PPTX → native Slides
   │      └─ returns { presentation_id, presentation_url,
   │                   total_slides, succeeded, failures }   (synchronous, no polling)
   │
-  └─ POST /api/export/google-slides/from-records    (fallback, only on 503)
+  └─ POST /api/export/google-slides/from-records    (fallback, only on 503; a 429 "busy" is shown, not retried)
          └─ client-side DOM walker (domWalker.ts) → records → pptxgenjs → same Drive upload
 ```
 
@@ -62,7 +63,7 @@ Frontend (SlidePanel → "Export to Google Slides")   ← the export
 1. **Admin** uploads `credentials.json` via the Google Slides tab on the `/admin` page.
 2. **Each user** opens **Configure → Settings** and clicks "Authorize with Google" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user (by `user_identity`). **Disconnect** on the same page deletes that token (`DELETE /api/export/google-slides/auth`). Users can also complete consent from the export popup if they are not yet authorized.
 3. **Export** (`exportToGoogleSlides` in `frontend/src/services/api.ts`) POSTs to `/from-huashu`. The backend builds the PPTX server-side and uploads it to Drive in a single synchronous round-trip — there is **no** job/poll cycle on this path.
-4. If the huashu pipeline is unavailable on the deployment (HTTP 503 — e.g. Chromium not bootstrapped), the frontend transparently falls back to `/from-records`, walking the deck DOM client-side and POSTing the extracted records.
+4. If the huashu pipeline is unavailable on the deployment (HTTP 503 — e.g. Chromium not bootstrapped), the frontend transparently falls back to `/from-records`, walking the deck DOM client-side and POSTing the extracted records. If the worker is busy (HTTP 429: its export slots and queue are full, or the wait for a slot ran out), the frontend shows the route's message, "Exports are busy right now. Please try again in a minute.", and does not fall back.
 
 ---
 
@@ -222,47 +223,48 @@ Key methods:
 - `authorize(code, redirect_uri)` — Exchanges code for tokens, persists.
 - `build_slides_service()` / `build_drive_service()` — Returns authenticated Google API clients.
 
-### Huashu PPTX pipeline (`src/services/pptx_from_html_huashu.py`)
+### The snapshot engine (`src/services/pptx_from_html_huashu.py`)
 
-The primary path. `build_pptx_huashu(title, slides_html, bypass_validation=…)`
+The primary path. `build_pptx_huashu(title, slides_html, bypass_validation=…, target=…)`
 JSON-encodes the deck and spawns the Node sidecar
-`services/pptx-emit-huashu/emit_deck.mjs`, which for each slide:
+`services/pptx-emit-huashu/emit_deck.mjs`, which for each slide
+(`render_slide.cjs`):
 
-1. Launches headless Chromium via Playwright and loads the slide's complete HTML doc (sized to 1280×720 px = 13.333"×7.5", `LAYOUT_WIDE`).
-2. Runs `preprocess.mjs` (`PREPROCESS_SOURCE`) as an in-page `page.evaluate()` DOM-mutation pass to bring Tellr's HTML into compliance with huashu's rules — wrap bare `<div>` text in `<p>`, flatten `<table>`s to positioned divs, rasterize `<canvas>`, transfer slide-root backgrounds to `<body>`, promote inline-background pills, etc.
-3. Walks the rendered DOM in `html2pptx.js`, reading each element's `getBoundingClientRect()` and converting px→inches at 96 px/in, and emits the corresponding pptxgenjs shapes/text/images.
-4. `pptxgenjs` assembles all slides into a single `.pptx`, returned as bytes.
+1. Loads the slide's complete HTML document in headless Chromium through Playwright (1280×720 px = 13.333"×7.5", `LAYOUT_WIDE`) and settles it: network idle, every font face its text asks for, every canvas drawn, every animation finished.
+2. Moves the slide root's ground onto `<body>` (`preprocess.mjs`), the slide background. Nothing that moves layout runs.
+3. Reads the page as the browser laid it out, read-only (`snapshot.mjs`, with pseudo-elements and list markers read through the DevTools protocol by `pseudo.mjs`), into a slide model, which Node validates (`model_check.cjs`) before any use.
+4. Captures what cannot be native as element-isolated 2× pictures (`capture.cjs`).
+5. Writes the model with pptxgenjs (`emit_model.cjs`): text boxes on the browser's lines, shapes, native tables and pictures, in paint order.
 
-**Availability / local-only.** The sidecar needs Chromium (via Playwright),
-which Databricks Apps containers lack by default. `is_available()` gates on
-`HUASHU_PIPELINE_ENABLED=1` (or `ENVIRONMENT=development`) plus node,
-`playwright`, `pptxgenjs`, and an installed Chromium. When it can't run, the
-route returns 503 and the frontend falls back to `/from-records`.
+The Google route passes `target="gslides"`: the deck is written for Google Slides' own placement of lines that hold a superscript or subscript run (the only constructs the two apps place apart; a deck without one is byte-identical for both targets). See [Export Features](./export-features.md) for the stages, the trade-offs and the limits.
 
-**Positioning is coordinate-faithful.** Element positions are measured from the
-rendered DOM, not inferred — an absolutely-positioned corner element lands in
-that corner in the PPTX (and therefore in Slides). The one place this was
-historically broken: `preprocess.mjs::emitInlineBackgrounds()` re-centers
-inline-background pills (`span`/`mark`/`kbd`) so table-cell badges sit centered
-in their cell. It now branches on `position` — author-positioned
-(`absolute`/`fixed`) pills keep their measured position (fixing corner
-"eyebrow"/"cadence" tags that used to drift to the slide center on export),
-while normal-flow badges are still centered.
+**Availability.** The sidecar needs node, its `node_modules` and a Playwright
+Chromium, which the deployed app's boot installs (`setup.sh`, started from
+`app.yaml`). `is_available()` gates on `HUASHU_PIPELINE_ENABLED=1` (set by the
+app template) or `ENVIRONMENT=development`, plus node, `playwright`,
+`pptxgenjs` and an installed Chromium. Until it can run, the route returns 503
+and the frontend falls back to `/from-records`.
 
-**Known limitation — normal-flow badges on a wide container.** Centering a
-normal-flow pill uses the resolved positioned ancestor's width. Inside a table
-cell that is correct. Inside a wide list — a numbered agenda, for example — the
-centre of the *list* is not the position of the *item*, so every badge resolves
-to roughly the same x and they overlap. It is layout-dependent rather than
-intermittent: the same markup fails the same way every time, and a narrow
-single-column list looks fine while a wide or two-column one does not.
-Affects the exported artifact only; the on-screen deck is unaffected.
+**Concurrency and limits.** A worker runs at most `TELLR_SIDECAR_CONCURRENCY`
+sidecars at once (default 1) and lets `TELLR_SIDECAR_QUEUE` more exports wait
+(default 15), each for up to `TELLR_SIDECAR_WAIT_SECONDS` (default 60 s); past
+either, the route answers 429 with `Retry-After: 60`. The run is bounded by
+`SIDECAR_TIMEOUT_SECONDS` (180 s), and every Drive request by
+`DRIVE_HTTP_TIMEOUT_SECONDS` (60 s without an answer, then a 502 "Drive upload
+failed"), so with the defaults the route answers within the ~300 s the
+Databricks Apps proxy allows a request.
 
-**Tables are not native tables.** The huashu emitter produces no records for
-`<td>`/`<th>`, so cells are flattened to absolutely-positioned text boxes: the
-layout is faithful but the result is not editable *as a table* in PowerPoint or
-Slides. This is current behaviour of the flattening approach rather than a
-stated product contract. See [Export Features](./export-features.md).
+**Positioning is coordinate-faithful.** Every item is where the browser drew
+it: text boxes sit on the browser's own lines, an absolutely-positioned corner
+element lands in that corner, and an inline pill or badge is a box on each line
+fragment it was laid out in, under its text.
+
+**Tables are native tables.** A `<table>` the browser laid out as a plain grid
+is one editable `<a:tbl>` with the browser's grid, spans, fills, collapsed
+borders and cell margins. Drive keeps it, borders included: every shared edge
+is written on both of its cells. A table no `<a:tbl>` can draw (card rows with
+visible spacing, one a clip cuts, the outer table of a nested pair,
+overlapping spans) is editable positioned items instead.
 
 ### Records PPTX pipeline (`src/services/pptx_from_records.py`)
 
@@ -270,13 +272,14 @@ The fallback path. `build_pptx(...)` takes the `SlideExtract[]` records that
 `frontend/src/services/domWalker.ts` produced by walking the deck DOM
 client-side (in a hidden `sandbox="allow-scripts"` iframe; records return via
 `postMessage`) and emits a PPTX with
-pptxgenjs — no server-side Chromium required. Lower fidelity than huashu but
-works on any deployment.
+pptxgenjs — no server-side Chromium required. Lower fidelity than the snapshot
+engine (tables are flattened to positioned boxes) but works on any deployment.
 
 ### Drive uploader (`src/services/drive_uploader.py`)
 
 - `upload_pptx_as_slides(auth, pptx_bytes, title)` — uploads the PPTX to Drive with `mimeType=application/vnd.google-apps.presentation`, which triggers Google's server-side conversion to a native editable Slides presentation. Returns `(presentation_id, web_view_url)`. The file is created with the requesting user's OAuth credentials, so it lives in *their* Drive with owner access (no extra sharing — the earlier "anyone-with-link" grant was removed after DoControl flagged it).
 - `replace_presentation(auth, old_id, pptx_bytes, title)` — best-effort delete of the old file, then a fresh upload. Used on re-export.
+- Both build their Drive client with `auth.build_drive_service(timeout=DRIVE_HTTP_TIMEOUT_SECONDS)` (60 s): a request whose server stops answering fails instead of holding the export's thread, and the routes answer it 502 "Drive upload failed".
 
 ### Legacy: HtmlToGoogleSlidesConverter (`src/services/html_to_google_slides.py`)
 
@@ -303,9 +306,9 @@ Per-user Connect / Re-authorize / Disconnect is **not** on this form.
 
 Rendered on `/settings` (Configure → Settings) for **every user**. Calls only `/api/export/google-slides/auth*`. If `has_credentials` is false, tells the user to ask an admin. Otherwise: Authorize, Re-authorize, Disconnect.
 
-### SlidePanel (`frontend/src/components/SlidePanel/SlidePanel.tsx`)
+### AppLayout (`frontend/src/components/Layout/AppLayout.tsx`)
 
-`handleExportGoogleSlides` calls `exportToGoogleSlides(sessionId, slideDeck, onProgress)`, which POSTs to `/from-huashu` and, on 503, extracts records via `domWalker.ts` and retries against `/from-records`.
+`handleExportGoogleSlides` (passed to the slide panel's header as `onExportGoogleSlides`) calls `exportToGoogleSlides(sessionId, slideDeck, onProgress)`, which POSTs to `/from-huashu` and, on 503, extracts records via `domWalker.ts` and retries against `/from-records`. Any other error, a 429 "busy" included, is shown to the user as the route's message.
 
 ### API Services
 

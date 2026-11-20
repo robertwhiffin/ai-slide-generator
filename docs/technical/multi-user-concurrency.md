@@ -8,7 +8,7 @@ How the backend handles concurrent requests from multiple users without blocking
 
 The AI Slide Generator supports multiple simultaneous users through:
 - **Session-scoped state** – each user operates on their own session with isolated slide decks
-- **Async endpoint handlers** – FastAPI endpoints use `asyncio.to_thread()` for blocking LLM calls
+- **Non-blocking endpoint handlers** – `async def` endpoints wrap blocking calls in `asyncio.to_thread()`; plain `def` endpoints (the PowerPoint and Google Slides exports among them) run in FastAPI's threadpool
 - **Database-based locking** – prevents concurrent mutations to the same session
 - **Per-request tool binding** – eliminates shared mutable state in the LangChain agent
 - **Per-user session isolation** – sessions are scoped to the authenticated user via the `created_by` column
@@ -51,7 +51,7 @@ Sessions are isolated per user using the `created_by` column. Authentication mid
 
 ### 1. Async Request Handling
 
-All FastAPI endpoints are `async def`. Blocking operations (LLM calls, database queries) are wrapped with `asyncio.to_thread()` so the event loop remains responsive:
+Blocking operations (LLM calls, database queries) never run on the event loop, so it remains responsive. An `async def` endpoint wraps them with `asyncio.to_thread()`; a plain `def` endpoint runs whole in FastAPI's threadpool (40 threads per worker), as the PowerPoint and Google Slides export routes do, whose waiting for a sidecar is bounded so exports never hold all of them (`TELLR_SIDECAR_QUEUE`, `TELLR_SIDECAR_WAIT_SECONDS`; see [Export Features](export-features.md)):
 
 ```python
 # src/api/routes/chat.py — excerpt from submit_chat_async

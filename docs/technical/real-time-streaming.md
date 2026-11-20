@@ -7,7 +7,7 @@ Dual-mode streaming with SSE (for local development) and polling (for Databricks
 ## Overview
 
 The streaming system provides:
-- **Dual-mode delivery** – SSE for local dev, polling for Databricks Apps (60s proxy timeout)
+- **Dual-mode delivery** – SSE for local dev, polling for Databricks Apps (whose proxy ends a request after about 300 s)
 - **Real-time updates** – Tool calls, responses, and results appear as they happen
 - **Message persistence** – All conversation messages stored in database for history
 - **Session restoration** – Chat history rehydrated from database when resuming sessions
@@ -41,7 +41,7 @@ Frontend                         Backend SSE Endpoint              Agent Thread
 
 ### Polling Mode (Databricks Apps)
 
-Databricks Apps runs behind a reverse proxy with a 60-second connection timeout, which breaks SSE for long-running agent requests. Polling mode works around this:
+Databricks Apps runs behind a reverse proxy that ends a request after about 300 seconds (measured 2026-11-20 on a plain request: one of 185 s returned 200, one of 310 s got 502 at 300.4 s). An agent turn can run longer than that (its hard timeout is 20 minutes), so it is never held open as one request there. Polling mode works around this:
 
 ```
 Frontend                    Backend

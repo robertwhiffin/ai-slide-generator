@@ -154,7 +154,7 @@ Step-by-step instructions with screenshots:
 | [Slide Parser](docs/technical/slide-parser-and-script-management.md) | HTML parsing, CSS merging |
 | [Slide Editing](docs/technical/slide-editing-robustness-fixes.md) | Deck preservation, validation |
 | [Save Points](docs/technical/save-points-versioning.md) | Version snapshots, preview/restore |
-| [Google Slides](docs/technical/google-slides-integration.md) | OAuth2 flow, encrypted credentials, LLM export |
+| [Google Slides](docs/technical/google-slides-integration.md) | OAuth2 flow, encrypted credentials, Drive conversion of the exported deck |
 | [Export Features](docs/technical/export-features.md) | The export routes, which are live, and per-route fidelity |
 | [Slide Host Frame Contract](docs/technical/slide-host-frame-contract.md) | Frame geometry, box model, and scoped resets across every surface |
 

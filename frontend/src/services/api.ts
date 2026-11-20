@@ -75,10 +75,12 @@ async function throwGatewayAdminError(response: Response, fallback: string): Pro
 
 /**
  * Detect if we should use polling instead of SSE streaming.
- * 
- * Databricks Apps runs behind a reverse proxy with a 60-second
- * connection timeout, which breaks SSE for long-running requests.
- * 
+ *
+ * Databricks Apps runs behind a reverse proxy that ends a request after
+ * about 300 seconds (measured on a plain request: 185 s returned, 310 s got
+ * a 502 at 300 s), and an agent turn can run longer than that, so a turn is
+ * never held open as one request there.
+ *
  * In production mode, we always use polling to be safe.
  * In development, we use SSE for faster feedback.
  */
@@ -1370,7 +1372,8 @@ export const api = {
    * 
    * Automatically detects the environment and uses:
    * - SSE streaming for local development
-   * - Polling for Databricks Apps (due to 60s proxy timeout)
+   * - Polling for Databricks Apps (its proxy ends a request after about 300 s,
+   *   and a turn can run longer)
    * 
    * @param sessionId - Session ID
    * @param message - User message
@@ -1918,14 +1921,16 @@ export const api = {
   },
 
   /**
-   * Export slides to Google Slides via the Claude Design path (server-side
-   * Playwright + Chromium, vendored from alchaincyf/huashu-design) → Drive
-   * auto-convert.
+   * Export slides to Google Slides via the snapshot engine (server-side
+   * Playwright + Chromium read each slide as the browser laid it out, and
+   * the deck is written for Google Slides) → Drive auto-convert.
    *
    * Tries the high-fidelity pipeline first. On 503 ("not available" — the
    * deployment hasn't been bootstrapped yet) falls back to the records
    * pipeline (DOM walker → pptxgenjs) so deployments without the runtime
-   * artifacts keep working in slow-but-functional mode.
+   * artifacts keep working in slow-but-functional mode. Any other error, a
+   * 429 when the worker's exports are busy included, is thrown with the
+   * route's message for the UI to show.
    *
    * Drive auto-converts on upload (mimeType=application/vnd.google-apps.
    * presentation). Single synchronous round-trip — no polling.

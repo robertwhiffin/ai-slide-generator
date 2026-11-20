@@ -31,7 +31,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
                           └──────────────────────────────────────────────┘
 ```
 
-- **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. All endpoints use `asyncio.to_thread()` for blocking operations.
+- **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. Blocking work stays off the event loop: an `async def` endpoint wraps it in `asyncio.to_thread()`, and a plain `def` endpoint runs whole in FastAPI's threadpool, as the PowerPoint and Google Slides export routes do (their sidecar run and Drive upload block for seconds).
 - **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that manages a session-scoped deck cache (thread-safe via `_cache_lock`). It no longer holds a persistent agent instance; instead it calls `build_agent_for_request()` from `src/services/agent_factory.py` to construct a fresh agent for each request using the session's `agent_config`.
 - **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores slide deck in `deck_json`, verification results separately in `verification_map` (keyed by content hash), and the session's `agent_config` JSON column.
 - **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Built per-request by `agent_factory.py` with tools derived from the session's `agent_config`.
@@ -222,9 +222,9 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint | `routes/export.export_pptx_huashu_from_html` |
+| `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint (the snapshot engine; 429 when the worker's exports are busy) | `routes/export.export_pptx_huashu_from_html` |
 | `POST` | `/api/export/pptx/editable/from-records` | **Fallback** — fires on 503 or an unavailable/installing pipeline message | `routes/export.export_pptx_editable_from_records` |
-| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Synchronous Google Slides export via Drive conversion | `routes/google_slides` |
+| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Synchronous Google Slides export via Drive conversion (429 when busy, 502 when Drive fails) | `routes/google_slides` |
 | `POST` | `/api/export/google-slides/from-records` | **Fallback** for the Google path | `routes/google_slides` |
 | `POST` | `/api/export/pptx` | **Legacy** — LLM code-generation path; no caller exists in this repository's frontend, and the UI uses the huashu route above | `routes/export.export_to_pptx` |
 | `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above; no caller in this repository's frontend | `routes/export.start_pptx_export_async` |
@@ -873,7 +873,7 @@ The graph's architect can author a **deck style** that gives the deck a look of 
 
 ## Extending the Backend
 
-1. **New endpoints:** Add a router under `src/api/routes`, register it in `src/api/main.py`, define Pydantic request/response models in `src/api/schemas/`, wrap blocking calls in `asyncio.to_thread()`, and add session locking for mutations.
+1. **New endpoints:** Add a router under `src/api/routes`, register it in `src/api/main.py`, define Pydantic request/response models in `src/api/schemas/`, keep blocking calls off the event loop (`asyncio.to_thread()` in an `async def` handler, or a plain `def` handler), and add session locking for mutations.
 2. **Additional tools:** Add a new module under `src/services/tools/`, implement a `build_*_tool()` function that returns a LangChain `StructuredTool`, re-export it from `src/services/tools/__init__.py`, and wire it into `agent_factory.py`. Remember to add a corresponding discovery endpoint in `routes/tools.py` and update prompts so the LLM knows when to invoke the tool.
 3. **Observability hooks:** Reuse `mlflow.start_span` or extend `logging_config` if you introduce new long-running operations (e.g., batch generation).
 4. **Integration with the frontend:** Any change that affects `ChatResponse` or slide deck structure must be reflected in `frontend/src/types` and `docs/technical/frontend-overview.md`.

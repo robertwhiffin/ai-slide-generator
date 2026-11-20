@@ -60,7 +60,7 @@ Either way, note what this avoids: there is no need to *find* the leading `@impo
 
 Two failure modes occur **after** the document is built, so they are invisible to any check that inspects the document handed to an emitter.
 
-**The emitter mutates the DOM.** The huashu preprocessing step measures table cells by appending them to `<body>`, which makes every cell a direct child of the document body for the duration of the measurement. **A document-level rule matching `body > *` therefore matches every table cell**, and one that sets `inset: 0` with full width and height collapses all of them onto a single rectangle. The rendered document is unaffected; only the emitted artifact is damaged.
+**The emitter writes to the DOM, a little.** The PowerPoint and Google Slides export (the snapshot engine) reads the page as the browser laid it out and moves no element, but it is not write-free: it moves the slide root's ground onto `<body>`, puts `data-tellr-*` marker attributes on the slide root, on pseudo-element hosts and on the elements it captures, appends offscreen metric probes to `<html>` (never to `<body>`, so a `body > *` or `body > :last-child` rule cannot match them) and removes them again, and captures each picture under an isolation stylesheet that hides everything but its target. A document-level rule that reacts to any of those (an attribute selector on `data-tellr-*`, a `html > div` rule) changes the emitted artifact while the rendered document stays as it was.
 
 **Corollary for verification:** an export-fidelity claim must be measured on the **emitted artifact**, not on the document passed to the emitter. A document-level comparison will report a perfect match while the exported file is destroyed.
 

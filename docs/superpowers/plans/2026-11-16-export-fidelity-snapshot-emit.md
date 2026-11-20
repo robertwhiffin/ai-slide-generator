@@ -736,4 +736,4 @@ Follow `.claude/skills/deploy-tellr-dev/SKILL.md` exactly. The owner's account i
   - an architecture slide on the Databricks design system.
 
   Export each to PPTX and Google Slides. Render both through the harness's `render_with_powerpoint` and thumbnails, and record the results with links in the ledger.
-- [ ] **Step 4: Do not delete the app.** Record its URL, instance id and version in the ledger. The owner tests it by hand for at least a week.
+- [ ] **Step 4: Do not delete the app.** Record its URL, instance id and version in the ledger. Keep it for at least 2 months from its deploy date; the owner tests it by hand.
