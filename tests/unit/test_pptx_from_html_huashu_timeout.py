@@ -1291,7 +1291,9 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         """A wait past the proxy's limit shows when a worker starts, before any export runs.
 
         A fresh interpreter imports the app, says so, then runs its lifespan's
-        startup: the budget warning comes between the two, once.
+        startup: the budget warning comes between the two, once, and so does the
+        line ``log_sidecar_bounds`` logs, the bounds the worker runs with. The
+        warning alone would show only that the startup loaded the wrapper.
         """
         script = (
             "import asyncio, logging, sys\n"
@@ -1323,6 +1325,16 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         ]
         assert len(budget) == 1 and imported < budget[0] < started, (
             f"the budget warning is not one line of the app's startup: {lines}"
+        )
+        cap = pptx_from_html_huashu.sidecar_concurrency(env)
+        queue = pptx_from_html_huashu.sidecar_queue(env)
+        bounds_line = (
+            f"[huashu] export sidecars per worker: {cap} at once, {queue} more waiting, "
+            "each up to 200s"
+        )
+        bounds = [index for index, line in enumerate(lines) if line == bounds_line]
+        assert len(bounds) == 1 and imported < bounds[0] < started, (
+            f"the startup did not log its bounds ({bounds_line!r}) once: {lines}"
         )
 
 

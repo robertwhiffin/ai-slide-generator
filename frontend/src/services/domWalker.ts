@@ -10,8 +10,9 @@
  *
  * Why this architecture: it needs no server-side Chromium, because the user's
  * browser already rendered the deck. It is the fallback where the server's own
- * export (the snapshot engine's sidecar, with its bundled Chromium) is not
- * available: before the app's boot has set it up, or where it is turned off.
+ * export (the snapshot engine's sidecar, with the Chromium the app's boot
+ * installs) is not available: before the app's boot has set it up, or where it
+ * is turned off.
  *
  * F-CR-25: the composite document runs in an opaque sandbox. The parent never
  * reads the iframe document; the trusted export runtime walks the DOM inside

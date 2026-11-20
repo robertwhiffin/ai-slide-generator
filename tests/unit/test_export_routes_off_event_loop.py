@@ -30,6 +30,7 @@ than threads and asks a sync route and an authenticated route meanwhile.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -43,6 +44,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import googleapiclient.http
 import httpx
 import pytest
 
@@ -761,12 +763,33 @@ class TestAWorkerFullOfExportsStillAnswers:
 DRIVE_SILENCE_SECONDS = 1
 DRIVE_ANSWER_SLACK_SECONDS = 4
 # What bounds a Drive request when the export's own timeout does not: the
-# socket timeout googleapiclient's build_http sets by default. The export's
-# thread is waited for this long per request, so it ends before the
+# socket timeout googleapiclient's build_http gives a request by default
+# (googleapiclient.http.DEFAULT_HTTP_TIMEOUT_SEC, 60 s), made this for the
+# Drive tests (``_real_drive``), so an export that lost its own timeout fails
+# them in seconds, not minutes. It must outlast each request's share of the
+# bound the test asserts (5 s for the upload, 3 s for each of a replace's two
+# requests), or such an export would still answer in time, and pass. The
+# export's thread is waited for this long per request, so it ends before the
 # redirect to the silent server does, whatever the export got wrong.
-LIBRARY_SOCKET_TIMEOUT_SECONDS = 60
+LIBRARY_SOCKET_TIMEOUT_SECONDS = 10
 # The hosts the redirect holds: every Google API and account host.
 GOOGLE_DOMAINS = ("googleapis.com", "google.com")
+# The settings that send a client's requests through a proxy instead of to their
+# host: httplib2, the Drive client's, reads https_proxy (with PySocks installed),
+# and urllib and requests read all of these. None is left set while the redirect
+# holds Google's hosts.
+PROXY_VARIABLES = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+)
+# An address off this machine that no network routes (TEST-NET-1, RFC 5737), and
+# a proxy there: what a developer's environment could point the Drive client at.
+NON_LOOPBACK_ADDRESS = "192.0.2.1"
+NON_LOOPBACK_PROXY = f"http://{NON_LOOPBACK_ADDRESS}:3128"
 # A token Credentials take as valid: it expires long after the test, so no refresh is tried.
 FAKE_GOOGLE_TOKEN = {
     "token": "fake-access-token",
@@ -784,6 +807,24 @@ def _is_google(host: object) -> bool:
     )
 
 
+def _is_this_machine(host: object) -> bool:
+    """Whether ``host`` is this machine: none, ``localhost``, or a loopback or unspecified address.
+
+    A host name is not: looking it up, let alone connecting to it, leaves the machine.
+    """
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if host is None or host in ("", "localhost"):
+        return True
+    if not isinstance(host, str):
+        return False
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
 class _SilentGoogle:
     """Google's hosts, for one test: a local server that takes each connection and never answers.
 
@@ -792,8 +833,11 @@ class _SilentGoogle:
     client, from its http object to its TLS handshake, waits on a server that
     never answers: the Drive that hangs. Once it is closed, a lookup of a Google
     host fails and a connection to one is refused. Either way nothing to a
-    Google host falls through to the network. ``threads`` are the test's threads
-    that may still talk to Google: they must end before it closes.
+    Google host falls through to the network. Nor to any other host: while it
+    is installed, a lookup or a connection to a host off this machine that is
+    not Google's (a proxy's, say) is refused, and recorded in ``refused``.
+    ``threads`` are the test's threads that may still talk to Google: they must
+    end before it closes.
     """
 
     def __init__(self) -> None:
@@ -803,23 +847,32 @@ class _SilentGoogle:
         self._address = self._server.getsockname()
         self._closed = False
         self.threads: list[threading.Thread] = []
+        # The hosts looked up, and the addresses connected to, that it refused.
+        self.refused: list[object] = []
         self._lookup = socket.getaddrinfo
         self._connect = socket.socket.connect
         # socket.socket inherits connect from _socket.socket: undone, it inherits it again.
         self._own_connect = "connect" in vars(socket.socket)
 
     def resolve(self, host, port, *args, **kwargs):
-        if not _is_google(host):
-            return self._lookup(host, port, *args, **kwargs)
-        if self._closed:
-            raise socket.gaierror(socket.EAI_NONAME, f"{host}: no Google host in this test")
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", self._address)]
+        if _is_google(host):
+            if self._closed:
+                raise socket.gaierror(socket.EAI_NONAME, f"{host}: no Google host in this test")
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", self._address)]
+        if not _is_this_machine(host):
+            self.refused.append(host)
+            raise socket.gaierror(socket.EAI_NONAME, f"{host}: off this machine, in this test")
+        return self._lookup(host, port, *args, **kwargs)
 
     def connect(self, sock: socket.socket, address: object) -> None:
-        if isinstance(address, tuple) and _is_google(address[0]):
-            if self._closed:
-                raise ConnectionRefusedError(f"{address[0]}: no Google host in this test")
-            address = self._address
+        if isinstance(address, tuple):
+            if _is_google(address[0]):
+                if self._closed:
+                    raise ConnectionRefusedError(f"{address[0]}: no Google host in this test")
+                address = self._address
+            elif not _is_this_machine(address[0]):
+                self.refused.append(address)
+                raise ConnectionRefusedError(f"{address[0]}: off this machine, in this test")
         return self._connect(sock, address)
 
     def install(self) -> None:
@@ -840,13 +893,18 @@ class _SilentGoogle:
 
 
 @pytest.fixture
-def silent_drive() -> Iterator[_SilentGoogle]:
+def silent_drive(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SilentGoogle]:
     """Google's hosts held by a ``_SilentGoogle`` for the test, and torn down in order.
 
-    First the test's threads are waited for, then the server is closed, and only
-    then is the redirect undone: a thread still running then would reach the
-    network, so the redirect stays, refusing every Google host, and the test errs.
+    No proxy setting is left while it holds them (``PROXY_VARIABLES``): with
+    one, the Drive client would send its requests to the proxy's host, not a
+    Google one. First the test's threads are waited for, then the server is
+    closed, and only then is the redirect undone: a thread still running then
+    would reach the network, so the redirect stays, refusing every host off this
+    machine, and the test errs. The proxy settings come back after it.
     """
+    for name in PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
     silent = _SilentGoogle()
     silent.install()
     try:
@@ -863,6 +921,53 @@ def silent_drive() -> Iterator[_SilentGoogle]:
     )
 
 
+@pytest.fixture
+def proxy_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Every proxy setting pointed off this machine, as a developer's environment could be.
+
+    Listed before ``silent_drive``, it is set up first: the environment the test started in.
+    """
+    for name in PROXY_VARIABLES:
+        monkeypatch.setenv(name, NON_LOOPBACK_PROXY)
+    return NON_LOOPBACK_PROXY
+
+
+def _proxy_settings() -> list[str]:
+    """The proxy settings the environment holds now."""
+    return [name for name in PROXY_VARIABLES if name in os.environ]
+
+
+class TestTheSilentGoogle:
+    """The redirect the Drive tests run under: Google's hosts are the silent server, and only them.
+
+    A test that fails must not reach the network either. So while the redirect
+    is installed, a lookup or a connection to any host off this machine but
+    Google's is refused, and recorded, and no proxy setting is left that would
+    send the Drive client's requests to another host.
+    """
+
+    def test_no_proxy_setting_is_left(
+        self, proxy_in_the_environment: str, silent_drive: _SilentGoogle
+    ) -> None:
+        assert _proxy_settings() == [], (
+            f"proxy settings left while Google's hosts are redirected: {_proxy_settings()}"
+        )
+
+    def test_nothing_off_this_machine_but_google_is_reached(
+        self, silent_drive: _SilentGoogle
+    ) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            with pytest.raises(ConnectionRefusedError):
+                sock.connect((NON_LOOPBACK_ADDRESS, 3128))
+        with pytest.raises(socket.gaierror):
+            socket.getaddrinfo("example.com", 443)
+        ((_, _, _, _, silent_server),) = socket.getaddrinfo("www.googleapis.com", 443)
+        for address in (("www.googleapis.com", 443), silent_server):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect(address)  # the silent server takes it, and says nothing
+        assert silent_drive.refused == [(NON_LOOPBACK_ADDRESS, 3128), "example.com"]
+
+
 @requires_node
 @pytest.mark.usefixtures("admin_and_db")
 class TestADriveThatNeverAnswers:
@@ -875,7 +980,8 @@ class TestADriveThatNeverAnswers:
     its socket until the timeout ends it, and the route answers as for any Drive
     failure, 502 "Drive upload failed", having recorded nothing. Without the
     timeout a hung Drive request would hold the export, and its thread, for as
-    long as the socket's default lets it.
+    long as the library's default lets it: 60 s per request, made
+    ``LIBRARY_SOCKET_TIMEOUT_SECONDS`` here, so such a run fails in seconds.
     """
 
     @pytest.fixture(autouse=True)
@@ -890,6 +996,14 @@ class TestADriveThatNeverAnswers:
         monkeypatch.setattr(f"{routes}.upload_pptx_as_slides", drive_uploader.upload_pptx_as_slides)
         monkeypatch.setattr(f"{routes}.replace_presentation", drive_uploader.replace_presentation)
         monkeypatch.setattr(drive_uploader, "DRIVE_HTTP_TIMEOUT_SECONDS", DRIVE_SILENCE_SECONDS)
+        # The library's own default made short (LIBRARY_SOCKET_TIMEOUT_SECONDS).
+        # build_http takes a process-wide default socket timeout over it.
+        assert socket.getdefaulttimeout() is None, (
+            "fixture drift: a default socket timeout, not the library's, would bound Drive"
+        )
+        monkeypatch.setattr(
+            googleapiclient.http, "DEFAULT_HTTP_TIMEOUT_SEC", LIBRARY_SOCKET_TIMEOUT_SECONDS
+        )
 
     @pytest.mark.parametrize(
         ("existing", "requests"),
@@ -903,11 +1017,34 @@ class TestADriveThatNeverAnswers:
         google_route: dict,
         silent_drive: _SilentGoogle,
     ) -> None:
-        """A first export uploads (one request); a re-export deletes, then uploads (two).
+        """A first export uploads (one request); a re-export deletes, then uploads (two)."""
+        self._assert_answered_502_in_time(existing, requests, google_route, silent_drive)
+
+    def test_a_proxy_in_the_environment_is_not_used(
+        self, proxy_in_the_environment: str, google_route: dict, silent_drive: _SilentGoogle
+    ) -> None:
+        """A proxy set where the test runs: the upload meets the silent Drive, never the proxy.
+
+        httplib2 sends an https request through ``https_proxy`` once PySocks is
+        installed, to the proxy's host, not a Google one: past the redirect, off
+        this machine.
+        """
+        assert _proxy_settings() == [], f"proxy settings left: {_proxy_settings()}"
+        self._assert_answered_502_in_time(None, 1, google_route, silent_drive)
+
+    def _assert_answered_502_in_time(
+        self,
+        existing: str | None,
+        requests: int,
+        google_route: dict,
+        silent_drive: _SilentGoogle,
+    ) -> None:
+        """The export answered 502 once its ``requests`` Drive requests timed out, and no sooner.
 
         Whatever the export does, its thread ends before the test does: past the
         bound the test asserts, it is waited for as long as the library's own
-        socket timeout could hold each request.
+        socket timeout could hold each request. And it tried no host off this
+        machine but Google's.
         """
         from fastapi.testclient import TestClient
 
@@ -915,6 +1052,11 @@ class TestADriveThatNeverAnswers:
             None if existing is None else {"presentation_id": existing}
         )
         bound = requests * DRIVE_SILENCE_SECONDS + DRIVE_ANSWER_SLACK_SECONDS
+        assert LIBRARY_SOCKET_TIMEOUT_SECONDS > bound / requests, (
+            f"fixture drift: the library's {LIBRARY_SOCKET_TIMEOUT_SECONDS}s default would end "
+            f"each of {requests} request(s) within the {bound}s bound, so an export that lost "
+            "its own Drive timeout would pass"
+        )
         answer: dict = {}
 
         def export() -> None:
@@ -944,3 +1086,6 @@ class TestADriveThatNeverAnswers:
             f"answered after {answer['seconds']:.1f}s, before its Drive requests timed out"
         )
         google_route["sessions"].set_google_slides_info.assert_not_called()
+        assert silent_drive.refused == [], (
+            f"the export tried hosts off this machine: {silent_drive.refused}"
+        )

@@ -6,9 +6,9 @@ Pipeline:
 The client-side walker (``frontend/src/services/domWalker.ts``) extracts
 DOM records in the user's browser, so this path needs no server-side
 Chromium: it is the fallback where the snapshot engine's sidecar
-(``pptx_from_html_huashu.py``, with its bundled Chromium) is not available,
-before the app's boot has set it up or where ``HUASHU_PIPELINE_ENABLED`` is
-off. The records are POSTed to
+(``pptx_from_html_huashu.py``, with the Chromium the app's boot installs) is
+not available, before the app's boot has set it up or where
+``HUASHU_PIPELINE_ENABLED`` is off. The records are POSTed to
 the FastAPI route which calls :func:`build_pptx` here. We spawn a short-
 lived Node subprocess that runs the pre-bundled ``emit.bundle.mjs`` (which
 inlines pptxgenjs via esbuild so no ``node_modules`` need ship). Output

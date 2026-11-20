@@ -4,6 +4,9 @@ app.yaml
 services/html-to-pptx/node_modules/
 services/html-to-pptx/tests/.out/
 
-# huashu pipeline — local-dev only (no Chromium on Apps)
+# The snapshot engine's sidecar (the PPTX and Google Slides export) runs on Apps
+# too: at boot its setup.sh extracts node_modules/ from the shipped
+# node_modules.tar.gz and installs Chromium, so these local, uncompressed copies
+# stay out of an upload.
 services/pptx-emit-huashu/node_modules/
 services/pptx-emit-huashu/playwright-browsers/
