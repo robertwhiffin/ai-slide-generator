@@ -48,6 +48,19 @@ many places as the worker has threads, are warned about once, when this
 module loads (``sidecar_bounds_warnings``), which the app's startup does in
 every worker (``log_sidecar_bounds``).
 
+Telemetry. Every export logs one line once it ends, however it ends (written,
+partly written, failed, timed out, or refused as busy): ``[huashu] export
+summary {json}`` (``_ExportSummary``), counts and timings only, never a slide's
+content, a user or a path. Its ``peakRssMb`` is the most memory the sidecar's
+process tree held, node and every Chromium it launched, read from the process
+table about every ``MEMORY_SAMPLE_SECONDS`` while it runs
+(``_TreeMemorySampler``); a reading that fails is null, and never fails or
+slows the export. The line has a logger of its own that writes each record as
+one line to stderr (``summary_logger``), not through the app's root handler:
+in a worker that is FastMCP's RichHandler, which wraps a long line at 80
+columns where stderr is no terminal, as on Databricks Apps, so the JSON would
+reach the logs in pieces.
+
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
 ``"gslides"`` for the Google Slides conversion. The two place a few constructs
@@ -87,9 +100,10 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -412,13 +426,32 @@ def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> Non
                 pass  # it exited between the poll and the signal
 
 
-def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
-    """Every running process as ``(pid, ppid, pgid)``: from /proc on Linux, else from ``ps``.
+class _ProcessRow(NamedTuple):
+    """A running process: its id, its parent's, its group's, and its resident memory."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    # Bytes resident (RSS); None where its /proc line stops short of the field.
+    rss_bytes: int | None
+
+
+# /proc/<pid>/stat, past "pid (comm) ": state is field 3, ppid 4, pgrp 5, rss 24
+# (proc(5)), the number of pages resident.
+_STAT_PPID, _STAT_PGRP, _STAT_RSS = 1, 2, 21
+# ps reports RSS in KiB.
+_PS_RSS_UNIT_BYTES = 1024
+
+
+def _read_process_table(proc: Path = Path("/proc")) -> list[_ProcessRow]:
+    """Every running process, in one pass: from /proc on Linux, else from ``ps``.
 
     Bounded: ``ps`` gets ``SIDECAR_TERM_GRACE_SECONDS``, and a process that
-    exits while it is read is skipped. An unreadable table is empty, logged.
+    exits while it is read, or whose line does not parse, is skipped. A table
+    that cannot be read at all raises ``OSError`` or ``subprocess.SubprocessError``.
     """
     if (proc / "self" / "stat").exists():
+        page_bytes = os.sysconf("SC_PAGE_SIZE")
         table = []
         for entry in os.listdir(proc):
             if not entry.isdigit():
@@ -427,27 +460,46 @@ def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
                 stat = (proc / entry / "stat").read_text()
                 # "pid (comm) state ppid pgrp …": comm can hold spaces and parentheses.
                 fields = stat[stat.rindex(")") + 2 :].split()
-                table.append((int(entry), int(fields[1]), int(fields[2])))
+                pages = int(fields[_STAT_RSS]) if len(fields) > _STAT_RSS else None
+                table.append(
+                    _ProcessRow(
+                        int(entry),
+                        int(fields[_STAT_PPID]),
+                        int(fields[_STAT_PGRP]),
+                        None if pages is None else pages * page_bytes,
+                    )
+                )
             except (OSError, ValueError, IndexError):
                 continue  # it exited, is not ours to read, or its line does not parse
         return table
+    listing = subprocess.run(
+        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "rss="],
+        capture_output=True,
+        text=True,
+        timeout=SIDECAR_TERM_GRACE_SECONDS,
+        check=True,
+    ).stdout
+    table = []
+    for line in listing.splitlines():
+        try:
+            pid, ppid, pgid, rss = (int(field) for field in line.split())
+        except ValueError:
+            continue  # not four numbers: not a process's line
+        table.append(_ProcessRow(pid, ppid, pgid, rss * _PS_RSS_UNIT_BYTES))
+    return table
+
+
+def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
+    """Every running process as ``(pid, ppid, pgid)`` (``_read_process_table``).
+
+    An unreadable table is empty, logged.
+    """
     try:
-        listing = subprocess.run(
-            ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="],
-            capture_output=True,
-            text=True,
-            timeout=SIDECAR_TERM_GRACE_SECONDS,
-            check=True,
-        ).stdout
+        rows = _read_process_table(proc)
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("could not list processes to sweep a blocked sidecar's browsers: %s", error)
         return []
-    table = []
-    for line in listing.splitlines():
-        fields = line.split()
-        if len(fields) == 3:
-            table.append((int(fields[0]), int(fields[1]), int(fields[2])))
-    return table
+    return [(row.pid, row.ppid, row.pgid) for row in rows]
 
 
 def _kill_detached_children(process: subprocess.Popen) -> None:
@@ -499,12 +551,16 @@ def run_sidecar_process(
     timeout: float,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a sidecar node script on ``input``, its output captured, bounded by ``timeout``.
 
     ``env`` defaults to ``sidecar_subprocess_env()``, never the app's own
     environment. The script starts a new session, so it leads a process group
-    of its own. A run past ``timeout``, or interrupted, is ended with
+    of its own. ``on_spawn``, when given, is called with the process once it
+    has started, before it is given ``input`` (the export's memory sampler,
+    ``_TreeMemorySampler.watch``); what it raises ends the run as an interruption
+    does. A run past ``timeout``, or interrupted, is ended with
     ``_end_process_group`` (SIGTERM, then SIGKILL after the grace period) and
     ``subprocess.TimeoutExpired`` is raised with what it printed. After any
     exit, a failing one included, the group is swept with SIGKILL, so no child
@@ -523,6 +579,8 @@ def run_sidecar_process(
     )
     try:
         try:
+            if on_spawn is not None:
+                on_spawn(process)
             stdout, stderr = process.communicate(input, timeout=timeout)
         except subprocess.TimeoutExpired as timed_out:
             _end_process_group(process)
@@ -553,6 +611,183 @@ def _remaining_output(process: subprocess.Popen) -> tuple[bytes, bytes]:
         return process.communicate(timeout=SIDECAR_TERM_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         return b"", b""
+
+
+# The export summary's memory reading (_TreeMemorySampler): how often the
+# sidecar's process tree is read while it runs, and the unit of the reading (MiB).
+MEMORY_SAMPLE_SECONDS = 0.25
+BYTES_PER_MB = 1024 * 1024
+
+
+def _tree_resident_bytes(root: int, table: list[_ProcessRow]) -> int | None:
+    """The resident bytes of process ``root`` and of every descendant of it; None once it is gone.
+
+    Descendants by the PPID chain, whatever their group: Playwright launches
+    each browser ``detached``, the leader of a group of its own (found as
+    ``_kill_detached_children`` finds it), and a browser's own processes are
+    its children. A process of the tree whose resident size the table does not
+    give raises ``ValueError``: a sum without it would read low.
+    """
+    rows: dict[int, _ProcessRow] = {}
+    children: dict[int, list[_ProcessRow]] = {}
+    for row in table:
+        rows[row.pid] = row
+        children.setdefault(row.ppid, []).append(row)
+    if root not in rows:
+        return None
+    total = 0
+    counted: set[int] = set()
+    pending = [rows[root]]
+    while pending:
+        row = pending.pop()
+        if row.pid in counted:
+            continue  # each process once, whatever chain the table holds
+        counted.add(row.pid)
+        if row.rss_bytes is None:
+            raise ValueError(f"the process table gives no resident size for process {row.pid}")
+        total += row.rss_bytes
+        pending.extend(children.get(row.pid, ()))
+    return total
+
+
+class _TreeMemorySampler:
+    """The most memory a sidecar's process tree held: node and every Chromium it launched.
+
+    ``watch`` (``run_sidecar_process``'s ``on_spawn``) starts a daemon thread
+    that reads the process table every ``MEMORY_SAMPLE_SECONDS``, in one pass
+    each (``_read_process_table``), and keeps the largest resident size of the
+    tree (``_tree_resident_bytes``). It stops once the sidecar has ended, or at
+    ``stop``. It is telemetry: a thread that cannot start, or a reading that
+    fails, leaves no reading (None, not the part read before it), and nothing
+    here raises into the export or waits on the thread.
+    """
+
+    def __init__(self) -> None:
+        self._stopped = threading.Event()
+        self._peak_bytes: int | None = None
+        self._failed = False
+
+    def watch(self, process: subprocess.Popen) -> None:
+        """Start reading ``process``'s tree, in a thread of its own."""
+        try:
+            threading.Thread(
+                target=self._sample, args=(process,), name="huashu-memory", daemon=True
+            ).start()
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail(error)
+
+    def _sample(self, process: subprocess.Popen) -> None:
+        try:
+            while not self._stopped.is_set() and process.returncode is None:
+                held = _tree_resident_bytes(process.pid, _read_process_table())
+                if held is None:
+                    return  # the sidecar has ended: no process has its id
+                if self._peak_bytes is None or held > self._peak_bytes:
+                    self._peak_bytes = held
+                self._stopped.wait(MEMORY_SAMPLE_SECONDS)
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail(error)
+
+    def _fail(self, error: Exception) -> None:
+        self._failed = True
+        logger.warning("[huashu] export memory not read, its summary says null: %s", error)
+
+    def stop(self) -> float | None:
+        """Stop reading, without waiting: the most the tree held in MB, or None if none was read."""
+        self._stopped.set()
+        if self._failed or self._peak_bytes is None:
+            return None
+        return round(self._peak_bytes / BYTES_PER_MB, 1)
+
+
+# The line each export logs once it ends (_ExportSummary), its prefix fixed: the
+# owner greps the app's logs for it.
+EXPORT_SUMMARY_PREFIX = "[huashu] export summary "
+
+
+class _StderrLineHandler(logging.StreamHandler):
+    """Each record as one line on ``sys.stderr``, the stream as it is when the record is logged.
+
+    Looked up per record, as logging's own last-resort handler does, so a
+    redirected stderr (a test's capture, the fidelity harness's tee) gets it.
+    """
+
+    def __init__(self) -> None:
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return sys.stderr
+
+
+# The export summary's logger: INFO, each record one line on stderr, and not
+# passed on to the app's root handler, which in a worker wraps a long line
+# (module docstring, Telemetry).
+summary_logger = logging.getLogger(f"{__name__}.summary")
+summary_logger.setLevel(logging.INFO)
+summary_logger.propagate = False
+if not summary_logger.handlers:
+    _summary_handler = _StderrLineHandler()
+    _summary_handler.setFormatter(logging.Formatter("%(message)s"))
+    summary_logger.addHandler(_summary_handler)
+
+
+@dataclass
+class _ExportSummary:
+    """One export's summary line (``EXPORT_SUMMARY_PREFIX``): counts and timings only.
+
+    ``outcome`` is ``failed`` until the export says otherwise: ``ok`` or
+    ``partial`` for a deck written without or with failed slides
+    (``exported``), and ``timeout`` or ``busy`` where those are raised.
+    """
+
+    target: str
+    slides: int
+    outcome: str = "failed"
+    slides_exported: int = 0
+    failures: int = 0
+    # Waiting for a sidecar slot; no run until there is one.
+    wait_seconds: float = 0.0
+    run_seconds: float | None = None
+    peak_rss_mb: float | None = None
+    pptx_bytes: int = 0
+
+    def exported(self, pptx_bytes: bytes, failures: list[dict[str, Any]]) -> None:
+        """What the export returned: a deck of the slides that passed, or none at all."""
+        self.pptx_bytes = len(pptx_bytes)
+        self.failures = len(failures)
+        if pptx_bytes:
+            self.slides_exported = max(self.slides - self.failures, 0)
+            self.outcome = "partial" if failures else "ok"
+
+    def line(self) -> str:
+        """The line: its JSON's keys in a fixed order, read by the owner's tools."""
+        if self.run_seconds is None or not self.slides:
+            seconds_per_slide = None
+        else:
+            seconds_per_slide = round(self.run_seconds / self.slides, 3)
+        fields = {
+            "target": self.target,
+            "slides": self.slides,
+            "slidesExported": self.slides_exported,
+            "failures": self.failures,
+            "outcome": self.outcome,
+            "waitSeconds": round(self.wait_seconds, 3),
+            "runSeconds": None if self.run_seconds is None else round(self.run_seconds, 3),
+            "secondsPerSlide": seconds_per_slide,
+            "peakRssMb": self.peak_rss_mb,
+            "pptxBytes": self.pptx_bytes,
+            "sidecarConcurrency": _sidecar_cap,
+            "queueBound": _sidecar_queue,
+        }
+        return EXPORT_SUMMARY_PREFIX + json.dumps(fields, separators=(",", ":"))
+
+    def log(self) -> None:
+        """Log the line. A failure to is logged, and never raised into the export."""
+        try:
+            summary_logger.info("%s", self.line())
+        except Exception:  # noqa: BLE001 (telemetry never fails an export)
+            logger.exception("could not log the export summary")
 
 
 def _local_dev_gate() -> bool:
@@ -619,48 +854,35 @@ RenderTarget = Literal["pptx", "gslides"]
 RENDER_TARGETS: tuple[RenderTarget, ...] = ("pptx", "gslides")
 
 
-def build_pptx_huashu(
+def _run_measured(
+    cmd: list[str], payload_bytes: bytes, summary: _ExportSummary
+) -> subprocess.CompletedProcess:
+    """The sidecar's run, its wall time and its tree's peak memory recorded on ``summary``."""
+    sampler = _TreeMemorySampler()
+    started = time.monotonic()
+    try:
+        return run_sidecar_process(
+            cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS, on_spawn=sampler.watch
+        )
+    except subprocess.TimeoutExpired as e:
+        summary.outcome = "timeout"
+        raise HuashuExportError(
+            f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
+        ) from e
+    finally:
+        summary.run_seconds = time.monotonic() - started
+        summary.peak_rss_mb = sampler.stop()
+
+
+def _export_deck(
     title: str,
     slides_html: list[dict[str, Any]],
     *,
-    bypass_validation: bool = False,
-    target: RenderTarget = "pptx",
+    bypass_validation: bool,
+    target: RenderTarget,
+    summary: _ExportSummary,
 ) -> tuple[bytes, list[dict[str, Any]]]:
-    """Run huashu's pipeline over each slide's HTML, return (pptx_bytes, failures).
-
-    ``slides_html`` is a list of ``{ "html": "<full doc string>", "notes": "..." }``.
-    The HTML string must be a complete standalone document with body sized
-    to 1280×720 px (= 13.333"×7.5"); the caller assembles this — see
-    ``src/api/routes/export.py::build_slide_html``.
-
-    ``bypass_validation``: when True, huashu's design-rule validation
-    (overflow > 100px, text-near-bottom-edge, layout dimension mismatch,
-    other authoring quality checks) becomes a per-slide console warning
-    instead of a throw. Slides that violate the rules still end up in the
-    output PPTX. Used by the Google Slides Drive route to guarantee every
-    slide ships, with the trade-off that some slides may render imperfectly.
-
-    ``target``: the app the deck is written for, ``"pptx"`` (PowerPoint, the
-    default) or ``"gslides"`` (the Google Slides conversion); see the module
-    docstring. Any other value raises ``ValueError``.
-
-    Returns a 2-tuple:
-      * pptx_bytes — the .pptx as bytes, even if some slides failed
-        (empty if ALL slides failed; the caller should handle that).
-      * failures  — list of ``{ slide_index, error }`` with one entry per
-        slide huashu rejected. Empty list = clean run.
-    """
-    if target not in RENDER_TARGETS:
-        raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
-    if not is_available():
-        raise HuashuExportError(
-            "huashu pipeline not available: it needs HUASHU_PIPELINE_ENABLED=1 "
-            "(Databricks Apps, whose boot runs the sidecar's setup.sh) or "
-            "ENVIRONMENT=development, node on PATH, the sidecar's node_modules "
-            "(playwright, pptxgenjs) and a Playwright Chromium "
-            "(`npx playwright install chromium` in services/pptx-emit-huashu/)"
-        )
-
+    """``build_pptx_huashu``'s export, its wait for a slot and its run recorded on ``summary``."""
     payload_bytes = json.dumps({
         "title": title,
         "slides": slides_html,
@@ -676,19 +898,19 @@ def build_pptx_huashu(
     with _export_place(), tempfile.TemporaryDirectory() as td:
         out_path = Path(td) / "out.pptx"
         cmd = ["node", str(SIDECAR_SCRIPT), str(out_path)]
-        with _sidecar_slot(len(slides_html)):
-            logger.info(
-                "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
-                " ".join(cmd), len(slides_html), len(payload_bytes),
-            )
-            try:
-                result = run_sidecar_process(
-                    cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS
+        asked_at = time.monotonic()
+        try:
+            with _sidecar_slot(len(slides_html)):
+                summary.wait_seconds = time.monotonic() - asked_at
+                logger.info(
+                    "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
+                    " ".join(cmd), len(slides_html), len(payload_bytes),
                 )
-            except subprocess.TimeoutExpired as e:
-                raise HuashuExportError(
-                    f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
-                ) from e
+                result = _run_measured(cmd, payload_bytes, summary)
+        except HuashuBusyError:
+            # Refused once its wait for a slot ran out: the wait was all of it.
+            summary.wait_seconds = time.monotonic() - asked_at
+            raise
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees
@@ -720,3 +942,71 @@ def build_pptx_huashu(
             )
 
         return out_path.read_bytes(), failures
+
+
+def build_pptx_huashu(
+    title: str,
+    slides_html: list[dict[str, Any]],
+    *,
+    bypass_validation: bool = False,
+    target: RenderTarget = "pptx",
+) -> tuple[bytes, list[dict[str, Any]]]:
+    """Run huashu's pipeline over each slide's HTML, return (pptx_bytes, failures).
+
+    ``slides_html`` is a list of ``{ "html": "<full doc string>", "notes": "..." }``.
+    The HTML string must be a complete standalone document with body sized
+    to 1280×720 px (= 13.333"×7.5"); the caller assembles this — see
+    ``src/api/routes/export.py::build_slide_html``.
+
+    ``bypass_validation``: when True, huashu's design-rule validation
+    (overflow > 100px, text-near-bottom-edge, layout dimension mismatch,
+    other authoring quality checks) becomes a per-slide console warning
+    instead of a throw. Slides that violate the rules still end up in the
+    output PPTX. Used by the Google Slides Drive route to guarantee every
+    slide ships, with the trade-off that some slides may render imperfectly.
+
+    ``target``: the app the deck is written for, ``"pptx"`` (PowerPoint, the
+    default) or ``"gslides"`` (the Google Slides conversion); see the module
+    docstring. Any other value raises ``ValueError``.
+
+    Each export logs one ``[huashu] export summary {json}`` line once it ends,
+    however it ends (module docstring, Telemetry). A call stopped before the
+    export starts, by an unknown ``target`` or with the pipeline unavailable
+    here (which the export routes answer 503), logs none.
+
+    Returns a 2-tuple:
+      * pptx_bytes — the .pptx as bytes, even if some slides failed
+        (empty if ALL slides failed; the caller should handle that).
+      * failures  — list of ``{ slide_index, error }`` with one entry per
+        slide huashu rejected. Empty list = clean run.
+    """
+    if target not in RENDER_TARGETS:
+        raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
+    if not is_available():
+        raise HuashuExportError(
+            "huashu pipeline not available: it needs HUASHU_PIPELINE_ENABLED=1 "
+            "(Databricks Apps, whose boot runs the sidecar's setup.sh) or "
+            "ENVIRONMENT=development, node on PATH, the sidecar's node_modules "
+            "(playwright, pptxgenjs) and a Playwright Chromium "
+            "(`npx playwright install chromium` in services/pptx-emit-huashu/)"
+        )
+
+    # The export's one summary line, logged once it ends, however it ends
+    # (module docstring, Telemetry).
+    summary = _ExportSummary(target=target, slides=len(slides_html))
+    try:
+        pptx_bytes, failures = _export_deck(
+            title,
+            slides_html,
+            bypass_validation=bypass_validation,
+            target=target,
+            summary=summary,
+        )
+    except HuashuBusyError:
+        summary.outcome = "busy"
+        raise
+    else:
+        summary.exported(pptx_bytes, failures)
+        return pptx_bytes, failures
+    finally:
+        summary.log()

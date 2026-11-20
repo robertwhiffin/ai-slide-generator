@@ -54,6 +54,41 @@ Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line wh
 - Each worker process runs at most `TELLR_SIDECAR_CONCURRENCY` sidecars at once (default 1; a node and Chromium tree takes about 790 MB). At most `TELLR_SIDECAR_QUEUE` more exports (default 15) wait for a slot, each for up to `TELLR_SIDECAR_WAIT_SECONDS` (default 60 s). An export past either bound is answered **429**, `Retry-After: 60`, "Exports are busy right now. Please try again in a minute.", which the UI shows as it is (no fallback). Waiting exports hold threads of the worker's threadpool (40), so the queue keeps the rest free for every other request.
 - The Databricks Apps proxy ends a request after about **300 s** (measured on 2026-11-20: requests of 30 to 185 s returned 200, one of 310 s got 502 at 300.4 s). With the defaults, the slowest route, Google Slides, answers within it: 60 s of waiting, the 180 s run, and the Drive upload, whose every request fails after 60 s without an answer (`DRIVE_HTTP_TIMEOUT_SECONDS`), a 502 "Drive upload failed". Bounds set past these limits are warned about in the log when the app starts.
 
+### The export summary line
+
+Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-20):
+
+```text
+[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.841,"secondsPerSlide":1.344,"peakRssMb":841.0,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
+```
+
+| Key | What it holds |
+|---|---|
+| `target` | `pptx` (the PowerPoint download) or `gslides` (the Google Slides route) |
+| `slides` | The slides the export was asked for |
+| `slidesExported` | The slides in the deck it wrote; 0 when it wrote none |
+| `failures` | The slide failures it returned: one per slide that failed, or one for a sidecar that failed before any slide |
+| `outcome` | `ok`: a deck, no slide failed. `partial`: a deck, some slides failed. `failed`: no deck, because every slide failed or the sidecar did. `timeout`: the run passed `SIDECAR_TIMEOUT_SECONDS`. `busy`: refused, HTTP 429 |
+| `waitSeconds` | The time spent waiting for a sidecar slot; 0 for an export refused at once |
+| `runSeconds` | The sidecar's wall time; `null` when no sidecar ran (`busy`) |
+| `secondsPerSlide` | `runSeconds / slides`; `null` with it |
+| `peakRssMb` | The most resident memory (RSS, in MiB) the sidecar's process tree held at once: node and every Chromium it launched. Playwright starts each browser in a process group of its own, so the tree is found through the parent chain, not the group. It is read every 0.25 s while the sidecar runs, in one pass of `/proc` (Linux) or `ps` (macOS). Each process's RSS is summed, so memory the processes share is counted in each: an upper bound, the same on every build. `null` when no sidecar ran or the reading failed. A reading that fails never fails or slows the export; it logs a `[huashu] export memory not read` warning |
+| `pptxBytes` | The size of the deck; 0 when it wrote none |
+| `sidecarConcurrency` | `TELLR_SIDECAR_CONCURRENCY` for the worker |
+| `queueBound` | `TELLR_SIDECAR_QUEUE` for the worker |
+
+The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503).
+
+Read the lines on Apps:
+
+```bash
+databricks apps logs <app> | grep "huashu] export summary"
+```
+
+`databricks apps logs` shows the last 200 lines by default. Add `--tail-lines 0` for every line the log service holds, or `--follow` to watch exports as they run. `| sed 's/.*export summary //' | jq .` leaves each line's JSON.
+
+The line has its own logger, `src.services.pptx_from_html_huashu.summary` at INFO, which writes each record to stderr as one line. It does not go through the app's root handler. In a worker, that handler is FastMCP's `RichHandler`, which wraps a long message into narrow pieces where stderr is not a terminal, as on Apps. Through it, even the line's prefix would be split.
+
 ### What the export trades away
 
 These are deliberate, each the closest a slide can come in an editable file:

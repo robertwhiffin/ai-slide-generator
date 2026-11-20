@@ -18,11 +18,16 @@ the test reads them, sleeps past a short timeout, and exits by itself after
 ``STUB_LIFETIME_SECONDS``, so no fault in the helper can hang the test: a helper
 that waits for the stub is caught by the elapsed-time assertion instead. The
 real-browser cases run the real scripts on a browser that never finishes.
+
+Every export, however it ends, also logs one ``[huashu] export summary {json}``
+line (``TestEveryExportLogsOneSummary`` and the classes after it): counts,
+timings and the peak memory of the sidecar's process tree, read while it runs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -33,8 +38,10 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import pytest
@@ -42,7 +49,17 @@ import pytest
 from src.api.routes import export as export_routes
 from src.services import pptx_from_html_huashu
 from src.services.pptx_from_html_huashu import HuashuExportError
-from tests.fixtures.export_snapshot_support import requires_huashu_sidecar, requires_node
+from tests.fixtures.export_snapshot_support import (
+    CORPUS_DECK,
+    CORPUS_DIR,
+    TEST_DECK_TITLE,
+    build_pptx_guarded,
+    pinned_font_css,
+    requires_huashu_sidecar,
+    requires_node,
+    slide_document,
+)
+from tests.unit.test_export_svg_raster import structural_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # A fresh interpreter imports the wrapper within this.
@@ -865,6 +882,8 @@ def _recorded_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_secon
 
 def _bound(monkeypatch: pytest.MonkeyPatch, *, cap: int, queue: int, wait: float) -> None:
     """The worker's sidecar bounds: ``cap`` run at once, ``queue`` more wait, each ``wait`` s."""
+    monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_cap", cap)
+    monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_queue", queue)
     monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap))
     monkeypatch.setattr(
         pptx_from_html_huashu, "_sidecar_admissions", threading.BoundedSemaphore(cap + queue)
@@ -1305,3 +1324,693 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         assert len(budget) == 1 and imported < budget[0] < started, (
             f"the budget warning is not one line of the app's startup: {lines}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The export summary: one line per export, however it ends
+# ---------------------------------------------------------------------------
+
+# What the owner greps the app's logs for: each export's line starts with this, then its JSON.
+SUMMARY_PREFIX = "[huashu] export summary "
+# The line's keys, in this order (docs/technical/export-features.md, The export summary line).
+SUMMARY_KEYS = [
+    "target",
+    "slides",
+    "slidesExported",
+    "failures",
+    "outcome",
+    "waitSeconds",
+    "runSeconds",
+    "secondsPerSlide",
+    "peakRssMb",
+    "pptxBytes",
+    "sidecarConcurrency",
+    "queueBound",
+]
+# Whole numbers, from 0.
+SUMMARY_COUNTS = (
+    "slides",
+    "slidesExported",
+    "failures",
+    "pptxBytes",
+    "sidecarConcurrency",
+    "queueBound",
+)
+# Read once the sidecar has run: null for an export refused before it ran.
+SUMMARY_RUN_READINGS = ("runSeconds", "secondsPerSlide", "peakRssMb")
+SUMMARY_OUTCOMES = ("ok", "partial", "failed", "timeout", "busy")
+SUMMARY_TARGETS = ("pptx", "gslides")
+
+# The summarised stub's run: long enough for the memory sampler (every 0.25 s) to
+# read the sidecar a few times.
+SUMMARISED_RUN_SECONDS = 1
+# A word no slide, title or note holds by chance, planted to show the line carries none.
+PLANTED_WORD = "Quellbrunnenzauber"
+# A slide's content the summary must not carry, three slides of it.
+THREE_SLIDES = [
+    {"html": f"<div class='slide'><p>{PLANTED_WORD} {number}</p></div>", "notes": PLANTED_WORD}
+    for number in (1, 2, 3)
+]
+# How much of its queue wait a summary may leave out: the start of node and the
+# reading of the clock are not its first export's run.
+QUEUE_WAIT_SLACK_SECONDS = 0.2
+# What the stub's detached child (a browser's stand-in) holds resident, in MB (MiB).
+DETACHED_CHILD_MB = 128
+BYTES_PER_MB = 1024 * 1024
+
+# The sidecar whose run a summary reads: it reads the payload, lives
+# SUMMARISED_RUN_SECONDS, reports as failed each slide it is told to (its error
+# quoting the slide, as a validation message can), and writes the deck when at
+# least one slide passed, as emit_deck.mjs does.
+STUB_SUMMARISED_RUN = """
+import fs from 'node:fs';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const slides = JSON.parse(Buffer.concat(chunks).toString('utf-8')).slides;
+const failed = %(failed)s.map(
+  (index) => ({ slide_index: index, error: 'rejected: ' + slides[index].html })
+);
+await new Promise((resolve) => setTimeout(resolve, %(ms)d));
+if (failed.length < slides.length) fs.writeFileSync(process.argv[2], 'PK');
+const result = { totalSlides: slides.length, succeeded: slides.length - failed.length, failed };
+console.error('__HUASHU_RESULT__ ' + JSON.stringify(result));
+"""
+
+# A sidecar that fails outright: no deck, no result line.
+STUB_FAILING_RUN = """
+process.stderr.write('boom\\n');
+process.exit(1);
+"""
+
+# A sidecar that never finishes: it answers SIGTERM by exiting, as emit_deck.mjs does.
+STUB_HUNG_RUN = """
+process.on('SIGTERM', () => process.exit(143));
+setTimeout(() => process.exit(0), %(lifetime_ms)d);
+setInterval(() => {}, 1000);
+"""
+
+# A sidecar whose detached child, a browser's stand-in, holds DETACHED_CHILD_MB of
+# random bytes resident (random: nothing can compress them away) until the
+# sidecar's exit handler kills its group, as Playwright's does.
+STUB_DETACHED_MEMORY = """
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const hog = "const held = require('node:crypto').randomFillSync(Buffer.allocUnsafe(%(bytes)d));"
+  + " process.stdout.write('ready'); setInterval(() => held[0], 1000);";
+const browser = spawn(process.execPath, ['-e', hog], {
+  detached: true, stdio: ['ignore', 'pipe', 'ignore'],
+});
+process.on('exit', () => {
+  try { process.kill(-browser.pid, 'SIGKILL'); } catch (error) { /* already gone */ }
+});
+fs.writeFileSync(%(pids)s, JSON.stringify({ sidecar: process.pid, browser: browser.pid }));
+await new Promise((resolve) => browser.stdout.once('data', resolve));
+await new Promise((resolve) => setTimeout(resolve, %(ms)d));
+fs.writeFileSync(process.argv[2], 'PK');
+console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded: 1, failed: [] }));
+// The child's pipe would hold node's event loop open: exit, through the handler above.
+process.exit(0);
+"""
+
+
+def _sidecar_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    """The export's sidecar made ``script``, with the pipeline available."""
+    stub = tmp_path / "stub_sidecar.mjs"
+    stub.write_text(script, encoding="utf-8")
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", stub)
+    monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+
+
+def _summarised_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: tuple[int, ...] = ()
+) -> None:
+    """The export's sidecar made a ``STUB_SUMMARISED_RUN`` failing the slides ``failed``."""
+    _sidecar_script(
+        tmp_path,
+        monkeypatch,
+        STUB_SUMMARISED_RUN
+        % {"failed": json.dumps(list(failed)), "ms": SUMMARISED_RUN_SECONDS * 1000},
+    )
+
+
+def _summary_lines(stderr: str) -> list[str]:
+    """Every export summary line on ``stderr``, in the order the exports logged them."""
+    return [line for line in stderr.splitlines() if line.startswith(SUMMARY_PREFIX)]
+
+
+def _summaries(stderr: str) -> list[dict]:
+    """The JSON of every export summary line on ``stderr``, each checked for its form."""
+    summaries = [json.loads(line.removeprefix(SUMMARY_PREFIX)) for line in _summary_lines(stderr)]
+    for summary in summaries:
+        _assert_well_formed(summary)
+    return summaries
+
+
+def _assert_well_formed(summary: dict) -> None:
+    """The line's keys, in order, each of its type."""
+    assert list(summary) == SUMMARY_KEYS, summary
+    assert summary["target"] in SUMMARY_TARGETS, summary
+    assert summary["outcome"] in SUMMARY_OUTCOMES, summary
+    for key in SUMMARY_COUNTS:
+        assert type(summary[key]) is int and summary[key] >= 0, (key, summary)
+    assert type(summary["waitSeconds"]) is float and summary["waitSeconds"] >= 0, summary
+    for key in SUMMARY_RUN_READINGS:
+        reading = summary[key]
+        assert reading is None or (type(reading) is float and reading >= 0), (key, summary)
+
+
+def _the_summary(capsys: pytest.CaptureFixture[str]) -> dict:
+    """The one summary line the export logged since the last read."""
+    summaries = _summaries(capsys.readouterr().err)
+    assert len(summaries) == 1, f"{len(summaries)} summary lines for one export: {summaries}"
+    return summaries[0]
+
+
+def _counts(summary: dict) -> dict:
+    """The summary without its timings and its memory reading."""
+    readings = ("waitSeconds", *SUMMARY_RUN_READINGS)
+    return {key: value for key, value in summary.items() if key not in readings}
+
+
+def _built(*, slides: int, exported: int, failures: int, outcome: str, deck: int) -> dict:
+    """What ``_counts`` reads from an export of ``slides`` at cap 1, queue 1, for PowerPoint."""
+    return {
+        "target": "pptx",
+        "slides": slides,
+        "slidesExported": exported,
+        "failures": failures,
+        "outcome": outcome,
+        "pptxBytes": deck,
+        "sidecarConcurrency": 1,
+        "queueBound": 1,
+    }
+
+
+def _assert_ran(summary: dict, *, at_least: float, slides: int) -> None:
+    """The sidecar ran ``at_least`` seconds, its memory read, its time per slide its run's share."""
+    assert at_least <= summary["runSeconds"] < at_least + RETURN_SLACK_SECONDS, summary
+    assert summary["secondsPerSlide"] == pytest.approx(summary["runSeconds"] / slides, abs=1e-3)
+    assert summary["peakRssMb"] is not None and summary["peakRssMb"] > 0, summary
+
+
+def _assert_never_ran(summary: dict) -> None:
+    """No sidecar ran: no run time, no time per slide, no memory reading."""
+    assert [summary[key] for key in SUMMARY_RUN_READINGS] == [None, None, None], summary
+
+
+@requires_node
+class TestEveryExportLogsOneSummary:
+    """One ``[huashu] export summary {json}`` line per export, once it ends, however it ends.
+
+    The owner reads them from the app's logs on Databricks Apps (``databricks apps
+    logs <app> | grep "huashu] export summary"``), and a build that launches one
+    browser per deck will be measured against this one by the same line. So the
+    line is one physical line, its keys fixed, each of a fixed type: whole-number
+    counts, seconds as numbers, and the run's readings null when no sidecar ran.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _known_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cap 1, queue 1, whatever the environment sets, so the line's bounds are known."""
+        _bound(monkeypatch, cap=1, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+
+    @pytest.mark.parametrize("target", SUMMARY_TARGETS)
+    def test_an_export_of_three_slides_that_all_passed(
+        self,
+        target: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+
+        exported = pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES, target=target)
+
+        assert exported == (b"PK", [])
+        summary = _the_summary(capsys)
+        assert _counts(summary) == {
+            **_built(slides=3, exported=3, failures=0, outcome="ok", deck=2),
+            "target": target,
+        }
+        assert summary["waitSeconds"] < REFUSED_WITHIN_SECONDS, "a free slot was waited for"
+        _assert_ran(summary, at_least=SUMMARISED_RUN_SECONDS, slides=3)
+
+    def test_an_export_some_of_whose_slides_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch, failed=(1,))
+
+        pptx, failures = pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+
+        assert (pptx, [failure["slide_index"] for failure in failures]) == (b"PK", [1])
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(
+            slides=3, exported=2, failures=1, outcome="partial", deck=2
+        )
+        _assert_ran(summary, at_least=SUMMARISED_RUN_SECONDS, slides=3)
+
+    def test_an_export_every_slide_of_which_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No deck, every slide's failure returned: failed."""
+        _summarised_sidecar(tmp_path, monkeypatch, failed=(0, 1, 2))
+
+        pptx, failures = pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+
+        assert (pptx, len(failures)) == (b"", 3)
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(
+            slides=3, exported=0, failures=3, outcome="failed", deck=0
+        )
+        _assert_ran(summary, at_least=SUMMARISED_RUN_SECONDS, slides=3)
+
+    def test_an_export_whose_sidecar_failed_outright(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No deck and no result line: the export raises, and its line says failed."""
+        _sidecar_script(tmp_path, monkeypatch, STUB_FAILING_RUN)
+
+        with pytest.raises(HuashuExportError, match="no pptx and no result line"):
+            pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(
+            slides=3, exported=0, failures=0, outcome="failed", deck=0
+        )
+        assert summary["runSeconds"] is not None and summary["secondsPerSlide"] is not None
+
+    def test_an_export_that_timed_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _sidecar_script(
+            tmp_path, monkeypatch, STUB_HUNG_RUN % {"lifetime_ms": STUB_LIFETIME_SECONDS * 1000}
+        )
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", STUB_TIMEOUT_SECONDS
+        )
+
+        with pytest.raises(HuashuExportError, match="timed out"):
+            pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(
+            slides=3, exported=0, failures=0, outcome="timeout", deck=0
+        )
+        _assert_ran(summary, at_least=STUB_TIMEOUT_SECONDS, slides=3)
+
+    def test_an_export_refused_at_once(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every place taken: busy, no wait and no run."""
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", _RUN_NOT_EXPECTED)
+        admissions = pptx_from_html_huashu._sidecar_admissions
+        assert admissions.acquire(blocking=False) and admissions.acquire(blocking=False)
+        try:
+            with pytest.raises(pptx_from_html_huashu.HuashuBusyError):
+                pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+        finally:
+            admissions.release()
+            admissions.release()
+
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(slides=3, exported=0, failures=0, outcome="busy", deck=0)
+        assert summary["waitSeconds"] == 0.0, summary
+        _assert_never_ran(summary)
+
+    def test_an_export_refused_after_its_wait(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The slot taken for longer than the wait bound: busy, after waiting the bound."""
+        _bound(monkeypatch, cap=1, queue=1, wait=WAIT_BOUND_SECONDS)
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", _RUN_NOT_EXPECTED)
+        slots = pptx_from_html_huashu._sidecar_slots
+        assert slots.acquire(blocking=False)  # another export's run
+        try:
+            (export,) = _exports_at_once(1)
+        finally:
+            slots.release()
+
+        assert type(export.outcome) is pptx_from_html_huashu.HuashuBusyError, export
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(slides=1, exported=0, failures=0, outcome="busy", deck=0)
+        assert (
+            WAIT_BOUND_SECONDS - 0.1
+            <= summary["waitSeconds"]
+            < WAIT_BOUND_SECONDS + REFUSED_WITHIN_SECONDS
+        ), summary
+        _assert_never_ran(summary)
+
+    @pytest.mark.parametrize(
+        ("run", "raised", "outcome"),
+        [
+            (_raising(OSError("node not found")), OSError, "failed"),
+            (
+                _raising(subprocess.TimeoutExpired(["node"], 1, output=b"", stderr=b"")),
+                HuashuExportError,
+                "timeout",
+            ),
+            (_raising(KeyboardInterrupt()), KeyboardInterrupt, "failed"),
+            (_raising(RuntimeError("anything else")), RuntimeError, "failed"),
+            (_writing_no_deck, HuashuExportError, "failed"),
+        ],
+        ids=["no node", "timed out", "interrupted", "anything else", "no deck written"],
+    )
+    def test_an_export_however_its_run_ends(
+        self,
+        run,
+        raised: type[BaseException],
+        outcome: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Each way a run can end without a deck, the line logged once and named for it."""
+        monkeypatch.setattr(pptx_from_html_huashu, "is_available", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu, "run_sidecar_process", run)
+
+        with pytest.raises(raised):
+            pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES)
+
+        summary = _the_summary(capsys)
+        assert _counts(summary) == _built(
+            slides=3, exported=0, failures=0, outcome=outcome, deck=0
+        )
+        # The stand-in run starts no process, so there is no memory to read.
+        assert summary["runSeconds"] is not None and summary["peakRssMb"] is None, summary
+
+    def test_a_queued_export_logs_its_wait(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Cap 1, two exports at once: the second waited out the first's run."""
+        _recorded_sidecar(tmp_path, monkeypatch, RECORDED_RUN_SECONDS)
+
+        exports = _exports_at_once(2)
+
+        assert [export.outcome for export in exports] == [(b"PK", []), (b"PK", [])], exports
+        first, second = _summaries(capsys.readouterr().err)
+        assert first["waitSeconds"] < QUEUE_WAIT_SLACK_SECONDS, first
+        assert second["waitSeconds"] >= first["runSeconds"] - QUEUE_WAIT_SLACK_SECONDS, (
+            f"the second export waited {second['waitSeconds']}s for a slot the first held "
+            f"{first['runSeconds']}s"
+        )
+
+    def test_the_line_holds_no_slide_content_and_no_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Counts and timings only: not the title, a slide, its notes, a failure or a file."""
+        _summarised_sidecar(tmp_path, monkeypatch, failed=(0,))
+
+        pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
+            f"{PLANTED_WORD} deck", THREE_SLIDES
+        )
+
+        assert pptx == b"PK" and PLANTED_WORD in failures[0]["error"], (
+            "fixture drift: the planted word is not in what the export returns"
+        )
+        (line,) = _summary_lines(capsys.readouterr().err)
+        assert PLANTED_WORD not in line, line
+        assert "/" not in line and "\\" not in line, f"a path in the summary: {line}"
+
+    def test_the_line_is_one_whole_line_in_the_apps_log(self, tmp_path: Path) -> None:
+        """Under the app's own logging, the summary is one line, and the only one naming it.
+
+        A fresh interpreter loads the app as a worker does, which leaves FastMCP's
+        RichHandler as the root handler: it wraps a long line at 80 columns when
+        stderr is no terminal, as on Databricks Apps. It then exports through a stub
+        sidecar, its stderr a pipe and no COLUMNS set: the summary must reach that
+        stderr whole, not as the handler's wrapped pieces, and not twice.
+        """
+        stub = tmp_path / "stub_sidecar.mjs"
+        stub.write_text(STUB_SUMMARISED_RUN % {"failed": "[]", "ms": 0}, encoding="utf-8")
+        script = (
+            "import logging, sys\n"
+            "from pathlib import Path\n"
+            "import src.api.main\n"
+            "from src.services import pptx_from_html_huashu as wrapper\n"
+            "print(*[type(handler).__name__ for handler in logging.getLogger().handlers])\n"
+            "wrapper.SIDECAR_SCRIPT = Path(sys.argv[1])\n"
+            "wrapper.is_available = lambda: True\n"
+            "slides = [{'html': '<p>x</p>', 'notes': ''}] * 3\n"
+            "print(wrapper.build_pptx_huashu('deck', slides))\n"
+        )
+        env = {key: value for key, value in os.environ.items() if key != "COLUMNS"}
+        env["ENVIRONMENT"] = "test"
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(stub)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=MODULE_LOAD_TIMEOUT_SECONDS,
+        )
+
+        assert result.returncode == 0, result.stderr
+        handlers, exported = result.stdout.splitlines()[-2:]
+        assert handlers == "RichHandler", (
+            f"fixture drift: the app's root handlers are {handlers!r}, not FastMCP's RichHandler"
+        )
+        assert exported == "(b'PK', [])", result.stdout
+        mentions = [line for line in result.stderr.splitlines() if "export summary" in line]
+        assert len(mentions) == 1 and mentions[0].startswith(SUMMARY_PREFIX), mentions
+        (summary,) = _summaries(result.stderr)
+        assert summary["outcome"] == "ok", summary
+
+
+@requires_node
+class TestTheSummaryReadsTheWholeTree:
+    """``peakRssMb``: the most the sidecar's process tree held, node and every Chromium it launched.
+
+    Playwright launches each browser ``detached``, the leader of a process group
+    of its own, so the tree is found through the PPID chain, as the blocked-loop
+    sweep finds the browsers, not through node's group.
+    """
+
+    def test_the_tree_is_node_and_every_descendant(self) -> None:
+        rows = [
+            pptx_from_html_huashu._ProcessRow(pid=10, ppid=1, pgid=10, rss_bytes=1000),
+            pptx_from_html_huashu._ProcessRow(pid=20, ppid=10, pgid=20, rss_bytes=100),
+            # A detached browser, the leader of its own group, and its renderer.
+            pptx_from_html_huashu._ProcessRow(pid=21, ppid=20, pgid=21, rss_bytes=10),
+            pptx_from_html_huashu._ProcessRow(pid=22, ppid=21, pgid=21, rss_bytes=1),
+            # A child in node's own group.
+            pptx_from_html_huashu._ProcessRow(pid=23, ppid=20, pgid=20, rss_bytes=5),
+            # Node's sibling, the app's other child: not node's.
+            pptx_from_html_huashu._ProcessRow(pid=30, ppid=10, pgid=30, rss_bytes=7000),
+        ]
+        assert pptx_from_html_huashu._tree_resident_bytes(20, rows) == 116
+        assert pptx_from_html_huashu._tree_resident_bytes(99, rows) is None
+
+    def test_a_detached_child_is_counted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A detached child holding 128 MB is read, though it is outside node's own group."""
+        pids_path = tmp_path / "pids.json"
+        _sidecar_script(
+            tmp_path,
+            monkeypatch,
+            STUB_DETACHED_MEMORY
+            % {
+                "bytes": DETACHED_CHILD_MB * BYTES_PER_MB,
+                "pids": json.dumps(str(pids_path)),
+                "ms": SUMMARISED_RUN_SECONDS * 1000,
+            },
+        )
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", STUB_LIFETIME_SECONDS
+        )
+        try:
+            assert pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "x"}]) == (b"PK", [])
+        finally:
+            if pids_path.exists():
+                pids = json.loads(pids_path.read_text(encoding="utf-8"))
+                _kill([pids["sidecar"], pids["browser"]])
+
+        summary = _the_summary(capsys)
+        assert summary["peakRssMb"] is not None and summary["peakRssMb"] >= DETACHED_CHILD_MB, (
+            f"the detached child's {DETACHED_CHILD_MB} MB were not read: {summary}"
+        )
+
+    def test_this_process_has_a_resident_size(self) -> None:
+        """The table the sampler reads: this process, its parent and group, and its RSS."""
+        rows = {row.pid: row for row in pptx_from_html_huashu._read_process_table()}
+        row = rows[os.getpid()]
+        assert (row.ppid, row.pgid) == (os.getppid(), os.getpgrp())
+        assert row.rss_bytes is not None and row.rss_bytes > 0, row
+
+    def test_it_reads_each_resident_size_from_proc(self, tmp_path: Path) -> None:
+        """Linux: /proc/<pid>/stat's 24th field, the resident pages."""
+        page = os.sysconf("SC_PAGE_SIZE")
+        fields = "S 7 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 12345 1000000 250 0 0"
+        for pid, stat in {
+            "self": "7 (python) S 1 7 7 0",
+            "42": f"42 (Chrome (helper) x) {fields}",
+            "43": "43 (node) R 7 7 7 0",
+        }.items():
+            (tmp_path / pid).mkdir()
+            (tmp_path / pid / "stat").write_text(stat, encoding="utf-8")
+
+        rows = sorted(pptx_from_html_huashu._read_process_table(tmp_path))
+
+        assert rows == [
+            pptx_from_html_huashu._ProcessRow(pid=42, ppid=7, pgid=42, rss_bytes=250 * page),
+            pptx_from_html_huashu._ProcessRow(pid=43, ppid=7, pgid=7, rss_bytes=None),
+        ]
+
+
+@requires_node
+class TestASamplerThatFailsNeverFailsTheExport:
+    """Memory sampling is telemetry: when it fails the export still succeeds, its reading null."""
+
+    @pytest.fixture(autouse=True)
+    def _known_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _bound(monkeypatch, cap=1, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+
+    def test_a_table_that_cannot_be_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+
+        def unreadable(*_: object) -> list:
+            raise OSError("no process table here")
+
+        monkeypatch.setattr(pptx_from_html_huashu, "_read_process_table", unreadable)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+        summary = _the_summary(capsys)
+        assert (summary["outcome"], summary["peakRssMb"]) == ("ok", None), summary
+
+    def test_a_failure_after_good_readings_leaves_no_partial_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A reading that missed part of the run is not its peak: null, not a smaller number."""
+        _summarised_sidecar(tmp_path, monkeypatch)
+        read = pptx_from_html_huashu._read_process_table
+        passes: list[int] = []
+
+        def failing_after_two(*arguments: object) -> list:
+            passes.append(len(passes))
+            if len(passes) > 2:
+                raise OSError("the process table went away")
+            return read(*arguments)
+
+        monkeypatch.setattr(pptx_from_html_huashu, "_read_process_table", failing_after_two)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+        assert len(passes) > 2, f"fixture drift: the sampler read the table {len(passes)} times"
+        summary = _the_summary(capsys)
+        assert (summary["outcome"], summary["peakRssMb"]) == ("ok", None), summary
+
+    def test_a_sampler_whose_thread_cannot_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A worker out of threads: the export runs unsampled."""
+        _summarised_sidecar(tmp_path, monkeypatch)
+
+        class Unstartable(threading.Thread):
+            def start(self) -> None:
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(
+            pptx_from_html_huashu,
+            "threading",
+            SimpleNamespace(Thread=Unstartable, Event=threading.Event),
+        )
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+        summary = _the_summary(capsys)
+        assert (summary["outcome"], summary["peakRssMb"]) == ("ok", None), summary
+
+
+class _NoSampler:
+    """A memory sampler that reads nothing: the export as it ran before its summary."""
+
+    def watch(self, process: subprocess.Popen) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+
+def _deck_text(pptx: bytes) -> str:
+    """Every slide part of a deck, as text."""
+    with zipfile.ZipFile(io.BytesIO(pptx)) as deck:
+        return "".join(
+            deck.read(name).decode("utf-8")
+            for name in deck.namelist()
+            if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+        )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTheSummaryOfARealExport:
+    """The real sidecar, node and Chromium: what its line reads, and what it leaves alone."""
+
+    def test_it_reads_the_memory_of_node_and_its_browsers(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        document = slide_document(f"<div class='slide'><p>{PLANTED_WORD}</p></div>")
+
+        pptx, failures = build_pptx_guarded(
+            f"{PLANTED_WORD} deck",
+            [{"html": document, "notes": PLANTED_WORD}],
+            bypass_validation=True,
+        )
+
+        assert failures == [] and PLANTED_WORD in _deck_text(pptx), (
+            "fixture drift: the planted word is not in the deck"
+        )
+        (line,) = _summary_lines(capsys.readouterr().err)
+        assert PLANTED_WORD not in line, line
+        (summary,) = _summaries(line)
+        assert (summary["outcome"], summary["slidesExported"]) == ("ok", 1), summary
+        assert summary["pptxBytes"] == len(pptx), summary
+        assert summary["peakRssMb"] is not None and summary["peakRssMb"] > 0, summary
+
+    def test_a_pinned_corpus_export_is_identical_with_it(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The 17-slide corpus, its fonts pinned: the same deck with the summary and without it.
+
+        Without it: no memory sampler and no line. The sampler reads the process
+        table while the sidecar renders, so it must not change what is rendered.
+        """
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        css = pinned_font_css()
+        paths = sorted((CORPUS_DIR / "slides").glob("*.html"))
+        assert len(paths) == 17, f"fixture drift: the corpus has {len(paths)} slides"
+        title = CORPUS_DECK.get("title", TEST_DECK_TITLE)
+        slides = [
+            {
+                "html": slide_document(
+                    path.read_text(encoding="utf-8"),
+                    css=css,
+                    scripts=CORPUS_DECK.get("scripts", ""),
+                    external_scripts=tuple(CORPUS_DECK.get("external_scripts", [])),
+                    title=title,
+                    slide_id=path.stem,
+                ),
+                "notes": path.stem,
+            }
+            for path in paths
+        ]
+
+        def manifest() -> dict:
+            pptx, failures = build_pptx_guarded(title, slides, bypass_validation=True)
+            assert failures == [], failures
+            return structural_manifest(pptx)
+
+        with monkeypatch.context() as without_summary:
+            without_summary.setattr(pptx_from_html_huashu, "_TreeMemorySampler", _NoSampler)
+            without_summary.setattr(pptx_from_html_huashu.summary_logger, "disabled", True)
+            unsummarised = manifest()
+        assert _summary_lines(capsys.readouterr().err) == [], "fixture drift: the summary ran"
+        summarised = manifest()
+        (summary,) = _summaries(capsys.readouterr().err)
+        assert summary["outcome"] == "ok" and summary["peakRssMb"] is not None, summary
+
+        assert summarised == unsummarised, "the export summary changed the deck"
