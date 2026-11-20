@@ -307,9 +307,18 @@ on its allow-list is omitted. The installer change prints a warning and continue
   new installer attached the Lakebase branch. A browser Agent deck using a Genie Agent and
   Genie One, its title, a PPTX export, an image, an MCP `create_deck`, an MCP `edit_deck`
   and a browser Legacy deck all completed without a Gateway error, which shows the Gateway
-  accepts the three-key tag. Reading the recorded tag values back from
-  `system.ai_gateway.usage` was still pending when this was written, so the Gateway record
-  checks above were still open.
+  accepts the three-key tag. The records in `system.ai_gateway.usage` then read back as
+  designed, all with the User-Agent `tellr/<the dev version> DatabricksOpenAI/Python …`:
+  the browser Agent deck's calls as `generation` + `app` and its title as `title` + `app`;
+  the two MCP turns' calls as `generation` + `mcp`, with one `title` + `mcp` record from
+  `create_deck` and none from `edit_deck`; the Legacy deck's one tagged record as
+  `title` + `app`; the export as `export` and the image as `image`, with no `entrypoint`.
+  No `generation` record made during a turn lacked its `entrypoint`, so the mark survives
+  the graph's node threads. The request records showed the Genie conversation requests as
+  `tellr-app-<hash>/<the dev version>`, the Genie One requests as
+  `tellr/<the dev version> python-httpx/<httpx version>`, and the app's own SDK requests
+  as `tellr-app-system/<the dev version>`. Still to confirm: that billing attributes the
+  Lakebase project's usage to the app.
 
 ## How it reaches installs
 
