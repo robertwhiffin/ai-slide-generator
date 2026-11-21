@@ -54,12 +54,15 @@ summary {json}`` (``_ExportSummary``), counts and timings only, never a slide's
 content, a user or a path. Its ``peakRssMb`` is the most memory the sidecar's
 process tree held, node and every Chromium it launched, read from the process
 table about every ``MEMORY_SAMPLE_SECONDS`` while it runs
-(``_TreeMemorySampler``); a reading that fails is null, and never fails or
-slows the export. The line has a logger of its own that writes each record as
-one line to stderr (``summary_logger``), not through the app's root handler:
-in a worker that is FastMCP's RichHandler, which wraps a long line at 80
-columns where stderr is no terminal, as on Databricks Apps, so the JSON would
-reach the logs in pieces.
+(``_TreeMemorySampler``); ``containerPeakMb`` is the most the whole container
+held meanwhile, as its cgroup counts it (``CGROUP_ROOT``), null where there is
+none. A reading that fails is null, and never fails or slows the export. The
+container's memory limit is logged once, when a worker starts
+(``log_sidecar_bounds``). Both lines have a logger of their own that writes
+each record as one line to stderr (``telemetry_logger``), not through the
+app's root handler: in a worker that is FastMCP's RichHandler, which wraps a
+long line at 80 columns where stderr is no terminal, as on Databricks Apps, so
+the JSON would reach the logs in pieces.
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
@@ -276,17 +279,30 @@ _warn_about_the_bounds()
 
 
 def log_sidecar_bounds() -> None:
-    """Log this worker's sidecar bounds. The app's startup calls it, in every worker.
+    """Log this worker's sidecar bounds and the container's memory limit.
 
-    Loading this module has warned already about any bound that defeats what it
-    is for, so with the startup loading it a misconfiguration shows when a
-    worker starts, not on its first export.
+    The app's startup calls it, in every worker. Loading this module has warned
+    already about any bound that defeats what it is for, so with the startup
+    loading it a misconfiguration shows when a worker starts, not on its first
+    export. The limit, ``[huashu] container memory limit <MB or none>``, is what
+    the exports' ``containerPeakMb`` is read against (module docstring,
+    Telemetry); one that cannot be read is logged as none, and never stops the
+    startup.
     """
     logger.info(
         "[huashu] export sidecars per worker: %d at once, %d more waiting, each up to %gs",
         _sidecar_cap,
         _sidecar_queue,
         SIDECAR_WAIT_SECONDS,
+    )
+    try:
+        limit = _container_memory_limit_bytes()
+    except (OSError, ValueError) as error:
+        logger.warning("could not read the container's cgroup limit: %s", error)
+        limit = None
+    telemetry_logger.info(
+        "[huashu] container memory limit %s",
+        "none" if limit is None else f"{limit / BYTES_PER_MB:.1f} MB",
     )
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
@@ -650,21 +666,78 @@ def _tree_resident_bytes(root: int, table: list[_ProcessRow]) -> int | None:
     return total
 
 
+# The container's own memory, as its cgroup charges it against its limit:
+# cgroup v2's memory.current and memory.max, else cgroup v1's usage and limit.
+# A container sees its own cgroup at this root; a machine with neither file
+# (macOS, a host's root cgroup) has no reading. Tests point it at a fake one.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+_CGROUP_MEMORY_FILES = (
+    ("memory.current", "memory.max"),
+    ("memory/memory.usage_in_bytes", "memory/memory.limit_in_bytes"),
+)
+# A cgroup v1 limit this large is none: v1 says "no limit" with the largest
+# page-aligned 63-bit number, v2 with "max".
+_CGROUP_UNLIMITED_BYTES = 1 << 62
+
+
+def _cgroup_memory_files() -> tuple[Path, Path] | None:
+    """The container's cgroup memory usage and limit files, v2 before v1; None for neither."""
+    for usage, limit in _CGROUP_MEMORY_FILES:
+        if (CGROUP_ROOT / usage).is_file():
+            return CGROUP_ROOT / usage, CGROUP_ROOT / limit
+    return None
+
+
+def _container_memory_limit_bytes() -> int | None:
+    """The container's memory limit, or None: no limit, or no cgroup memory files.
+
+    A limit file that cannot be read, or does not hold a number, raises
+    ``OSError`` or ``ValueError``.
+    """
+    files = _cgroup_memory_files()
+    if files is None:
+        return None
+    value = files[1].read_text(encoding="ascii").strip()
+    if value == "max":
+        return None
+    limit = int(value)
+    return None if limit >= _CGROUP_UNLIMITED_BYTES else limit
+
+
+class _MemoryPeaks(NamedTuple):
+    """What a ``_TreeMemorySampler`` read, in MB (MiB): None for a reading it does not have."""
+
+    # The sidecar's process tree: node and every Chromium it launched, RSS summed.
+    tree_mb: float | None
+    # The whole container, as its cgroup counts it.
+    container_mb: float | None
+
+
+def _megabytes(held: int | None) -> float | None:
+    return None if held is None else round(held / BYTES_PER_MB, 1)
+
+
 class _TreeMemorySampler:
-    """The most memory a sidecar's process tree held: node and every Chromium it launched.
+    """The most memory a sidecar's process tree held, and the container with it.
 
     ``watch`` (``run_sidecar_process``'s ``on_spawn``) starts a daemon thread
-    that reads the process table every ``MEMORY_SAMPLE_SECONDS``, in one pass
-    each (``_read_process_table``), and keeps the largest resident size of the
-    tree (``_tree_resident_bytes``). It stops once the sidecar has ended, or at
-    ``stop``. It is telemetry: a thread that cannot start, or a reading that
-    fails, leaves no reading (None, not the part read before it), and nothing
-    here raises into the export or waits on the thread.
+    that reads, every ``MEMORY_SAMPLE_SECONDS`` and in one pass each, the
+    process table (``_read_process_table``) and, where there is one, the
+    container's cgroup memory usage (``_cgroup_memory_files``). It keeps the
+    largest resident size of the tree (``_tree_resident_bytes``) and the largest
+    usage of the container. It stops once the sidecar has ended, or at
+    ``stop``. It is telemetry: a thread that cannot start, or a pass that fails
+    before ``stop``, leaves no readings (None, not the part read before it), and
+    nothing here raises into the export or waits on the thread. A pass that
+    fails after ``stop`` changes nothing: the export has logged its readings.
     """
 
     def __init__(self) -> None:
+        # Guards what the thread records against ``stop`` reading it.
+        self._lock = threading.Lock()
         self._stopped = threading.Event()
         self._peak_bytes: int | None = None
+        self._container_peak_bytes: int | None = None
         self._failed = False
 
     def watch(self, process: subprocess.Popen) -> None:
@@ -678,26 +751,46 @@ class _TreeMemorySampler:
 
     def _sample(self, process: subprocess.Popen) -> None:
         try:
+            cgroup = _cgroup_memory_files()
             while not self._stopped.is_set() and process.returncode is None:
                 held = _tree_resident_bytes(process.pid, _read_process_table())
                 if held is None:
                     return  # the sidecar has ended: no process has its id
-                if self._peak_bytes is None or held > self._peak_bytes:
-                    self._peak_bytes = held
+                container = None
+                if cgroup is not None:
+                    container = int(cgroup[0].read_text(encoding="ascii"))
+                with self._lock:
+                    if self._peak_bytes is None or held > self._peak_bytes:
+                        self._peak_bytes = held
+                    if container is not None and (
+                        self._container_peak_bytes is None
+                        or container > self._container_peak_bytes
+                    ):
+                        self._container_peak_bytes = container
                 self._stopped.wait(MEMORY_SAMPLE_SECONDS)
         except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
             self._fail(error)
 
     def _fail(self, error: Exception) -> None:
-        self._failed = True
+        with self._lock:
+            if self._stopped.is_set():
+                return  # the export has its readings already, and has logged them
+            self._failed = True
         logger.warning("[huashu] export memory not read, its summary says null: %s", error)
 
-    def stop(self) -> float | None:
-        """Stop reading, without waiting: the most the tree held in MB, or None if none was read."""
-        self._stopped.set()
-        if self._failed or self._peak_bytes is None:
-            return None
-        return round(self._peak_bytes / BYTES_PER_MB, 1)
+    def stop(self) -> _MemoryPeaks:
+        """Stop reading, without waiting: the most the tree and the container held, in MB.
+
+        Each is None when it was not read, or when a pass failed.
+        """
+        with self._lock:
+            self._stopped.set()
+            if self._failed:
+                return _MemoryPeaks(tree_mb=None, container_mb=None)
+            return _MemoryPeaks(
+                tree_mb=_megabytes(self._peak_bytes),
+                container_mb=_megabytes(self._container_peak_bytes),
+            )
 
 
 # The line each export logs once it ends (_ExportSummary), its prefix fixed: the
@@ -720,16 +813,17 @@ class _StderrLineHandler(logging.StreamHandler):
         return sys.stderr
 
 
-# The export summary's logger: INFO, each record one line on stderr, and not
+# The telemetry's logger, for each export's summary line and the container's
+# memory limit at startup: INFO, each record one line on stderr, and not
 # passed on to the app's root handler, which in a worker wraps a long line
 # (module docstring, Telemetry).
-summary_logger = logging.getLogger(f"{__name__}.summary")
-summary_logger.setLevel(logging.INFO)
-summary_logger.propagate = False
-if not summary_logger.handlers:
-    _summary_handler = _StderrLineHandler()
-    _summary_handler.setFormatter(logging.Formatter("%(message)s"))
-    summary_logger.addHandler(_summary_handler)
+telemetry_logger = logging.getLogger(f"{__name__}.telemetry")
+telemetry_logger.setLevel(logging.INFO)
+telemetry_logger.propagate = False
+if not telemetry_logger.handlers:
+    _telemetry_handler = _StderrLineHandler()
+    _telemetry_handler.setFormatter(logging.Formatter("%(message)s"))
+    telemetry_logger.addHandler(_telemetry_handler)
 
 
 @dataclass
@@ -749,7 +843,9 @@ class _ExportSummary:
     # Waiting for a sidecar slot; no run until there is one.
     wait_seconds: float = 0.0
     run_seconds: float | None = None
+    # The sidecar's process tree, and the whole container (_TreeMemorySampler).
     peak_rss_mb: float | None = None
+    container_peak_mb: float | None = None
     pptx_bytes: int = 0
 
     def exported(self, pptx_bytes: bytes, failures: list[dict[str, Any]]) -> None:
@@ -776,6 +872,7 @@ class _ExportSummary:
             "runSeconds": None if self.run_seconds is None else round(self.run_seconds, 3),
             "secondsPerSlide": seconds_per_slide,
             "peakRssMb": self.peak_rss_mb,
+            "containerPeakMb": self.container_peak_mb,
             "pptxBytes": self.pptx_bytes,
             "sidecarConcurrency": _sidecar_cap,
             "queueBound": _sidecar_queue,
@@ -785,7 +882,7 @@ class _ExportSummary:
     def log(self) -> None:
         """Log the line. A failure to is logged, and never raised into the export."""
         try:
-            summary_logger.info("%s", self.line())
+            telemetry_logger.info("%s", self.line())
         except Exception:  # noqa: BLE001 (telemetry never fails an export)
             logger.exception("could not log the export summary")
 
@@ -857,7 +954,7 @@ RENDER_TARGETS: tuple[RenderTarget, ...] = ("pptx", "gslides")
 def _run_measured(
     cmd: list[str], payload_bytes: bytes, summary: _ExportSummary
 ) -> subprocess.CompletedProcess:
-    """The sidecar's run, its wall time and its tree's peak memory recorded on ``summary``."""
+    """The sidecar's run, its wall time and its memory peaks recorded on ``summary``."""
     sampler = _TreeMemorySampler()
     started = time.monotonic()
     try:
@@ -871,7 +968,7 @@ def _run_measured(
         ) from e
     finally:
         summary.run_seconds = time.monotonic() - started
-        summary.peak_rss_mb = sampler.stop()
+        summary.peak_rss_mb, summary.container_peak_mb = sampler.stop()
 
 
 def _export_deck(

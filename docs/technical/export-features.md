@@ -56,10 +56,10 @@ Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line wh
 
 ### The export summary line
 
-Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-20):
+Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-21; no cgroup there, so `containerPeakMb` is `null`):
 
 ```text
-[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.841,"secondsPerSlide":1.344,"peakRssMb":841.0,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
+[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.703,"secondsPerSlide":1.335,"peakRssMb":838.8,"containerPeakMb":null,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
 ```
 
 | Key | What it holds |
@@ -72,22 +72,53 @@ Every export logs one line once it ends, however it ends, so export times and me
 | `waitSeconds` | The time spent waiting for a sidecar slot; 0 for an export refused at once |
 | `runSeconds` | The sidecar's wall time; `null` when no sidecar ran (`busy`) |
 | `secondsPerSlide` | `runSeconds / slides`; `null` with it |
-| `peakRssMb` | The most resident memory (RSS, in MiB) the sidecar's process tree held at once: node and every Chromium it launched. Playwright starts each browser in a process group of its own, so the tree is found through the parent chain, not the group. It is read every 0.25 s while the sidecar runs, in one pass of `/proc` (Linux) or `ps` (macOS). Each process's RSS is summed, so memory the processes share is counted in each: an upper bound, the same on every build. `null` when no sidecar ran or the reading failed. A reading that fails never fails or slows the export; it logs a `[huashu] export memory not read` warning |
+| `peakRssMb` | The most resident memory (RSS, in MiB) the sidecar's process tree held at once: node and every Chromium it launched. Playwright starts each browser in a process group of its own, so the tree is found through the parent chain, not the group. It is read every 0.25 s while the sidecar runs, in one pass of `/proc` (Linux) or `ps` (macOS), and the largest reading is kept. `null` when no sidecar ran or a reading failed |
+| `containerPeakMb` | The most memory the whole container held during the export, in MiB, as its cgroup counts it: cgroup v2's `/sys/fs/cgroup/memory.current`, else cgroup v1's `/sys/fs/cgroup/memory/memory.usage_in_bytes`. It is read in the same passes as `peakRssMb`, and the largest reading during the export is kept, not the cgroup's lifetime `memory.peak`. `null` where neither file exists (macOS), when no sidecar ran, or when a reading failed |
 | `pptxBytes` | The size of the deck; 0 when it wrote none |
 | `sidecarConcurrency` | `TELLR_SIDECAR_CONCURRENCY` for the worker |
 | `queueBound` | `TELLR_SIDECAR_QUEUE` for the worker |
 
-The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503).
+The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503). A memory reading that fails never fails or slows the export: both readings are `null`, and a `[huashu] export memory not read` warning says why, unless the export had logged its line already.
 
-Read the lines on Apps:
+**`peakRssMb` and `containerPeakMb`.** They answer different questions:
+- **`peakRssMb` compares builds.** It is this export's own processes only, summed per process. Memory the processes share (Chromium's shared libraries and its shared memory between its processes) is counted in each, so it is an upper bound for the export, measured the same way on every build.
+- **`containerPeakMb` judges headroom.** It is everything in the container at once: every worker of the app, every export running then, shared pages counted once, and the page cache, file data the kernel keeps in memory and gives back under pressure. That total is what the container's limit is charged against. So it can be below `peakRssMb`, with shared pages counted once, or above it, with the app and the cache included.
 
-```bash
-databricks apps logs <app> | grep "huashu] export summary"
+To judge whether memory is comfortable, read `containerPeakMb` against the container's limit. Each worker logs the limit once, when it starts:
+
+```text
+[huashu] container memory limit 4096.0 MB
 ```
 
-`databricks apps logs` shows the last 200 lines by default. Add `--tail-lines 0` for every line the log service holds, or `--follow` to watch exports as they run. `| sed 's/.*export summary //' | jq .` leaves each line's JSON.
+The limit is read from cgroup v2's `memory.max`, else cgroup v1's `memory.limit_in_bytes`. The line says `none` when the cgroup sets no limit, or when there is no cgroup (macOS).
 
-The line has its own logger, `src.services.pptx_from_html_huashu.summary` at INFO, which writes each record to stderr as one line. It does not go through the app's root handler. In a worker, that handler is FastMCP's `RichHandler`, which wraps a long message into narrow pieces where stderr is not a terminal, as on Apps. Through it, even the line's prefix would be split.
+**Reading the lines on Apps.** These were measured on 2026-11-21 with the Databricks CLI v1.20.0, read-only, against a deployed app:
+- **To collect every summary the log service holds,** about 5 days back, run:
+
+  ```bash
+  databricks apps logs <app> --profile <profile> --search "huashu] export summary" --tail-lines 100000 \
+    | grep "huashu] export summary"
+  ```
+
+  `--search` sends the term to the log service, which answers in about 3 s. One measured run reached back about 5 days, 11,088 entries. Its match is loose (it returns other lines too), so the `grep` keeps only the summaries. The same with `--search "container memory limit"` finds the startup limit lines.
+- **Without `--search`, only the latest window comes back.** Even `--tail-lines 100000` reached only about 728 lines, about 5.6 hours of this app's log, and the default is 200 lines.
+- **`--tail-lines 0` does not return.** It streams live lines until it is interrupted.
+- **To watch exports as they run,** run:
+
+  ```bash
+  databricks apps logs <app> --profile <profile> --follow | grep --line-buffered "huashu] export summary"
+  ```
+
+- **To keep what a command shows in a file as well,** add `--output-file <path>`.
+- **To leave each line's JSON,** add one of the following. Every Apps log line starts with its time and `[APP]`:
+
+  ```bash
+  … | sed -n 's/.*huashu] export summary //p' | jq -c .
+  … | sed -n 's/.*huashu] export summary //p' \
+      | jq -r '[.target, .outcome, .slides, .runSeconds, .peakRssMb, .containerPeakMb] | @tsv'
+  ```
+
+The summary and the limit lines have their own logger, `src.services.pptx_from_html_huashu.telemetry` at INFO, which writes each record to stderr as one line. It does not go through the app's root handler. In a worker, that handler is FastMCP's `RichHandler`, which wraps a long message into narrow pieces where stderr is not a terminal, as on Apps. Through it, even the line's prefix would be split.
 
 ### What the export trades away
 

@@ -1291,9 +1291,10 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         """A wait past the proxy's limit shows when a worker starts, before any export runs.
 
         A fresh interpreter imports the app, says so, then runs its lifespan's
-        startup: the budget warning comes between the two, once, and so does the
-        line ``log_sidecar_bounds`` logs, the bounds the worker runs with. The
-        warning alone would show only that the startup loaded the wrapper.
+        startup: the budget warning comes between the two, once, and so do the
+        lines ``log_sidecar_bounds`` logs, the bounds the worker runs with and the
+        container's memory limit. The warning alone would show only that the
+        startup loaded the wrapper.
         """
         script = (
             "import asyncio, logging, sys\n"
@@ -1336,6 +1337,12 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         assert len(bounds) == 1 and imported < bounds[0] < started, (
             f"the startup did not log its bounds ({bounds_line!r}) once: {lines}"
         )
+        limits = [index for index, line in enumerate(lines) if line.startswith(LIMIT_PREFIX)]
+        assert len(limits) == 1 and imported < limits[0] < started, (
+            f"the startup did not log the container's memory limit once: {lines}"
+        )
+        if sys.platform == "darwin":
+            assert lines[limits[0]] == LIMIT_PREFIX + "none", lines[limits[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1362,7 @@ SUMMARY_KEYS = [
     "runSeconds",
     "secondsPerSlide",
     "peakRssMb",
+    "containerPeakMb",
     "pptxBytes",
     "sidecarConcurrency",
     "queueBound",
@@ -1369,7 +1377,7 @@ SUMMARY_COUNTS = (
     "queueBound",
 )
 # Read once the sidecar has run: null for an export refused before it ran.
-SUMMARY_RUN_READINGS = ("runSeconds", "secondsPerSlide", "peakRssMb")
+SUMMARY_RUN_READINGS = ("runSeconds", "secondsPerSlide", "peakRssMb", "containerPeakMb")
 SUMMARY_OUTCOMES = ("ok", "partial", "failed", "timeout", "busy")
 SUMMARY_TARGETS = ("pptx", "gslides")
 
@@ -1445,6 +1453,60 @@ console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded:
 // The child's pipe would hold node's event loop open: exit, through the handler above.
 process.exit(0);
 """
+
+# STUB_DETACHED_MEMORY's child, freed before the sidecar ends: it holds its bytes
+# for %(ms)d ms, is killed (a browser closed between slides), and the sidecar runs
+# on as long again without it, so the last reading of the tree is node alone.
+STUB_FREED_MEMORY = STUB_DETACHED_MEMORY.replace(
+    "await new Promise((resolve) => setTimeout(resolve, %(ms)d));\n",
+    "await new Promise((resolve) => setTimeout(resolve, %(ms)d));\n"
+    "const exited = new Promise((resolve) => browser.once('exit', resolve));\n"
+    "process.kill(-browser.pid, 'SIGKILL');\n"
+    "await exited;\n"
+    "await new Promise((resolve) => setTimeout(resolve, %(ms)d));\n",
+)
+
+# A sidecar that sets the fake cgroup's memory.current to each of its readings in
+# turn (MiB), holding each longer than two samples, and writes each whole (a new
+# file renamed over the old), so no sample reads half a number.
+STUB_CGROUP_READINGS = """
+import fs from 'node:fs';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const usage = %(usage)s;
+for (const mb of %(readings)s) {
+  fs.writeFileSync(usage + '.next', String(mb * 1048576) + '\\n');
+  fs.renameSync(usage + '.next', usage);
+  await new Promise((resolve) => setTimeout(resolve, %(hold_ms)d));
+}
+fs.writeFileSync(process.argv[2], 'PK');
+console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded: 1, failed: [] }));
+"""
+# What the fake cgroup's memory.current reads before and during STUB_CGROUP_READINGS,
+# and the lifetime peak its memory.peak claims, which the export must not report.
+CGROUP_BEFORE_MB = 100
+CGROUP_READINGS_MB = (300, 500, 200)
+CGROUP_LIFETIME_PEAK_MB = 900
+CGROUP_HOLD_MS = 600
+# cgroup v1's "no limit": the largest page-aligned 63-bit value.
+CGROUP_V1_UNLIMITED = 9223372036854771712
+# The startup line for the container's memory limit.
+LIMIT_PREFIX = "[huashu] container memory limit "
+
+
+def _join_samplers() -> None:
+    """Wait for every memory sampler's thread to end: the export itself never waits on one."""
+    for thread in threading.enumerate():
+        if thread.name == "huashu-memory":
+            thread.join(timeout=EXPORTS_RETURN_WITHIN_SECONDS)
+
+
+def _cgroup(root: Path, files: dict[str, str]) -> Path:
+    """A fake cgroup filesystem at ``root``: each file of ``files`` with its contents."""
+    for name, contents in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(contents, encoding="utf-8")
+    return root
 
 
 def _sidecar_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
@@ -1529,7 +1591,7 @@ def _assert_ran(summary: dict, *, at_least: float, slides: int) -> None:
 
 def _assert_never_ran(summary: dict) -> None:
     """No sidecar ran: no run time, no time per slide, no memory reading."""
-    assert [summary[key] for key in SUMMARY_RUN_READINGS] == [None, None, None], summary
+    assert [summary[key] for key in SUMMARY_RUN_READINGS] == [None] * 4, summary
 
 
 @requires_node
@@ -1845,6 +1907,53 @@ class TestTheSummaryReadsTheWholeTree:
             f"the detached child's {DETACHED_CHILD_MB} MB were not read: {summary}"
         )
 
+    def test_the_reading_is_the_peak_not_the_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A child that held 128 MB and was freed before the end: the reading is still 128 MB."""
+        pids_path = tmp_path / "pids.json"
+        _sidecar_script(
+            tmp_path,
+            monkeypatch,
+            STUB_FREED_MEMORY
+            % {
+                "bytes": DETACHED_CHILD_MB * BYTES_PER_MB,
+                "pids": json.dumps(str(pids_path)),
+                "ms": SUMMARISED_RUN_SECONDS * 1000,
+            },
+        )
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", STUB_LIFETIME_SECONDS
+        )
+        readings: list[int] = []
+        tree_bytes = pptx_from_html_huashu._tree_resident_bytes
+
+        def recorded(root: int, table: list) -> int | None:
+            held = tree_bytes(root, table)
+            if held is not None:
+                readings.append(held)
+            return held
+
+        monkeypatch.setattr(pptx_from_html_huashu, "_tree_resident_bytes", recorded)
+        try:
+            assert pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "x"}]) == (b"PK", [])
+            _join_samplers()
+        finally:
+            if pids_path.exists():
+                pids = json.loads(pids_path.read_text(encoding="utf-8"))
+                _kill([pids["sidecar"], pids["browser"]])
+
+        child = DETACHED_CHILD_MB * BYTES_PER_MB
+        assert readings and max(readings) >= child, "fixture drift: the child was never read"
+        assert readings[-1] < child, (
+            f"fixture drift: the last reading ({readings[-1] / BYTES_PER_MB:.1f} MB) is not "
+            "after the child was freed"
+        )
+        summary = _the_summary(capsys)
+        assert summary["peakRssMb"] is not None and summary["peakRssMb"] >= DETACHED_CHILD_MB, (
+            f"the reading is not the tree's peak but a later one: {summary}"
+        )
+
     def test_this_process_has_a_resident_size(self) -> None:
         """The table the sampler reads: this process, its parent and group, and its RSS."""
         rows = {row.pid: row for row in pptx_from_html_huashu._read_process_table()}
@@ -1928,12 +2037,183 @@ class TestASamplerThatFailsNeverFailsTheExport:
         monkeypatch.setattr(
             pptx_from_html_huashu,
             "threading",
-            SimpleNamespace(Thread=Unstartable, Event=threading.Event),
+            SimpleNamespace(Thread=Unstartable, Event=threading.Event, Lock=threading.Lock),
         )
 
         assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
         summary = _the_summary(capsys)
         assert (summary["outcome"], summary["peakRssMb"]) == ("ok", None), summary
+
+    def test_a_failure_once_the_export_has_its_reading_says_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pass that fails after the export logged its number must not warn the number is null.
+
+        The first pass reads the table; the next blocks until the export has
+        returned, its summary logged with that first reading, and then fails.
+        """
+        _summarised_sidecar(tmp_path, monkeypatch)
+        read = pptx_from_html_huashu._read_process_table
+        returned = threading.Event()
+        passes: list[int] = []
+
+        def failing_once_returned(*arguments: object) -> list:
+            passes.append(len(passes))
+            if len(passes) == 1:
+                return read(*arguments)
+            returned.wait(EXPORTS_RETURN_WITHIN_SECONDS)
+            raise OSError("the process table went away")
+
+        monkeypatch.setattr(pptx_from_html_huashu, "_read_process_table", failing_once_returned)
+
+        with caplog.at_level("WARNING", logger=pptx_from_html_huashu.__name__):
+            assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+            returned.set()
+            _join_samplers()
+
+        assert len(passes) >= 2, f"fixture drift: the sampler read the table {len(passes)} times"
+        warnings = [record.message for record in caplog.records if "memory" in record.message]
+        assert warnings == [], f"a warning that contradicts the logged reading: {warnings}"
+        summary = _the_summary(capsys)
+        assert summary["peakRssMb"] is not None, f"fixture drift: no reading was logged: {summary}"
+
+
+@requires_node
+class TestTheContainerMemory:
+    """``containerPeakMb``: the most memory the container's own cgroup held during the export.
+
+    The whole container, as its memory limit counts it: every worker and every
+    export at once, shared pages once each. Read from cgroup v2's
+    ``memory.current``, else cgroup v1's ``memory.usage_in_bytes``, by the same
+    sampler and in the same passes as the process tree: the largest reading during
+    the export, never the cgroup's lifetime ``memory.peak``. Null where neither
+    file is (macOS). The container's limit is logged once, when a worker starts.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _known_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _bound(monkeypatch, cap=1, queue=1, wait=EXPORTS_RETURN_WITHIN_SECONDS)
+
+    def test_no_cgroup_memory_is_null(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", _cgroup(tmp_path / "cg", {}))
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert summary["containerPeakMb"] is None, summary
+        assert summary["peakRssMb"] is not None, "the tree is read without a cgroup"
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS has no cgroup filesystem")
+    def test_on_macos_it_is_null(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert "containerPeakMb" in summary and summary["containerPeakMb"] is None, summary
+
+    def test_it_is_the_largest_cgroup_v2_reading_during_the_export(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """memory.current moves 100, 300, 500, 200 MB: 500, not the last, nor memory.peak's 900."""
+        cgroup = _cgroup(
+            tmp_path / "cg",
+            {
+                "memory.current": f"{CGROUP_BEFORE_MB * BYTES_PER_MB}\n",
+                "memory.peak": f"{CGROUP_LIFETIME_PEAK_MB * BYTES_PER_MB}\n",
+                "memory.max": "max\n",
+            },
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", cgroup)
+        _sidecar_script(
+            tmp_path,
+            monkeypatch,
+            STUB_CGROUP_READINGS
+            % {
+                "usage": json.dumps(str(cgroup / "memory.current")),
+                "readings": json.dumps(list(CGROUP_READINGS_MB)),
+                "hold_ms": CGROUP_HOLD_MS,
+            },
+        )
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "x"}]) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert summary["containerPeakMb"] == float(max(CGROUP_READINGS_MB)), summary
+
+    def test_cgroup_v1_is_read_where_v2_is_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+        cgroup = _cgroup(
+            tmp_path / "cg",
+            {
+                "memory/memory.usage_in_bytes": f"{256 * BYTES_PER_MB}\n",
+                "memory/memory.limit_in_bytes": f"{CGROUP_V1_UNLIMITED}\n",
+            },
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", cgroup)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        assert _the_summary(capsys)["containerPeakMb"] == 256.0
+
+    @pytest.mark.parametrize(
+        ("files", "limit"),
+        [
+            ({"memory.current": "1\n", "memory.max": f"{4096 * BYTES_PER_MB}\n"}, "4096.0 MB"),
+            # cgroup v2 says "no limit" with "max": a reading, not an error.
+            ({"memory.current": "1\n", "memory.max": "max\n"}, "none"),
+            (
+                {
+                    "memory/memory.usage_in_bytes": "1\n",
+                    "memory/memory.limit_in_bytes": f"{2048 * BYTES_PER_MB}\n",
+                },
+                "2048.0 MB",
+            ),
+            (
+                {
+                    "memory/memory.usage_in_bytes": "1\n",
+                    "memory/memory.limit_in_bytes": f"{CGROUP_V1_UNLIMITED}\n",
+                },
+                "none",
+            ),
+            ({}, "none"),
+            ({"memory.current": "1\n", "memory.max": "not a number\n"}, "none"),
+        ],
+        ids=["v2 limit", "v2 no limit", "v1 limit", "v1 no limit", "no cgroup", "unreadable"],
+    )
+    def test_the_limit_is_logged_when_a_worker_starts(
+        self,
+        files: dict[str, str],
+        limit: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        """Once, in MB or as none; only a limit file that cannot be read is warned about."""
+        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", _cgroup(tmp_path / "cg", files))
+
+        with caplog.at_level("WARNING", logger=pptx_from_html_huashu.__name__):
+            pptx_from_html_huashu.log_sidecar_bounds()
+
+        stderr = capsys.readouterr().err
+        lines = [line for line in stderr.splitlines() if line.startswith(LIMIT_PREFIX)]
+        assert lines == [LIMIT_PREFIX + limit], stderr
+        warned = [record.message for record in caplog.records if "cgroup limit" in record.message]
+        unreadable = request.node.callspec.id == "unreadable"
+        assert bool(warned) is unreadable, warned
 
 
 class _NoSampler:
@@ -1942,8 +2222,8 @@ class _NoSampler:
     def watch(self, process: subprocess.Popen) -> None:
         return None
 
-    def stop(self) -> None:
-        return None
+    def stop(self) -> pptx_from_html_huashu._MemoryPeaks:
+        return pptx_from_html_huashu._MemoryPeaks(tree_mb=None, container_mb=None)
 
 
 def _deck_text(pptx: bytes) -> str:
@@ -2018,7 +2298,7 @@ class TestTheSummaryOfARealExport:
 
         with monkeypatch.context() as without_summary:
             without_summary.setattr(pptx_from_html_huashu, "_TreeMemorySampler", _NoSampler)
-            without_summary.setattr(pptx_from_html_huashu.summary_logger, "disabled", True)
+            without_summary.setattr(pptx_from_html_huashu.telemetry_logger, "disabled", True)
             unsummarised = manifest()
         assert _summary_lines(capsys.readouterr().err) == [], "fixture drift: the summary ran"
         summarised = manifest()
