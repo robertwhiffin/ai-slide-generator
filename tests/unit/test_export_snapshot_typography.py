@@ -1326,6 +1326,245 @@ class TestSnapshotRunKerning:
 
 
 # ---------------------------------------------------------------------------
+# Fallback faces: characters a webfont lacks (CALIBRATION.md D8)
+# ---------------------------------------------------------------------------
+
+NBH = "\u2011"  # NON-BREAKING HYPHEN
+HYPHEN = "\u2010"
+FALLBACK_SLIDE = (
+    '<div class="slide">'
+    '<p id="fallback-sans" style="font-size: 24px; margin: 0;">'
+    "Revenue \u25b2 12% \u25bc 3% \u2192 next \u2193 down \u2713 done</p>"
+    '<p id="fallback-mono" style="font-family: var(--mono); font-size: 24px; margin: 0;">'
+    "\u25b2 10.7</p>"
+    """<p id="fallback-serif" style="font-family: 'DM Sans', Georgia, serif; font-size: 24px; """
+    'margin: 0;">Serif stack \u25b2 up</p>'
+    '<p id="fallback-bold" style="font-size: 24px; font-weight: 700; margin: 0;">Bold \u25b2 up</p>'
+    '<p id="fallback-georgia" style="font-family: Georgia; font-size: 24px; margin: 0;">'
+    "Georgia \u25b2 stays</p>"
+    '<p id="fallback-joined" style="font-size: 24px; margin: 0;">Joined \u25b2\ufe0e here</p>'
+    f'<p id="fallback-nbh" style="font-size: 24px; margin: 0;">end{NBH}to{NBH}end</p>'
+    f'<p id="fallback-hyphen" style="font-size: 24px; margin: 0;">left{HYPHEN}to{HYPHEN}right</p>'
+    "</div>"
+)
+# The same paragraph on a slide whose script replaces the page realm's FontFace
+# and FontFaceSet methods before the export runs.
+HOSTILE_FALLBACK_SLIDE = (
+    "<script>"
+    "window.FontFace = function () { throw new Error('no FontFace'); };"
+    "const set = Object.getPrototypeOf(document.fonts);"
+    "set.add = function () { throw new Error('no add'); };"
+    "set.delete = function () { throw new Error('no delete'); };"
+    "</script>"
+    '<div class="slide"><p id="fallback-sans" style="font-size: 24px; margin: 0;">'
+    "Revenue \u25b2 12% \u25bc 3% \u2192 next \u2193 down \u2713 done</p></div>"
+)
+# fallback-sans as the deck writes it in both targets: (text, typeface).
+FALLBACK_SANS_RUNS = [
+    ("Revenue ", "DM Sans"),
+    ("\u25b2", "Arial"),
+    (" 12% ", "DM Sans"),
+    ("\u25bc", "Arial"),
+    (" 3% ", "DM Sans"),
+    ("\u2192", "Arial"),
+    (" next \u2193 down \u2713 done", "DM Sans"),
+]
+
+
+@pytest.fixture(scope="module")
+def fallback_decks() -> Iterator[dict[str, bytes]]:
+    """The fallback slide and its hostile twin, exported once for each target."""
+    decks = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            decks[target], failures = export_slides(
+                [FALLBACK_SLIDE, HOSTILE_FALLBACK_SLIDE],
+                css=DECK_CSS,
+                monkeypatch=monkeypatch,
+                target=target,
+            )
+            assert failures == [], f"the export rejected a fallback slide: {failures}"
+    yield decks
+
+
+def _fallback_document() -> str:
+    return slide_document(FALLBACK_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+
+
+def _lacks(document: str, selector: str, character: str) -> bool:
+    """Whether the element's own family draws ``character`` from another face.
+
+    Set in that family with Courier New after it, and with Times New Roman
+    after it (both cover WGL4, with advances of 0.6 and 0.99 em for ▲): a
+    character the family draws measures the same, one it lacks each fallback's
+    own advance. A generic family after it would not do: Chrome on a Mac draws
+    ▲ after DM Sans from Hiragino Sans whether ``monospace`` or ``serif`` follows.
+    """
+    style = browser_style(document, selector)
+    family = style["fontFamily"].split(",")[0]
+    face = f"font: {style['fontStyle']} {style['fontWeight']} 100px {family}"
+    widths = browser_probes(
+        document,
+        [(character, f'{face}, "Courier New"'), (character, f'{face}, "Times New Roman"')],
+    )
+    return abs(widths[0]["w"] - widths[1]["w"]) > 1
+
+
+def _written_runs(shape: Shape) -> list[tuple[str, str | None]]:
+    return [(run.text, run.typeface) for run in _runs(shape) if run.text]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotFallbackFaces:
+    def test_characters_a_webfont_lacks_are_runs_in_a_face_every_app_has(
+        self, fallback_decks: dict[str, bytes]
+    ) -> None:
+        """D8: ``Revenue ▲ 12% ▼ 3% → next ↓ down ✓ done`` in DM Sans, a webfont the page loaded.
+
+        DM Sans lacks ▲, ▼ and → (guarded in the page), which the browser draws
+        from a face the machine picks (Hiragino Sans and Lucida Grande on a
+        Mac), and each app from its own (Times New Roman, Arial, DM Sans's own →).
+        So in both decks each is a run of its own in Arial, which PowerPoint for
+        Windows and Mac and Google Slides all have and whose WGL4 covers them,
+        and the nearest of those faces to the browser's (CALIBRATION.md D8).
+        ↓ is DM Sans's own (guarded), and ✓ is no WGL4 character, so neither
+        is taken out. The text reads as before.
+        """
+        document = _fallback_document()
+        lacking = {
+            character: _lacks(document, "#fallback-sans", character) for character in "▲▼→↓"
+        }
+        assert lacking == {"▲": True, "▼": True, "→": True, "↓": False}, (
+            f"fixture drift: which characters the page's DM Sans lacks: {lacking}"
+        )
+        for target, deck in fallback_decks.items():
+            box = _box(slide_shapes(deck, 0), "Revenue")
+            assert _written_runs(box) == FALLBACK_SANS_RUNS, (
+                f"{target}: the paragraph's runs are {_written_runs(box)}, expected "
+                f"{FALLBACK_SANS_RUNS}"
+            )
+
+    @pytest.mark.parametrize(
+        ("selector", "fragment", "family", "typeface", "bold"),
+        [
+            pytest.param("#fallback-mono", "10.7", "DM Mono", "Courier New", False, id="monospace"),
+            pytest.param(
+                "#fallback-serif", "Serif", "DM Sans", "Times New Roman", False, id="serif"
+            ),
+            pytest.param("#fallback-bold", "Bold", "DM Sans", "Arial", True, id="bold"),
+        ],
+    )
+    def test_the_fallback_face_is_the_stacks_generic_family(
+        self,
+        fallback_decks: dict[str, bytes],
+        selector: str,
+        fragment: str,
+        family: str,
+        typeface: str,
+        bold: bool,
+    ) -> None:
+        """D8: the face a lacking character is written in follows the run's generic family.
+
+        The browser falls back along the run's own stack, so the export takes
+        the face of its generic family that every app has: Courier New for a
+        monospace stack (its 0.600 em cell, against the browser's 0.602 em for
+        ▲ after DM Mono, where Arial's is 0.99), Times New Roman for a serif
+        one, Arial otherwise. The run keeps its weight: a bold ▲ is Arial plus
+        bold. The rest of the paragraph stays in its own face.
+        """
+        document = _fallback_document()
+        assert _lacks(document, selector, "▲"), f"fixture drift: {selector}'s face has ▲"
+        for target, deck in fallback_decks.items():
+            runs = _runs(_box(slide_shapes(deck, 0), fragment))
+            triangles = [run for run in runs if "▲" in run.text]
+            assert len(triangles) == 1 and triangles[0].text == "▲", (
+                f"{target}: ▲ must be a run of its own: {[run.text for run in runs]}"
+            )
+            assert (triangles[0].typeface, triangles[0].bold) == (typeface, bold), (
+                f"{target}: the ▲ run is {_describe_run(triangles[0])}, expected {typeface} "
+                f"with bold={bold}"
+            )
+            others = [run for run in runs if "▲" not in run.text and run.text.strip()]
+            assert others and all(run.typeface.startswith(family) for run in others), (
+                f"{target}: the rest must stay {family}: {[_describe_run(run) for run in others]}"
+            )
+
+    def test_a_family_the_page_did_not_load_keeps_every_character(
+        self, fallback_decks: dict[str, bytes]
+    ) -> None:
+        """D8 reads webfonts alone: a Georgia paragraph is one Georgia run, its ▲ included.
+
+        Georgia lacks ▲ (guarded), but a family the page did not load is a
+        font on the viewer's machine, whose coverage is that machine's own.
+        """
+        assert _lacks(_fallback_document(), "#fallback-georgia", "▲"), (
+            "fixture drift: the machine's Georgia has ▲"
+        )
+        for target, deck in fallback_decks.items():
+            box = _box(slide_shapes(deck, 0), "Georgia")
+            assert _written_runs(box) == [("Georgia \u25b2 stays", "Georgia")], (
+                f"{target}: the Georgia paragraph is {_written_runs(box)}"
+            )
+
+    def test_a_joining_character_stays_with_the_character_before_it(
+        self, fallback_decks: dict[str, bytes]
+    ) -> None:
+        """D8: a variation selector (U+FE0E) after ▲ is part of the ▲'s fallback run.
+
+        It joins the character before it, so a renderer draws the pair in one face.
+        """
+        for target, deck in fallback_decks.items():
+            box = _box(slide_shapes(deck, 0), "Joined")
+            assert _written_runs(box) == [
+                ("Joined ", "DM Sans"),
+                ("\u25b2\ufe0e", "Arial"),
+                (" here", "DM Sans"),
+            ], f"{target}: the joined paragraph is {_written_runs(box)}"
+
+    @pytest.mark.parametrize(
+        ("target", "nbh", "hyphen"),
+        [("pptx", NBH, "-"), ("gslides", "-", "-")],
+    )
+    def test_hyphens_the_face_lacks_are_written_as_each_app_draws_them(
+        self, fallback_decks: dict[str, bytes], target: str, nbh: str, hyphen: str
+    ) -> None:
+        """D8: U+2010 and U+2011 in DM Sans, which has neither.
+
+        The browser draws both with DM Sans's own hyphen-minus, so neither is
+        taken out of its run (guarded: the page's DM Sans draws them). Measured
+        in the apps (CALIBRATION.md D8): PowerPoint draws U+2011 so too, but
+        U+2010 from Cambria Math; Google Slides draws both from MS PGothic, 22
+        px short over "end-to-end" at 48 px. So the deck for PowerPoint writes
+        U+2010 as U+002D and keeps U+2011, which keeps its no-break meaning;
+        the deck for Google Slides writes both as U+002D.
+        """
+        document = _fallback_document()
+        assert not _lacks(document, "#fallback-nbh", NBH), (
+            "fixture drift: the page's DM Sans does not draw U+2011 itself"
+        )
+        shapes = slide_shapes(fallback_decks[target], 0)
+        for fragment in (f"end{nbh}to{nbh}end", f"left{hyphen}to{hyphen}right"):
+            box = _box(shapes, fragment[:4])
+            assert _written_runs(box) == [(fragment, "DM Sans")], (
+                f"{target}: the paragraph is {_written_runs(box)}, expected one DM Sans run "
+                f"{fragment!r}"
+            )
+
+    def test_a_page_that_replaces_its_font_api_still_splits(
+        self, fallback_decks: dict[str, bytes]
+    ) -> None:
+        """Hostile slide script: the page realm's FontFace, and its font set's add and
+        delete, throw. The coverage probe uses the pristine realm's (dom_access.mjs), so
+        the paragraph is written as on the plain slide."""
+        for target, deck in fallback_decks.items():
+            box = _box(slide_shapes(deck, 1), "Revenue")
+            assert _written_runs(box) == FALLBACK_SANS_RUNS, (
+                f"{target}: the hostile slide's paragraph is {_written_runs(box)}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Colour: pre-blended opacity and alpha, gradient and transparent text
 # ---------------------------------------------------------------------------
 

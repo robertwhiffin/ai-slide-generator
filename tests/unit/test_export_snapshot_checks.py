@@ -1103,6 +1103,16 @@ class TestHarnessOracle:
         pptx = _deck_of_texts([[f"Revenue grew1{WORD_JOINER}"]])
         assert reference_text_loss(pptx, ["Revenue grew¹"]) == [[]]
 
+    def test_a_hyphen_written_as_hyphen_minus_is_no_difference(self) -> None:
+        """U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN, which the decks write as U+002D
+        where an app would draw them from another font (CALIBRATION.md D8), are the
+        hyphen-minus they are drawn as, for the harness's ``_normalise_text``. A dash
+        stays a dash."""
+        pptx = _deck_of_texts([["end-to-end left-to-right"]])
+        assert reference_text_loss(pptx, ["end\u2011to\u2011end left\u2010to\u2010right"]) == [[]]
+        dashed = _deck_of_texts([["end-to-end"]])
+        assert reference_text_loss(dashed, ["end\u2013to\u2013end"]) == [["end\u2013to\u2013end"]]
+
 
 @pytest.mark.slow
 @requires_huashu_sidecar

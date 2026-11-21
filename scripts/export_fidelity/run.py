@@ -492,16 +492,22 @@ _DEFAULT_IGNORABLE = {
     for start, end in _DEFAULT_IGNORABLE_RANGES
     for code_point in range(start, end + 1)
 }
+# U+2010 HYPHEN, which NFKC also makes of U+2011 NON-BREAKING HYPHEN: the decks
+# write either as U+002D where an app would draw it from another font, the
+# hyphen-minus the browser draws it as (CALIBRATION.md D8).
+_HYPHEN_AS_MINUS = {0x2010: "-"}
 
 
 def _normalise_text(text: str) -> str:
     """``text`` as the text-loss check compares it, the way text_check.cjs normalises.
 
     Compatibility forms are folded (NFKC: a literal "¹" is "1", a ligature its
-    letters, a fullwidth form its ASCII), then white space and default-ignorable
-    code points are removed, then the rest is lower-cased.
+    letters, a fullwidth form its ASCII), a hyphen is the hyphen-minus the decks
+    may write it as, then white space and default-ignorable code points are
+    removed, then the rest is lower-cased.
     """
-    folded = unicodedata.normalize("NFKC", text).translate(_DEFAULT_IGNORABLE)
+    folded = unicodedata.normalize("NFKC", text).translate(_HYPHEN_AS_MINUS)
+    folded = folded.translate(_DEFAULT_IGNORABLE)
     return "".join(folded.split()).lower()
 
 

@@ -236,7 +236,7 @@ JSON-encodes the deck and spawns the Node sidecar
 4. Captures what cannot be native as element-isolated 2× pictures (`capture.cjs`).
 5. Writes the model with pptxgenjs (`emit_model.cjs`): text boxes on the browser's lines, shapes, native tables and pictures, in paint order.
 
-The Google route passes `target="gslides"`: the deck is written for Google Slides' own placement of lines that hold a superscript or subscript run (the only constructs the two apps place apart; a deck without one is byte-identical for both targets). See [Export Features](./export-features.md) for the stages, the trade-offs and the limits.
+The Google route passes `target="gslides"`: the deck is written for what Google Slides draws differently from PowerPoint: its own placement of lines that hold a superscript or subscript run, run tracking without PowerPoint's kerning compensation, italics as the family plus italic, and both hyphens U+2010 and U+2011 as U+002D. See [Export Features](./export-features.md) for the stages, the trade-offs and the limits.
 
 **Availability.** The sidecar needs node, its `node_modules` and a Playwright
 Chromium, which the deployed app's boot installs (`setup.sh`, started from

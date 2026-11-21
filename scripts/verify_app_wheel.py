@@ -43,6 +43,7 @@ GRAPH_ROOT = "emit_deck.mjs"
 # tests/unit/test_verify_app_wheel_huashu.py keeps this list equal to that reading.
 SIDECAR_SOURCES = (
     "capture.cjs",
+    "coverage_font.mjs",
     "dom_access.mjs",
     "emit_deck.mjs",
     "emit_model.cjs",

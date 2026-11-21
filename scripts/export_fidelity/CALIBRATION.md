@@ -547,6 +547,59 @@ bare family name is Calibri. With a variable install the deck's family itself do
 upright text included, so it cannot decide the italic naming; the statics' naming is the one
 PowerPoint draws as the plain italic.
 
+## D8: characters a webfont lacks
+
+Measured 2026-11-21 (Task 14 B1).
+
+**The browser.** Chrome on a Mac (CDP `CSS.getPlatformFontsForNode`, 100 px; advance and ink
+box in em) draws what the deck's DM Sans lacks from faces the machine picks:
+
+| character | after DM Sans | after DM Mono |
+|---|---|---|
+| ▲ U+25B2 | Hiragino Sans, advance 1.000, ink 0.90 × 0.79 | Menlo, 0.602, ink 0.60 |
+| ▼ U+25BC | Lucida Grande, 0.980, ink 0.82 × 0.82 | Menlo, 0.602 |
+| → U+2192 | Lucida Grande, 1.000, ink 0.78 × 0.42 | Menlo, 0.602 |
+| ‑ U+2011, ‐ U+2010 | DM Sans's own hyphen-minus, 0.541 (as `-`) | DM Mono's, 0.600 |
+
+The latin webfonts the decks load lack U+2010, U+2011, ▲, ▼ and → (→ is in the installed DM
+Sans statics but outside Google's latin `unicode-range`). Linux Chromium picks other faces, or
+none: what the browser itself falls back to is no choice for the export.
+
+**The apps** (the probe deck of D1, PDF fonts and advances at 24 pt):
+
+| written | PowerPoint | Google Slides |
+|---|---|---|
+| ▲▼ in DM Sans | Times New Roman, 0.99 | Arial, 0.99 |
+| → in DM Sans | DM Sans (the static's), 0.78 | DM Sans, 0.78 |
+| ▲▼→ in Arial | Arial, 0.99 / 1.00 | Arial, 0.99 / 1.00 |
+| ▲▼→ in Times New Roman | Times New Roman, 0.99 / 1.00 | Times New Roman, 0.99 / 1.00 |
+| ▲▼→ in Courier New | Courier New, 0.600 | Courier New, 0.600 |
+| ▲▼ in DM Mono | Courier New, 0.600 | Courier New, 0.600 |
+| "end‑to‑end" (U+2011), 48 px | DM Sans, 269.20 px | MS PGothic hyphens, 246.06 |
+| "end‐to‐end" (U+2010) | Cambria Math hyphens, 249.20 | MS PGothic hyphens, 264.43 |
+| "end-to-end" (U+002D) | DM Sans, 269.19 | DM Sans, 268.42 |
+| U+2011 in Arial / Times New Roman | Arial's hyphen | MS PGothic / MS PMincho |
+
+**The choice.** Of the faces PowerPoint for Windows and Mac and Google Slides all have, Arial,
+Times New Roman and Courier New cover all of WGL4, in Office's copies, macOS's copies and in
+Google; Verdana, Georgia, Trebuchet MS and Calibri lack ▲▼→. Arial and Times New Roman draw
+▲▼→ alike (0.99 and 1.00 em), the browser's advance within 2% after DM Sans, where Courier
+New's is 40% short; after DM Mono the browser's ▲ is 0.602 em and Courier New's cell 0.600,
+where Arial's is 64% wide. So a character a loaded webfont lacks that WGL4 holds (ASCII aside)
+is a run of its own in the face of the run's generic family: Courier New for monospace, Times
+New Roman for serif, Arial otherwise (`snapshot_text.mjs` fallbackFaceOf). The ink of Arial's
+▲ is 0.69 em against Hiragino's 0.90, the nearest the three apps share. Which characters a face
+lacks is read from the face itself: each candidate is probed in the run's face with a font
+whose every code point is one 4 em glyph after it (`coverage_font.mjs`), so a probe reaching
+4 em is a character the face lacks, on any machine. A family the page did not load is the
+viewer's own font and is not read.
+
+The hyphens are drawn by the face itself in the browser, so they stay in their run, and are
+written as each app draws them right: U+2010 as U+002D in both decks (PowerPoint draws it from
+Cambria Math), U+2011 as U+002D in the deck for Google Slides alone (PowerPoint draws it as
+the face's hyphen, and it keeps its no-break meaning there). U+2010 in place of U+2011 would not
+do: Google draws it from MS PGothic too.
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |

@@ -162,7 +162,10 @@
 //  * ascentPx the largest run's ascent: its glyph top to its baseline; null when unread;
 //  * text     as painted: text-transform applied;
 //  * family   the first face in the stack that is not a generic or a system alias;
-//  *          a stack of generics alone is Arial, Times New Roman or Courier New;
+//  *          a stack of generics alone is Arial, Times New Roman or Courier New.
+//  *          Characters a webfont the page loaded lacks are runs of their own in
+//  *          the face of its stack's generic family that every app has
+//  *          (snapshot_text_metrics.mjs splitFallbackRuns);
 //  * weight   100..900, the computed weight to the nearest hundred;
 //  * color    solid, pre-blended: what the browser paints the glyphs with, composited
 //  *          layer by layer over the backdrop (Drive drops text alpha);
@@ -203,7 +206,9 @@ import { TURNED_TEXT_SOURCE } from './snapshot_text_turned.mjs';
 //   isPseudo        node -> whether it is a pseudo-element (a PseudoRecord), read
 //                   without touching a DOM node's own properties;
 //   pseudoOf        element -> {before, after}, its pseudo-elements, or null;
-//   rectOf          element -> its border box bounds, {left, top, width, height}.
+//   rectOf          element -> its border box bounds, {left, top, width, height};
+//   coverageFont    {family, advanceEm, bytes}: the coverage probe font
+//                   (coverage_font.mjs), which tells the characters a webfont lacks.
 // Wherever this layout takes an element, a pseudo-element will do.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
@@ -286,8 +291,9 @@ function createTextLayout(env) {
   // What applyMetrics reads once the walk is done, so no probe is in the page
   // while the walk reads its Range rects:
   //   paragraphs  {paragraph, face, lineHeight}
-  //   runs        {run, face, width: the browser's px | null (a justified line,
-  //                whose drawn width includes the stretch), endsLine}
+  //   runs        {run, runs: the line's runs, which hold it, face, width: the
+  //                browser's px | null (a justified line, whose drawn width
+  //                includes the stretch), endsLine}
   const pendingParagraphs = [];
   const pendingRuns = [];
   // The slide's hidden text (hiddenText), in the order it is recorded: the
@@ -309,6 +315,7 @@ function createTextLayout(env) {
     probeFaceOf,
     pendingParagraphs,
     pendingRuns,
+    coverageFont: env.coverageFont,
   });
   const { joinMarkers, markerBlock, markerGlyphLine, readMarkerTokens } = createListMarkers(env, {
     SLACK_FRACTION,
@@ -627,6 +634,23 @@ function createTextLayout(env) {
     return names;
   }
 
+  // The face a character the run's webfont lacks is written in, a run of its
+  // own (snapshot_text_metrics.mjs splitFallbackRuns): of the faces all three
+  // apps have whose WGL4 coverage takes it, the one of the stack's generic
+  // family, its first generic keyword as GENERIC_FACES maps it (Courier New
+  // for monospace, Times New Roman for serif), else Arial. The browser falls
+  // back along the same stack, and measured, Courier New keeps a monospace
+  // run's cell (0.600 em, the browser's 0.602) where Arial is 0.99 em, and Arial
+  // a sans run's (0.99 em, the browser's 1.00) (CALIBRATION.md D8).
+  function fallbackFaceOf(stack) {
+    const names = familyNames(stack);
+    for (let index = 0; index < names.length; index++) {
+      const key = names[index].toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(GENERIC_FACES, key)) return GENERIC_FACES[key];
+    }
+    return DEFAULT_FACE;
+  }
+
   // The run's family: the first face that is not a generic keyword or a system
   // alias, else the face the first generic maps to. Quoted or not: Chrome
   // serialises BlinkMacSystemFont as the quoted family "system-ui".
@@ -741,7 +765,11 @@ function createTextLayout(env) {
   //   variation    the element's font-variation-settings;
   //   optical      its font-optical-sizing;
   //   scale        the block's transform scale: probes are set at the computed,
-  //                unscaled size, and their widths and heights scale with it.
+  //                unscaled size, and their widths and heights scale with it;
+  //   coverage     the run's face alone, style, weight, stretch and family, the
+  //                start of a coverage probe's font-family (splitFallbackRuns);
+  //   fallback     the face a character the run's family lacks is written in
+  //                (fallbackFaceOf).
   function probeFaceOf(ps, family, scale) {
     const quoted = '"' + String(family).replace(/[\u0000-\u001F]/g, '').replace(/["\\]/g, '\\$&') + '"';
     return {
@@ -754,6 +782,9 @@ function createTextLayout(env) {
       variation: String(ps.fontVariationSettings || 'normal'),
       optical: String(ps.fontOpticalSizing || 'auto'),
       scale,
+      coverage: 'font-style:' + ps.fontStyle + ';font-weight:' + ps.fontWeight + ';font-stretch:' + ps.fontStretch +
+        ';font-family:' + quoted + ',',
+      fallback: fallbackFaceOf(ps.fontFamily),
     };
   }
 
@@ -1744,6 +1775,7 @@ function createTextLayout(env) {
         const extent = line.extents[run];
         pendingRuns.push({
           run: line.runs[run],
+          runs: line.runs,
           face: extent.face,
           width: align === 'justify' || !extent.advance || !advancesRead ? null : extent.right - extent.left,
           endsLine: run === line.runs.length - 1,

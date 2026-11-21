@@ -180,6 +180,8 @@ export const DOM_ACCESS_SOURCE = `
         columnSpan: (column) => columnSpan.get.call(column),
         fontsReady: fonts.fontsReady,
         loadingFontFaces: fonts.loadingFontFaces,
+        addFontFace: fonts.addFontFace,
+        deleteFontFace: fonts.deleteFontFace,
       };
     } catch (e) {
       return null;
@@ -195,12 +197,16 @@ export const DOM_ACCESS_SOURCE = `
   }
 
   // The document's font faces, each one's load status and the promise that
-  // settles once none is loading (render_slide.cjs pageFontsSettled), from the
-  // pristine realm when it has them all, else the page's own (OWN_DOM_ACCESS):
-  // apart from the rest, because not every Chromium exposes FontFaceSet as a
-  // global (the 147 headless shell does not), so its prototype is taken from
-  // the pristine document's own font set, and a browser without one must not
-  // cost the other reads their pristine accessors.
+  // settles once none is loading (render_slide.cjs pageFontsSettled), and how a
+  // pass adds a face of its own for one probe and deletes it again
+  // (snapshot_text_metrics.mjs splitFallbackRuns), from the pristine realm when
+  // it has them all, else the page's own (OWN_DOM_ACCESS): apart from the rest,
+  // because not every Chromium exposes FontFaceSet as a global (the 147
+  // headless shell does not), so its prototype is taken from the pristine
+  // document's own font set, and a browser without one must not cost the other
+  // reads their pristine accessors. A face of a font's bytes loads at once, so
+  // addFontFace gives back the face it added, or null where it did not load; a
+  // face the pristine realm made works in the page's document, its frame gone.
   function captureFontAccess(realm, describe) {
     try {
       const documentFonts = describe(realm.Document.prototype, 'fonts');
@@ -211,9 +217,15 @@ export const DOM_ACCESS_SOURCE = `
       const fontSetReady = fontSetPrototype ? describe(fontSetPrototype, 'ready') : null;
       const fontSetForEach = fontSetPrototype ? fontSetPrototype.forEach : null;
       const fontFaceStatus = realm.FontFace ? describe(realm.FontFace.prototype, 'status') : null;
+      const FontFaceOfRealm = realm.FontFace;
+      const BytesOfRealm = realm.Uint8Array;
+      const fontSetAdd = fontSetPrototype ? fontSetPrototype.add : null;
+      const fontSetDelete = fontSetPrototype ? fontSetPrototype.delete : null;
       if (!fontSetReady || typeof fontSetReady.get !== 'function' ||
           typeof fontSetForEach !== 'function' ||
-          !fontFaceStatus || typeof fontFaceStatus.get !== 'function') {
+          !fontFaceStatus || typeof fontFaceStatus.get !== 'function' ||
+          typeof FontFaceOfRealm !== 'function' || typeof BytesOfRealm !== 'function' ||
+          typeof fontSetAdd !== 'function' || typeof fontSetDelete !== 'function') {
         return OWN_DOM_ACCESS;
       }
       return {
@@ -225,6 +237,15 @@ export const DOM_ACCESS_SOURCE = `
             if (fontFaceStatus.get.call(face) === 'loading') loading += 1;
           });
           return loading;
+        },
+        addFontFace: (family, bytes) => {
+          const face = new FontFaceOfRealm(family, new BytesOfRealm(bytes));
+          if (fontFaceStatus.get.call(face) !== 'loaded') return null;
+          fontSetAdd.call(documentFonts.get.call(document), face);
+          return face;
+        },
+        deleteFontFace: (face) => {
+          fontSetDelete.call(documentFonts.get.call(document), face);
         },
       };
     } catch (e) {
@@ -273,6 +294,15 @@ export const DOM_ACCESS_SOURCE = `
         if (next.value && next.value.status === 'loading') loading += 1;
       }
       return loading;
+    },
+    addFontFace: (family, bytes) => {
+      const face = new FontFace(family, new Uint8Array(bytes));
+      if (face.status !== 'loaded') return null;
+      document.fonts.add(face);
+      return face;
+    },
+    deleteFontFace: (face) => {
+      document.fonts.delete(face);
     },
   };
 

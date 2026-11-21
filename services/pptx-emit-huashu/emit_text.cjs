@@ -84,7 +84,7 @@
 // so it is raised by the offset along its own up, which a turn takes off the
 // slide's.
 
-const { runOptions, xmlText } = require('./emit_typography.cjs');
+const { runOptions, runText } = require('./emit_typography.cjs');
 const { PT_PER_PX, inches } = require('./units.cjs');
 
 const NBSP = '\u00a0';
@@ -253,7 +253,7 @@ function writtenParagraphs(item, faces, renderer) {
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
         const options = itemRunOptions(runs[runIndex], item, faces, sizing);
         if (runIndex === 0 && !opensParagraph) options.softBreakBefore = true;
-        current.objects.push({ text: xmlText(runs[runIndex].text), options });
+        current.objects.push({ text: runText(runs[runIndex].text, sizing), options });
         previousRun = runs[runIndex];
       }
       if (forPowerPoint && runs[runs.length - 1].baseline) {

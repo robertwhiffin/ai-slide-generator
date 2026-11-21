@@ -60,6 +60,17 @@
 // script run is capped at the size its line should be sized by (sizing.capPx,
 // emit_text.cjs), which keeps the line where the browser has it, the script
 // glyph up to some 20% small (measured in both apps; CALIBRATION.md A4).
+//
+// Hyphens a face lacks. The browser draws U+2010 HYPHEN and U+2011
+// NON-BREAKING HYPHEN with the face's own hyphen-minus where the face has
+// neither (DM Sans has neither). PowerPoint draws U+2011 so too, but U+2010
+// from another font (Cambria Math, 20 px short over two hyphens at 48 px), and
+// Google Slides both from MS PGothic (U+2011 22 px short over "end-to-end"),
+// and U+2010 there too. Written as U+002D, either is the face's own hyphen in
+// every app, the glyph the browser drew (measured: CALIBRATION.md D8). So the
+// deck for PowerPoint writes U+2010 as U+002D and keeps U+2011, which keeps its
+// no-break meaning when the text is edited; the deck for Google Slides writes
+// both as U+002D.
 
 const { PT_PER_PX } = require('./units.cjs');
 
@@ -91,6 +102,8 @@ const SINGLE_WEIGHT_FAMILIES = new Set(['impact', 'arial black']);
 // surrogate. One of them in a run would make the slide part unreadable.
 const XML_UNSAFE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const XML_ATTRIBUTE_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+// The hyphens each target writes as U+002D (see Hyphens a face lacks).
+const HYPHENS_WRITTEN_AS_MINUS = { pptx: /\u2010/g, gslides: /[\u2010\u2011]/g };
 
 // A CSS weight as one of 100..900: a variable font's 450 is 500. Unreadable is 400.
 function cssWeight(value) {
@@ -188,6 +201,13 @@ function xmlText(value) {
   return String(value || '').replace(XML_UNSAFE, '');
 }
 
+// runText(text, sizing) -> a run's text as the deck for sizing.target writes
+// it: xmlText, with the hyphens that target's app would draw from another font
+// written as U+002D.
+function runText(text, sizing) {
+  return xmlText(text).replace(HYPHENS_WRITTEN_AS_MINUS[targetOf(sizing)], '-');
+}
+
 // pptxgenjs writes a typeface into an XML attribute as is, so a family named
 // with & or a quote would break the slide part.
 function xmlAttribute(value) {
@@ -269,4 +289,4 @@ function blendOver(color, alpha, backdrop) {
   return blended.toUpperCase();
 }
 
-module.exports = { typefaceFor, runOptions, blendOver, transparencyOf, xmlText };
+module.exports = { typefaceFor, runOptions, runText, blendOver, transparencyOf, xmlText };

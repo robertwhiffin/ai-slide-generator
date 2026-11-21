@@ -82,6 +82,7 @@
 //  */
 
 import { CAPTURE_ATTRIBUTE, HIDDEN_ATTRIBUTE } from './capture.cjs';
+import { COVERAGE_ADVANCE_EM, COVERAGE_FONT_BYTES, COVERAGE_FONT_FAMILY } from './coverage_font.mjs';
 import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
 import { blendOver } from './emit_typography.cjs';
 import { GRADIENT_SOURCE } from './gradient.mjs';
@@ -1770,6 +1771,7 @@ async function snapshotPage(config, pseudoData) {
     isPseudo,
     pseudoOf: (element) => pseudoHosts.get(element) || null,
     rectOf,
+    coverageFont: config.coverageFont,
   });
   // follows element -> its waiting {group, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).
@@ -2232,10 +2234,13 @@ async function snapshotPage(config, pseudoData) {
   // are made (snapshot_text.mjs turnedBlocks, and turnedMarkerBlock during
   // the walk), from probes of their faces made on the way.
   pushTurnedTexts();
-  // Line spacing and optical-size tracking, from offscreen probes read once
-  // the walk has read every rect (snapshot_text.mjs applyMetrics).
-  textLayout.applyMetrics();
+  // The webfonts the page loaded, read before the metric probes, which add a
+  // face of their own for a moment (snapshot_text_metrics.mjs splitFallbackRuns).
   const { fonts, italicFonts } = textLayout.loadedFonts();
+  // Line spacing, optical-size and kerning tracking, and the characters a
+  // webfont lacks, from offscreen probes read once the walk has read every
+  // rect (snapshot_text.mjs applyMetrics).
+  textLayout.applyMetrics(fonts);
   if (textLayout.truncated()) stats.truncated = true;
   nameCaptureTargets();
 
@@ -2269,6 +2274,7 @@ ${blendOver.toString()}
     captureAttribute: CAPTURE_ATTRIBUTE,
     hiddenAttribute: HIDDEN_ATTRIBUTE,
     pseudoHostAttribute: PSEUDO_HOST_ATTRIBUTE,
+    coverageFont: { family: COVERAGE_FONT_FAMILY, advanceEm: COVERAGE_ADVANCE_EM, bytes: COVERAGE_FONT_BYTES },
   })}, pseudoData);
 })
 `;
