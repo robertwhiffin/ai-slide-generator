@@ -2345,8 +2345,9 @@ class TestTheContainerMemory:
                 },
                 "memory/docker/abc",
             ),
-            # A path that climbs out of the cgroup filesystem is not followed.
-            ("0::/../outside\n", {"memory.current": "1", "../outside/memory.current": "2"}, "."),
+            # A path that climbs ("..") puts the process outside the root it sees, so
+            # that root is not its own cgroup: nothing is read, not the root.
+            ("0::/../outside\n", {"memory.current": "1", "../outside/memory.current": "2"}, None),
             # No /proc/self/cgroup (macOS, here with a cgroup filesystem anyway).
             (None, {"memory.current": "1"}, "."),
             (None, {}, None),
@@ -2506,6 +2507,32 @@ class TestTheContainerMemory:
                 "0::/kubepods/pod1/container\n",
                 "1024.0 MB",
             ),
+            # The walk up stops at the top of the hierarchy in view: a smaller
+            # limit file above it is not the container's.
+            (
+                {
+                    "memory.current": "1\n",
+                    "memory.max": f"{2048 * BYTES_PER_MB}\n",
+                    "../memory.max": f"{512 * BYTES_PER_MB}\n",
+                },
+                "0::/\n",
+                "2048.0 MB",
+            ),
+            (
+                {
+                    "memory/memory.usage_in_bytes": "1\n",
+                    "memory/memory.limit_in_bytes": f"{2048 * BYTES_PER_MB}\n",
+                    "memory.limit_in_bytes": f"{512 * BYTES_PER_MB}\n",
+                },
+                "12:memory:/\n",
+                "2048.0 MB",
+            ),
+            # A climbing path: the root in view is not the container's, so no limit.
+            (
+                {"memory.current": "1\n", "memory.max": f"{1024 * BYTES_PER_MB}\n"},
+                "0::/../outside\n",
+                "none",
+            ),
         ],
         ids=[
             "v2 limit",
@@ -2516,6 +2543,9 @@ class TestTheContainerMemory:
             "unreadable",
             "own nested cgroup",
             "a parent's limit",
+            "v2 stops at its top",
+            "v1 stops at its top",
+            "climbs out",
         ],
     )
     def test_the_limit_is_logged_when_a_worker_starts(

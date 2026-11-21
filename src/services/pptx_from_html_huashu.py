@@ -677,8 +677,10 @@ def _tree_resident_bytes(root: int, table: list[_ProcessRow]) -> int | None:
 # and the root is read. A host-wide view's root is the whole machine: under v1
 # it has the usage file, and would read the machine's usage. So the root is
 # read only where the process's own path is not in view, and there the root is
-# the container's own cgroup. A machine with neither (macOS) has no reading.
-# Tests point both at fakes.
+# the container's own cgroup. A path that climbs ("..") out of the root in
+# view says that root is not the process's own cgroup: nothing is read for
+# that version. A machine with neither (macOS) has no reading. Tests point
+# both at fakes.
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 # A cgroup v1 limit this large is none: v1 says "no limit" with the largest
@@ -731,12 +733,13 @@ def _container_cgroup() -> _CgroupMemory | None:
     own = _own_cgroup_paths()
     for version, mount, usage, limit, inactive_file in _CGROUP_VERSIONS:
         top = CGROUP_ROOT / mount if mount else CGROUP_ROOT
-        candidates = []
         path = own.get(version)
-        # A path that climbs (".."), as for a process outside the namespace's root
-        # cgroup, would leave the hierarchy: not followed.
-        if path is not None and ".." not in PurePosixPath(path).parts:
-            candidates.append(top / path.lstrip("/"))
+        if path is not None and ".." in PurePosixPath(path).parts:
+            # A path that climbs ("..") names a cgroup outside the root this process
+            # sees (its namespace's): that root is not its own cgroup but the
+            # namespace's, or the whole machine's, so this version has none to read.
+            continue
+        candidates = [] if path is None else [top / path.lstrip("/")]
         candidates.append(top)
         for directory in candidates:
             if (directory / usage).is_file():
