@@ -7,7 +7,8 @@ conversion, 1600 px thumbnails), against the browser at device scale 2. PowerPoi
 written for it (`build_pptx_huashu(..., target="pptx")`), Google Slides the one written for it
 (`target="gslides"`), as the two exports do. All values are CSS px at 1280 px width, renderer
 minus browser (+ is lower or wider in the renderer). A4 and A5 are measured from the text of each
-app's PDF with `scripts/export_fidelity/measure_script_lines.py`.
+app's PDF with `scripts/export_fidelity/measure_script_lines.py`. D4, D5 and D6 at the end
+record probes of shapes, shadows and dashes, made the same way.
 
 The tests read the constants from this file: each sits on a line of its own, once, and
 `services/pptx-emit-huashu/emit_text.cjs` and `emit_typography.cjs` define the same values
@@ -378,7 +379,7 @@ probes `plain-*`, a 16 px paragraph; offsets of each line after the first):
 | line-height 26 px, a 20 px run on line 2 | −0.14, −1.58, −1.58 | −0.14, +0.42, +0.42 |
 
 So a line with no script run takes its growth alike in both decks (the decks still differ in
-tracking, italics and U+2011: X1, D1 and D8 below). A 28 px line opening a paragraph whose
+tracking, italics and U+2011, and in dotted borders: X1, D1, D8 and D6 below). A 28 px line opening a paragraph whose
 spacing is tighter than single (66.7%) still sits 2.6 px high, in PowerPoint 3.6 px: that is
 the two apps' spacing between paragraphs of different sizes, which no growth changes.
 
@@ -611,6 +612,77 @@ Cambria Math), U+2011 as U+002D in the deck for Google Slides alone (PowerPoint 
 the face's hyphen, and it keeps its no-break meaning there). U+2010 in place of U+2011 would not
 do: Google draws it from MS PGothic too.
 
+## D4 and D5: shadow layers
+
+Measured 2026-11-21 (Task 14 B2), on a probe deck rendered in PowerPoint for Mac (its PDF at
+1280 px) and converted through Drive (1600 px thumbnails, box-filtered to 1280).
+
+**A shape's shadow follows its fill's alpha, in both apps.** A 160 × 100 white rect on white
+casting black at alpha 0.5, 16 px at 45°, blur 0; the shadow's level beside the rect (255 is
+none, 128 the full shadow), and under the rect where its fill lets it through:
+
+| fill | PowerPoint beside / under | Google Slides beside / under |
+|---|---|---|
+| alpha 1 | 126 / 255 | 127 / 255 |
+| alpha 0.5 | 191 / 223 | 191 / 223 |
+| alpha 0.1 | 242 / 243 | 242 / 243 |
+| alpha 0.01 | 253 / 253 | 254 / 254 |
+| alpha 0 (transparency 100) | 255 / 255 | 255 / 255 |
+| no fill, a 1 px outline | the outline's own shadow alone, a thin offset frame | the same |
+
+So no shape casts a full shadow unless it is filled opaque, and both apps draw a shadow under
+a translucent fill, through it, where the browser (which paints a box-shadow outside the border
+box only) shows what lies beneath the box. A shape carries one outer shadow (`a:outerShdw`).
+Hence the shadow shape (`snapshot_borders.mjs` shadowShape): each box-shadow layer the box's
+own shape cannot carry is a shape under the box, at its border box, filled opaque so it shows
+nothing but its shadow: with the box's own colour under an opaque box, and otherwise with the
+one colour the export paints beneath it, or not at all where no one colour lies there.
+
+**The blur needs no calibration.** CSS blur radius B is written as `blurRad` B (in points of
+px). White 240 × 160 boxes, 14 px round, on F9F7F4, black at alpha 0.5; the darkening below
+the box summed over 60 px, and where it ends (the last px at ≥ 0.5 level):
+
+| layer | Chrome | PowerPoint | Google Slides |
+|---|---|---|---|
+| `0 8px 20px` | 1098, 33 px | 1103, 25 px | 1009, 22 px |
+| `0 2px 6px` | 301, 8 px | 285, 6 px | 257, 5 px |
+| `0 24px 48px` | 3114, 59+ px | 3048, 59+ px | 2961, 59+ px |
+| `0 8px 20px`, 1B3139 at 0.08 | 140, 25 px | 149, 19 px | 124, 18 px |
+
+The total matches within 10 %; both apps fall off a little more steeply than Chrome's Gaussian.
+
+## D6: dotted borders in Google Slides
+
+Measured 2026-11-21 (Task 14 B2). Lines 400 px long, read from each app's PDF (dash arrays in
+pt, at 1.5 pt for a 2 px line) and from the Slides API:
+
+| written | PowerPoint | Drive converts to | Google Slides draws |
+|---|---|---|---|
+| `sysDot` | [w w] | DOT | [w 3w] |
+| `dot` | [w 3w] | DOT | [w 3w] |
+| `sysDash` | [3w w] | DASH | [4w 3w] |
+| `dash` | [4w 3w] | DASH | [4w 3w] |
+| `custDash` 1:1, 1:0.5 or 1:2 | as written | DASH_DOT | [4w 3w w 3w] |
+
+DOT is [w 3w] at 1, 2 and 4 px, on lines and outlines alike: no dash Drive offers is the 1:1
+dot CSS paints. A custom-geometry stroke holding its centre line twice, as two subpaths, the
+second starting two widths along, keeps both subpaths in Drive (stored as a freeform line,
+`lineType` unset), and Drive starts the dash afresh on each: in its thumbnails the dots are 1:1
+at 1, 2 and 3 px (period 4 px at 2 px), straight and closed. PowerPoint draws the same stroke
+as one sysDot line, the passes on the same dots. So the deck for Google Slides writes a dotted
+border so (`emit_dotted.cjs`); the deck for PowerPoint keeps sysDot.
+
+**Where the dots fall.** Chrome draws a thin dotted side's dots on whole px, one width on and one
+off, laid back from the side's right or bottom end: its last dot ends there, and what the length
+leaves over is a narrower gap after its first dot (sides of 97 to 549 px at 1, 2 and 3 px, all
+four sides; one of twelve, 100 px starting at 10.3 px, put the narrow gap before its last dot
+instead). A dash runs from its path's start, so the Google passes start at that end.
+
+**Result** (`slide-azure-flow-example`'s dotted column separators, 2 px, read down the first
+one's centre at 1280 px): the dot period is UI 4.00 px, Google 8.00 → 4.00 px, PowerPoint 4.00
+px (unchanged); the dot centres sit at 0.50 px past a period in the UI, 0.41 in Google and 1.34
+in PowerPoint (the deck for PowerPoint runs its lines from the top, as before).
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |
@@ -623,7 +695,9 @@ do: Google draws it from MS PGothic too.
 A4 and A5 (2026-11-19) were measured on presentations the script deletes by id once read.
 D1, X1 and D8 (2026-11-21) were measured on probe decks rendered in PowerPoint and converted
 through Drive, whose presentation was deleted by id once read, and on the two corpora
-(`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1).
+(`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1). D4, D5 and D6 (B2) were
+measured the same way, on probe decks of shapes and lines and on Chrome screenshots at device
+scale 4.
 
 To re-run (PowerPoint will briefly open a window):
 

@@ -311,8 +311,23 @@ Every item carries its order key, so the emitted stacking matches the screen.
 - each border side: a uniform border becomes the shape outline, otherwise one line per
   side, keeping `dashed` and `dotted`;
 - all four corner radii;
-- outer `box-shadow`;
+- outer `box-shadow`, every layer, in the order CSS paints them (the last listed lowest):
+  - a spread-only layer is a ring: the box's outline when it is opaque, listed first and the
+    box has no uniform border, else an unfilled shape of its own. A translucent ring shows
+    what lies under it, never the box's fill, so its box keeps its fill at the border box
+    (as built, Task 14 B2);
+  - a blurred or offset layer is an outer shadow. One shape carries one, and neither app
+    casts a shadow from an unfilled shape or more than a faint one from a translucent fill.
+    So the box's own shape carries the first layer when its fill is opaque, and every other
+    layer is a *shadow shape* under the box: its border box (shrunk by a negative spread),
+    unoutlined, named "Shadow", filled so it shows nothing but its shadow: with the box's own
+    colour under an opaque box, else with the one colour the export paints beneath it. Where
+    no one colour lies beneath (text, a picture, a shape's edge, a picture ground), the
+    shadow shapes are dropped and the box keeps its first layer, as before (as built, B2);
 - cumulative opacity.
+
+An overflow box with round corners clips to its rounded padding box. The clip carries that
+box, which a native table's corner cells read (Tables).
 
 Gradients of any kind, background images, `filter`, `mix-blend-mode`, `clip-path` and
 masks go to capture as a box-only picture; the box's text stays separate and editable.
@@ -393,6 +408,9 @@ growth as space before. In any text: each run's tracking (PowerPoint for Mac ker
 Sans, so its deck folds each run's kerning in, with no optical-size band; Google's keeps
 A1), an italic webfont run's typeface (for PowerPoint its italic static's own name with
 italic off; for Google the family plus italic), and U+2011 (written as U+002D for Google).
+In any box: a dotted border (for PowerPoint dashed `sysDot`, one width on and one off; for
+Google, whose every dot dash is one on and three off, one unfilled custom shape drawing the
+centre line twice, the second pass two widths along).
 `build_pptx_huashu(..., target=...)` names the app the deck is for: `"pptx"` (the download)
 or `"gslides"` (the Google Slides route). Only those constructs branch. In the Google deck a
 script glyph on a line the browser did not grow is drawn at 0.8 of its size, an accepted
@@ -415,7 +433,10 @@ PowerPoint pictures have no radius.
 - all four borders on every cell;
 - vertical alignment;
 - runs under the same rules as text blocks;
-- table radius and shadow, as a shape under the table.
+- table radius and shadow, as a shape under the table;
+- where a rounded clip (a wrapper's `border-radius` with `overflow: hidden`) cuts a filled
+  cell, the cell is unfilled in the table, and its fill is a custom shape under the table,
+  the cell cut to the rounded padding box (as built, B2: an `a:tc` cannot be clipped).
 
 A cell holding an image, SVG, Harvey ball or block layout keeps the native table, and that
 content is overlaid as its own items at its measured rect. A table containing a nested

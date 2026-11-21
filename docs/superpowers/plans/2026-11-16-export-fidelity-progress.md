@@ -377,3 +377,110 @@ browser's Hiragino Sans 0.90 em: the nearest the three apps share.
 The baseline and probe presentations were deleted by id and confirmed gone (`files.get` 404):
 `1s4GvZG0BsB7mOQvTyJfkA2X5UjCB61EsjCDvPcl2Tt8`, `18qHrxBxjZSV9JDzWIZzNr2tXT2XhyxS_cmzTw5jV9hg`
 and `1ojKjuEjNudBDuhf_7gabGK9r71FC88nISm9nIXo8auM`.
+
+## Phase B, batch B2: shapes and effects (D2, D4, D5, D6), engine `d661ee70`
+
+Commits: `d476cb70` box-shadow layers and rings (D2, D4, D5's unfilled-box shadows),
+`9c606b1c` table corners in a rounded clip (D5), `d661ee70` dotted borders for Google (D6). The
+app probes behind each decision are in `scripts/export_fidelity/CALIBRATION.md` (D4 and D5, D6).
+Both corpora were re-run with `run.py --pin-fonts --powerpoint --gslides`; the baseline is a
+fresh run at `ef9f316c`, identical to B1's final run on every slide in both apps.
+
+### Scores, baseline (`ef9f316c`) → B2 (`d661ee70`)
+
+In-repo corpus (17 slides): both decks are byte-identical to the baseline's on every slide (no
+slide holds a multi-layer or unfilled shadow, a translucent ring, a dotted border or a table in
+a rounded clip), and every score is the same to the hundredth: PowerPoint mean 1.92, Google 2.40.
+
+Design-system corpus (27 slides; the defect a slide's change is for):
+
+| Slide | Defect | PowerPoint | Google |
+|---|---|---|---|
+| slide-2x2-matrix | D2 | 2.21 → 2.19 | 1.75 → 1.73 |
+| slide-action-title |  | 1.59 → 1.59 | 2.27 → 2.27 |
+| slide-agenda |  | 0.84 → 0.84 | 0.96 → 0.96 |
+| slide-azure-flow-example | D6 | 1.67 → 1.67 | 1.34 → 1.25 |
+| slide-bold-title |  | 1.63 → 1.63 | 1.43 → 1.43 |
+| slide-charts |  | 0.97 → 0.97 | 0.83 → 0.83 |
+| slide-closing |  | 0.92 → 0.92 | 0.71 → 0.71 |
+| slide-comparison |  | 1.36 → 1.36 | 1.50 → 1.50 |
+| slide-content |  | 2.22 → 2.22 | 1.75 → 1.75 |
+| slide-cover |  | 2.46 → 2.46 | 1.83 → 1.83 |
+| slide-data-table | D5 | 2.13 → 2.10 | 1.19 → 1.17 |
+| slide-event-cover |  | 2.03 → 2.03 | 1.27 → 1.27 |
+| slide-executive-summary |  | 3.97 → 3.97 | 2.59 → 2.59 |
+| slide-industry-title |  | 2.39 → 2.39 | 2.93 → 2.93 |
+| slide-journey |  | 1.21 → 1.21 | 0.75 → 0.75 |
+| slide-kpi-dashboard | D4 | 2.23 → 2.21 | 1.95 → 1.93 |
+| slide-lakehouse-blueprint |  | 2.73 → 2.73 | 2.05 → 2.05 |
+| slide-medallion | D4, D5 | 1.78 → 1.77 | 1.96 → 1.93 |
+| slide-milestones |  | 1.18 → 1.18 | 0.86 → 0.86 |
+| slide-reference-architecture |  | 1.97 → 1.97 | 1.96 → 1.96 |
+| slide-section |  | 0.90 → 0.90 | 1.38 → 1.38 |
+| slide-statement |  | 1.62 → 1.62 | 2.39 → 2.39 |
+| slide-stats |  | 1.09 → 1.09 | 1.09 → 1.09 |
+| slide-three-cards | D4 | 1.50 → 1.31 | 1.17 → 0.99 |
+| slide-timeline |  | 0.61 → 0.61 | 0.82 → 0.82 |
+| slide-two-column |  | 1.84 → 1.84 | 1.44 → 1.44 |
+| slide-waterfall |  | 1.51 → 1.51 | 1.15 → 1.15 |
+| **mean** | | **1.72 → 1.71** | **1.53 → 1.52** |
+
+Only the six slides tagged change, in either deck. No slide is worse in either app; every
+changed slide improves in both. No text loss, no MODEL DROPS, no export or capture failures, in
+both corpora and both targets.
+
+### What was measured on each defect (UI / PowerPoint / Google, at 1280 px)
+
+| Defect | Measure | UI | Before | After |
+|---|---|---|---|---|
+| D2 `slide-2x2-matrix` dot | solid dot, then pale ring, px across its middle | 14 / 8 | 18 / 4, 18 / 4 | 14 / 8, 13 / 9 |
+| D4 `slide-three-cards` card | shadow tail below the card (to < 1 level) | 26 px | 5, 5 px | 21, 18 px |
+| D4 | the same, darkening summed over 60 px | 176 | 27, 28 | 160, 142 |
+| D5 `slide-data-table` header | coral px outside the two top corner arcs | 0 | 12, 12 | 0, 0 |
+| D5 wrapper | shadow below the wrapper (≥ 0.5 level), summed | 4 px, 33 | 0 px, 0 | 3 px 26, 2 px 23 |
+| D6 `slide-azure-flow-example` | dot period of the dotted separators | 4.00 px | 4.00, 8.00 px | 4.00, 4.00 px |
+| D6 | dot centre, px past a period | 0.50 | 1.34, 5.58 (of 8) | 1.34, 0.41 |
+
+`slide-kpi-dashboard` (five `--shadow-sm` cards) and `slide-medallion` (an unfilled, bordered
+`--shadow-sm` frame, whose outline cast a thin offset shadow of itself before) improve by 0.01
+to 0.03 in each app.
+
+### Rulings and corrections from B2
+
+- **Ruling (D4, D5):** a shadow layer the box's own shape cannot carry is a *shadow shape*
+  under the box: its border box (shrunk by a negative spread), unoutlined, named "Shadow" in the
+  selection pane, filled opaque, since both apps scale a shape's shadow by its fill's alpha and
+  cast none from an unfilled shape. Its fill is the box's own colour under an opaque box, else
+  the one colour the export paints beneath it; where no one colour does, the shapes are dropped
+  and the box keeps its first layer, as before. The box stays on top, so a click selects the
+  box; a shadow shape is reached through the selection pane, and moving the box leaves it behind.
+  pptxgenjs writes no groups, so the shapes are ordered, not grouped.
+- **Ruling (D5):** a rounded overflow clip is carried with the clip (`rounds`); a native table
+  leaves a cell a rounded corner cuts unfilled and draws its fill as a custom shape under the
+  table, cut to the corner. The table stays native and every cell keeps its text.
+- **Correction (D6, the brief):** no dash Drive offers is a 1:1 dot. It converts `sysDot` and
+  `dot` alike to DOT, one width on and three off, and every `custDash` to DASH_DOT. The deck for
+  Google draws a dotted border as one custom shape holding its centre line twice, the second pass
+  two widths along, run back from the right or bottom end, where Chrome lays its dots from.
+- **Correction (Phase A, azure-flow):** `slide-azure-flow-example` renders no element with a
+  box-shadow, so Phase A's D4 note on it was mistaken; its D6 separators are its B2 change.
+- **Not changed:** a positive spread on a blurred layer is still not drawn (an outer shadow has
+  none, and a grown shadow shape would show). A dotted table-cell border is still written dashed
+  (pptxgenjs's table borders are solid or dashed). The deck for PowerPoint runs dotted lines from
+  their start, so its dots sit 0.8 px off Chrome's; its spacing is right.
+- **Harness note:** one Google conversion (the in-repo deck, in the first after-run) drew every
+  slide's text wider and lower, scoring 1.5 worse on average, although its deck was byte-identical
+  to the baseline's. Converting the same file again reproduced the baseline on all 17 slides to
+  the hundredth, and so did the final run. A Google regression on an unchanged deck is the
+  conversion, not the export: re-convert before reading it as one.
+- **Owner-facing notes:** a shadow shape under a card is left behind when the card alone is
+  moved in PowerPoint or Slides (select both, or delete it); in the Google deck a dotted border
+  is a freeform stroke, which moves and recolours whole but is not a preset line.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1t2y0ty0JiPIsz-sLSgAM__1X2ybiA25Ct98x4nFRYkw/edit
+- Design-system corpus: https://docs.google.com/presentation/d/1U4LrQh0t8VcmOsAsdoFPeHOWTVin4nw5Ys0mUsDKC4s/edit
+
+The baseline, first-run, re-conversion and probe presentations were deleted by id and
+confirmed gone (`files.get` 404).
