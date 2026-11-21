@@ -13,12 +13,16 @@ For a fixture deck (``deck.css`` + ``deck.json`` + ``slides/*.html``) this:
    leaving out each slide's hidden text, the words the page reads but the
    slide does not show;
 4. renders the .pptx with LibreOffice (``--lo``) and/or PowerPoint
-   (``--powerpoint``), and/or converts a deck written for Google Slides
-   (``target="gslides"``, ``export-gslides.pptx``) through Drive and downloads
-   the slide thumbnails (``--gslides``): the deck and the conversion the
-   Google Slides export uses;
+   (``--powerpoint``), each app's PDF rasterised at 4x and box-filtered to
+   1280x720 (``rasterise_pdf``), and/or converts a deck written for Google
+   Slides (``target="gslides"``, ``export-gslides.pptx``) through Drive and
+   downloads the slide thumbnails (``--gslides``): the deck and the conversion
+   the Google Slides export uses, whose text loss is checked as well
+   (``text_loss-gslides.json``);
 5. writes one side-by-side comparison PNG per slide plus a ``scores.json``
-   holding a per-slide visual difference score (lower is closer).
+   holding a per-slide visual difference score (lower is closer), and a
+   ``summary.md`` table of every slide's scores, against a baseline run's
+   with ``--baseline``, its text loss, MODEL DROPS and captures, per deck.
 
 Usage (from the repo root)::
 
@@ -32,7 +36,9 @@ and inspected; delete them by hand when finished.
 
 ``--pin-fonts`` replaces the deck CSS's Google Fonts ``@import`` lines with the
 same faces from committed files (``pinned_fonts_css``), so two runs, before and
-after a change, render with one font binary per face.
+after a change, render with one font binary per face. ``--baseline DIR`` names
+an earlier run's ``--out``, whose scores ``summary.md`` sets each of this run's
+against.
 """
 
 from __future__ import annotations
@@ -62,6 +68,21 @@ from src.services import pptx_from_html_huashu  # noqa: E402
 
 SLIDE_WIDTH_PX = 1280
 SLIDE_HEIGHT_PX = 720
+
+# PowerPoint's PDF embeds each picture at twice its slide size, with an alpha
+# mask and /Interpolate true. MuPDF drawing such a page at the slide's own
+# 1280 px draws a picture's 1 px rules dark, over two rows (corpus slide 03's
+# EBEBEB gridlines at B2B2B1), and a fringe round a mark in the ground's own
+# colour, which neither the UI nor Apple's Quartz drawing the same PDF shows:
+# an artefact of the harness's raster, not of the export (Task 14 Phase A,
+# H1). Drawn at this many times the slide's size and box-filtered down, each
+# pixel the mean of the 16 it covers, they come out as Quartz draws them. The
+# method is recorded in each run's harness.json (HARNESS_RECORD), so a summary
+# can tell a baseline rasterised another way, whose PowerPoint scores do not
+# compare.
+PDF_RASTER_SCALE = 4
+PDF_RASTER = f"MuPDF at {PDF_RASTER_SCALE}x, box-filtered to {SLIDE_WIDTH_PX}x{SLIDE_HEIGHT_PX}"
+HARNESS_RECORD = "harness.json"
 
 
 # A fixture deck loads its webfonts with a Google Fonts @import, and Google now
@@ -334,9 +355,27 @@ def recorded_summaries(out_dir: Path, target: str = "pptx") -> list[dict | None]
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def render_with_libreoffice(pptx_path: Path, names: list[str], out_dir: Path) -> None:
-    import fitz  # pymupdf
+def rasterise_pdf(pdf_path: Path, names: list[str], out_dir: Path) -> None:
+    """Each page of an app's PDF as ``out_dir/<names[i]>.png``, the slide's 1280x720.
 
+    The page is drawn at PDF_RASTER_SCALE times the slide's size and
+    box-filtered down, so a picture the PDF embeds at twice its size is drawn
+    as the app shows it, not with MuPDF's dark rules and fringes (PDF_RASTER).
+    """
+    import fitz  # pymupdf
+    from PIL import Image
+
+    pdf = fitz.open(pdf_path)
+    for index, page in enumerate(pdf):
+        zoom = PDF_RASTER_SCALE * SLIDE_WIDTH_PX / page.rect.width
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        drawn = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        drawn.resize((SLIDE_WIDTH_PX, SLIDE_HEIGHT_PX), Image.BOX).save(
+            out_dir / f"{names[index]}.png"
+        )
+
+
+def render_with_libreoffice(pptx_path: Path, names: list[str], out_dir: Path) -> None:
     soffice = shutil.which("soffice") or "/Applications/LibreOffice.app/Contents/MacOS/soffice"
     lo_dir = out_dir / "libreoffice"
     lo_dir.mkdir(parents=True, exist_ok=True)
@@ -345,10 +384,7 @@ def render_with_libreoffice(pptx_path: Path, names: list[str], out_dir: Path) ->
         check=True,
         capture_output=True,
     )
-    pdf = fitz.open(lo_dir / (pptx_path.stem + ".pdf"))
-    for index, page in enumerate(pdf):
-        zoom = SLIDE_WIDTH_PX / page.rect.width
-        page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(lo_dir / f"{names[index]}.png"))
+    rasterise_pdf(lo_dir / (pptx_path.stem + ".pdf"), names, lo_dir)
 
 
 POWERPOINT_STAGING_DIR = (
@@ -419,11 +455,10 @@ def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> 
     hold the wrong slides. A staged copy an earlier run left open is closed
     first (close_harness_presentations); the owner's own documents are never
     touched, so the script saves and closes only the presentation whose path
-    is the copy it staged. The PDF is copied into ``out_dir/powerpoint`` and
-    both staged files are deleted from the container. Returns the copied PDF.
+    is the copy it staged. The PDF is copied into ``out_dir/powerpoint``,
+    where each page is rasterised (rasterise_pdf), and both staged files are
+    deleted from the container. Returns the copied PDF.
     """
-    import fitz  # pymupdf
-
     close_harness_presentations()
     POWERPOINT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
     stamp = f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{os.getpid()}"
@@ -456,10 +491,7 @@ end timeout
     finally:
         staged_pptx.unlink(missing_ok=True)
         staged_pdf.unlink(missing_ok=True)
-    pdf = fitz.open(exported_pdf)
-    for index, page in enumerate(pdf):
-        zoom = SLIDE_WIDTH_PX / page.rect.width
-        page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(powerpoint_dir / f"{names[index]}.png"))
+    rasterise_pdf(exported_pdf, names, powerpoint_dir)
     return exported_pdf
 
 
@@ -549,7 +581,11 @@ def _slides_by_name(slides: list, names: list[str]) -> dict:
 
 
 def check_text_loss(
-    pptx_path: Path, names: list[str], out_dir: Path, hidden_text: list[str] | None = None
+    pptx_path: Path,
+    names: list[str],
+    out_dir: Path,
+    hidden_text: list[str] | None = None,
+    target: str = "pptx",
 ) -> dict[str, list[str]]:
     """Words the browser renders that are absent from the exported slide.
 
@@ -564,6 +600,9 @@ def check_text_loss(
     page reads but the slide does not show, each whole (opacity 0, a clip, off
     the slide, cut by an ellipsis), which are no loss. A slide the deck lacks
     shows none of its words, so nothing it hides excuses any.
+
+    ``target`` is the renderer the deck was written for, which names the file
+    the losses are recorded in: text_loss.json, or text_loss-gslides.json.
     """
     from pptx import Presentation
 
@@ -585,7 +624,9 @@ def check_text_loss(
                 lost.append(word)
         if lost:
             missing[name] = lost
-    (out_dir / "text_loss.json").write_text(json.dumps(missing, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / f"text_loss{_target_suffix(target)}.json").write_text(
+        json.dumps(missing, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return missing
 
 
@@ -679,6 +720,182 @@ def compare(names: list[str], out_dir: Path) -> dict:
     return scores
 
 
+def write_harness_record(out_dir: Path, fixture_dir: Path, slides: int) -> None:
+    """``out_dir/harness.json``: the fixture the run read, its slide count and its PDF raster."""
+    record = {"fixture": str(fixture_dir), "slides": slides, "pdfRaster": PDF_RASTER}
+    (out_dir / HARNESS_RECORD).write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+
+# The apps in summary.md's columns, in compare's order, and what each is called there.
+RENDERER_LABELS = {
+    "powerpoint": "PowerPoint",
+    "gslides": "Google Slides",
+    "libreoffice": "LibreOffice",
+}
+# The decks a run writes, in the order summary.md names them.
+TARGETS = ("pptx", "gslides")
+# A score this much above its baseline's is a slide gone worse (the Task 14
+# Phase B rule); summary.md lists every one.
+REGRESSION_THRESHOLD = 0.05
+# The lost words summary.md shows of one slide and deck before it counts the rest.
+LOST_WORDS_SHOWN = 8
+
+
+def _read_json(path: Path, missing: object) -> object:
+    """The JSON in ``path``, or ``missing`` when there is no such file."""
+    if not path.is_file():
+        return missing
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _deck_file(out_dir: Path, stem: str, target: str) -> Path:
+    """The ``stem`` file of the ``target`` deck, as summaries.json or summaries-gslides.json."""
+    return out_dir / f"{stem}{_target_suffix(target)}.json"
+
+
+def _cell(text: str) -> str:
+    """``text`` as one markdown table cell: a pipe in it divides no cells."""
+    return text.replace("|", "\\|")
+
+
+def _lost_words(words: list[str]) -> str:
+    if not words:
+        return "none"
+    shown = " ".join(words[:LOST_WORDS_SHOWN])
+    more = len(words) - LOST_WORDS_SHOWN
+    return f"{shown} (+{more} more)" if more > 0 else shown
+
+
+def _score_change(baseline: float | None, now: float | None) -> str:
+    if now is None:
+        return "—"
+    if baseline is None:
+        return f"{now:.2f}"
+    return f"{baseline:.2f} → {now:.2f}"
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+# A slide's summary in one deck (summaries.json), or None for a slide the export failed.
+def _model_drops(summary: dict | None) -> str:
+    return "export failed" if summary is None else str(summary.get("modelDrops") or 0)
+
+
+def _captures(summary: dict | None) -> str:
+    """Captures taken / failed: the targets named, less those whose picture failed."""
+    if summary is None:
+        return "export failed"
+    failed = summary.get("captureFailures") or 0
+    return f"{(summary.get('captures') or 0) - failed} / {failed}"
+
+
+def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = None) -> Path:
+    """``out_dir/summary.md``: one table row per slide, from the files the run wrote.
+
+    Each row holds the slide's score in each app the run rendered in
+    (scores.json), as ``baseline → now`` when ``baseline_dir`` (an earlier
+    run's --out) scored it too; the words each deck loses (text_loss.json,
+    text_loss-gslides.json); and each deck's MODEL DROPS and captures taken and
+    failed (summaries.json, summaries-gslides.json), or "export failed" for a
+    slide the deck lacks. A mean row follows, over the slides each column
+    scores (both runs' means over the same slides), and then every slide worse
+    than its baseline by more than REGRESSION_THRESHOLD. A baseline whose
+    harness.json does not record this run's PDF raster (one from before it,
+    which has none) rasterised PowerPoint another way: its PowerPoint scores do
+    not compare, and the summary says so. A file the run did not write is
+    taken as empty: a deck it did not export has no column.
+    """
+    scores = _read_json(out_dir / "scores.json", {})
+    record = _read_json(out_dir / HARNESS_RECORD, {})
+    renderers = [
+        kind for kind in RENDERER_LABELS if any(kind in scores.get(name, {}) for name in names)
+    ]
+    targets = [target for target in TARGETS if _deck_file(out_dir, "summaries", target).is_file()]
+    summaries = {
+        target: _read_json(_deck_file(out_dir, "summaries", target), []) for target in targets
+    }
+    losses = {
+        target: _read_json(_deck_file(out_dir, "text_loss", target), {}) for target in targets
+    }
+    baseline_scores = _read_json(baseline_dir / "scores.json", {}) if baseline_dir else {}
+    baseline_record = _read_json(baseline_dir / HARNESS_RECORD, {}) if baseline_dir else {}
+    baseline_raster = baseline_record.get("pdfRaster")
+    raster_differs = baseline_dir is not None and baseline_raster != PDF_RASTER
+
+    def label(kind: str) -> str:
+        if kind == "powerpoint" and raster_differs:
+            return f"{RENDERER_LABELS[kind]} (baseline rasterised otherwise)"
+        return RENDERER_LABELS[kind]
+
+    decks = " / ".join(targets)
+    header = [
+        "Slide",
+        *(label(kind) for kind in renderers),
+        f"Text loss ({decks})",
+        f"MODEL DROPS ({decks})",
+        f"Captures taken / failed ({'; '.join(targets)})",
+    ]
+    lines = [
+        "# Export fidelity summary",
+        "",
+        f"Fixture: `{record.get('fixture', '?')}`, {len(names)} slides. "
+        f"Baseline: {f'`{baseline_dir}`' if baseline_dir else 'none'}.",
+        "",
+        "A score is the mean per-pixel difference from the UI's own rendering: 0 is identical, "
+        f"lower is closer. PowerPoint's PDF is rasterised as {PDF_RASTER}; Google Slides is its "
+        "LARGE thumbnail, resized to the slide's size.",
+    ]
+    if raster_differs:
+        lines += [
+            "",
+            f"The baseline rasterised its PowerPoint PDFs another way "
+            f"({baseline_raster or 'before harness.json recorded it'}), so its PowerPoint "
+            "scores do not compare with these.",
+        ]
+    lines += ["", "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    worse = []
+    means: dict[str, tuple[list[float], list[float]]] = {kind: ([], []) for kind in renderers}
+    for index, name in enumerate(names):
+        row = [_cell(name)]
+        for kind in renderers:
+            now = scores.get(name, {}).get(kind)
+            before = baseline_scores.get(name, {}).get(kind)
+            row.append(_score_change(before, now))
+            if now is None:
+                continue
+            if baseline_dir is None:
+                means[kind][1].append(now)
+            elif before is not None:
+                means[kind][0].append(before)
+                means[kind][1].append(now)
+                if now - before > REGRESSION_THRESHOLD:
+                    worse.append(f"{name} ({RENDERER_LABELS[kind]} +{now - before:.2f})")
+        deck_summaries = [
+            summaries[target][index] if index < len(summaries[target]) else None
+            for target in targets
+        ]
+        lost = [_lost_words(losses[target].get(name, [])) for target in targets]
+        row.append(_cell(" / ".join(lost)))
+        row.append(" / ".join(_model_drops(summary) for summary in deck_summaries))
+        row.append("; ".join(_captures(summary) for summary in deck_summaries))
+        lines.append("| " + " | ".join(row) + " |")
+    mean_row = ["**mean**"]
+    for kind in renderers:
+        before, now = means[kind]
+        change = _score_change(_mean(before) if baseline_dir else None, _mean(now))
+        mean_row.append(f"**{change}**" if now else change)
+    mean_row += [""] * (len(header) - len(mean_row))
+    lines.append("| " + " | ".join(mean_row) + " |")
+    if baseline_dir is not None:
+        worse_text = ", ".join(worse) or "none"
+        lines += ["", f"Worse than the baseline by more than {REGRESSION_THRESHOLD}: {worse_text}."]
+    path = out_dir / "summary.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("fixture_dir", type=Path)
@@ -692,6 +909,11 @@ def main() -> int:
         action="store_true",
         help="load the deck's Google Fonts from the committed files, so runs compare like for like",
     )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="an earlier run's --out, whose scores summary.md sets this run's against",
+    )
     args = parser.parse_args()
 
     deck, slides = load_fixture_deck(args.fixture_dir, pin_fonts=args.pin_fonts)
@@ -699,6 +921,7 @@ def main() -> int:
         slides = [s for s in slides if any(s[0].startswith(prefix) for prefix in args.only)]
     args.out.mkdir(parents=True, exist_ok=True)
     names = [name for name, _ in slides]
+    write_harness_record(args.out, args.fixture_dir, len(names))
     documents = build_documents(deck, slides, args.out)
     render_truth(documents, args.out)
     pptx_path = export_pptx(deck, documents, args.out)
@@ -714,9 +937,21 @@ def main() -> int:
         # The Google Slides export writes its deck for Google (target "gslides"), so the
         # conversion here does too.
         gslides_path = export_pptx(deck, documents, args.out, target="gslides")
+        gslides_hidden = [
+            (summary or {}).get("hiddenText", "")
+            for summary in recorded_summaries(args.out, target="gslides")
+        ]
+        gslides_lost = check_text_loss(
+            gslides_path, names, args.out, hidden_text=gslides_hidden, target="gslides"
+        )
+        print(
+            "Text missing from the Google Slides export:",
+            json.dumps(gslides_lost, indent=2, ensure_ascii=False) if gslides_lost else "none",
+        )
         print("Google Slides:", render_with_google_slides(gslides_path, names, args.out))
     scores = compare(names, args.out)
     print(json.dumps(scores, indent=2))
+    print("Summary:", write_summary(args.out, names, args.baseline))
     return 0
 
 
