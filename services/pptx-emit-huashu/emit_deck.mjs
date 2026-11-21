@@ -19,6 +19,10 @@
 // line or outline, for Google Slides a stroke drawn twice (emit_dotted.cjs;
 // scripts/export_fidelity/CALIBRATION.md X1, D1, D8 and D6).
 //
+// pptxgenjs writes the deck; its dotted table-cell borders are then written
+// sysDot, a dash pptxgenjs cannot write a table border in (emit_table.cjs
+// dotTableBorders).
+//
 // argv:  emit_deck.mjs <out.pptx>
 //
 // stderr: progress lines + a final marker line
@@ -88,8 +92,10 @@ async function main() {
   // node_modules are missing fails with one "setup" message. If chromium
   // isn't installed yet, the require itself succeeds but the first slide throws.
   let renderSlide;
+  let dotTableBorders;
   try {
     ({ renderSlide } = require('./render_slide.cjs'));
+    ({ dotTableBorders } = require('./emit_table.cjs'));
   } catch (e) {
     console.error('[huashu] failed to load render_slide.cjs:', oneLine(e.message));
     console.error('[huashu] hint: cd services/pptx-emit-huashu && npm install && npx playwright install chromium');
@@ -144,7 +150,10 @@ async function main() {
     return;
   }
 
-  await pres.writeFile({ fileName: outArg });
+  // As pptxgenjs's writeFile names the file: with .pptx added when it lacks one.
+  const fileName = outArg.toLowerCase().endsWith('.pptx') ? outArg : outArg + '.pptx';
+  const deck = await pres.write({ outputType: 'nodebuffer' });
+  await fs.writeFile(fileName, await dotTableBorders(deck, pres.slides));
   console.error(`[huashu] wrote ${outArg} (${succeeded}/${slides.length} slides)`);
   console.error('__HUASHU_RESULT__ ' + logJson({
     totalSlides: slides.length, succeeded, failed, tmpDir,

@@ -29,7 +29,8 @@ browser's own:
   further left (right, in a right-to-left table). That winner is written on
   BOTH cells' sides. Neither PowerPoint nor Drive then
   sees one cell's ``noFill`` contradicting its neighbour's line. Every cell
-  writes all four sides;
+  writes all four sides, a dotted one ``sysDot`` (pptxgenjs writes only solid
+  and ``sysDash``, so the deck's XML is rewritten for it);
 * under ``border-collapse: separate`` with no spacing, two cells' borders
   that meet paint side by side: alike, they are one line as wide as both;
   in different colours, no ``a:tbl`` edge draws them;
@@ -318,6 +319,11 @@ TABLES_CSS = (
 .snap tr.total td { background: #1B3139; color: #FFFFFF; border-bottom: 0; }
 .ground-table { border-collapse: collapse; width: 100%; font-size: 16px; background: #F3F3F3; }
 .ground-table td { padding: 13px 18px; }
+.dotted { position: absolute; border-collapse: collapse; font-size: 18px; }
+.dotted td { padding: 10px 14px; }
+.dotted tr.first td { border-bottom: 2px dotted #1B3139; }
+.dotted tr.second td { border-bottom: 2px dashed #FF5F46; }
+.dotted td + td { border-left: 1px dotted #5A6F77; }
 """
 )
 
@@ -779,6 +785,31 @@ SNAP_BODY = """<div class="slide">
   </table>
 </div>"""
 SNAP_TABLE = "#snap"
+# A table whose rules are dotted (row 0's bottom, 2 px; the column rule, 1 px)
+# and dashed (row 1's bottom, 2 px); below it a second, whose dotted rule runs
+# under a cell spanning both columns; and, ahead of both in paint order, a
+# table with no dotted rule.
+DOTTED_BODY = """<div class="slide">
+  <table id="undotted" class="ruled" style="left: 800px; top: 120px; width: 380px;">
+    <tbody>
+      <tr><td>Region</td><td>FY24</td></tr>
+      <tr><td>EMEA</td><td>412.0</td></tr>
+    </tbody>
+  </table>
+  <table id="dotted" class="dotted" style="left: 88px; top: 120px; width: 640px;">
+    <tbody>
+      <tr class="first"><td>Revenue</td><td>1,240.0</td></tr>
+      <tr class="second"><td>Gross profit</td><td>434.0</td></tr>
+      <tr><td>Operating income</td><td>148.8</td></tr>
+    </tbody>
+  </table>
+  <table id="dotted-span" class="dotted" style="left: 88px; top: 420px; width: 640px;">
+    <tbody>
+      <tr class="first"><td colspan="2">Statement of income</td></tr>
+      <tr><td>Net income</td><td>97.8</td></tr>
+    </tbody>
+  </table>
+</div>"""
 # The snapped table's own background, under its unfilled body cells.
 SNAP_GROUND = "F7F5F2"
 # A grid line, a margin and a content edge agree within this (EMU rounding is 1/9525 px).
@@ -3558,6 +3589,80 @@ class TestWholePixelGrid:
         assert not problems, "the corpus tables' grids do not lie on whole px:\n  " + (
             "\n  ".join(problems)
         )
+
+
+# ---------------------------------------------------------------------------
+# Dotted cell borders
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def dotted_export() -> Iterator[Callable[[str], list[Shape]]]:
+    """The dotted table exported for ``target`` (``pptx`` or ``gslides``), once each."""
+    exported: dict[str, list[Shape]] = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+
+        def export(target: str) -> list[Shape]:
+            if target not in exported:
+                pptx, failures = export_slides(
+                    [DOTTED_BODY], css=TABLES_CSS, monkeypatch=monkeypatch, target=target
+                )
+                assert failures == [] and pptx, f"the export rejected the dotted table: {failures}"
+                exported[target] = slide_shapes(pptx)
+            return exported[target]
+
+        yield export
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestDottedCellBorders:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_dotted_cell_border_is_written_dotted(
+        self, dotted_export: Callable[[str], list[Shape]], target: str
+    ) -> None:
+        """Each dotted edge is ``sysDot`` on both its cells, in the deck for either app.
+
+        PowerPoint draws ``sysDot`` one width on and one off, as CSS paints a
+        dotted border; Drive converts it to its ``DOT`` (one on and three off),
+        the nearest dash a Google table border has. Row 0's 2 px dotted rule and
+        the 1 px dotted column rule are ``sysDot`` on both sides of every
+        edge; row 1's dashed rule stays ``sysDash``. In the table below it, the
+        dotted rule under a cell spanning both columns is ``sysDot`` on that
+        cell and on both cells beneath it. The table ahead of them, which has
+        no dotted rule, keeps its solid rules.
+        """
+        document = slide_document(DOTTED_BODY, css=TABLES_CSS, slide_id="snapshot-1")
+        shapes = dotted_export(target)
+        plain = [((row, 0, "right"), "sysDot") for row in range(3)]
+        plain += [((row, 1, "left"), "sysDot") for row in range(3)]
+        for col in range(2):
+            plain += [((0, col, "bottom"), "sysDot"), ((1, col, "top"), "sysDot")]
+            plain += [((1, col, "bottom"), "sysDash"), ((2, col, "top"), "sysDash")]
+        spanned = [((0, 0, "bottom"), "sysDot"), ((1, 0, "top"), "sysDot")]
+        spanned += [((1, 1, "top"), "sysDot"), ((1, 0, "right"), "sysDot")]
+        spanned += [((1, 1, "left"), "sysDot")]
+        wrong = []
+        for selector, expected in (("#dotted", plain), ("#dotted-span", spanned)):
+            (table,) = browser_tables(document, selector)
+            _, frame = _frame_for(shapes, _grid_rect(table), selector)
+            rows = frame.table.rows
+            wrong += [
+                f"{selector} slot ({row}, {col}) {side}: "
+                f"{getattr(rows[row][col].borders[side], 'dash', None)}, expected {dash}"
+                for (row, col, side), dash in expected
+                if rows[row][col].borders[side] is None or rows[row][col].borders[side].dash != dash
+            ]
+        (undotted,) = browser_tables(document, "#undotted")
+        _, frame = _frame_for(shapes, _grid_rect(undotted), "#undotted")
+        wrong += [
+            f"#undotted slot ({row}, {col}) {side}: {border.dash}"
+            for row, cells in enumerate(frame.table.rows)
+            for col, cell in enumerate(cells)
+            for side, border in cell.borders.items()
+            if border is not None and border.dash not in (None, "solid")
+        ]
+        assert not wrong, f"the {target} deck's dotted tables: " + "; ".join(wrong)
 
 
 def _with_table(name: str) -> str:

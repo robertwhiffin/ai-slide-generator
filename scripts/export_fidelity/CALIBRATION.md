@@ -683,6 +683,48 @@ one's centre at 1280 px): the dot period is UI 4.00 px, Google 8.00 → 4.00 px,
 px (unchanged); the dot centres sit at 0.50 px past a period in the UI, 0.41 in Google and 1.34
 in PowerPoint (the deck for PowerPoint runs its lines from the top, as before).
 
+## D10: dotted table-cell borders
+
+Measured 2026-11-21 (Task 14 B3). Native tables whose cells write one edge's border on both
+sides (as the deck writes every collapsed edge), at 1, 2 and 3 px, each dash written into the
+cells' `a:lnB`/`a:lnT`, read from each app's PDF (dash arrays in pt) and from the Slides API's
+`tableBorderProperties.dashStyle`:
+
+| written on a cell border | PowerPoint | Drive converts to | Google Slides draws |
+|---|---|---|---|
+| `sysDot` | [w w] | DOT | [w 3w] |
+| `dot` | [w 3w] | DOT | [w 3w] |
+| `sysDash` | [3w w] | DASH | [4w 3w] |
+
+A cell border is one `a:ln` (`a:lnL`, `a:lnR`, `a:lnT`, `a:lnB` in `a:tcPr`), a preset or a custom
+dash and nothing more: it holds no second stroke, so the two-pass dotted stroke of D6 cannot be
+one, and Drive converts every `custDash` to DASH_DOT (D6). So both decks write a dotted cell
+border `sysDot`: PowerPoint draws CSS's 1:1 dot, Google Slides its DOT, a dot one width long
+every four widths. pptxgenjs writes a table border only solid or `sysDash`, so the dotted sides
+are written dashed and their `prstDash` rewritten once the deck is written
+(`emit_table.cjs dotTableBorders`). A border Drive sees `noFill` on one side of an edge and a line
+on the other it drops, whichever its dash: the deck writes each edge on both cells.
+
+**Result** (the engine's own export of a table with 2 px dotted rules and a 1 px dotted column
+rule, read from each app's PDF): PowerPoint draws [w w] at 1 and 2 px (before, written
+`sysDash`: [3w w]); Google Slides [w 3w] (before: [4w 3w]). For the 2 px rule, dash and period:
+
+| | dash | period |
+|---|---|---|
+| UI (CSS dotted) | 2 px | 4 px |
+| PowerPoint, before → after | 6 → 2 px | 8 → 4 px |
+| Google Slides, before → after | 8 → 2 px | 14 → 8 px |
+
+## D7: seams between filled table cells
+
+Measured 2026-11-21 (Task 14 B3), in PowerPoint's PDF of the corpora, rasterised at 1280 px by
+MuPDF and by Apple's Quartz. For every interior column line between two cells of one row filled
+alike, the pixel columns either side of it over the row's middle half; a seam is one straying
+more than 6 levels from the fill. Cell fills that meet between two pixels anti-alias into a
+lighter column; Chrome snaps every box edge to a whole pixel and paints none. The grid lines
+are now the whole px nearest the browser's (`snapshot_table.mjs snappedLines`); the numbers are
+in the ledger, B3.
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |
@@ -697,7 +739,8 @@ D1, X1 and D8 (2026-11-21) were measured on probe decks rendered in PowerPoint a
 through Drive, whose presentation was deleted by id once read, and on the two corpora
 (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1). D4, D5 and D6 (B2) were
 measured the same way, on probe decks of shapes and lines and on Chrome screenshots at device
-scale 4.
+scale 4. D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
+PowerPoint PDFs.
 
 To re-run (PowerPoint will briefly open a window):
 

@@ -145,10 +145,14 @@ def test_a_source_the_graph_no_longer_reaches_is_named(tmp_path: Path) -> None:
     """A file still listed but no longer loaded says so, rather than passing in silence."""
     emit_model = _read_sidecar("emit_model.cjs")
     assert emit_model is not None
-    unlinked = emit_model.replace("require('./emit_table.cjs')", "({ emitTable: null })")
-    assert unlinked != emit_model, "fixture drift: emit_model.cjs no longer requires emit_table.cjs"
+    # emit_dotted.cjs is reached through emit_model.cjs alone.
+    unlinked = emit_model.replace(
+        "require('./emit_dotted.cjs')",
+        "({ dottedLine: null, dottedOutline: null, strokePoints: null })",
+    )
+    assert unlinked != emit_model, "fixture drift: emit_model.cjs does not require emit_dotted.cjs"
     problems = check_wheel(_wheel(tmp_path, replace={"emit_model.cjs": unlinked}), min_wheel_mb=0)
-    assert len(problems) == 1 and "no longer reaches emit_table.cjs" in problems[0], problems
+    assert len(problems) == 1 and "no longer reaches emit_dotted.cjs" in problems[0], problems
 
 
 def test_main_exits_one_and_prints_each_problem(
