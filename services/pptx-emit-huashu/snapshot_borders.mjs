@@ -221,7 +221,8 @@ function createBorders(env) {
   //   its uniform border or else by its outline ring (ringedShape);
   // * a border that differs between sides, over the fill (pushSideLines).
   // The slide root's ground is the slide background (the background transfer,
-  // preprocess.mjs, put it on body), so its fill, shadow and rings are never painted a second time here.
+  // preprocess.mjs, put it on body, or for an image ground its picture,
+  // snapshot.mjs groundCapture), so its fill, shadow and rings are never painted a second time here.
   // `slice` is sideBorders': the sides a fragment of an inline box loses.
   // `withoutBorder` leaves the border out: a collapsed native table's border
   // is its grid's outer edges (snapshot_table.mjs).
@@ -369,9 +370,9 @@ function createBorders(env) {
   // inside it), down to an opaque one or to a ground of a colour. Then the
   // shapes take it and the box casts nothing itself. Otherwise (text, a
   // picture, a line, a table, a shape's edge or its translucent shadow there,
-  // or a picture ground) a filled shape would hide what shows through the box,
-  // so the shapes are dropped and the box keeps its first shadow, as with no
-  // shapes at all. Returns the items left, in order, and how many it dropped.
+  // or a picture ground: an image, or the slide root's image ground) a filled
+  // shape would hide what shows through the box, so the shapes are dropped
+  // and the box keeps its first shadow, as with no shapes at all. Returns the items left, in order, and how many it dropped.
   // Comparing each box with what lies under it is bounded, in all, by
   // COLLECTION_ITEM_LIMIT steps: past that, the rest keep their box's shadow.
   // Bounds within this of each other only touch (layout rounding).
@@ -438,7 +439,7 @@ function createBorders(env) {
       covers.push(item.fill);
     }
     if (base === null) {
-      if (!background || !background.color || background.image) return { color: null, budget };
+      if (!background || !background.color || background.image || background.captureId) return { color: null, budget };
       base = background.color;
     }
     let colour = base;

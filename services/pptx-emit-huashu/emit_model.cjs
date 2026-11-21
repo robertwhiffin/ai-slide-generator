@@ -48,8 +48,13 @@ function pictureData(item, captures) {
   return typeof data === 'string' && RASTER_DATA_URI.test(data) ? data : null;
 }
 
-function applyBackground(slide, background) {
-  if (background && typeof background.image === 'string' && RASTER_DATA_URI.test(background.image)) {
+// The slide's ground: the slide root's image ground, its capture's picture
+// (snapshot.mjs groundCapture), when it was taken; a raster image; else its colour.
+function applyBackground(slide, background, captures) {
+  const ground = background && background.captureId && captures ? captures.get(background.captureId) : null;
+  if (typeof ground === 'string' && RASTER_DATA_URI.test(ground)) {
+    slide.background = { data: ground };
+  } else if (background && typeof background.image === 'string' && RASTER_DATA_URI.test(background.image)) {
     slide.background = { data: background.image };
   } else if (background && background.color) {
     slide.background = { color: background.color };
@@ -195,7 +200,7 @@ function emitSlide(pres, model, captures, renderer) {
   const slide = pres.addSlide();
   // The webfonts the page loaded, all faces and the italic ones, which name a run's face.
   const faces = { weights: model.fonts, italicWeights: model.italicFonts };
-  applyBackground(slide, model.background);
+  applyBackground(slide, model.background, captures);
   let skippedPictures = 0;
   let outOfRange = 0;
   for (const item of model.items) {

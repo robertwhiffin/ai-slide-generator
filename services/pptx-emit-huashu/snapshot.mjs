@@ -22,7 +22,9 @@
 // /**
 //  * SlideModel = {
 //  *   width, height,                       // CSS px; the slide is 1280x720
-//  *   background: {color: 'RRGGBB'} | {image: 'data:image/…;base64,…'},
+//  *   background: {color: 'RRGGBB'} | {image: 'data:image/…;base64,…'}
+//  *             | {color, captureId: 'c<n>'},  // the slide root's image ground: its
+//  *                                         // 'ground' capture, else the colour
 //  *   items: Item[],                        // sorted back to front, by `order` then `id`
 //  *   captures: Capture[],
 //  *   fonts: {'<family>': number[]},        // the weights (100..900) of its faces in
@@ -63,7 +65,7 @@
 //  *  {kind:'table', x,y, colWidths, rowHeights, cells}
 //  *   (one native table; snapshot_table.mjs documents TableItem and TableCell)
 //  *
-//  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
+//  * Capture = {id, x,y,w,h, mode:'subtree'|'box'|'ground', selector:'[data-tellr-capture="c<n>"]',
 //  *   pseudo:null|'before'|'after'|'marker', hiddenWithin:boolean,
 //  *   paint:{borderColors:string[4], boxShadow:string}|null, bordersHidden:boolean}
 //  *   (the picture's rect, which its image item shares; selector, the target
@@ -73,7 +75,10 @@
 //  *   for a box target, its computed border colours and shadow; bordersHidden
 //  *   for a box target whose borders, and those of all it holds, the picture
 //  *   leaves out: a collapsed native table, whose grid draws them; capture.cjs
-//  *   reads them. `failed` when the target could not be named.)
+//  *   reads them. `failed` when the target could not be named. A 'ground'
+//  *   capture is the slide root's image ground, the whole slide as the
+//  *   browser paints it under the root's border and all the root holds: the
+//  *   slide's background picture, which no image item shows (groundCapture).)
 //  *
 //  * Units: CSS px on the slide. `alpha` is 0..1 and already includes the cumulative
 //  * opacity of the element and its ancestors. A shape's box is where its outline's
@@ -1869,6 +1874,41 @@ async function snapshotPage(config, pseudoData) {
     return capture;
   }
 
+  // ─── the slide root's image ground ───────────────────────────────────
+  // A slide root whose ground holds a data: image (a photo, a pattern, under a
+  // scrim gradient or not) paints what no slide colour can, and the
+  // background transfer leaves it on the root (preprocess.mjs). Its picture is
+  // the slide's background: one capture of the whole slide as the browser
+  // paints it under all the root holds (capture.cjs ground mode), so each
+  // layer keeps its size, position and repeat (cover, contain, a corner), over
+  // body's ground and the white canvas. The root's border is drawn natively
+  // (emitBox), so the picture leaves it out. Null until the walk meets one.
+  const DATA_IMAGE_LAYER = /url\(\s*["']?data:/i;
+  let groundCapture = null;
+
+  function paintsImageGround(s) {
+    return !clipsToText(s) && DATA_IMAGE_LAYER.test(String(s.backgroundImage || ''));
+  }
+
+  function pushGroundCapture(element, s) {
+    const id = 'c' + nextCaptureSeq++;
+    groundCapture = {
+      id,
+      x: 0,
+      y: 0,
+      w: SLIDE_WIDTH,
+      h: SLIDE_HEIGHT,
+      mode: 'ground',
+      selector: '[' + config.captureAttribute + '="' + id + '"]',
+      pseudo: null,
+      hiddenWithin: false,
+      paint: { borderColors: [s.borderTopColor, s.borderRightColor, s.borderBottomColor, s.borderLeftColor], boxShadow: s.boxShadow },
+      bordersHidden: true,
+    };
+    captures.push(groundCapture);
+    captureTargets.push({ element, capture: groundCapture, hidden: [] });
+  }
+
   // The snapshot's one lasting write, made once every read is done (the metric
   // probes are gone by then), so no read saw a changed page: each target is
   // named for capture.cjs, through the pristine realm, and each descendant
@@ -2479,6 +2519,7 @@ async function snapshotPage(config, pseudoData) {
         picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box,
           Boolean(table && table.collapse));
       } else if (box) {
+        if (element === slideRoot && !groundCapture && paintsImageGround(s)) pushGroundCapture(element, s);
         emitBox(s, table ? snappedBox(box) : box, opacity, place.box, element === slideRoot, clips.box, null,
           Boolean(table && table.collapse));
       }
@@ -2579,14 +2620,19 @@ async function snapshotPage(config, pseudoData) {
   nameCaptureTargets();
 
   items.sort(compareItems);
+  // The slide root's image ground is the slide's background picture, its
+  // colour what the slide falls back to without it.
+  const slideGround = groundCapture
+    ? { color: groundColour(htmlStyle, bodyStyle), captureId: groundCapture.id }
+    : background;
   // A shadow shape under a box with no opaque fill is filled with what lies
   // beneath it, or dropped where no one colour does (snapshot_borders.mjs).
-  const shadowed = resolveShadowShapes(items, background);
+  const shadowed = resolveShadowShapes(items, slideGround);
   stats.shapes -= shadowed.dropped;
   return {
     width: SLIDE_WIDTH,
     height: SLIDE_HEIGHT,
-    background,
+    background: slideGround,
     items: shadowed.items,
     captures,
     fonts,

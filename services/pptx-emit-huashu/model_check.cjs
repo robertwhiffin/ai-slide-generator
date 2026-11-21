@@ -14,7 +14,7 @@
 //     written reset, as an empty slide has it. Everything else is kept as it is,
 //     the same objects, so the slide exports all that is valid:
 //     * a capture is kept when its id is c<n> and no other capture has it, its
-//       rect is four finite numbers, its mode is 'subtree' or 'box' and its
+//       rect is four finite numbers, its mode is 'subtree', 'box' or 'ground' and its
 //       selector is a string (capture.cjs checks what that string names);
 //     * an item is kept when its kind is one the emitters write and every field
 //       they read is as the snapshot writes it (snapshot.mjs SlideModel,
@@ -24,7 +24,8 @@
 //       none; a native table's cells, spans included, lie inside its grid
 //       and cover each of its slots once;
 //     * the fields: items and captures are lists, background is a raster data:
-//       image or else a colour (as emit_model.cjs applyBackground takes it),
+//       image, a colour, or a colour beside a kept capture it names (the slide
+//       root's image ground), as emit_model.cjs applyBackground takes it,
 //       fonts and italicFonts map families to weights, reference.hiddenText is a
 //       string, and stats.elements and stats.pseudoElements are counts.
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
@@ -34,7 +35,7 @@ const { RASTER_DATA_URI } = require('./emit_model.cjs');
 
 const CAPTURE_ID = /^c\d+$/;
 const COLOUR = /^[0-9A-Fa-f]{6}$/;
-const CAPTURE_MODES = new Set(['subtree', 'box']);
+const CAPTURE_MODES = new Set(['subtree', 'box', 'ground']);
 const PSEUDO_ELEMENTS = new Set(['before', 'after', 'marker']);
 const GEOMETRIES = new Set(['rect', 'roundRect', 'ellipse', 'path']);
 const DASHES = new Set(['solid', 'dash', 'dot']);
@@ -243,11 +244,14 @@ function checkCaptures(captures) {
 }
 
 // The slide's ground as emit_model.cjs applyBackground takes it: an image only
-// when it is a raster data: URI, and otherwise a colour, which must be one.
-function isBackground(background) {
+// when it is a raster data: URI, a ground picture only when it names a kept
+// capture, and otherwise a colour, which must be one (a ground picture's too,
+// what the slide falls back to).
+function isBackground(background, captureIds) {
   if (background === null) return true;
   if (!isObject(background)) return false;
   if (typeof background.image === 'string' && RASTER_DATA_URI.test(background.image)) return true;
+  if (background.captureId !== undefined && !captureIds.has(background.captureId)) return false;
   return isColour(background.color);
 }
 
@@ -273,7 +277,7 @@ function checkModel(model) {
     fields += 1;
     return empty;
   };
-  const background = kept(isBackground(source.background), source.background, null);
+  const background = kept(isBackground(source.background, captureIds), source.background, null);
   const fonts = kept(isFonts(source.fonts), source.fonts, {});
   const italicFonts = kept(isFonts(source.italicFonts), source.italicFonts, {});
   const reference = kept(isObject(source.reference) && typeof source.reference.hiddenText === 'string',

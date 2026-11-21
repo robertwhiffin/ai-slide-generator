@@ -7,7 +7,9 @@
 //                        the fonts waited for again: an animation's end state
 //                        can set text in a face nothing had asked for;
 //   2. preprocess        PREPROCESS_SOURCE (preprocess.mjs): the slide root's
-//                        ground onto body, nothing that moves layout;
+//                        ground onto body (an image ground's colour alone:
+//                        the ground stays on the root, captured as the
+//                        slide's background picture), nothing that moves layout;
 //   3. validate          body overflow, the layout's size and text too near
 //                        the bottom edge;
 //   4. pseudo-elements   pseudo.mjs: every ::before, ::after and list item
@@ -20,7 +22,8 @@
 //                        slide's realm built it, so what slide script made of it
 //                        is dropped and counted;
 //   6. capture           capture.cjs: an element-isolated 2x screenshot of each
-//                        capture target the model names, from the same page;
+//                        capture target the model names, from the same page
+//                        (the slide root's image ground among them);
 //   7. reference         the page's rendered text, read once every capture is
 //                        taken, so it changes no picture (pageRenderedText);
 //   8. emit              emit_model.cjs writes the model to a pptxgenjs slide;

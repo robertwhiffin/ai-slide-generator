@@ -2144,6 +2144,23 @@ MODEL_FIELD_DEFECTS = {
         "background",
         None,
     ),
+    # A ground picture names a capture the check kept, beside the colour the
+    # slide falls back to without it.
+    "background-ground-capture-unknown": (
+        _set("background", {"color": "F9F7F4", "captureId": "c9"}),
+        "background",
+        None,
+    ),
+    "background-ground-capture-not-a-string": (
+        _set("background", {"color": "F9F7F4", "captureId": 0}),
+        "background",
+        None,
+    ),
+    "background-ground-colour-injected": (
+        _set("background", {"color": INJECTED_COLOUR, "captureId": "c0"}),
+        "background",
+        None,
+    ),
     "fonts-not-a-map": (_set("fonts", ["DM Sans"]), "fonts", {}),
     "fonts-weight-nan": (_set("fonts", {"DM Sans": [NAN]}), "fonts", {}),
     "italic-fonts-not-a-map": (_set("italicFonts", ["DM Sans"]), "italicFonts", {}),
@@ -2171,6 +2188,29 @@ class TestModelCheck:
         """A gradient ground the snapshot rasterised: a data: PNG, as applyBackground embeds."""
         model = _valid_model()
         model["background"] = {"image": "data:image/png;base64,iVBORw0KGgo="}
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
+        assert checked["model"] == model
+
+    def test_a_ground_picture_background_passes_untouched(self) -> None:
+        """The slide root's image ground: a whole-slide ``ground`` capture the background names."""
+        model = _valid_model()
+        model["captures"].append(
+            {
+                "id": "c2",
+                "x": 0,
+                "y": 0,
+                "w": 1280,
+                "h": 720,
+                "mode": "ground",
+                "selector": '[data-tellr-capture="c2"]',
+                "pseudo": None,
+                "hiddenWithin": False,
+                "paint": {"borderColors": ["rgb(0, 0, 0)"] * 4, "boxShadow": "none"},
+                "bordersHidden": True,
+            }
+        )
+        model["background"] = {"color": "F9F7F4", "captureId": "c2"}
         checked = _check_model(model)
         assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
         assert checked["model"] == model

@@ -27,6 +27,11 @@
 //   2. the target's rect is screenshotted at the page's device scale (2) on a
 //      transparent ground;
 //   3. the stylesheet is removed.
+// A 'ground' capture is the slide root's image ground (snapshot.mjs
+// groundCapture): the whole slide, the root's own box shown as in box mode and
+// html and body kept as they are, their text transparent, every other element
+// hidden, on the white canvas the slide is painted on. It is the slide's
+// background picture: what the browser paints under all the root holds.
 // A capture that fails is logged and has no entry in the map: its picture is
 // skipped (emit_model.cjs) and counted in the slide summary. The slide stays.
 //
@@ -115,6 +120,14 @@ function isolationCss(capture) {
   }
   const pseudoHidden = `*${BOOST}::before, *${BOOST}::after { visibility: hidden !important; }\n`;
   const ownMarker = `${selector}${BOOST}::marker { color: transparent !important; }`;
+  // The canvas paints html's ground (body's, when html has none) whatever their
+  // visibility, but body's own ground under html's only when body shows: both
+  // show, painting nothing else, as the slide paints them under its content.
+  if (capture.mode === 'ground') {
+    return `*${BOOST} { visibility: hidden !important; }\n` + pseudoHidden +
+      `html${BOOST}, body${BOOST}, ${selector}${BOOST} { visibility: visible !important; ${transparentText} }\n` +
+      ownMarker;
+  }
   if (pseudo === 'marker') {
     const unpainted = 'background: transparent !important; border-color: transparent !important;' +
       ' box-shadow: none !important; outline-color: transparent !important;' +
@@ -132,14 +145,15 @@ function isolationCss(capture) {
 //   (an SVG group with visibility="hidden") is hidden again, one attribute
 //   selector more specific than the rule that shows it; its pseudo-elements
 //   inherit that, as they do on the slide.
-// * Box mode makes the target's text transparent by setting `color`, which a
-//   border or shadow drawn in currentColor follows; each is pinned to the
-//   colour the slide paints it in, on the pseudo-element for a pseudo-element
-//   target.
+// * Box and ground mode make the target's text transparent by setting
+//   `color`, which a border or shadow drawn in currentColor follows; each is
+//   pinned to the colour the slide paints it in, on the pseudo-element for a
+//   pseudo-element target.
 // * A box target whose borders are drawn elsewhere (bordersHidden: a
 //   collapsed native table, whose grid draws its own and its cells' collapsed
-//   borders, which the browser paints even for hidden cells) has every border
-//   of it and of all it holds transparent instead. A border's colour moves
+//   borders, which the browser paints even for hidden cells; the slide root,
+//   whose border is a shape over its ground picture) has every border of it
+//   and of all it holds transparent instead. A border's colour moves
 //   nothing, so the picture is laid out as the slide is.
 function retainedCss(capture) {
   const { selector, pseudo } = targetOf(capture);
@@ -149,11 +163,12 @@ function retainedCss(capture) {
   if (capture.mode === 'subtree' && capture.hiddenWithin) {
     rules.push(`${selector} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
   }
-  const bordersHidden = capture.mode === 'box' && capture.bordersHidden === true && !pseudo;
+  const boxed = capture.mode === 'box' || capture.mode === 'ground';
+  const bordersHidden = boxed && capture.bordersHidden === true && !pseudo;
   if (bordersHidden) {
     rules.push(`${selector}${boost}, ${selector} *${boost} { border-color: transparent !important; }`);
   }
-  const paint = capture.mode === 'box' && capture.paint ? capture.paint : null;
+  const paint = boxed && capture.paint ? capture.paint : null;
   if (paint) {
     const declarations = [];
     const sides = ['top', 'right', 'bottom', 'left'];
@@ -201,7 +216,7 @@ async function captureOne(page, capture, viewport) {
   const retained = retainedCss(capture);
   const png = await page.screenshot({
     clip: clipOf(capture, viewport),
-    omitBackground: true,
+    omitBackground: capture.mode !== 'ground',
     type: 'png',
     scale: 'device',
     animations: 'disabled',

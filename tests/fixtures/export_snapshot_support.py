@@ -2062,6 +2062,18 @@ def slide_background(pptx: bytes, index: int = 0) -> str | None:
     return None if color is None else color.get("val").upper()
 
 
+def slide_background_picture(pptx: bytes, index: int = 0) -> bytes | None:
+    """The picture bytes of slide ``index``'s ``<p:bg>`` picture fill; None without one."""
+    with _open_pptx(pptx) as archive:
+        part = _slide_part(archive, index)
+        slide = _read_xml(archive, part)
+        blip = slide.find("p:cSld/p:bg/p:bgPr/a:blipFill/a:blip", NAMESPACES)
+        if blip is None:
+            return None
+        target = _relationships(archive, part).get(blip.get(RELATIONSHIP_EMBED))
+        return None if target is None else archive.read(target)
+
+
 def text_shapes(shapes: list[Shape], contains: str) -> list[Shape]:
     """The text shapes whose text contains ``contains``, in z-order."""
     return [shape for shape in shapes if shape.kind == "text" and contains in shape.text]

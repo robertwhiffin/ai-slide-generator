@@ -20,12 +20,22 @@ artifact can show is *which branch* ran — a rootless deck and a broken locator
 both end up white — so the ``'no-root'`` sentinel is asserted separately via the
 sidecar's ``probe_bg_transfer.mjs``.
 
+A slide root whose ground holds a ``data:`` image (a photo, a pattern, under a
+scrim gradient or not) is the other case: the transfer leaves that ground on the
+root (``bgTransferred`` is ``image``), and the slide's ``<p:bg>`` is one
+picture of the whole slide as the browser paints it under the content, each
+layer at its own size and position (cover, contain, a side), over what lies
+beneath the root. Those tests read the background picture's pixels against the
+browser's own (``browser_pixels``) at points where cover, contain and a stretch
+differ.
+
 Gating matches the sibling export suite: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import re
@@ -35,9 +45,21 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from src.services import pptx_from_html_huashu
-from tests.fixtures.export_snapshot_support import build_pptx_guarded, slide_shapes
+from tests.fixtures.export_snapshot_support import (
+    DECK_CSS,
+    browser_pixels,
+    build_pptx_guarded,
+    export_logged,
+    export_slides,
+    slide_background,
+    slide_background_picture,
+    slide_document,
+    slide_shapes,
+    slide_summaries,
+)
 
 # Reuse the sibling suite's timestamp-canonical manifest so both modules mean
 # exactly the same thing by "structurally identical pptx".
@@ -48,9 +70,7 @@ from tests.unit.test_export_svg_raster import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_slide_root"
-PROBE_SCRIPT = (
-    REPO_ROOT / "services" / "pptx-emit-huashu" / "probe_bg_transfer.mjs"
-)
+PROBE_SCRIPT = REPO_ROOT / "services" / "pptx-emit-huashu" / "probe_bg_transfer.mjs"
 
 # The fixtures' only colour. Synthetic — no brand palette in test data.
 GROUND = "123456"
@@ -215,3 +235,230 @@ class TestSlideRootBranchTaken:
         )
         assert [r["bgTransferred"] for r in results] == ["solid"] * 4
         assert [r["bodyBackgroundColor"] for r in results] == [GROUND_RGB] * 4
+
+
+# ---------------------------------------------------------------------------
+# A slide root whose ground is a data: image
+# ---------------------------------------------------------------------------
+
+# Four bands of 100 rows each, top to bottom, on a 400 px square: cover, contain
+# and a stretch to the slide put the band edges at different heights.
+STRIPE_COLOURS = ((238, 51, 34), (34, 170, 85), (34, 85, 204), (238, 187, 34))
+IMAGE_GROUND_TITLE = "Industry outlook"
+# A pixel of the exported ground and the browser's agree within this per channel.
+GROUND_COLOUR_TOLERANCE = 8
+
+
+def _stripes_png() -> str:
+    image = Image.new("RGB", (400, 400))
+    for band, colour in enumerate(STRIPE_COLOURS):
+        image.paste(colour, (0, band * 100, 400, band * 100 + 100))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _photo_jpeg() -> str:
+    """An 800x600 'photograph': smooth ramps on every channel, JPEG-encoded."""
+    image = Image.new("RGB", (800, 600))
+    image.putdata(
+        [
+            (40 + x * 180 // 800, 60 + y * 160 // 600, 200 - (x + y) * 120 // 1400)
+            for y in range(600)
+            for x in range(800)
+        ]
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=92)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _ground_pixels(pptx: bytes, points: list[tuple[float, float]]) -> list[tuple[int, int, int]]:
+    """What the slide's background picture shows at each point, the picture laid over the slide.
+
+    A slide's ground has no holes: each app shows its own colour through one,
+    so the picture must be opaque wherever it is.
+    """
+    picture = slide_background_picture(pptx)
+    assert picture is not None, "the slide has no background picture"
+    image = Image.open(BytesIO(picture)).convert("RGBA")
+    alpha = image.getchannel("A").getextrema()
+    assert alpha == (255, 255), f"the background picture is not opaque: its alpha runs {alpha}"
+    image = image.convert("RGB").resize((1280, 720), Image.BILINEAR)
+    return [image.getpixel((int(x), int(y))) for x, y in points]
+
+
+def _assert_ground_is_the_browsers(
+    pptx: bytes, document: str, points: list[tuple[float, float]], what: str
+) -> None:
+    """The background picture shows what the browser shows at each point, within tolerance."""
+    shown = browser_pixels(document, points)
+    exported = _ground_pixels(pptx, points)
+    wrong = [
+        f"({x:g}, {y:g}): the browser shows {browser}, the background picture {picture}"
+        for (x, y), browser, picture in zip(points, shown, exported)
+        if max(abs(a - b) for a, b in zip(browser, picture)) > GROUND_COLOUR_TOLERANCE
+    ]
+    assert not wrong, f"{what}: the background picture is not the browser's ground:\n  " + (
+        "\n  ".join(wrong)
+    )
+
+
+def _assert_ground_is_no_item(pptx: bytes, what: str) -> None:
+    """The ground is the slide's background alone: no solid fill, no picture item over it."""
+    assert slide_background(pptx) is None, (
+        f"{what}: the slide's background is the solid {slide_background(pptx)}, not a picture"
+    )
+    pictures = [shape for shape in slide_shapes(pptx) if shape.kind == "picture"]
+    assert pictures == [], f"{what}: the ground is repeated as {len(pictures)} picture item(s)"
+    titles = [
+        shape
+        for shape in slide_shapes(pptx)
+        if shape.kind == "text" and IMAGE_GROUND_TITLE in shape.text
+    ]
+    assert len(titles) == 1, f"{what}: the title is not one native text item"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSlideRootImageGround:
+    """A slide root painting a data: image is the slide's background picture, fitted as it shows."""
+
+    def test_a_cover_image_ground_is_the_background_picture_the_browser_shows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``.slide`` root painting a square banded image ``center / cover``.
+
+        Cover scales the image to the slide's width and crops its top and
+        bottom, so the band edges fall at 40, 360 and 680 px; stretched to the
+        slide they would fall at 180, 360 and 540. The slide's ``<p:bg>`` is
+        one picture showing the browser's pixels at points either side of
+        each, the root's colour is no solid fill under it, no picture item
+        repeats it, and the title stays native text.
+        """
+        body = (
+            '<div class="slide" style="background: #000000 url('
+            + _stripes_png()
+            + ') center / cover no-repeat;">'
+            f'<h1 style="font-size: 40px; color: #FFFFFF;">{IMAGE_GROUND_TITLE}</h1></div>'
+        )
+        document = slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
+        pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
+        assert failures == [], failures
+        _assert_ground_is_no_item(pptx, "the cover ground")
+        points = [
+            (x, y) for x in (640.0, 1100.0) for y in (20.0, 100.0, 250.0, 520.0, 620.0, 700.0)
+        ]
+        _assert_ground_is_the_browsers(pptx, document, points, "the cover ground")
+
+    def test_a_photo_under_a_scrim_is_one_background_picture_and_the_text_stays_native(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A photo-cover slide: a JPEG ``center / cover`` under a gradient scrim, in one ground.
+
+        The design system's industry and event covers paint a photograph on the
+        slide; here the scrim is the ground's own first layer, as a generated
+        deck often writes it. The background transfer leaves that ground on the
+        root and says so (``bgTransferred`` is ``image``); the slide's
+        ``<p:bg>`` is one picture of the photo under its scrim as the browser
+        shows it, and the white title is native text over it.
+        """
+        body = (
+            '<div class="slide" style="background: linear-gradient(90deg, rgba(0, 0, 0, 0.75), '
+            "rgba(0, 0, 0, 0) 60%), url(" + _photo_jpeg() + ') center / cover; color: #FFFFFF;">'
+            f'<h1 style="font-size: 40px;">{IMAGE_GROUND_TITLE}</h1></div>'
+        )
+        document = slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
+        logged = export_logged([document], monkeypatch=monkeypatch)
+        assert logged.failures == [], logged.failures
+        (summary,) = slide_summaries(logged.stderr)
+        assert summary["bgTransferred"] == "image", summary
+        _assert_ground_is_no_item(logged.pptx, "the photo ground")
+        points = [(x, y) for x in (120.0, 640.0, 1000.0, 1250.0) for y in (30.0, 360.0, 690.0)]
+        _assert_ground_is_the_browsers(logged.pptx, document, points, "the photo ground")
+
+    def test_a_contained_image_on_a_section_root_letterboxes_on_its_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pinned template's ``<section>`` root painting the banded image ``right / contain``.
+
+        Contain fits the whole image to the slide's height at its right, so
+        the root's colour shows to its left and the bands are 180 px each. The
+        background picture shows both as the browser does.
+        """
+        body = (
+            '<section style="background: #123456 url('
+            + _stripes_png()
+            + ') no-repeat right center / contain;"><div class="slide" style="background: none;">'
+            f'<h1 style="font-size: 40px; color: #FFFFFF;">{IMAGE_GROUND_TITLE}</h1>'
+            "</div></section>"
+        )
+        document = slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
+        pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
+        assert failures == [], failures
+        _assert_ground_is_no_item(pptx, "the contained ground")
+        points = [(x, y) for x in (300.0, 700.0, 1200.0) for y in (100.0, 250.0, 450.0, 650.0)]
+        _assert_ground_is_the_browsers(pptx, document, points, "the contained ground")
+
+    @pytest.mark.parametrize(
+        ("body_style", "uncovered"),
+        [("<style>body { background: #2B0D08; }</style>", (43, 13, 8)), ("", (255, 255, 255))],
+        ids=["body-painted", "canvas-white"],
+    )
+    def test_a_ground_the_image_leaves_uncovered_shows_what_lies_beneath(
+        self, monkeypatch: pytest.MonkeyPatch, body_style: str, uncovered: tuple[int, int, int]
+    ) -> None:
+        """A ``.slide`` root painting the banded image ``center / contain``, with no colour.
+
+        Where the image leaves the slide uncovered, at its left and right, the
+        browser shows what lies beneath the root: body's ground when the deck
+        paints body (2B0D08), else the white canvas. The background picture is
+        the whole slide as the browser paints it under the content, so it shows
+        that there too, not a hole.
+        """
+        body = (
+            body_style
+            + '<div class="slide" style="background: url('
+            + _stripes_png()
+            + ') no-repeat center / contain;">'
+            f'<h1 style="font-size: 40px; color: #FFFFFF;">{IMAGE_GROUND_TITLE}</h1></div>'
+        )
+        document = slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
+        pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch)
+        assert failures == [], failures
+        _assert_ground_is_no_item(pptx, "the uncovered ground")
+        assert browser_pixels(document, [(150.0, 450.0)]) == [uncovered], (
+            f"fixture drift: the browser does not show {uncovered} beside the image"
+        )
+        points = [(x, y) for x in (150.0, 640.0, 1150.0) for y in (250.0, 450.0, 650.0)]
+        _assert_ground_is_the_browsers(pptx, document, points, "the uncovered ground")
+
+    def test_a_document_that_paints_no_ground_shows_the_white_canvas(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slide document of its own, painting neither html nor body, the image ``contain``.
+
+        The export routes' documents paint html white; a document handed to
+        the sidecar as it is may paint nothing, and then the browser shows its
+        white canvas beside the image, which the picture shows too: opaque,
+        not a hole.
+        """
+        document = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+            "* { margin: 0; padding: 0; } body { width: 1280px; height: 720px; } "
+            ".slide { width: 1280px; height: 720px; }</style></head><body>"
+            '<div class="slide" style="background: url('
+            + _stripes_png()
+            + ') no-repeat center / contain;">'
+            f'<h1 style="font-size: 40px; color: #FFFFFF;">{IMAGE_GROUND_TITLE}</h1>'
+            "</div></body></html>"
+        )
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        pptx, failures = build_pptx_guarded("image ground", [{"html": document}])
+        assert failures == [], failures
+        _assert_ground_is_no_item(pptx, "the canvas ground")
+        assert browser_pixels(document, [(150.0, 450.0)]) == [(255, 255, 255)], (
+            "fixture drift: the browser does not show its white canvas beside the image"
+        )
+        points = [(x, y) for x in (150.0, 640.0, 1150.0) for y in (250.0, 450.0, 650.0)]
+        _assert_ground_is_the_browsers(pptx, document, points, "the canvas ground")

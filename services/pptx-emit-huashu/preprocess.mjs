@@ -35,7 +35,12 @@ const ROOT_AND_BACKGROUND_SRC = `
   // rasterize the gradient to a PNG data URL via canvas and set it as
   // body's background-image, which the slide background embeds as a
   // full-slide picture. Solid colors (or the gradient fallback if
-  // rasterization fails) go to body's backgroundColor.
+  // rasterization fails) go to body's backgroundColor. A ground holding a
+  // data: image (a photo or a pattern, a scrim gradient over it or not) stays
+  // on the root, which the browser alone paints at its size, position and
+  // repeat: the snapshot captures it as the slide's background picture
+  // (snapshot.mjs groundCapture), and only its colour, what the slide falls
+  // back to, is copied to body.
   // rasterizeGradientToDataURL is GRADIENT_SOURCE's (gradient.mjs), composed
   // ahead of this fragment.
   //
@@ -183,6 +188,10 @@ const ROOT_AND_BACKGROUND_SRC = `
     return { matched: false, steps: WALK_STEP_LIMIT, stoppedAt: '(unread)', reason: 'iteration limit reached' };
   }
 
+  // A ground layer the export embeds: a data: image (SDR-4437). The slide's
+  // CSP loads no other, so another url() paints nothing.
+  const DATA_IMAGE_LAYER = /url\\(\\s*["']?data:/i;
+
   // The root is passed in, located once by the caller, so a rootless deck reports
   // its no-root diagnostic exactly once.
   function transferSlideRootBackground(root) {
@@ -190,6 +199,11 @@ const ROOT_AND_BACKGROUND_SRC = `
     const body = queryOne('body');
     const cs = window.getComputedStyle(root);
     const bgImage = cs.backgroundImage;
+    if (bgImage && DATA_IMAGE_LAYER.test(bgImage)) {
+      const colour = cs.backgroundColor;
+      if (colour && colour !== 'rgba(0, 0, 0, 0)' && colour !== 'transparent') body.style.backgroundColor = colour;
+      return 'image';
+    }
     if (bgImage && bgImage !== 'none' && /gradient/.test(bgImage)) {
       // Rasterize the gradient at slide dims so the export sees a real
       // image (preserving the 135° sweep). 1280×720 is our standard.
@@ -235,8 +249,9 @@ const ROOT_AND_BACKGROUND_SRC = `
 
 // Evaluated into the slide's page by render_slide.cjs before the snapshot, and
 // by probe_bg_transfer.mjs, which reports the branch it took. Returns
-// { bgTransferred }: 'gradient-raster', 'gradient-firststop', 'solid' or
-// 'unchanged' for a slide root, 'no-root' when the locator resolves none.
+// { bgTransferred }: 'image', 'gradient-raster', 'gradient-firststop',
+// 'solid' or 'unchanged' for a slide root, 'no-root' when the locator
+// resolves none.
 export const PREPROCESS_SOURCE = `
 (function () {
   const DOM_ACCESS_LOG_PREFIX = '[preprocess]';
