@@ -453,8 +453,13 @@ to 0.03 in each app.
   cast none from an unfilled shape. Its fill is the box's own colour under an opaque box, else
   the one colour the export paints beneath it; where no one colour does, the shapes are dropped
   and the box keeps its first layer, as before. The box stays on top, so a click selects the
-  box; a shadow shape is reached through the selection pane, and moving the box leaves it behind.
-  pptxgenjs writes no groups, so the shapes are ordered, not grouped.
+  box; a shadow shape is reached through the selection pane. pptxgenjs writes no groups, so the
+  shapes are ordered under the box, not grouped with it (what a moved box leaves behind: the
+  owner-facing notes and the owner decision below).
+- **Ruling (D4, fix round 1):** a ring listed before the first shadow (Tailwind's ring, then
+  shadow) paints over that shadow, so when such a ring is a shape of its own the box carries no
+  shadow and every shadow layer is a shadow shape, in CSS order. An opaque ring that is the box's
+  outline is drawn with the box, over its shadow, and changes nothing.
 - **Ruling (D5):** a rounded overflow clip is carried with the clip (`rounds`); a native table
   leaves a cell a rounded corner cuts unfilled and draws its fill as a custom shape under the
   table, cut to the corner. The table stays native and every cell keeps its text.
@@ -468,14 +473,49 @@ to 0.03 in each app.
   none, and a grown shadow shape would show). A dotted table-cell border is still written dashed
   (pptxgenjs's table borders are solid or dashed). The deck for PowerPoint runs dotted lines from
   their start, so its dots sit 0.8 px off Chrome's; its spacing is right.
+- **Limits (D5):** a corner cell's own outer border, written on its `a:tc`, still draws square
+  past the wrapper's arc (an `a:tc` border cannot be clipped; the data table has none). A
+  `<table>`'s own background shape (its fill, radius and shadow under the frame) does not read
+  the clip's `rounds`: carried to B3, with D3, which clips shapes to a rounded clip.
 - **Harness note:** one Google conversion (the in-repo deck, in the first after-run) drew every
   slide's text wider and lower, scoring 1.5 worse on average, although its deck was byte-identical
   to the baseline's. Converting the same file again reproduced the baseline on all 17 slides to
   the hundredth, and so did the final run. A Google regression on an unchanged deck is the
   conversion, not the export: re-convert before reading it as one.
-- **Owner-facing notes:** a shadow shape under a card is left behind when the card alone is
-  moved in PowerPoint or Slides (select both, or delete it); in the Google deck a dotted border
-  is a freeform stroke, which moves and recolours whole but is not a preset line.
+- **Owner-facing notes (what a moved object leaves behind):**
+  - A card's text and its box were already separate objects before B2: moving the box alone
+    has always left its text in place.
+  - A card with a two-layer shadow (every design-system `--shadow-md` and `--shadow-sm` card)
+    has, under its box, a shadow shape that is an **opaque copy of the card's own shape, in the
+    card's own colour, casting the soft shadow**. Moving the card alone leaves that copy behind,
+    a visible ghost card where the card was. Select the card and its "Shadow" together (or
+    delete the "Shadow") to move it cleanly.
+  - An unfilled box's shadow shapes (the data table's wrapper, the medallion frame) are opaque
+    copies of its shape in the slide's colour beneath, casting its shadow; they stay behind too.
+  - A moved data table leaves behind its rounded corner pieces (coral above, white below),
+    while its own corner cells, unfilled, move with it and show what is beneath them.
+  - In the Google deck a dotted border is a freeform stroke, which moves and recolours whole
+    but is not a preset line; a dotted box's border is a stroke separate from its box.
+
+### Owner decision: how a box's extra shadow layers are written
+
+| Option | What a moved card leaves | Shadow tail below a `--shadow-md` card (`slide-three-cards`), PowerPoint / Google | Summed darkening, PowerPoint / Google |
+|---|---|---|---|
+| UI | | 26 px | 176 |
+| before B2 (first layer only) | nothing | 5 / 5 px | 27 / 28 |
+| **(a)** separate shadow shapes (as built) | an opaque ghost of the card, with its shadow | 21 / 18 px | 160 / 142 |
+| **(b)** one fitted shadow per box, no extra shapes (measured, not built) | nothing | 16 / 14 px | 146 / 141 |
+| **(c)** (a), grouped with its box by post-processing into `p:grpSp` (not built) | nothing: the group moves whole | as (a) | as (a) |
+
+- **(a)** keeps every layer: the closest look, and one more shape per extra layer.
+- **(b)** is the one layer closest, by least squares over the profile below and beside the box,
+  to the two layers' composite in CSS's box-shadow model: `0 5px 15px rgba(27,49,57,.14)` for
+  `--shadow-md`. It needs no extra shapes, and its tail is 5 px (PowerPoint) and 4 px (Google)
+  shorter than (a)'s. Slide scores, (a) against (b) rendered together: PowerPoint 1.31 / 1.33,
+  Google 1.04 / 1.04. An unfilled box would still need (a)'s filled shape to cast at all.
+- **(c)** groups each box with its shadow shapes, written after pptxgenjs (which writes no
+  groups). A larger variant would group each card's pieces together, its text included. A
+  click then selects the group first, and a second click its part.
 
 ### Google Slides decks kept for the owner
 

@@ -502,6 +502,12 @@ DOTTED_BOX = ("7B2FBE", 2.0)
 # widths further along, puts Drive's dots in each other's gaps: one width on,
 # one off (measured 1:1 at 1, 2 and 3 px).
 DOT_PITCH_WIDTHS = 2.0
+# A square box whose uniform border is dotted, with no fill: its outline alone.
+DOTTED_SQUARE_BODY = (
+    '<div class="slide"><div id="dotted-square" style="position: absolute; left: 200px; '
+    'top: 200px; width: 200px; height: 200px; border: 3px dotted #1B3139;"></div></div>'
+)
+DOTTED_SQUARE = ("1B3139", 3.0)
 # Points of a dotted stroke's subpaths lie where the side's centre line does, within this.
 STROKE_POINT_TOLERANCE_PX = 0.05
 
@@ -2193,6 +2199,29 @@ def _along(points: list[tuple[float, float]], closed: bool, distance: float) -> 
     raise AssertionError(f"the polyline is shorter than {distance} px more")
 
 
+def _assert_rotated_a_pitch(
+    first: list[tuple[float, float]], second: list[tuple[float, float]], pitch: float, what: str
+) -> None:
+    """The closed second pass is the first's polygon begun ``pitch`` along: the point that far
+    along, then every vertex of the first from the next one round to the one before it, so it
+    runs the whole outline and closes along it, with no shortcut across it."""
+    later = _along(first, True, pitch)
+    run = first + [first[0]]
+    travelled = 0.0
+    following = None
+    for index, (start, end) in enumerate(zip(run, run[1:])):
+        length = ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5
+        if travelled + length > pitch:
+            following = index + 1
+            break
+        travelled += length
+    assert following is not None, f"{what}: the outline is shorter than the pitch"
+    rotated = [later] + first[following:] + first[:following]
+    assert len(second) == len(rotated) and all(
+        _near(point, expected) for point, expected in zip(second, rotated)
+    ), f"{what}: the second pass is {second}, not the first rotated a pitch along: {rotated}"
+
+
 def _near(a: tuple[float, float], b: tuple[float, float]) -> bool:
     return (
         abs(a[0] - b[0]) <= STROKE_POINT_TOLERANCE_PX
@@ -2311,10 +2340,7 @@ class TestDottedStrokesForGoogleSlides:
             f"{[(len(points), closed) for points, closed in subpaths]}"
         )
         (first, _), (second, _) = subpaths
-        later = _along(first, True, DOT_PITCH_WIDTHS * width_px)
-        assert _near(second[0], later), (
-            f"the second pass starts at {second[0]}, not {later}, two widths along the first"
-        )
+        _assert_rotated_a_pitch(first, second, DOT_PITCH_WIDTHS * width_px, "the dotted box")
         radius = 12 - width_px / 2
         for point in first + second:
             x = min(
@@ -2333,6 +2359,48 @@ class TestDottedStrokesForGoogleSlides:
             )
             on_arc = abs(((point[0] - x) ** 2 + (point[1] - y) ** 2) ** 0.5 - radius) <= 0.1
             assert on_edge or on_arc, f"{point} lies off the border's rounded centre line"
+
+    def test_a_dotted_square_outline_is_its_rect_traced_twice_without_a_shortcut(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A square box with a uniform 3 px dotted border and no fill, in the deck for Google.
+
+        Its border is one unfilled custom shape over the border's centre line
+        (the border box inset by 1.5 px), holding two closed subpaths: the rect
+        clockwise from its top left, and the same rect begun 6 px (two widths)
+        along its top edge, which runs round every corner and back along the top
+        edge to where it began, so its close draws no diagonal across the box.
+        No other shape is drawn.
+        """
+        colour, width_px = DOTTED_SQUARE
+        rect = browser_rect(_document(DOTTED_SQUARE_BODY), "#dotted-square")
+        pptx = _export(DOTTED_SQUARE_BODY, monkeypatch, target="gslides")
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+
+        strokes = _dotted_strokes(shapes, colour)
+        assert len(shapes) == 1 and len(strokes) == 1, (
+            f"expected the dotted border alone:\n{_describe(shapes)}"
+        )
+        stroke = shapes[strokes[0]]
+        centre_line = _grown(rect, -width_px / 2)
+        _assert_box(stroke, centre_line, OUTLINE_TOLERANCE_PX, "the border's centre line")
+        subpaths = _subpaths(elements[strokes[0]], stroke)
+        assert len(subpaths) == 2 and subpaths[0][1] and subpaths[1][1], (
+            f"expected two closed subpaths, got {subpaths}"
+        )
+        (first, _), (second, _) = subpaths
+        left, top = centre_line["x"], centre_line["y"]
+        right, bottom = left + centre_line["w"], top + centre_line["h"]
+        corners = [(left, top), (right, top), (right, bottom), (left, bottom)]
+        assert len(first) == 4 and all(_near(a, b) for a, b in zip(first, corners)), (
+            f"the first pass is {first}, not the rect's corners {corners}"
+        )
+        _assert_rotated_a_pitch(first, second, DOT_PITCH_WIDTHS * width_px, "the dotted square")
+        for start, end in zip(second, second[1:] + second[:1]):
+            assert _near((start[0], end[1]), start) or _near((end[0], start[1]), start), (
+                f"the second pass runs across the box from {start} to {end}"
+            )
 
 
 # ---------------------------------------------------------------------------

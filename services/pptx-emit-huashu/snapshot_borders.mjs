@@ -43,7 +43,7 @@ function createBorders(env) {
   } = env;
   // A border that is the same on all four sides is the shape's outline. A
   // border that differs between sides is a line per painted side (pushSideLines).
-  // A spread-only box-shadow is an outline ring (spreadRings).
+  // A spread-only box-shadow layer is a ring (paintedLayers).
   const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
 
   // The dash a border style paints with: dashed and dotted keep theirs, and
@@ -204,9 +204,11 @@ function createBorders(env) {
   //     the box's fill (a box-shadow paints outside the border box only), so
   //     its box keeps its fill at the border box;
   //   - a shadow, a blurred or offset layer: the box's own when the box's fill
-  //     is opaque and this is the first such layer, since one shape carries one
-  //     outer shadow and a shadow under an opaque fill shows outside the box
-  //     alone; every other one a shadow shape of its own (shadowShape). Under a
+  //     is opaque, this is the first such layer and no ring listed before it is
+  //     a shape of its own, since one shape carries one outer shadow, a shadow
+  //     under an opaque fill shows outside the box alone, and a box's shadow
+  //     paints with the box, over every shape under it; every other one a
+  //     shadow shape of its own (shadowShape). Under a
   //     box with no fill, or a translucent one, every shadow is a shadow shape:
   //     neither app casts a shadow from an unfilled shape, and both draw one
   //     under a translucent fill, through it, where the browser shows what
@@ -234,10 +236,15 @@ function createBorders(env) {
     const outlineRing = !line && top && top.ring && top.ring.alpha >= 1 ? top.ring : null;
     const opaque = Boolean(fill) && fill.alpha >= 1;
     let firstShadow = null;
+    // A ring listed before the first shadow paints over it (Tailwind's ring,
+    // then shadow); drawn as a shape under the box, it would lie under the
+    // box's own shadow, so then every shadow is a shape, in order.
+    let ringOverShadow = false;
     for (let index = 0; index < layers.length && !firstShadow; index++) {
       if (layers[index].shadow) firstShadow = layers[index];
+      else if (layers[index].ring !== outlineRing) ringOverShadow = true;
     }
-    const ownShadow = opaque ? firstShadow : null;
+    const ownShadow = opaque && !ringOverShadow ? firstShadow : null;
     // What the shadow shapes of a box with no opaque fill cover at most: its border box.
     const footprint = { x: box.x, y: box.y, w: box.w, h: box.h, geometry: corners.geometry, radius: corners.radius, rotate: box.rotate };
     const pending = !opaque && firstShadow ? { shapes: [], box: [], shadow: firstShadow.shadow, footprint } : null;

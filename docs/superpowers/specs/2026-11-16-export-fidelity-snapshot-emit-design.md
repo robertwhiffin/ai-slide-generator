@@ -318,8 +318,9 @@ Every item carries its order key, so the emitted stacking matches the screen.
     (as built, Task 14 B2);
   - a blurred or offset layer is an outer shadow. One shape carries one, and neither app
     casts a shadow from an unfilled shape or more than a faint one from a translucent fill.
-    So the box's own shape carries the first layer when its fill is opaque, and every other
-    layer is a *shadow shape* under the box: its border box (shrunk by a negative spread),
+    So the box's own shape carries the first layer when its fill is opaque and no ring listed
+    before that layer is a shape of its own (which the box's shadow would paint over), and every
+    other layer is a *shadow shape* under the box: its border box (shrunk by a negative spread),
     unoutlined, named "Shadow", filled so it shows nothing but its shadow: with the box's own
     colour under an opaque box, else with the one colour the export paints beneath it. Where
     no one colour lies beneath (text, a picture, a shape's edge, a picture ground), the
