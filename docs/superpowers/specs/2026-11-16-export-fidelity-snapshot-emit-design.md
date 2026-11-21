@@ -328,7 +328,20 @@ Every item carries its order key, so the emitted stacking matches the screen.
 - cumulative opacity.
 
 An overflow box with round corners clips to its rounded padding box. The clip carries that
-box, which a native table's corner cells read (Tables).
+box, and what it cuts is cut to it (as built, B3): a shape's fill and outline become a
+custom-geometry path cut to its arcs (a Harvey ball's fill to its circle, a card's header
+band to the card's corners), its outline left open along the cut; a side line ends where
+its centre line meets the arc; a native table's corner cells and its own background round
+with it (Tables); a raster picture its arcs cut is captured, cut as the browser cuts it.
+Text is never cut, and stays native.
+
+**The slide's ground** (as built, B3). The slide root's ground is the slide's `<p:bg>`. A
+colour or a gradient moves to body (§2) and is read from there. A ground holding a `data:`
+image (a photo, a pattern, a scrim gradient over it or not) stays on the root, and one
+*ground* capture of the whole slide, the root's own box shown and html, body and the white
+canvas kept, everything else hidden, is the background picture: every layer at the size,
+position and repeat the browser fits it at. The root's border is drawn natively over it; its
+colour is the fallback when the capture fails.
 
 Gradients of any kind, background images, `filter`, `mix-blend-mode`, `clip-path` and
 masks go to capture as a box-only picture; the box's text stays separate and editable.
@@ -411,7 +424,14 @@ A1), an italic webfont run's typeface (for PowerPoint its italic static's own na
 italic off; for Google the family plus italic), and U+2011 (written as U+002D for Google).
 In any box: a dotted border (for PowerPoint dashed `sysDot`, one width on and one off; for
 Google, whose every dot dash is one on and three off, one unfilled custom shape drawing the
-centre line twice, the second pass two widths along).
+centre line twice, the second pass two widths along; a table cell's dotted border is one
+`a:ln`, which holds no second stroke, so both decks write it `sysDot`, which Google draws as
+its DOT). A native table's grid (B3): for PowerPoint, whose PDF anti-aliases two cell fills
+meeting between pixels into a seam, each grid line lies where Chrome paints it, its border's
+first edge on the whole px nearest the browser's (a line with no border on that px, a 1 px
+rule half a px past it), the margins keeping each cell's text where the browser set it;
+for Google, which draws no seam and shows no CSS px as a whole pixel, the browser's own
+grid. The snapshot is told the target for this one construct.
 `build_pptx_huashu(..., target=...)` names the app the deck is for: `"pptx"` (the download)
 or `"gslides"` (the Google Slides route). Only those constructs branch. In the Google deck a
 script glyph on a line the browser did not grow is drawn at 0.8 of its size, an accepted
@@ -437,7 +457,10 @@ PowerPoint pictures have no radius.
 - table radius and shadow, as a shape under the table;
 - where a rounded clip (a wrapper's `border-radius` with `overflow: hidden`) cuts a filled
   cell, the cell is unfilled in the table, and its fill is a custom shape under the table,
-  the cell cut to the rounded padding box (as built, B2: an `a:tc` cannot be clipped).
+  the cell cut to the rounded padding box (as built, B2: an `a:tc` cannot be clipped); the
+  table's own background is cut to that box too (B3);
+- a dotted border is written `sysDot` (B3): pptxgenjs writes table borders only solid or
+  dashed, so the deck's XML is rewritten for it once written.
 
 A cell holding an image, SVG, Harvey ball or block layout keeps the native table, and that
 content is overlaid as its own items at its measured rect. A table containing a nested
@@ -449,7 +472,10 @@ Each capture target is taken from the **original, untouched page**:
 1. An isolation stylesheet makes every element `visibility:hidden` except the target
    subtree. Visibility does not change layout.
 2. The target's rect is screenshotted at device scale 2 with a transparent background.
-   Box-only captures also make the target's text transparent.
+   Box-only captures also make the target's text transparent. The slide root's image
+   ground is a *ground* capture: the whole slide, html and body shown with their own
+   grounds on the white canvas, their text transparent, the root as in a box-only capture
+   (as built, B3).
 3. The stylesheet is removed.
 
 This captures exactly what the browser paints, including the deck's CSS, webfonts, CSS

@@ -524,3 +524,175 @@ to 0.03 in each app.
 
 The baseline, first-run, re-conversion and probe presentations were deleted by id and
 confirmed gone (`files.get` 404).
+
+## Phase B, batch B3: clipping, tables and the slide root's image ground (D3, D7, D9, D10), engine `6733070c`
+
+Commits:
+- `e468466f` table grid lines on whole px (D7, first form);
+- `c0ca9dbe` what a rounded overflow box clips is cut to its round corners (D3, with the table's own
+  background);
+- `345a2849` a slide root's image ground is the slide's background picture (D9);
+- `fd473854` dotted table-cell borders written `sysDot` (D10);
+- `6733070c` the grid's rules kept crisp, the whole-px grid for the PowerPoint deck alone (D7, as
+  built).
+
+The app probes behind each decision are in `scripts/export_fidelity/CALIBRATION.md` (D10, D7).
+Both corpora were re-run with `run.py --pin-fonts --powerpoint --gslides`; the baseline is a
+fresh run at `3066f801`, identical to B2's final run on every slide in both apps.
+
+### Scores, baseline (`3066f801`) → B3 (`6733070c`)
+
+In-repo corpus (17 slides). The PowerPoint deck changes on its four native-table slides alone
+(D7); every slide's XML in the Google deck is byte-identical to the baseline's.
+
+| Slide | Defect | PowerPoint | Google |
+|---|---|---|---|
+| 04-harvey-table-caption | D7 | 2.36 → 2.13 | 2.97 → 2.97 |
+| 05-balance-sheet-two-tables | D7 | 2.26 → 2.00 | 1.80 → 1.80 |
+| 06-delta-pills-table-callout | D7 | 2.02 → 1.88 | 2.72 → 2.72 |
+| 15-dense-table-badges-zebra | D7 | 1.72 → 1.38 | 2.56 → 2.56 |
+| the other 13 slides | | unchanged to the hundredth | unchanged |
+| **mean** | | **1.92 → 1.86** | **2.40 → 2.40** |
+
+Design-system corpus (27 slides):
+
+| Slide | Defect | PowerPoint | Google |
+|---|---|---|---|
+| slide-2x2-matrix |  | 2.19 → 2.19 | 1.73 → 1.73 |
+| slide-action-title |  | 1.59 → 1.59 | 2.27 → 2.27 |
+| slide-agenda |  | 0.84 → 0.84 | 0.96 → 0.96 |
+| slide-azure-flow-example |  | 1.67 → 1.67 | 1.25 → 1.25 |
+| slide-bold-title |  | 1.63 → 1.63 | 1.43 → 1.43 |
+| slide-charts |  | 0.97 → 0.97 | 0.83 → 0.83 |
+| slide-closing |  | 0.92 → 0.92 | 0.71 → 0.71 |
+| slide-comparison | D3, D7 | 1.36 → 1.25 | 1.50 → 1.44 |
+| slide-content |  | 2.22 → 2.22 | 1.75 → 1.75 |
+| slide-cover |  | 2.46 → 2.46 | 1.83 → 1.83 |
+| slide-data-table | D7 | 2.10 → 1.99 | 1.17 → 1.17 |
+| slide-event-cover |  | 2.03 → 2.03 | 1.27 → 1.27 |
+| slide-executive-summary |  | 3.97 → 3.97 | 2.59 → 2.59 |
+| slide-industry-title |  | 2.39 → 2.39 | 2.93 → 2.93 |
+| slide-journey |  | 1.21 → 1.21 | 0.75 → 0.75 |
+| slide-kpi-dashboard |  | 2.21 → 2.21 | 1.93 → 1.93 |
+| slide-lakehouse-blueprint | D3 | 2.73 → 2.72 | 2.05 → 2.04 |
+| slide-medallion | D3 | 1.77 → 1.77 | 1.93 → 1.93 |
+| slide-milestones |  | 1.18 → 1.18 | 0.86 → 0.86 |
+| slide-reference-architecture |  | 1.97 → 1.97 | 1.96 → 1.96 |
+| slide-section |  | 0.90 → 0.90 | 1.38 → 1.38 |
+| slide-statement |  | 1.62 → 1.62 | 2.39 → 2.39 |
+| slide-stats |  | 1.09 → 1.09 | 1.09 → 1.09 |
+| slide-three-cards |  | 1.31 → 1.31 | 0.99 → 0.99 |
+| slide-timeline |  | 0.61 → 0.61 | 0.82 → 0.82 |
+| slide-two-column |  | 1.84 → 1.84 | 1.44 → 1.44 |
+| slide-waterfall |  | 1.51 → 1.51 | 1.15 → 1.15 |
+| **mean** | | **1.71 → 1.71** | **1.52 → 1.51** |
+
+Only the slides tagged change, in either deck (in the Google deck only those D3 touches). No slide is worse in either app. No text
+loss, no MODEL DROPS, no export or capture failures, in both corpora and both targets. Neither
+corpus has a slide root painting an image or a dotted table border, so D9 and D10 are measured
+on probe decks below.
+
+**D9's probe corpus** (four slides: a `.slide` root painting a banded 400 px square `center /
+cover` over black; a photo `center / cover` under a scrim gradient; a `<section>` root
+painting the bands `right / contain` over 123456; the bands `contain` on a root with no colour,
+body 2B0D08), the same harness against the baseline engine:
+
+| Slide | PowerPoint | Google |
+|---|---|---|
+| 01 cover | 106.05 → 0.25 | 106.07 → 0.32 |
+| 02 photo under a scrim | 55.21 → 0.64 | 55.26 → 0.61 |
+| 03 contain, section root | 47.40 → 0.33 | 47.46 → 0.42 |
+| 04 contain, body's colour beside it | 59.66 → 0.33 | 59.00 → 0.44 |
+
+### What was measured on each defect (UI / PowerPoint / Google, at 1280 px)
+
+| Defect | Measure | UI | Before | After |
+|---|---|---|---|---|
+| D3 `slide-comparison` | navy px outside the 19 Harvey balls' circles | 0 | 64, 46 | 0, 0 |
+| D3 `slide-medallion` | tile px outside the frame's 12 px corner arcs (bottom left + bottom right) | 0 + 0 | 6 + 6, 6 + 6 | 0 + 0, 0 + 0 |
+| D7 corpus 05 | seam pixel columns in PowerPoint's PDF, MuPDF / Quartz (8 interior lines in filled rows) | | 8 / 6 | 0 / 0 |
+| D7 corpus 15 | the same (16 lines) | | 6 / 8 | 0 / 0 |
+| D7 `slide-data-table` | the same (20 lines) | | 1 / 1 | 0 / 0 |
+| D7 | worst stray from the fill beside a line, levels | | 53 to 55 | 0 to 1 |
+| D7 corpus 05 | its 1 px rule at 403 px, down x = 300 | DCE0E2 on one row | two blended rows | DCE0E2 on one row |
+| D9 cover | the ground's band edges down x = 1100 | 40, 680 | none (solid 000000) | 40, 680; 40, 680 |
+| D9 contain | the letterbox edge across y = 250; the band edges | 560; 180, 360, 540 | none (solid 123456) | the same, both apps |
+| D9 contain on body | the image's left and right edges across y = 450 | 280, 1000 | none (solid 2B0D08) | 280, 1000, both apps |
+| D10 2 px dotted cell rule (probe deck) | dash / period | 2 / 4 px | PowerPoint 6 / 8 px, Google 8 / 14 px | PowerPoint 2 / 4 px, Google 2 / 8 px |
+
+D3 and D7 meet in `slide-comparison` (its Harvey balls, and its native table), in
+`slide-lakehouse-blueprint` (its rounded lanes, 12 paths cut to their corners) and in
+`slide-data-table`'s PowerPoint deck (its grid; its corner pieces now meet the grid on whole
+px). `slide-medallion`'s corners are right in both apps and score the same to the hundredth.
+
+### Rulings and corrections from B3
+
+- **Ruling (D3):** what an overflow box's round corners clip is cut to them with the existing
+  custom-geometry clip, not captured: a shape's fill and outline (the outline open along the
+  cut), a side line (ending where its centre line meets the arc), a native table's corner cells
+  and its own background; a raster picture they cut is captured, cut as the browser cuts it.
+  Text is never cut and stays native. This covers what the brief's capture alternative would
+  have (a Harvey ball) and what it could not (a card's header band, which holds text).
+- **Ruling (D7, measured):** the whole-px grid is the PowerPoint deck's alone, and a grid line
+  lies where Chrome paints its border. The first form (`e468466f`), every line on the nearest
+  whole px, cleared the seams but blurred each 1 px rule over two pixel rows (corpus 05,
+  PowerPoint 2.26 → 2.41), and cost Google Slides, which drew no seam and shows no CSS px as a
+  whole pixel in any view (its thumbnails are 1.25 px to one): `slide-data-table` 1.17 → 1.57,
+  corpus 05 1.80 → 2.17. As built, a line's border starts on the whole px nearest the
+  browser's (a line with no border lies on that px, a 1 px rule half a px past it); the deck
+  for Google keeps the browser's grid. The snapshot is told the renderer for this one
+  construct (R11g: a renderer-specific construct, chosen by measurement).
+- **Ruling (D7):** the margins are measured from the snapped lines, so each cell's text stays
+  where the browser set it; the corpus 05 margin test now measures from the browser's cell
+  edge, as its rule (padding plus half the collapsed border, where the browser puts the
+  content) says. The table's own box and the rounded boxes that cut its corner cells are
+  snapped with the grid, so a grid line snapped past a wrapper's edge by a part of a px still
+  lies on it.
+- **Correction (B2, concern 5):** the faint row at a Google corner shape's top edge is not the
+  seam family whole-px snapping fixes: Google shows no CSS px as a whole pixel, so its deck is
+  left as it was.
+- **Ruling (D9):** a slide root whose ground holds a `data:` image is the slide's `<p:bg>`
+  picture: one *ground* capture of the whole slide as the browser paints it under the root's
+  border and content (html, body and the white canvas kept, everything else hidden), each layer
+  at its own size, position and repeat; the root's border is native over it, and its colour,
+  copied to body (`bgTransferred: "image"`), is the fallback when the capture fails. A probe:
+  Chrome paints html's ground (body's, when html has none) on the canvas whatever their
+  visibility, but body's own ground under html's only when body shows, so both show in the
+  ground capture.
+- **Finding (D9, the legacy engine, measured on the test slides at `origin/main`):** a `div`
+  root's `url()` ground became a nested `<img>` (`replaceBackgroundImageWithImg`), exported as
+  a selectable picture item stretched to the slide (the 400 px square at 1280 × 720, no crop),
+  over a slide-sized black shape and a solid `<p:bg>`; a photo under a scrim gradient became
+  the gradient's first colour, the photo lost; a `<section>` root's image was lost.
+- **Ruling (D10):** a dotted table-cell border is `sysDot` in both decks. pptxgenjs writes a
+  table border only solid or `sysDash`, so the dotted sides are written dashed and their
+  `prstDash` rewritten once the deck is written (`emit_table.cjs dotTableBorders`, with the
+  zip library pptxgenjs writes with; a deck with none is written as before). Measured:
+  PowerPoint draws `sysDot` as CSS's 1:1 dot; Drive converts `sysDot` and `dot` alike to its
+  DOT, one on and three off.
+- **Not done (D10, why):** D6's two-pass stroke cannot be a cell border. A cell border is one
+  `a:ln` in `a:tcPr`, a preset or custom dash and nothing more, and Drive converts every
+  `custDash` to DASH_DOT, so Google draws a dotted cell rule at twice CSS's period, its DOT, the
+  nearest its tables have (before: a dash).
+- **Limits:** a corner cell's own outer border still draws square past the wrapper's arc (B2's
+  limit stands); a clipped shape's shadow still falls along the cut (Task 6); a rounded clip
+  cuts no text. MuPDF's 1× raster of PowerPoint's PDF bleeds about 13 % across a fill edge that
+  lies exactly on a pixel (corpus 05's header, row 183), where Quartz and the UI show none: the
+  H1 family B4 addresses.
+- **Owner-facing notes:**
+  - A slide whose root paints a photo or pattern now exports it as the slide's background
+    picture: it is not selectable or movable (Format Background in PowerPoint, Change
+    background in Google Slides), as a slide ground should be; its colour, its border and the
+    text over it stay native.
+  - A Harvey ball's fill, a card's header band and the like in a rounded clipping box are now
+    freeform shapes cut to the corners: they recolour and move whole, but are no longer
+    preset rectangles.
+  - In the Google deck a dotted table rule is Google's dot, spaced twice as wide as the UI's.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1uH2AVoDJvA_xO1lv-Kq_MD0hvIZT7MsBJQs_GEVY8_g/edit
+- Design-system corpus: https://docs.google.com/presentation/d/1wSqLCtwzCQktYKY9F4T2y1Ae39JS0_xQr2FSPTUmh-w/edit
+
+The baseline, intermediate-run and probe presentations were deleted by id and confirmed gone
+(`files.get` 404).

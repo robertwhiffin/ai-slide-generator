@@ -721,9 +721,27 @@ Measured 2026-11-21 (Task 14 B3), in PowerPoint's PDF of the corpora, rasterised
 MuPDF and by Apple's Quartz. For every interior column line between two cells of one row filled
 alike, the pixel columns either side of it over the row's middle half; a seam is one straying
 more than 6 levels from the fill. Cell fills that meet between two pixels anti-alias into a
-lighter column; Chrome snaps every box edge to a whole pixel and paints none. The grid lines
-are now the whole px nearest the browser's (`snapshot_table.mjs snappedLines`); the numbers are
-in the ledger, B3.
+lighter column; Chrome snaps every box edge to a whole pixel and paints none.
+
+The first fix put every grid line on the whole px nearest the browser's. That cleared the
+seams but blurred each 1 px rule, centred on its line, over two pixel rows (corpus 05,
+PowerPoint 2.26 → 2.41), and it cost Google Slides, which drew no seam: none of its views
+shows a CSS px as a whole pixel (its thumbnails are 1.25 px to one), so the moved edges only
+fell between its pixels (`slide-data-table` 1.17 → 1.57). So, as built:
+- the deck for PowerPoint puts each grid line where Chrome paints its border: the border's
+  first edge on the whole px nearest the browser's, so a line with no border lies on that px
+  and a 1 px rule's centre half a px past it (`snapshot_table.mjs snappedLines`; a line takes
+  the width most of its slots draw, the wider on a tie);
+- the deck for Google Slides keeps the browser's grid.
+
+| PowerPoint's PDF, seam pixel columns (MuPDF / Quartz), worst stray | before | after |
+|---|---|---|
+| corpus 05, 8 interior lines in filled rows | 8 / 6, 55 levels | 0 / 0, 1 level |
+| corpus 15, 16 lines | 6 / 8, 54 | 0 / 0, 1 |
+| `slide-data-table`, 20 lines | 1 / 1, 46 | 0 / 0, 1 |
+
+Corpus 05's 1 px rule at 403 px, down x = 300: UI DCE0E2 on one pixel row; before, two blended
+rows; after, DCE0E2 on that one row.
 
 ## Runs behind this record
 
