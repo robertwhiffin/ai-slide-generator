@@ -1,0 +1,229 @@
+# Export fidelity: verification ledger (Task 14)
+
+Plan: `docs/superpowers/plans/2026-11-16-export-fidelity-snapshot-emit.md`.
+Spec: `docs/superpowers/specs/2026-11-16-export-fidelity-snapshot-emit-design.md` (RC1–RC13).
+Harness: `scripts/export_fidelity/run.py`, `docs/technical/export-fidelity-harness.md`.
+
+This ledger records the baselines, the results and one line per corpus slide, judged against
+the spec's root causes. It holds tables only: the comparison sheets and renders stay local.
+
+## Phase A: verification at engine `d867eba8`, harness `3f4ed61e`
+
+Phase A measures and changes no engine code. Its one code change is the harness's
+`--pin-fonts` (commit `3f4ed61e`). Phase B fixes the defects below, red first, and re-runs
+both corpora.
+
+### How it was measured
+
+- **Fonts pinned on both sides.** `run.py --pin-fonts` replaces each Google Fonts `@import` with
+  the latin faces Google serves for that import, from committed OFL files. The in-repo corpus
+  pins to exactly `pinned_font_css()`. The design-system deck imports DM Sans **without** an
+  optical-size axis, so Google serves a different, weight-axis-only file; pinning it to the
+  corpus file would have changed its UI (a 48 px bold title is 702.5 px wide with its own file
+  and 645.4 px with the corpus file). It pins to its own faces, including the true italic,
+  DM Mono 300 and Barlow. A 48 px probe measured pinned and live widths equal for both decks.
+- **After.** The branch head, both corpora, both renderers:
+  `uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py <corpus> --out <dir> --pin-fonts --powerpoint --gslides`.
+- **Before (legacy).** The `origin/main` extract has no harness, so its export ran through its
+  own code:
+  - documents built as the harness builds them, with main's `build_slide_html({"slide_id", "html"}, deck)`,
+    using a deck CSS already pinned by the branch's `pinned_fonts_css`;
+  - main's `build_pptx_huashu(title, [{"html", "notes": name}], bypass_validation=True)`,
+    run from the extract with the branch's `.venv` python. Main has no `target`, so one deck
+    serves both apps.
+
+  It was then rendered with the branch harness's own `render_with_powerpoint`,
+  `render_with_google_slides`, `check_text_loss` (without hidden text, since main logs no
+  summaries) and `compare`.
+- **One UI reference.** Both runs are scored against the after run's truth images. Main's
+  documents differ only in the chart-init canvas step (Task 7). They render pixel-identical,
+  except on corpus slide 17, where main's step wipes the script-drawn canvas the UI shows.
+- **Beyond the scores.**
+  - Each slide's sheet (UI | PowerPoint | Google | difference map) was inspected by eye, with
+    zoomed crops where something differed.
+  - A line-placement check matched every browser text line (Range rects, baseline from the
+    font's ascent) against the glyph positions in PowerPoint's PDF and in Google's own PDF
+    (Drive export).
+  - Every matched line sits within **2.3 px** of the browser's baseline in both apps (95th
+    percentile 1.0–1.2 px). No line re-wraps: every unmatched segment was checked by eye
+    (hidden text, list markers, letter-spaced or monospaced gaps, fallback glyphs).
+
+### Results
+
+### In-repo corpus (tests/fixtures/export_fidelity, 17 slides)
+
+| Slide | PowerPoint before → after | Google before → after | Text loss (after) | MODEL DROPS (pptx / gslides) | Captures (taken / failed) |
+|---|---|---|---|---|---|
+| 01-cover-gradient-svg-art | 10.99 → 4.35 | 10.72 → 2.82 | none | 0 / 0 | 2 / 0 |
+| 02-agenda-grid-rules | 3.50 → 1.74 | 3.40 → 1.78 | none | 0 / 0 | 1 / 0 |
+| 03-svg-combo-chart-legend-callout | 16.40 → 4.13 | 17.08 → 2.67 | none | 0 / 0 | 3 / 0 |
+| 04-harvey-table-caption | 8.49 → 4.39 | 8.27 → 2.97 | none | 0 / 0 | 9 / 0 |
+| 05-balance-sheet-two-tables | 13.75 → 2.91 | 13.52 → 1.80 | none | 0 / 0 | 1 / 0 |
+| 06-delta-pills-table-callout | 29.54 → 4.17 | 29.35 → 2.72 | none | 0 / 0 | 1 / 0 |
+| 07-timeline-dots-mono-dates | 6.06 → 4.69 | 6.08 → 2.57 | none | 0 / 0 | 1 / 0 |
+| 08-kpi-cards-grid | 7.33 → 3.88 | 6.85 → 3.26 | none | 0 / 0 | 1 / 0 |
+| 09-pseudo-bullets-accent-quote | 7.87 → 4.67 | 8.34 → 3.55 | none (before: profit1) | 0 / 0 | 1 / 0 |
+| 10-svg-waterfall | 5.69 → 2.49 | 6.02 → 2.13 | none | 0 / 0 | 2 / 0 |
+| 11-chartjs-canvas | 2.86 → 2.07 | 2.75 → 1.63 | none | 0 / 0 | 2 / 0 |
+| 12-progress-bars-icons | 7.13 → 1.87 | 6.77 → 1.96 | none | 0 / 0 | 9 / 0 |
+| 13-code-gradtext-rotated | 5.37 → 2.31 | 4.26 → 1.82 | none | 0 / 0 | 1 / 0 |
+| 14-two-col-text-image-overlap | 4.99 → 2.51 | 5.48 → 2.15 | none | 0 / 0 | 0 / 0 |
+| 15-dense-table-badges-zebra | 5.52 → 3.13 | 5.51 → 2.56 | none | 0 / 0 | 1 / 0 |
+| 16-closing-cta | 5.46 → 3.09 | 5.41 → 1.59 | none | 0 / 0 | 1 / 0 |
+| 17-mixed-content-hidden-graphics | 10.78 → 3.13 | 10.84 → 2.79 | none | 0 / 0 | 6 / 0 |
+| **mean** | **8.93 → 3.27** | **8.86 → 2.40** | none | 0 / 0 | 42 / 0 |
+
+Slides worse than the legacy baseline in either renderer: none. PowerPoint means with the 4x box-filtered raster (see the Task 7 item): before 8.92, after 3.22.
+
+### Design-system corpus (local `$TMP/ds_fixture`, 27 slides)
+
+| Slide | PowerPoint before → after | Google before → after | Text loss (after) | MODEL DROPS (pptx / gslides) | Captures (taken / failed) |
+|---|---|---|---|---|---|
+| slide-2x2-matrix | 5.71 → 3.64 | 5.12 → 1.75 | none | 0 / 0 | 0 / 0 |
+| slide-action-title | 5.66 → 3.42 | 6.53 → 2.27 | none | 0 / 0 | 1 / 0 |
+| slide-agenda | 3.69 → 2.09 | 4.18 → 0.96 | none | 0 / 0 | 0 / 0 |
+| slide-azure-flow-example | 4.48 → 2.08 | 4.02 → 1.34 | none | 0 / 0 | 14 / 0 |
+| slide-bold-title | 5.36 → 3.18 | 5.45 → 1.43 | none | 0 / 0 | 2 / 0 |
+| slide-charts | 4.27 → 1.35 | 4.46 → 0.83 | none | 0 / 0 | 2 / 0 |
+| slide-closing | 4.43 → 1.11 | 4.18 → 0.71 | none | 0 / 0 | 1 / 0 |
+| slide-comparison | 5.12 → 2.44 | 5.39 → 1.50 | none | 0 / 0 | 0 / 0 |
+| slide-content | 6.63 → 4.21 | 6.86 → 1.75 | none | 0 / 0 | 1 / 0 |
+| slide-cover | 7.37 → 2.75 | 7.04 → 1.83 | none | 0 / 0 | 2 / 0 |
+| slide-data-table | 6.15 → 2.35 | 6.54 → 1.19 | none | 0 / 0 | 0 / 0 |
+| slide-event-cover | 6.19 → 3.88 | 6.38 → 1.27 | none | 0 / 0 | 2 / 0 |
+| slide-executive-summary | 7.69 → 6.33 | 5.30 → 2.58 | none | 0 / 0 | 0 / 0 |
+| slide-industry-title | 9.35 → 3.85 | 9.14 → 2.93 | none | 0 / 0 | 3 / 0 |
+| slide-journey | 3.12 → 1.51 | 3.42 → 0.75 | none | 0 / 0 | 0 / 0 |
+| slide-kpi-dashboard | 8.93 → 3.00 | 9.37 → 1.95 | none | 0 / 0 | 1 / 0 |
+| slide-lakehouse-blueprint | 11.44 → 3.24 | 11.32 → 2.05 | none | 0 / 0 | 9 / 0 |
+| slide-medallion | 5.29 → 3.49 | 5.69 → 1.96 | none | 0 / 0 | 0 / 0 |
+| slide-milestones | 3.20 → 1.47 | 3.34 → 0.86 | none | 0 / 0 | 0 / 0 |
+| slide-reference-architecture | 5.98 → 2.78 | 5.75 → 1.95 | none | 0 / 0 | 7 / 0 |
+| slide-section | 3.86 → 1.29 | 4.32 → 2.31 | none | 0 / 0 | 1 / 0 |
+| slide-statement | 7.80 → 3.77 | 9.40 → 2.39 | none | 0 / 0 | 1 / 0 |
+| slide-stats | 5.05 → 1.32 | 5.41 → 1.09 | none | 0 / 0 | 0 / 0 |
+| slide-three-cards | 3.73 → 2.19 | 3.82 → 1.17 | none | 0 / 0 | 3 / 0 |
+| slide-timeline | 3.78 → 0.70 | 4.06 → 0.82 | none | 0 / 0 | 0 / 0 |
+| slide-two-column | 5.78 → 2.84 | 5.95 → 1.44 | none | 0 / 0 | 0 / 0 |
+| slide-waterfall | 4.03 → 2.46 | 3.61 → 1.15 | none | 0 / 0 | 1 / 0 |
+| **mean** | **5.71 → 2.69** | **5.78 → 1.56** | none | 0 / 0 | 51 / 0 |
+
+Slides worse than the legacy baseline in either renderer: none. PowerPoint means with the 4x box-filtered raster (see the Task 7 item): before 5.68, after 2.62.
+
+
+Both corpora: no text loss, no MODEL DROPS, no export failures and no capture failures, in
+either target. Every slide improved in both renderers. The legacy engine lost one word
+(`profit1`, slide 09's superscript).
+
+### Defects found (Phase B work)
+
+| Id | Renderer | What differs from the UI | Cause (measured) | Proposed fix, owning module |
+|---|---|---|---|---|
+| D1 | PowerPoint | DM Sans **italic** runs drawn as **Bold Italic**: lines 15–42 px wider and visibly heavy (10 slides) | The run is `DM Sans` + `i="1"`. The installed statics name the regular italic's family `DM Sans Italic` (name ID 1, no italic bit), so the only italic member of family `DM Sans` is Bold Italic. PowerPoint's PDF embeds `DMSans-BoldItalic` for every such run; Google embeds `DMSans-Italic` | For the `pptx` target, write the italic static's own family (`DM Sans Italic`, `DM Sans Medium Italic`, …) with italic off. Google keeps `DM Sans` + italic. First probe both namings in PowerPoint, including a variable-font install. `emit_typography.cjs` |
+| D2 | both | A translucent spread ring (`box-shadow: 0 0 0 4px rgba(…,.18)`) on a 14 px dot draws an 18 px solid dot with a 2 px halo | The ring becomes the shape's own outline on a shape grown by half the spread, and the fill grows with it, under the translucent ring | Keep the fill at the border box, with the ring as its own unfilled shape (or keep the merge for opaque rings only). `snapshot_borders.mjs` (`spreadRings`), `emit_model.cjs` |
+| D3 | both | Harvey-ball fills (pseudo-elements inside a round `overflow:hidden` host) poke out of the circle as square corners | A rounded overflow container clips as its rectangle (deferred Task 6 minor) | Clip the children to the rounded padding box (the custom-geometry path the clipped circles already use), or capture such a host as one picture. `snapshot.mjs` (overflow clip) |
+| D4 | both | Card shadows too short and faint: the UI's shadow tail is 26 px, the export's 6 px | Only the first `box-shadow` layer is kept (one `outerShdw` per shape). The design system's `--shadow-md` and `--shadow-lg` are two layers, and the larger one is dropped | Emit each further layer as its own shadow-casting shape under the box. `snapshot_borders.mjs` (`outerShadow`), `emit_model.cjs` |
+| D5 | both | A rounded, shadowed table wrapper: square header corners and no shadow | The shadow sits on an unfilled `roundRect`, and neither app casts a shadow from `noFill`. The header cells' fills overpaint the wrapper's rounded corners | Give the shadow shape a fill hidden under the table, and clip the corner cells to the radius (or draw the header as a rounded shape under transparent cells). `emit_model.cjs`, `snapshot_table.mjs` / `emit_table.cjs` |
+| D6 | Google | Dotted 2 px borders have twice the UI's dot spacing | `sysDot` converts to the Slides `DOT` dash, whose gap is about 3× the width | For the `gslides` target, use the dash that Drive maps to a 1:1 dot (probe `dot` and `custDash`). `emit_model.cjs` |
+| D7 | PowerPoint | Light seams between filled table cells (header and total rows) | Per-cell fills meet at fractional px (`gridCol` 3104852 EMU = 325.97 px). They anti-alias into seams under **Apple's Quartz** as well as MuPDF, which corrects the Task 10 "MuPDF only" ruling. Snapping the grid to whole CSS px removed the seams in both renderers (probe) | Snap the column and row boundaries (absolute, not each width) to whole px. `emit_table.cjs` |
+| D8 | both | Glyphs DM Sans lacks fall back to another face per app: ▲▼ come out smaller (Times New Roman or Courier New in PowerPoint, Arial in Google). In Google, U+2011 comes from MS PGothic, so "end‑to‑end" at 64 px is 29 px short | The run names only the deck family. Each app picks its own fallback, unlike Chrome | Write the face Chrome used for fallback glyphs, as their own run (CDP `CSS.getPlatformFontsForNode`). For the `gslides` target, write U+2011 as U+2010. `snapshot_text.mjs`, `emit_typography.cjs` |
+| X1 | PowerPoint | Upright DM Sans lines run 0.5–1.8 % wider than the UI on every slide: titles +4.5 px median and +10.7 px at most, 22 px subtitles up to +9.6 px. Line breaks hold, inside the slack | PowerPoint for Mac applies no pair kerning to DM Sans. A probe with `kern` absent, `0` or added gave identical widths. Kerning is about 60 % of the excess (slide 07's subtitle: unkerned +5.5 px of +9.6 px). The rest is the optical-size delta's 0.5 % dead band (`OPTICAL_SIZE_THRESHOLD`) | For the `pptx` target, fold each run's kerning (measured with `font-kerning: none`) into its `spc`, and drop the dead band. `snapshot_text_metrics.mjs`, `emit_typography.cjs` |
+| H1 | harness | PowerPoint 1 px picture gridlines look dark, and same-colour logo marks show a fringe, in the harness PNG only | MuPDF's 1× raster of the embedded 2× pictures. Quartz, and MuPDF at 4× box-filtered, match the UI | `run.py`: rasterise PowerPoint's PDF at 4× and box-filter it to 1280×720 (mean PowerPoint score −0.04 corpus, −0.08 design system). Also the brief's `summary.md`. `scripts/export_fidelity/run.py` |
+
+### One line per slide
+
+DEFECT, TRADE-OFF or MATCHES, judged against RC1–RC13. X1 (PowerPoint lines 0.5–1.8 % wide) is
+on every slide, so it is listed once above and not repeated. "|Δy|" is the worst line baseline
+offset, PowerPoint / Google.
+
+**In-repo corpus.** DEFECT 7, TRADE-OFF 2, MATCHES 8.
+
+| Slide | Tag | What still differs, cause → fix | \|Δy\| px |
+|---|---|---|---|
+| 01-cover-gradient-svg-art | MATCHES | Gradient ground, SVG art, tracking and breaks as the UI | 1.9 / 1.4 |
+| 02-agenda-grid-rules | MATCHES | Grid, rules and mono numerals as the UI | 1.1 / 1.1 |
+| 03-svg-combo-chart-legend-callout | MATCHES | The chart is a picture with editable legend text. Its darker gridlines are H1, not the export | 2.0 / 1.1 |
+| 04-harvey-table-caption | DEFECT | D1: the italic caption is bold italic in PowerPoint, 42 px wider. Harvey balls, the highlighted column and the native table match | 0.6 / 1.2 |
+| 05-balance-sheet-two-tables | DEFECT | D7: seams between the coral header and dark total-row cells in PowerPoint. Both native tables sit side by side, captions in place (RC1/RC9 fixed) | 1.1 / 0.9 |
+| 06-delta-pills-table-callout | DEFECT | D1: the italic source line in PowerPoint. Pills, table and callout match; ▲▼ fall back to a slightly smaller glyph (D8) | 1.0 / 1.1 |
+| 07-timeline-dots-mono-dates | MATCHES | Dots, rule and mono dates as the UI. The 22 px subtitle is +9.6 px in PowerPoint (X1) | 0.8 / 1.2 |
+| 08-kpi-cards-grid | DEFECT | D1: the italic source line. D8: the ▲▼ deltas are visibly smaller in both apps | 0.7 / 1.2 |
+| 09-pseudo-bullets-accent-quote | DEFECT | D1: the `<em>` phrase and the italic footnote are bold italic in PowerPoint (+16 px). Pseudo bullets, accent bar, quote border, chip and superscript match | 0.5 / 1.1 |
+| 10-svg-waterfall | DEFECT | D1: the italic source line. The waterfall picture and its card match; the dark baseline is H1 | 1.1 / 1.2 |
+| 11-chartjs-canvas | TRADE-OFF | The Chart.js doughnut, with its canvas-drawn legend, is one picture ("charts become pictures"); the cards and title are native | 1.1 / 1.1 |
+| 12-progress-bars-icons | MATCHES | Progress fills, icons and the off-slide circle as the UI | 0.9 / 1.1 |
+| 13-code-gradtext-rotated | TRADE-OFF | Gradient headline words are one solid colour, the gradient's middle (spec §3 Runs; Task 3 ruling). The code block and the turned "Governed data" label match | 0.5 / 1.1 |
+| 14-two-col-text-image-overlap | MATCHES | As the UI. Light-on-dark text looks thinner in both apps, which is Chrome's macOS text rendering in the truth, not a weight change | 1.4 / 1.2 |
+| 15-dense-table-badges-zebra | DEFECT | D7: seams between header and net-income cells in PowerPoint. Zebra rows and badges match | 1.0 / 1.0 |
+| 16-closing-cta | MATCHES | As the UI | 1.4 / 1.6 |
+| 17-mixed-content-hidden-graphics | MATCHES | Icons beside bare text, hidden graphics hidden, faded copy faded, the script-drawn canvas present (the legacy export lost it) | 0.9 / 1.1 |
+
+**Design-system corpus.** DEFECT 9, TRADE-OFF 0, MATCHES 18.
+
+| Slide | Tag | What still differs, cause → fix | \|Δy\| px |
+|---|---|---|---|
+| slide-2x2-matrix | DEFECT | D2: the plotted dot's translucent ring is drawn as a larger solid dot in both apps. The matrix, the turned axis label and the bullets match | 1.1 / 0.9 |
+| slide-action-title | DEFECT | D1: the italic footnote in PowerPoint (+27 px). Bars and callout match | 0.7 / 0.9 |
+| slide-agenda | MATCHES | As the UI | 1.2 / 1.2 |
+| slide-azure-flow-example | DEFECT | D1: the italic caption (+38 px, PowerPoint). D6: the dotted column separators have double spacing in Google. D4: the `--shadow-md` cards lose their outer shadow layer | 1.5 / 0.7 |
+| slide-bold-title | MATCHES | As the UI. The logo-mark fringe in the harness PNG is H1: Quartz shows none | 1.6 / 1.6 |
+| slide-charts | MATCHES | Charts are pictures with native titles and legends. The gridlines are H1 | 0.7 / 1.1 |
+| slide-closing | MATCHES | As the UI | 1.8 / 1.6 |
+| slide-comparison | DEFECT | D3: the Harvey-ball fills show square corners outside their circles in both apps. D1: the italic legend labels in PowerPoint | 1.1 / 0.9 |
+| slide-content | MATCHES | As the UI | 0.9 / 1.1 |
+| slide-cover | MATCHES | As the UI | 2.3 / 1.7 |
+| slide-data-table | DEFECT | D5: square header corners and no wrapper shadow, in both apps. D7: header seams in PowerPoint | 0.8 / 1.1 |
+| slide-event-cover | MATCHES | As the UI. The tracked 64 px title is about +7 px in PowerPoint and −5 px in Google (glyph extent) | 1.5 / 1.4 |
+| slide-executive-summary | MATCHES | As the UI. The highest PowerPoint score of the corpus is X1 summed over its 15 lines | 1.0 / 0.9 |
+| slide-industry-title | MATCHES | As the UI, the photo capture included | 1.5 / 1.9 |
+| slide-journey | MATCHES | As the UI | 1.0 / 1.1 |
+| slide-kpi-dashboard | MATCHES | As the UI. The `--shadow-sm` second layer (D4) and the ▲ fallback (D8) are present but not visible at this size | 1.0 / 1.3 |
+| slide-lakehouse-blueprint | MATCHES | As the UI (65 lines of dense diagram) | 1.0 / 0.7 |
+| slide-medallion | MATCHES | As the UI | 1.0 / 0.9 |
+| slide-milestones | MATCHES | As the UI | 0.6 / 1.1 |
+| slide-reference-architecture | DEFECT | D1: the italic caption (+32 px, PowerPoint) | 1.2 / 0.7 |
+| slide-section | DEFECT | D8: the non-breaking hyphens in the title are drawn from MS PGothic in Google, 29 px short | 1.1 / 1.5 |
+| slide-statement | MATCHES | As the UI | 0.9 / 1.2 |
+| slide-stats | MATCHES | As the UI | 1.3 / 1.8 |
+| slide-three-cards | DEFECT | D4: card shadows are 6 px instead of the UI's 26 px tail, in both apps | 0.5 / 1.1 |
+| slide-timeline | MATCHES | As the UI | 0.4 / 1.1 |
+| slide-two-column | MATCHES | As the UI | 0.9 / 1.1 |
+| slide-waterfall | DEFECT | D1: the italic caption (+21 px, PowerPoint) | 1.1 / 0.9 |
+
+### Carry-over items
+
+| Item | Verdict |
+|---|---|
+| Task 1: unbordered shapes write `<a:ln></a:ln>` | **No default outline.** 222 (corpus) and 432 (design system) such shapes. Google reports every one as an unrendered outline (Slides API), and no PowerPoint render shows one |
+| Task 2: justified text plus slack may stretch in PowerPoint | **No stretch.** Neither corpus has `text-align: justify`. A probe paragraph exports `algn="l"` with the browser's four breaks, so nothing can stretch. The UI's flush right edge is not reproduced, by the Task 4 A3 ruling |
+| Task 2: `<a:pPr>` after every `<a:br/>` | **No repair prompt.** Every `<a:br>` in both decks (7 and 15) is followed by `<a:pPr>`. PowerPoint opened all seven decks (after, before, three probe decks) and saved them to PDF unattended; a repair dialog would have blocked the script |
+| Task 4: DM Sans italic heavier in PowerPoint | **Cause found: D1.** PowerPoint uses Bold Italic (the PDF embeds `DMSans-BoldItalic`). The fix is target-specific and needs a PowerPoint probe of the font namings, so it is Phase B |
+| Task 5: `a<br> <br>b` may drop the blank line | **Kept.** The browser draws three lines (box 100.8 px = 3 × 33.6). The export writes `alpha`, a blank paragraph and `bravo`, identical to `a<br><br>b` |
+| Task 7: dark PowerPoint gridlines in the harness PNG | **Harness artefact (H1).** The PDF raster through Quartz matches the UI. Method: MuPDF at 4× (5120 px) box-filtered to 1280×720, which also clears the logo-mark fringe. Means: corpus 3.27 → 3.22, design system 2.69 → 2.62. Adopt in `run.py` in Phase B |
+| PowerPoint seams between filled cells | **Real in PowerPoint's PDF: D7.** Visible under Quartz too (not only MuPDF), and gone when the grid is snapped to whole px. PowerPoint's own window could not be captured: this session has no Screen Recording permission (`screencapture` cannot create an image), and PowerPoint's AppleScript "save as PNG/JPG" writes no files. The owner can confirm on screen: kept in-repo deck, slide 5, zoom 100 % |
+| Mixed-size paragraph-spacing residuals (−1.68 / −3.63 / −2.62 px; half-leading) | **Not visible in the corpora.** Worst baseline offset of any matched line is 2.3 px in PowerPoint and 1.9 px in Google; the largest are the first lines of 60–88 px display text. No fix proposed from the corpora; the Task 15 decks are re-checked |
+| Form-control text (`select`, `input`, `textarea`) | **None in either corpus.** Real decks are checked in Task 15 |
+
+### Rulings and corrections from this verification
+
+- **Correction (Task 10 ruling):** the table seams are not a MuPDF-only artefact. Apple's Quartz
+  draws them from PowerPoint's PDF too, and snapping the grid to whole px removes them (D7).
+- **Correction (Task 4 numbers):** PowerPoint is up to 1.8 % wider, not "up to +0.78 %"
+  (X1). The `kern` attribute plays no part: PowerPoint for Mac does not kern DM Sans at all.
+- **Ruling:** the design-system corpus pins its own Google files, not the in-repo corpus's.
+  The two DM Sans files differ by 9 % in a 48 px title's width, and the truth must stay the
+  owner's UI.
+- **Ruling:** the "before" and "after" runs share one UI reference, the branch's
+  `build_slide_html` truth. That is the UI the user sees: main's document wipes a
+  script-drawn canvas the UI preview keeps (corpus 17).
+- **Note:** the line-placement widths of letter-spaced lines include one trailing letter
+  space on the browser side (a Range rect holds the spacing; a PDF glyph box does not).
+  The event-cover figures above are corrected for it.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus (17 slides): https://docs.google.com/presentation/d/1Bsb0-izV34VDKCBGOM6YDrqJmqRVIQ7YgTvVGC4zvXw/edit
+- Design-system corpus (27 slides): https://docs.google.com/presentation/d/10V2fOXlYx6o_pSo8j7qGfTWrk-Zs-dkD6QyhEHSSMKw/edit
+
+The two legacy-run presentations were deleted by id and confirmed gone (`files.get` 404):
+`1oGYCOUgeocQVgxwx7cOBuenpHY083fqTby2D9ly9U70` and `1cguwomh9alx4rG4dE_iB8KBCNsFUZBnJKbVLxYcFFDE`.
