@@ -227,3 +227,148 @@ offset, PowerPoint / Google.
 
 The two legacy-run presentations were deleted by id and confirmed gone (`files.get` 404):
 `1oGYCOUgeocQVgxwx7cOBuenpHY083fqTby2D9ly9U70` and `1cguwomh9alx4rG4dE_iB8KBCNsFUZBnJKbVLxYcFFDE`.
+
+## Phase B, batch B1: typography (D1, X1, D8), engine `41e4bc2e`
+
+Commits: `996e7dc6` D1, `b06e50ad` X1, `41e4bc2e` D8. The measurements, and the probes behind
+each decision, are in `scripts/export_fidelity/CALIBRATION.md` (D1, X1, D8). Both corpora were
+re-run with `run.py --pin-fonts --powerpoint --gslides`; the baseline is a fresh run at
+`07fee925`, identical to Phase A's on every slide in both apps (no run-to-run noise).
+
+### Scores, baseline (`07fee925`) → B1 (`41e4bc2e`)
+
+In-repo corpus (17 slides):
+
+| Slide | PowerPoint | Google |
+|---|---|---|
+| 01-cover-gradient-svg-art | 4.35 → 3.35 | 2.82 → 2.82 |
+| 02-agenda-grid-rules | 1.74 → 1.23 | 1.78 → 1.78 |
+| 03-svg-combo-chart-legend-callout | 4.13 → 2.28 | 2.67 → 2.67 |
+| 04-harvey-table-caption | 4.39 → 2.36 | 2.97 → 2.97 |
+| 05-balance-sheet-two-tables | 2.91 → 2.26 | 1.80 → 1.80 |
+| 06-delta-pills-table-callout | 4.17 → 2.02 | 2.72 → 2.72 |
+| 07-timeline-dots-mono-dates | 4.69 → 2.58 | 2.57 → 2.57 |
+| 08-kpi-cards-grid | 3.88 → 2.16 | 3.26 → 3.26 |
+| 09-pseudo-bullets-accent-quote | 4.67 → 2.02 | 3.55 → 3.55 |
+| 10-svg-waterfall | 2.49 → 1.51 | 2.13 → 2.13 |
+| 11-chartjs-canvas | 2.07 → 1.13 | 1.63 → 1.63 |
+| 12-progress-bars-icons | 1.87 → 1.44 | 1.96 → 1.96 |
+| 13-code-gradtext-rotated | 2.31 → 1.60 | 1.82 → 1.82 |
+| 14-two-col-text-image-overlap | 2.51 → 1.86 | 2.15 → 2.15 |
+| 15-dense-table-badges-zebra | 3.13 → 1.72 | 2.56 → 2.56 |
+| 16-closing-cta | 3.09 → 1.57 | 1.59 → 1.59 |
+| 17-mixed-content-hidden-graphics | 3.13 → 1.58 | 2.79 → 2.79 |
+| **mean** | **3.27 → 1.92** | **2.40 → 2.40** |
+
+Design-system corpus (27 slides):
+
+| Slide | PowerPoint | Google |
+|---|---|---|
+| slide-2x2-matrix | 3.64 → 2.21 | 1.75 → 1.75 |
+| slide-action-title | 3.42 → 1.59 | 2.27 → 2.27 |
+| slide-agenda | 2.09 → 0.84 | 0.96 → 0.96 |
+| slide-azure-flow-example | 2.08 → 1.67 | 1.34 → 1.34 |
+| slide-bold-title | 3.18 → 1.63 | 1.43 → 1.43 |
+| slide-charts | 1.35 → 0.97 | 0.83 → 0.83 |
+| slide-closing | 1.11 → 0.92 | 0.71 → 0.71 |
+| slide-comparison | 2.44 → 1.36 | 1.50 → 1.50 |
+| slide-content | 4.21 → 2.22 | 1.75 → 1.75 |
+| slide-cover | 2.75 → 2.46 | 1.83 → 1.83 |
+| slide-data-table | 2.35 → 2.13 | 1.19 → 1.19 |
+| slide-event-cover | 3.88 → 2.03 | 1.27 → 1.27 |
+| slide-executive-summary | 6.33 → 3.97 | 2.58 → 2.59 |
+| slide-industry-title | 3.85 → 2.39 | 2.93 → 2.93 |
+| slide-journey | 1.51 → 1.21 | 0.75 → 0.75 |
+| slide-kpi-dashboard | 3.00 → 2.23 | 1.95 → 1.95 |
+| slide-lakehouse-blueprint | 3.24 → 2.73 | 2.05 → 2.05 |
+| slide-medallion | 3.49 → 1.78 | 1.96 → 1.96 |
+| slide-milestones | 1.47 → 1.18 | 0.86 → 0.86 |
+| slide-reference-architecture | 2.78 → 1.97 | 1.95 → 1.96 |
+| slide-section | 1.29 → 0.90 | 2.31 → 1.38 |
+| slide-statement | 3.77 → 1.62 | 2.39 → 2.39 |
+| slide-stats | 1.32 → 1.09 | 1.09 → 1.09 |
+| slide-three-cards | 2.19 → 1.50 | 1.17 → 1.17 |
+| slide-timeline | 0.70 → 0.61 | 0.82 → 0.82 |
+| slide-two-column | 2.84 → 1.84 | 1.44 → 1.44 |
+| slide-waterfall | 2.46 → 1.51 | 1.15 → 1.15 |
+| **mean** | **2.69 → 1.72** | **1.56 → 1.53** |
+
+No slide is worse in either app (the largest rise is +0.01, two Google slides). Every
+PowerPoint slide improves. The Google deck changes only where D8 writes something else
+(U+2011, →): `slide-section` 2.31 → 1.38. No text loss, no MODEL DROPS, in both corpora.
+
+### D1: italic is drawn as Bold Italic in PowerPoint
+
+| | Before | After |
+|---|---|---|
+| Italic glyphs in PowerPoint's PDF | DMSans-BoldItalic (258 in-repo, 364 design system) | DMSans-Italic (258; 358 + 3 arrows in Arial Italic) |
+| Italic line width, the 10 slides (PowerPoint) | +1.5 to +41.9 px (every caption +14.8 or more) | −1.7 to +2.1 px |
+| Google | DMSans-Italic | unchanged |
+
+The deck for PowerPoint writes `<family> [Weight ]Italic` with italic off, and 700 as the family
+plus bold and italic. The deck for Google keeps the family plus italic.
+
+### X1: PowerPoint kerns no DM Sans
+
+PowerPoint line width minus the browser's, px, upright lines (the browser's width less the
+trailing letter space its Range rect holds):
+
+| Corpus | Median | Median of \|error\| | Largest \|error\| |
+|---|---|---|---|
+| in-repo, before | +0.56 | 0.60 | 15.99 |
+| in-repo, after | +0.16 | 0.23 | 2.73 |
+| design system, before | +0.76 | 0.79 | 11.14 |
+| design system, after | +0.16 | 0.30 | 3.34 |
+
+Over all lines, italic included, the largest error goes from 41.86 to 2.73 px (in-repo) and from
+37.57 to 3.34 px (design system). Keeping A1's 0.5 % band for PowerPoint measured +0.19 / 0.27 /
+4.32 in-repo against +0.16 / 0.23 / 2.73 without, and the same on the design system, so the
+band is dropped for PowerPoint. Google's line widths are unchanged.
+
+### D8: characters a webfont lacks
+
+| | PowerPoint before → after | Google before → after |
+|---|---|---|
+| ▲▼ in DM Sans | Times New Roman → Arial | Arial → Arial |
+| → in DM Sans | DM Sans (0.78 em) → Arial (1.00 em, the browser's 1.00) | DM Sans → Arial |
+| ▲▼ in DM Mono | Courier New → Courier New | Courier New → Courier New |
+| "end‑to‑end" (U+2011), 64 px, `slide-section` | +0.81 → −0.04 px | −30.05 px (MS PGothic) → +0.62 px |
+
+Both apps now draw the same face for every such character. Arial's ▲ is 0.69 em tall, the
+browser's Hiragino Sans 0.90 em: the nearest the three apps share.
+
+### Rulings and corrections from B1
+
+- **Ruling (D1):** the italic static's name, italic off, is right for both static
+  conventions: DM Sans's own-family italics, and RIBBI families such as DM Mono, whose
+  `DM Mono Italic` PowerPoint resolves to DMMono-Italic, pixel-identical to `DM Mono` plus
+  italic. Italic on slants DM Sans Italic twice. With a variable install, PowerPoint for Mac
+  resolves only each file's default instance (`DM Sans 9pt`), so the deck's family does not
+  resolve at all and cannot decide the naming.
+- **Correction (D8, the brief):** Google draws U+2010 from MS PGothic too, so the deck for
+  Google writes U+2011 as U+002D, the face's own hyphen, not as U+2010. PowerPoint draws U+2011
+  as the face's hyphen-minus (269.20 px against 269.19 for U+002D) and U+2010 from Cambria
+  Math, so the deck for PowerPoint writes U+2010 as U+002D and keeps U+2011. The harness's
+  text-loss check reads a hyphen as U+002D.
+- **Ruling (D8):** the fallback face is the run's generic family's of Arial, Times New Roman
+  and Courier New, which cover WGL4 in all three apps. Which characters a webfont lacks is
+  read with a generated coverage probe font (`coverage_font.mjs`), the same on Linux Chromium
+  as on a Mac; a family the page did not load is not read.
+- **Ruling (X1):** a run's kerning is spread over n − 1 gaps when it ends its line, and n
+  when another run follows it there. PowerPoint puts `spc` after every character, the last
+  included (measured), and kerns Arial and Times New Roman unless `kern="0"`, which pptxgenjs
+  writes with every `spc`.
+- **Superseded (R11j′):** a deck with no script run is no longer the same for both targets.
+  Tracking, italic naming and the hyphens are written per target; the cross-target tests take
+  them out as they take out script sizes.
+- **Owner check:** PowerPoint for Windows was not probed: the italic static's name for a RIBBI
+  family, and `kern="0"` turning DM Sans kerning off, are measured on PowerPoint for Mac only.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1PANCNIzpLm4c1qai-ByRBz_yto1XOInLIG6D8JAKBvs/edit
+- Design-system corpus: https://docs.google.com/presentation/d/1qRod10oTAgRFDT-9hp3xgzCbHkcJUO91YGyGUx3S8Kg/edit
+
+The baseline and probe presentations were deleted by id and confirmed gone (`files.get` 404):
+`1s4GvZG0BsB7mOQvTyJfkA2X5UjCB61EsjCDvPcl2Tt8`, `18qHrxBxjZSV9JDzWIZzNr2tXT2XhyxS_cmzTw5jV9hg`
+and `1ojKjuEjNudBDuhf_7gabGK9r71FC88nISm9nIXo8auM`.

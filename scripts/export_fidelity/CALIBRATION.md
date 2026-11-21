@@ -610,6 +610,9 @@ do: Google draws it from MS PGothic too.
 | 4 | option C, the constants above (verification) | https://docs.google.com/presentation/d/1XS2dxYxfkzb0C9hEzaWOho8dwzPO4SZ1MJF1Pk6aGYw/edit |
 
 A4 and A5 (2026-11-19) were measured on presentations the script deletes by id once read.
+D1, X1 and D8 (2026-11-21) were measured on probe decks rendered in PowerPoint and converted
+through Drive, whose presentation was deleted by id once read, and on the two corpora
+(`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1).
 
 To re-run (PowerPoint will briefly open a window):
 
