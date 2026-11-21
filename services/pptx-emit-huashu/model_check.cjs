@@ -15,7 +15,9 @@
 //     the same objects, so the slide exports all that is valid:
 //     * a capture is kept when its id is c<n> and no other capture has it, its
 //       rect is four finite numbers, its mode is 'subtree', 'box' or 'ground' and its
-//       selector is a string (capture.cjs checks what that string names);
+//       selector is a string (capture.cjs checks what that string names); and,
+//       for a 'ground' capture, when it is the model's only one, as the snapshot
+//       takes one at most (the slide root's image ground, snapshot.mjs groundCapture);
 //     * an item is kept when its kind is one the emitters write and every field
 //       they read is as the snapshot writes it (snapshot.mjs SlideModel,
 //       snapshot_text.mjs TextBlock and Run, snapshot_table.mjs TableItem): each
@@ -24,8 +26,8 @@
 //       none; a native table's cells, spans included, lie inside its grid
 //       and cover each of its slots once;
 //     * the fields: items and captures are lists, background is a raster data:
-//       image, a colour, or a colour beside a kept capture it names (the slide
-//       root's image ground), as emit_model.cjs applyBackground takes it,
+//       image, a colour, or a colour beside the kept 'ground' capture it names
+//       (the slide root's image ground), as emit_model.cjs applyBackground takes it,
 //       fonts and italicFonts map families to weights, reference.hiddenText is a
 //       string, and stats.elements and stats.pseudoElements are counts.
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
@@ -234,24 +236,30 @@ function isCapture(capture) {
     (capture.pseudo === null || capture.pseudo === undefined || PSEUDO_ELEMENTS.has(capture.pseudo));
 }
 
-// The captures kept, in order: each well formed, with an id no other has.
+// The captures kept, in order: each well formed, with an id no other has, and
+// a ground capture only when no other capture is one.
 function checkCaptures(captures) {
   const seen = new Map();
+  let grounds = 0;
   for (const capture of captures) {
-    if (isCapture(capture)) seen.set(capture.id, (seen.get(capture.id) || 0) + 1);
+    if (!isCapture(capture)) continue;
+    seen.set(capture.id, (seen.get(capture.id) || 0) + 1);
+    if (capture.mode === 'ground') grounds += 1;
   }
-  return captures.filter((capture) => isCapture(capture) && seen.get(capture.id) === 1);
+  return captures.filter((capture) => isCapture(capture) && seen.get(capture.id) === 1 &&
+    (capture.mode !== 'ground' || grounds === 1));
 }
 
 // The slide's ground as emit_model.cjs applyBackground takes it: an image only
-// when it is a raster data: URI, a ground picture only when it names a kept
-// capture, and otherwise a colour, which must be one (a ground picture's too,
-// what the slide falls back to).
-function isBackground(background, captureIds) {
+// when it is a raster data: URI, a ground picture only when it names the kept
+// 'ground' capture (never a chart's or a box's picture), and otherwise a
+// colour, which must be one (a ground picture's too, what the slide falls back
+// to). `groundIds` holds the ids of the kept ground captures.
+function isBackground(background, groundIds) {
   if (background === null) return true;
   if (!isObject(background)) return false;
   if (typeof background.image === 'string' && RASTER_DATA_URI.test(background.image)) return true;
-  if (background.captureId !== undefined && !captureIds.has(background.captureId)) return false;
+  if (background.captureId !== undefined && !groundIds.has(background.captureId)) return false;
   return isColour(background.color);
 }
 
@@ -277,7 +285,8 @@ function checkModel(model) {
     fields += 1;
     return empty;
   };
-  const background = kept(isBackground(source.background, captureIds), source.background, null);
+  const groundIds = new Set(captures.filter((capture) => capture.mode === 'ground').map((capture) => capture.id));
+  const background = kept(isBackground(source.background, groundIds), source.background, null);
   const fonts = kept(isFonts(source.fonts), source.fonts, {});
   const italicFonts = kept(isFonts(source.italicFonts), source.italicFonts, {});
   const reference = kept(isObject(source.reference) && typeof source.reference.hiddenText === 'string',

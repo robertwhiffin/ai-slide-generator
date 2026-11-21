@@ -1768,6 +1768,23 @@ def _cell(row: int, col: int, **fields: object) -> dict:
     return cell
 
 
+def _ground_capture(capture_id: str) -> dict:
+    """The slide root's image ground as the snapshot names it: a whole-slide ``ground`` capture."""
+    return {
+        "id": capture_id,
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 720,
+        "mode": "ground",
+        "selector": f'[data-tellr-capture="{capture_id}"]',
+        "pseudo": None,
+        "hiddenWithin": False,
+        "paint": {"borderColors": ["rgb(0, 0, 0)"] * 4, "boxShadow": "none"},
+        "bordersHidden": True,
+    }
+
+
 def _valid_model() -> dict:
     """One item of every kind, every optional field the snapshot writes, and two captures."""
     return {
@@ -1998,6 +2015,16 @@ def _set_each(*changes: tuple[str, object]):
     return mutate
 
 
+def _in_turn(*mutations):
+    """A mutation of the valid model: each of ``mutations`` made in turn."""
+
+    def mutate(model: dict) -> None:
+        for mutation in mutations:
+            mutation(model)
+
+    return mutate
+
+
 def _append(path: str, value: object):
     def mutate(model: dict) -> None:
         target = model
@@ -2036,6 +2063,15 @@ MODEL_DEFECTS = {
     "capture-selector-not-a-string": (_set("captures.0.selector", None), {3}, 1),
     "capture-pseudo-unknown": (_set("captures.1.pseudo", "first-line"), set(), 1),
     "capture-not-an-object": (_append("captures", "c9"), set(), 1),
+    # The snapshot takes one ground capture at most (the slide root's): a model
+    # holding two did not come from it, so neither is kept.
+    "capture-ground-twice": (
+        _in_turn(
+            _append("captures", _ground_capture("c2")), _append("captures", _ground_capture("c3"))
+        ),
+        set(),
+        2,
+    ),
     "item-kind-unknown": (_append("items", {"kind": "script", "id": 8, "x": 0, "y": 0}), {8}, 0),
     "item-not-an-object": (_append("items", None), {None}, 0),
     "image-capture-missing": (_set("items.3.captureId", "c9"), {3}, 0),
@@ -2156,6 +2192,12 @@ MODEL_FIELD_DEFECTS = {
         "background",
         None,
     ),
+    # The ground picture is the slide root's ground capture, never a chart's or a box's.
+    "background-capture-not-a-ground": (
+        _set("background", {"color": "F9F7F4", "captureId": "c0"}),
+        "background",
+        None,
+    ),
     "background-ground-colour-injected": (
         _set("background", {"color": INJECTED_COLOUR, "captureId": "c0"}),
         "background",
@@ -2195,25 +2237,21 @@ class TestModelCheck:
     def test_a_ground_picture_background_passes_untouched(self) -> None:
         """The slide root's image ground: a whole-slide ``ground`` capture the background names."""
         model = _valid_model()
-        model["captures"].append(
-            {
-                "id": "c2",
-                "x": 0,
-                "y": 0,
-                "w": 1280,
-                "h": 720,
-                "mode": "ground",
-                "selector": '[data-tellr-capture="c2"]',
-                "pseudo": None,
-                "hiddenWithin": False,
-                "paint": {"borderColors": ["rgb(0, 0, 0)"] * 4, "boxShadow": "none"},
-                "bordersHidden": True,
-            }
-        )
+        model["captures"].append(_ground_capture("c2"))
         model["background"] = {"color": "F9F7F4", "captureId": "c2"}
         checked = _check_model(model)
         assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}
         assert checked["model"] == model
+
+    def test_a_background_naming_one_of_two_ground_captures_is_reset(self) -> None:
+        """Two ground captures: both are dropped, so the background naming one is reset."""
+        model = _valid_model()
+        model["captures"] += [_ground_capture("c2"), _ground_capture("c3")]
+        model["background"] = {"color": "F9F7F4", "captureId": "c2"}
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 2, "fields": 1}, checked["dropped"]
+        assert [capture["id"] for capture in checked["model"]["captures"]] == ["c0", "c1"]
+        assert checked["model"]["background"] is None
 
     def test_a_table_whose_spans_fill_its_grid_passes_untouched(self) -> None:
         """A 2 by 2 grid: a cell spanning both rows, and one cell in each row beside it."""
