@@ -29,16 +29,22 @@ The Google Slides path uses gcloud application-default credentials and the
 quota project in ``GOOGLE_QUOTA_PROJECT``. Converted presentations are left in
 Drive (named ``tellr-export-fidelity <timestamp>``) so they can be opened
 and inspected; delete them by hand when finished.
+
+``--pin-fonts`` replaces the deck CSS's Google Fonts ``@import`` lines with the
+same faces from committed files (``pinned_fonts_css``), so two runs, before and
+after a change, render with one font binary per face.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import datetime
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,13 +64,134 @@ SLIDE_WIDTH_PX = 1280
 SLIDE_HEIGHT_PX = 720
 
 
-def load_fixture_deck(fixture_dir: Path) -> tuple[dict, list[tuple[str, str]]]:
+# A fixture deck loads its webfonts with a Google Fonts @import, and Google now
+# and then answers one with another stylesheet naming another font file, so two
+# runs of one deck can render it differently (text widths move PowerPoint scores
+# by about 0.08). --pin-fonts replaces each import with the faces Google serves
+# for it, as data: (the slide CSP's font-src allows it): the latin files, the
+# only subset the corpora's text reaches, committed with their OFL licences
+# under tests/fixtures/export_snapshot/fonts and declared as Google declares
+# them. The corpus deck's import pins to the faces the snapshot tests pin
+# (tests/fixtures/export_snapshot_support.py pinned_font_css).
+PINNED_FONT_DIR = REPO_ROOT / "tests" / "fixtures" / "export_snapshot" / "fonts"
+GOOGLE_FONTS_HOSTS = ("fonts.googleapis.com", "fonts.gstatic.com")
+GOOGLE_FONTS_IMPORT = re.compile(
+    r"^@import url\('(https://fonts\.googleapis\.com/[^']*)'\);\n", re.M
+)
+LATIN_UNICODE_RANGE = (
+    "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, "
+    "U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, "
+    "U+FEFF, U+FFFD"
+)
+# tests/fixtures/export_fidelity/deck.css. DM Sans with its optical-size axis:
+# gstatic /s/dmsans/v17/rP2Hp2ywxg089UriCZOIHTWEBlw.woff2; DM Mono 400 and 500:
+# /s/dmmono/v16/aFTU7PB1QTsUX8KYthqQBK6PYK0 and aFTR7PB1QTsUX8KYvumzEYOtbYf-Vlg.
+CORPUS_FONTS_IMPORT = (
+    "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:"
+    "opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap"
+)
+# The design-system corpus's deck.css. Its DM Sans names no optical-size axis,
+# so Google serves another file, with a weight axis only:
+# /s/dmsans/v17/rP2Yp2ywxg089UriI5-g4vlH9VoD8Cmcqbu0-K6z9mXg.woff2; its italic,
+# rP2rp2ywxg089UriCZaSExd86J3t9jz86Mvy4qCRAL19DksVat-JDV30TGcro9o45zw; DM Mono
+# 300: /s/dmmono/v16/aFTR7PB1QTsUX8KYvrGyEYOtbYf-Vlg; Barlow 400 to 700:
+# /s/barlow/v13/7cHpv4kjgoGqM7E_DMs5ynghnQ, 7cHqv4kjgoGqM7E3_-gs51ostz0rdg,
+# 7cHqv4kjgoGqM7E30-8s51ostz0rdg and 7cHqv4kjgoGqM7E3t-4s51ostz0rdg.
+DESIGN_SYSTEM_FONTS_IMPORT = (
+    "https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:"
+    "ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap"
+)
+DESIGN_SYSTEM_DISPLAY_FONTS_IMPORT = (
+    "https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&display=swap"
+)
+# Import URL -> its faces, as Google declares them: (family, style, weight, file
+# under PINNED_FONT_DIR).
+PINNED_FONT_IMPORTS: dict[str, tuple[tuple[str, str, int, str], ...]] = {
+    CORPUS_FONTS_IMPORT: (
+        ("DM Mono", "normal", 400, "dm-mono/DMMono-400-latin.woff2"),
+        ("DM Mono", "normal", 500, "dm-mono/DMMono-500-latin.woff2"),
+        ("DM Sans", "normal", 400, "dm-sans/DMSans-latin.woff2"),
+        ("DM Sans", "normal", 500, "dm-sans/DMSans-latin.woff2"),
+        ("DM Sans", "normal", 600, "dm-sans/DMSans-latin.woff2"),
+        ("DM Sans", "normal", 700, "dm-sans/DMSans-latin.woff2"),
+    ),
+    DESIGN_SYSTEM_FONTS_IMPORT: (
+        ("DM Mono", "normal", 300, "dm-mono/DMMono-300-latin.woff2"),
+        ("DM Mono", "normal", 400, "dm-mono/DMMono-400-latin.woff2"),
+        ("DM Mono", "normal", 500, "dm-mono/DMMono-500-latin.woff2"),
+        ("DM Sans", "italic", 400, "dm-sans/DMSans-Italic-400-latin.woff2"),
+        ("DM Sans", "normal", 400, "dm-sans/DMSans-wght-latin.woff2"),
+        ("DM Sans", "normal", 500, "dm-sans/DMSans-wght-latin.woff2"),
+        ("DM Sans", "normal", 600, "dm-sans/DMSans-wght-latin.woff2"),
+        ("DM Sans", "normal", 700, "dm-sans/DMSans-wght-latin.woff2"),
+    ),
+    DESIGN_SYSTEM_DISPLAY_FONTS_IMPORT: (
+        ("Barlow", "normal", 400, "barlow/Barlow-400-latin.woff2"),
+        ("Barlow", "normal", 500, "barlow/Barlow-500-latin.woff2"),
+        ("Barlow", "normal", 600, "barlow/Barlow-600-latin.woff2"),
+        ("Barlow", "normal", 700, "barlow/Barlow-700-latin.woff2"),
+    ),
+}
+
+
+def _pinned_face(family: str, style: str, weight: int, name: str) -> str:
+    """One pinned face as an @font-face rule, its file embedded as data:."""
+    font = base64.b64encode((PINNED_FONT_DIR / name).read_bytes()).decode("ascii")
+    return (
+        f"@font-face {{ font-family: '{family}'; font-style: {style}; font-weight: {weight}; "
+        f"font-display: swap; src: url(data:font/woff2;base64,{font}) format('woff2'); "
+        f"unicode-range: {LATIN_UNICODE_RANGE}; }}"
+    )
+
+
+def pinned_fonts_css(css: str) -> str:
+    """``css`` with each Google Fonts @import line replaced by its pinned faces.
+
+    The faces come first, in import order, then the CSS without its import
+    lines. An import PINNED_FONT_IMPORTS has no faces for, or any other
+    reference to Google Fonts left (an import written another way, an
+    @font-face loading a Google file), raises ValueError naming it: a pinned
+    run never loads a live webfont.
+    """
+    imports = GOOGLE_FONTS_IMPORT.findall(css)
+    unpinned = [url for url in imports if url not in PINNED_FONT_IMPORTS]
+    if unpinned:
+        raise ValueError(f"no pinned faces for the Google Fonts import(s) {unpinned}")
+    rest = GOOGLE_FONTS_IMPORT.sub("", css)
+    for host in GOOGLE_FONTS_HOSTS:
+        if host in rest:
+            line = next(line for line in rest.splitlines() if host in line)
+            raise ValueError(
+                f"the CSS still loads from {host}, which cannot be pinned: {line.strip()[:200]}"
+            )
+    faces = [_pinned_face(*face) for url in imports for face in PINNED_FONT_IMPORTS[url]]
+    return "".join(face + "\n" for face in faces) + rest
+
+
+def load_fixture_deck(
+    fixture_dir: Path, pin_fonts: bool = False
+) -> tuple[dict, list[tuple[str, str]]]:
+    """The fixture deck (deck.json with deck.css as its ``css``) and its slides, by name.
+
+    With ``pin_fonts`` the deck's CSS loads its webfonts from the pinned files
+    (pinned_fonts_css), and a slide that loads Google Fonts itself raises
+    ValueError naming it.
+    """
     deck = json.loads((fixture_dir / "deck.json").read_text(encoding="utf-8"))
     deck["css"] = (fixture_dir / "deck.css").read_text(encoding="utf-8")
     slides = [
         (path.stem, path.read_text(encoding="utf-8"))
         for path in sorted((fixture_dir / "slides").glob("*.html"))
     ]
+    if pin_fonts:
+        deck["css"] = pinned_fonts_css(deck["css"])
+        unpinned = [
+            name for name, html in slides if any(host in html for host in GOOGLE_FONTS_HOSTS)
+        ]
+        if unpinned:
+            raise ValueError(
+                f"slide(s) {unpinned} load Google Fonts themselves, which cannot be pinned"
+            )
     return deck, slides
 
 
@@ -551,9 +678,14 @@ def main() -> int:
     parser.add_argument("--lo", action="store_true", help="render the .pptx with LibreOffice (smoke check only)")
     parser.add_argument("--gslides", action="store_true", help="convert through Google Drive")
     parser.add_argument("--only", nargs="*", help="slide name prefixes to include")
+    parser.add_argument(
+        "--pin-fonts",
+        action="store_true",
+        help="load the deck's Google Fonts from the committed files, so runs compare like for like",
+    )
     args = parser.parse_args()
 
-    deck, slides = load_fixture_deck(args.fixture_dir)
+    deck, slides = load_fixture_deck(args.fixture_dir, pin_fonts=args.pin_fonts)
     if args.only:
         slides = [s for s in slides if any(s[0].startswith(prefix) for prefix in args.only)]
     args.out.mkdir(parents=True, exist_ok=True)

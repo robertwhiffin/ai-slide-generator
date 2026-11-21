@@ -54,7 +54,8 @@ what the browser itself laid out for the same document.
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
-  and ``browser_loaded_weights`` the webfont weights the page loaded.
+  and ``browser_loaded_weights`` the webfont weights the page loaded
+  (``browser_loaded_faces`` each loaded face with its style).
   ``browser_probes`` sets text offscreen in the page's own fonts and reads its
   size; ``browser_natural_line_height`` is the ``line-height: normal`` probe.
   ``browser_title`` reads ``document.title``, where a hostile fixture's
@@ -1107,6 +1108,23 @@ def browser_loaded_weights(document_html: str) -> dict[str, list[int]]:
         family = face["family"].strip().strip("\"'")
         loaded.setdefault(family, set()).update(_face_weights(face["weight"]))
     return {family: sorted(weights) for family, weights in sorted(loaded.items())}
+
+
+def browser_loaded_faces(document_html: str) -> set[tuple[str, str, int]]:
+    """``(family, style, weight)`` of every face in ``document.fonts`` whose status is ``loaded``.
+
+    As ``browser_loaded_weights`` reads them, keeping each face's style
+    (``normal`` or ``italic``), so an italic face the page painted with is told
+    from the upright one. A variable face's weight range gives one entry per
+    hundred inside it.
+    """
+    faces = json.loads(_run_measure(document_html, "--mode=fonts"))
+    return {
+        (face["family"].strip().strip("\"'"), face["style"], weight)
+        for face in faces
+        if face["status"] == "loaded"
+        for weight in _face_weights(face["weight"])
+    }
 
 
 def browser_probes(document_html: str, probes: list[tuple[str, str]]) -> list[dict]:

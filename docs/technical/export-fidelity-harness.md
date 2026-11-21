@@ -31,6 +31,7 @@ uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py \
 | `--gslides` | Exports the deck for Google Slides, uploads it to Drive as a Slides presentation and downloads each slide's thumbnail (`gslides/`). Uses gcloud application-default credentials and the quota project in `GOOGLE_QUOTA_PROJECT`. The presentation is left in Drive, named `tellr-export-fidelity <timestamp>`, so it can be opened and inspected; its URL is printed and written to `gslides_url.txt`. Delete it by hand when finished. |
 | `--lo` | Renders `export.pptx` with LibreOffice (`libreoffice/`). A smoke check only; see below. |
 | `--only 04 05` | Runs only the slides whose names start with these prefixes. |
+| `--pin-fonts` | Loads the deck's webfonts from committed files instead of Google Fonts: each `@import` of `fonts.googleapis.com` in `deck.css` becomes the latin faces Google serves for that import, embedded as `data:` (`PINNED_FONT_IMPORTS` in `run.py`, files under `tests/fixtures/export_snapshot/fonts`). Google now and then answers one import with another font file, which moves text widths and PowerPoint scores by about 0.08 between runs, so use it whenever two runs are compared (before and after a change). An import with no pinned faces, or a slide that loads Google Fonts itself, stops the run with an error naming it. Without the option the deck loads its live fonts, as the app does. |
 
 ## 3. Which renderers to trust
 
