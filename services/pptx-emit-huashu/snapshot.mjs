@@ -769,6 +769,12 @@ async function snapshotPage(config, pseudoData) {
   // What a clip shows of a box, a picture or a word is shownPart. What it shows
   // under MINIMUM_VISIBLE_PX of, along an axis it cuts, is hidden: the
   // visually-hidden pattern clips to 1 px.
+  // An overflow box with round corners clips to its padding box with its inner
+  // radii (CSS Backgrounds 3), so a clip may also carry `rounds`, each such
+  // padding box in effect, {left, top, right, bottom, radii: [{h, v}] top left,
+  // top right, bottom right, bottom left}; its bounds are the rect around them
+  // all, which is what shownPart reads. A native table's cells read the rounds
+  // (pushTable).
   const SLIDE_CLIP = { left: 0, top: 0, right: SLIDE_WIDTH, bottom: SLIDE_HEIGHT };
   const NO_CLIP = { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
   const VIEWPORT_CLIPS = { tree: NO_CLIP, flow: SLIDE_CLIP, absolute: SLIDE_CLIP, fixed: SLIDE_CLIP };
@@ -784,12 +790,14 @@ async function snapshotPage(config, pseudoData) {
   const REFERENCE_BOX = /\b(margin-box|border-box|padding-box|content-box|fill-box|stroke-box|view-box)\b/;
 
   function intersectClips(a, b) {
-    return {
+    const clip = {
       left: Math.max(a.left, b.left),
       top: Math.max(a.top, b.top),
       right: Math.min(a.right, b.right),
       bottom: Math.min(a.bottom, b.bottom),
     };
+    if (a.rounds || b.rounds) clip.rounds = (a.rounds || []).concat(b.rounds || []);
+    return clip;
   }
 
   function clipIsEmpty(clip) {
@@ -826,17 +834,38 @@ async function snapshotPage(config, pseudoData) {
   // An overflow box clips what it holds to its padding box (CSS Overflow 3, the
   // overflow clip edge), on each axis whose overflow is not visible: hidden,
   // clip, auto and scroll all clip. Under a rotation the bounds hold the turned
-  // box and are the clip, which hides nothing the box shows.
+  // box and are the clip, which hides nothing the box shows. An unturned box
+  // that clips both axes and rounds a corner clips to its rounded padding box
+  // as well: each inner radius is the used outer one less the border beside
+  // it, floored at 0 (CSS Backgrounds 3, corner clipping).
   function overflowClipOf(s, bounds, frame) {
     const clipsX = s.overflowX !== 'visible';
     const clipsY = s.overflowY !== 'visible';
     const border = (side, scale) => (frame.angle ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * scale);
-    return {
+    const clip = {
       left: clipsX ? bounds.left + border('Left', frame.scaleX) : -Infinity,
       top: clipsY ? bounds.top + border('Top', frame.scaleY) : -Infinity,
       right: clipsX ? bounds.right - border('Right', frame.scaleX) : Infinity,
       bottom: clipsY ? bounds.bottom - border('Bottom', frame.scaleY) : Infinity,
     };
+    if (!clipsX || !clipsY || frame.angle) return clip;
+    const outer = usedCornerRadii(s, { w: bounds.right - bounds.left, h: bounds.bottom - bounds.top, scale: frame.scale });
+    const left = border('Left', frame.scaleX);
+    const top = border('Top', frame.scaleY);
+    const right = border('Right', frame.scaleX);
+    const bottom = border('Bottom', frame.scaleY);
+    const radii = [
+      { h: Math.max(0, outer[0].h - left), v: Math.max(0, outer[0].v - top) },
+      { h: Math.max(0, outer[1].h - right), v: Math.max(0, outer[1].v - top) },
+      { h: Math.max(0, outer[2].h - right), v: Math.max(0, outer[2].v - bottom) },
+      { h: Math.max(0, outer[3].h - left), v: Math.max(0, outer[3].v - bottom) },
+    ];
+    let rounded = false;
+    for (let index = 0; index < radii.length; index++) {
+      if (radii[index].h > 0 && radii[index].v > 0) rounded = true;
+    }
+    if (rounded) clip.rounds = [{ left: clip.left, top: clip.top, right: clip.right, bottom: clip.bottom, radii }];
+    return clip;
   }
 
   function hasClipRect(s) {
@@ -983,11 +1012,10 @@ async function snapshotPage(config, pseudoData) {
     };
   }
 
-  // The used corner radii after CSS's overlap rule (all scaled down together
-  // until no two adjacent radii exceed their side), then the preset they need:
-  // an ellipse when every corner reaches half its side, else a roundRect
-  // carrying the largest corner.
-  function cornerShape(s, box) {
+  // The used radii {h, v} of a box's corners, top left, top right, bottom
+  // right, bottom left, after CSS's overlap rule: all scaled down together
+  // until no two adjacent radii exceed their side.
+  function usedCornerRadii(s, box) {
     const corners = [
       cornerRadius(s.borderTopLeftRadius, box),
       cornerRadius(s.borderTopRightRadius, box),
@@ -1009,11 +1037,22 @@ async function snapshotPage(config, pseudoData) {
     for (let index = 0; index < sums.length; index++) {
       if (sums[index][0] > sums[index][1]) factor = Math.min(factor, sums[index][1] / sums[index][0]);
     }
+    const used = [];
+    for (let index = 0; index < corners.length; index++) {
+      used.push({ h: corners[index].h * factor, v: corners[index].v * factor });
+    }
+    return used;
+  }
+
+  // The preset a box's used corner radii need: an ellipse when every corner
+  // reaches half its side, else a roundRect carrying the largest corner.
+  function cornerShape(s, box) {
+    const corners = usedCornerRadii(s, box);
     let ellipse = true;
     let largest = 0;
     for (let index = 0; index < corners.length; index++) {
-      const horizontal = corners[index].h * factor;
-      const vertical = corners[index].v * factor;
+      const horizontal = corners[index].h;
+      const vertical = corners[index].v;
       if (horizontal < box.w / 2 - RADIUS_EPSILON_PX || vertical < box.h / 2 - RADIUS_EPSILON_PX) ellipse = false;
       largest = Math.max(largest, Math.min(horizontal, vertical));
     }
@@ -1252,6 +1291,93 @@ async function snapshotPage(config, pseudoData) {
         const previous = polygon[(index + polygon.length - 1) % polygon.length];
         if (inside(current) !== inside(previous)) kept.push(crossing(previous, current, axis, bound));
         if (inside(current)) kept.push(current);
+      }
+      polygon = kept;
+    }
+    return polygon;
+  }
+
+  // A rounded padding box of a clip (its rounds) as a convex polygon of slide
+  // px, clockwise from its top left corner's arc, each corner an elliptical
+  // quarter of its radii, or the corner itself where they are 0.
+  function roundedPolygon(round) {
+    const points = [];
+    const corners = [
+      { x: round.left, y: round.top, signX: 1, signY: 1, start: Math.PI },
+      { x: round.right, y: round.top, signX: -1, signY: 1, start: Math.PI * 1.5 },
+      { x: round.right, y: round.bottom, signX: -1, signY: -1, start: 0 },
+      { x: round.left, y: round.bottom, signX: 1, signY: -1, start: Math.PI * 0.5 },
+    ];
+    for (let index = 0; index < corners.length; index++) {
+      const corner = corners[index];
+      const radii = round.radii[index];
+      if (!(radii.h > 0 && radii.v > 0)) {
+        points.push({ x: corner.x, y: corner.y });
+        continue;
+      }
+      const centreX = corner.x + corner.signX * radii.h;
+      const centreY = corner.y + corner.signY * radii.v;
+      const steps = arcSteps(Math.max(radii.h, radii.v));
+      for (let step = 0; step <= steps; step++) {
+        const angle = corner.start + (Math.PI / 2) * (step / steps);
+        points.push({ x: centreX + radii.h * Math.cos(angle), y: centreY + radii.v * Math.sin(angle) });
+      }
+    }
+    return points;
+  }
+
+  // Whether a rounded padding box holds the rect `bounds` whole.
+  function roundHolds(round, bounds) {
+    const corners = [
+      { x: bounds.left, y: bounds.top },
+      { x: bounds.right, y: bounds.top },
+      { x: bounds.right, y: bounds.bottom },
+      { x: bounds.left, y: bounds.bottom },
+    ];
+    for (let index = 0; index < corners.length; index++) {
+      const point = corners[index];
+      if (point.x < round.left - CUT_EPSILON_PX || point.x > round.right + CUT_EPSILON_PX ||
+          point.y < round.top - CUT_EPSILON_PX || point.y > round.bottom + CUT_EPSILON_PX) return false;
+      const radii = round.radii[index];
+      if (!(radii.h > 0 && radii.v > 0)) continue;
+      const centreX = index === 0 || index === 3 ? round.left + radii.h : round.right - radii.h;
+      const centreY = index < 2 ? round.top + radii.v : round.bottom - radii.v;
+      const outwardX = index === 0 || index === 3 ? point.x < centreX : point.x > centreX;
+      const outwardY = index < 2 ? point.y < centreY : point.y > centreY;
+      if (!outwardX || !outwardY) continue;
+      const dx = (point.x - centreX) / radii.h;
+      const dy = (point.y - centreY) / radii.v;
+      if (dx * dx + dy * dy > 1 + CUT_EPSILON_PX) return false;
+    }
+    return true;
+  }
+
+  // The convex polygon `points` cut to the convex polygon `clipper`, one of
+  // its edges at a time (Sutherland-Hodgman); either may run either way round.
+  function clipConvex(points, clipper) {
+    let area = 0;
+    for (let index = 0; index < clipper.length; index++) {
+      const a = clipper[index];
+      const b = clipper[(index + 1) % clipper.length];
+      area += a.x * b.y - b.x * a.y;
+    }
+    const sign = area < 0 ? -1 : 1;
+    let polygon = points;
+    for (let edge = 0; edge < clipper.length && polygon.length; edge++) {
+      const from = clipper[edge];
+      const to = clipper[(edge + 1) % clipper.length];
+      const side = (point) => sign * ((to.x - from.x) * (point.y - from.y) - (to.y - from.y) * (point.x - from.x));
+      const kept = [];
+      for (let index = 0; index < polygon.length; index++) {
+        const current = polygon[index];
+        const previous = polygon[(index + polygon.length - 1) % polygon.length];
+        const currentSide = side(current);
+        const previousSide = side(previous);
+        if ((currentSide >= 0) !== (previousSide >= 0)) {
+          const share = previousSide / (previousSide - currentSide);
+          kept.push({ x: previous.x + (current.x - previous.x) * share, y: previous.y + (current.y - previous.y) * share });
+        }
+        if (currentSide >= 0) kept.push(current);
       }
       polygon = kept;
     }
@@ -2036,8 +2162,38 @@ async function snapshotPage(config, pseudoData) {
     return layout;
   }
 
-  function pushTable(layout, order) {
-    items.push({ ...layout.item, id: nextItemId++, order });
+  // The table item, over what its clip leaves of each cell fill a rounded
+  // corner of the clip cuts (its rounds, overflowClipOf): an a:tc cannot be
+  // clipped, so such a cell is unfilled in the table and its fill is a shape
+  // under the table, the cell's grid rect cut to each rounded padding box.
+  function pushTable(layout, order, clip) {
+    const item = layout.item;
+    const rounds = clip.rounds || [];
+    if (rounds.length) {
+      const columns = [item.x];
+      const rows = [item.y];
+      for (let index = 0; index < item.colWidths.length; index++) columns.push(columns[index] + item.colWidths[index]);
+      for (let index = 0; index < item.rowHeights.length; index++) rows.push(rows[index] + item.rowHeights[index]);
+      for (let index = 0; index < item.cells.length; index++) {
+        const cell = item.cells[index];
+        if (!cell.fill) continue;
+        const rect = { left: columns[cell.col], top: rows[cell.row], right: columns[cell.col + cell.colspan], bottom: rows[cell.row + cell.rowspan] };
+        let region = null;
+        for (let round = 0; round < rounds.length && round < WALK_STEP_LIMIT; round++) {
+          if (roundHolds(rounds[round], rect)) continue;
+          region = clipConvex(region || [
+            { x: rect.left, y: rect.top },
+            { x: rect.right, y: rect.top },
+            { x: rect.right, y: rect.bottom },
+            { x: rect.left, y: rect.bottom },
+          ], roundedPolygon(rounds[round]));
+        }
+        if (!region) continue;
+        if (region.length >= 3) pushPath(order, [region], true, cell.fill, null, null);
+        cell.fill = null;
+      }
+    }
+    items.push({ ...item, id: nextItemId++, order });
     stats.tables++;
   }
 
@@ -2158,7 +2314,7 @@ async function snapshotPage(config, pseudoData) {
         emitBox(s, box, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
       }
       // Over the table's own box, under everything its cells hold.
-      if (table) pushTable(table, place.box);
+      if (table) pushTable(table, place.box, clips.box);
     }
     if (replaced) return;
     const backdrop = backdropInside(state.backdrop, s);

@@ -89,6 +89,7 @@ from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
     EMU_PER_PX,
+    NAMESPACES,
     Border,
     BrowserBorder,
     BrowserCell,
@@ -116,6 +117,7 @@ from tests.fixtures.export_snapshot_support import (
     requires_huashu_sidecar,
     single_line_box_top,
     slide_document,
+    slide_shape_elements,
     slide_shapes,
     slide_text_loss,
     slides_api_cell_text,
@@ -255,6 +257,11 @@ TABLES_CSS = (
 .edges td + td { border-left: 1px solid #FF3621; }
 #cards { position: absolute; border-collapse: separate; border-spacing: 8px; font-size: 18px; }
 #cards td { background: #FFFFFF; border-radius: 10px; padding: 14px 18px; }
+.rounded-table { border-collapse: collapse; width: 100%; font-size: 16px; }
+.rounded-table th { background: #FF5F46; color: #fff; text-align: left; padding: 13px 18px; }
+.rounded-table td { padding: 13px 18px; }
+.rounded-table tbody tr:nth-child(odd) { background: #fff; }
+.rounded-table tbody tr:nth-child(even) { background: #F3F3F3; }
 #plain { position: absolute; font-size: 18px; background: #FFFFFF; border-radius: 12px;
          box-shadow: 0 2px 8px rgba(27, 49, 57, 0.12); }
 #plain th, #plain td { padding: 10px 16px; text-align: left; }
@@ -702,6 +709,37 @@ GRAD_BORDER = (INK, 3.0)
 # A picture pixel is a colour within this per channel.
 PIXEL_TOLERANCE = 8
 
+# The design system's data table: a collapsed table filling an unfilled wrapper
+# that rounds its corners by clipping (``border-radius: 8px; overflow: hidden``)
+# and casts --shadow-sm. The corner cells' fills reach into the wrapper's
+# rounded corners, which the browser clips away.
+ROUNDED_WRAPPER = "#rounded-wrapper"
+ROUNDED_RADIUS_PX = 8.0
+ROUNDED_BODY = (
+    '<div class="slide"><div id="rounded-wrapper" style="position: absolute; left: 88px; '
+    "top: 160px; width: 900px; border-radius: 8px; overflow: hidden; "
+    'box-shadow: 0 1px 2px rgba(27,49,57,.06), 0 1px 3px rgba(27,49,57,.08);">'
+    '<table class="rounded-table"><thead><tr><th>Use case</th><th>Measurement</th>'
+    "<th>Cost</th></tr></thead><tbody><tr><td>UC 1</td><td>Batch load</td><td>$184</td></tr>"
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# Each slot's fill as the browser paints it: the header row coral, the body rows
+# white, then F3F3F3.
+ROUNDED_FILLS = (("FF5F46",) * 3, ("FFFFFF",) * 3, ("F3F3F3",) * 3)
+# The slots the wrapper's corners cut: the grid's four corners.
+ROUNDED_CORNERS = {
+    (0, 0): "top-left",
+    (0, 2): "top-right",
+    (2, 0): "bottom-left",
+    (2, 2): "bottom-right",
+}
+# The same table in a wrapper whose padding keeps every cell clear of its corners.
+CLEAR_BODY = ROUNDED_BODY.replace(
+    "overflow: hidden; ", "overflow: hidden; padding: 12px; background: #FFFFFF; "
+).replace('id="rounded-wrapper"', 'id="clear-wrapper"')
+# A vertex within this of the corner arc lies on it (the arc is drawn as a polygon).
+ARC_TOLERANCE_PX = 0.1
+
 INLINE_BODIES = {
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
@@ -715,6 +753,8 @@ INLINE_BODIES = {
     "fills": FILLS_BODY,
     "origin": ORIGIN_BODY,
     "clip": CLIP_BODY,
+    "rounded": ROUNDED_BODY,
+    "clear": CLEAR_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
     "dots": DOTS_BODY,
@@ -2985,6 +3025,198 @@ class TestPositionedTables:
 # ---------------------------------------------------------------------------
 # A hostile realm
 # ---------------------------------------------------------------------------
+
+
+def _custom_geometry_points(element, shape: Shape) -> list[tuple[float, float]]:
+    """Every point of a custGeom shape's path, in order, in slide px (its space is its EMU)."""
+    return [
+        (shape.x + int(point.get("x")) / EMU_PER_PX, shape.y + int(point.get("y")) / EMU_PER_PX)
+        for point in element.iterfind("p:spPr/a:custGeom/a:pathLst/a:path//a:pt", NAMESPACES)
+    ]
+
+
+def _inside_rounded(point: tuple[float, float], box: dict, radius: float, tolerance: float) -> bool:
+    """Whether ``point`` lies in ``box``, corners rounded by ``radius``, within ``tolerance``."""
+    x, y = point
+    left, top = box["x"], box["y"]
+    right, bottom = left + box["w"], top + box["h"]
+    if not (
+        left - tolerance <= x <= right + tolerance and top - tolerance <= y <= bottom + tolerance
+    ):
+        return False
+    centre_x = min(max(x, left + radius), right - radius)
+    centre_y = min(max(y, top + radius), bottom - radius)
+    return ((x - centre_x) ** 2 + (y - centre_y) ** 2) ** 0.5 <= radius + tolerance
+
+
+def _corner_of(rect: dict, corner: str) -> tuple[float, float]:
+    vertical, horizontal = corner.split("-")
+    return (
+        rect["x"] + (rect["w"] if horizontal == "right" else 0),
+        rect["y"] + (rect["h"] if vertical == "bottom" else 0),
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestRoundedWrapper:
+    def test_corner_cells_are_filled_by_shapes_cut_to_the_wrappers_corners(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The data table in its rounded wrapper: its four corner cells round with the wrapper.
+
+        The wrapper clips the table to its padding box, 8 px round at each
+        corner, so the browser shows the coral header's top corners and the
+        last row's bottom corners round. An a:tc cannot be clipped. So the
+        table stays one native frame on the browser's grid, every cell's text
+        its own, and each corner cell's a:tc is unfilled; under the frame, one
+        custom shape per corner cell paints its fill: its cell's rect within
+        0.5 px, every vertex inside the wrapper's rounded box, the cell's
+        corner itself replaced by the 8 px arc (a vertex on the arc, none at
+        the corner). Every other cell keeps its own fill.
+        """
+        document = _inline_document("rounded")
+        pptx = inline_export("rounded")
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        (table,) = browser_tables(document, "table")
+        wrapper = browser_rect(document, ROUNDED_WRAPPER)
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the rounded data table")
+        _assert_grid_matches(frame, table, "the rounded data table")
+
+        wrong = []
+        for row, fills in enumerate(ROUNDED_FILLS):
+            for col, fill in enumerate(fills):
+                cell = frame.table.rows[row][col]
+                corner = ROUNDED_CORNERS.get((row, col))
+                expected = None if corner else fill
+                if cell.fill != expected:
+                    wrong.append(f"slot ({row}, {col}): a:tc fill {cell.fill}, expected {expected}")
+                if not corner:
+                    continue
+                rect = table_cell_rect(frame, row, col)
+                under = [
+                    position
+                    for position, shape in enumerate(shapes[:frame_position])
+                    if shape.kind == "shape"
+                    and shape.geometry == "custGeom"
+                    and shape.fill == fill
+                    and _same_rect(_box(shape), rect, 0.5)
+                ]
+                if len(under) != 1:
+                    wrong.append(
+                        f"slot ({row}, {col}): {len(under)} {fill} custom shapes at its rect "
+                        f"{rect} "
+                        "under the table"
+                    )
+                    continue
+                shape = shapes[under[0]]
+                points = _custom_geometry_points(elements[under[0]], shape)
+                outside = [
+                    point
+                    for point in points
+                    if not _inside_rounded(point, wrapper, ROUNDED_RADIUS_PX, ARC_TOLERANCE_PX)
+                ]
+                corner_x, corner_y = _corner_of(rect, corner)
+                at_corner = [
+                    point
+                    for point in points
+                    if abs(point[0] - corner_x) <= ARC_TOLERANCE_PX
+                    and abs(point[1] - corner_y) <= ARC_TOLERANCE_PX
+                ]
+                centre_x = corner_x + (
+                    ROUNDED_RADIUS_PX if "left" in corner else -ROUNDED_RADIUS_PX
+                )
+                centre_y = corner_y + (ROUNDED_RADIUS_PX if "top" in corner else -ROUNDED_RADIUS_PX)
+                on_arc = [
+                    point
+                    for point in points
+                    if abs(
+                        ((point[0] - centre_x) ** 2 + (point[1] - centre_y) ** 2) ** 0.5
+                        - ROUNDED_RADIUS_PX
+                    )
+                    <= ARC_TOLERANCE_PX
+                    and abs(point[0] - centre_x) > ARC_TOLERANCE_PX
+                    and abs(point[1] - centre_y) > ARC_TOLERANCE_PX
+                ]
+                if outside or at_corner or not on_arc or shape.line is not None:
+                    wrong.append(
+                        f"slot ({row}, {col}) {corner}: vertices outside the wrapper "
+                        f"{outside[:3]}, "
+                        f"at the square corner {at_corner}, on the arc {len(on_arc)}, outline "
+                        f"{shape.line}"
+                    )
+        assert not wrong, "the corner cells do not round with the wrapper:\n" + "\n".join(
+            [*wrong, _describe(shapes)]
+        )
+        for cell in table.cells:
+            origin = frame.table.rows[cell.row][cell.col]
+            assert _normalised(origin.text) == _normalised(cell.text), (
+                f"slot ({cell.row}, {cell.col}) reads {origin.text!r}, the browser {cell.text!r}"
+            )
+
+    def test_the_unfilled_wrapper_casts_its_shadow_from_under_the_table(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The wrapper paints no background, so its two shadow layers are shapes of their own.
+
+        Each is named "Shadow", at the wrapper's border box rounded 8 px,
+        filled F9F7F4 (the slide's ground, which is what lies beneath the
+        wrapper) and unoutlined, and both paint under the corner shapes and the
+        table: back to front the second layer, then the first.
+        """
+        document = _inline_document("rounded")
+        shapes = slide_shapes(inline_export("rounded"))
+        (table,) = browser_tables(document, "table")
+        wrapper = browser_rect(document, ROUNDED_WRAPPER)
+        frame_position, _ = _frame_for(shapes, _grid_rect(table), "the rounded data table")
+
+        hidden = [
+            (position, shape) for position, shape in enumerate(shapes) if shape.name == "Shadow"
+        ]
+        corner_shapes = [
+            position for position, shape in enumerate(shapes) if shape.geometry == "custGeom"
+        ]
+        assert len(hidden) == 2, f"expected the wrapper's two shadow layers:\n{_describe(shapes)}"
+        for position, shape in hidden:
+            assert shape.fill == "F9F7F4" and shape.line is None and shape.shadow is not None, (
+                f"spTree {position}: a shadow shape filled {shape.fill}, outlined {shape.line}, "
+                f"casting {shape.shadow}"
+            )
+            assert _same_rect(_box(shape), wrapper, 0.1) and shape.geometry == "roundRect", (
+                f"spTree {position}: a {shape.geometry} at {_rect(shape)}, "
+                f"not the wrapper {wrapper}"
+            )
+            assert (
+                position < min(corner_shapes, default=frame_position) and position < frame_position
+            ), (
+                f"spTree {position}: a shadow layer paints over the corner shapes {corner_shapes} "
+                f"or the table ({frame_position})"
+            )
+        blurs = [shape.shadow.blur_px for _, shape in hidden]
+        assert blurs == sorted(blurs, reverse=True) and abs(blurs[0] - 3) <= 0.05, (
+            f"back to front the 3 px layer, then the 2 px one; emitted blurs {blurs}"
+        )
+
+    def test_cells_the_wrappers_corners_do_not_reach_keep_their_fills(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The same table 12 px inside its rounded wrapper: no corner cuts a cell, so none changes.
+
+        Every a:tc keeps its fill and no custom shape is drawn.
+        """
+        document = _inline_document("clear")
+        shapes = slide_shapes(inline_export("clear"))
+        (table,) = browser_tables(document, "table")
+        _, frame = _frame_for(shapes, _grid_rect(table), "the padded data table")
+        for row, fills in enumerate(ROUNDED_FILLS):
+            for col, fill in enumerate(fills):
+                assert frame.table.rows[row][col].fill == fill, (
+                    f"slot ({row}, {col}): a:tc fill {frame.table.rows[row][col].fill}, not {fill}"
+                )
+        assert [shape for shape in shapes if shape.geometry == "custGeom"] == [], (
+            f"a custom shape was drawn for a cell no corner cuts:\n{_describe(shapes)}"
+        )
 
 
 def _with_table(name: str) -> str:
