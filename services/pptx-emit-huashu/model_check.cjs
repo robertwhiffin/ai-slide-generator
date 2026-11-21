@@ -22,7 +22,8 @@
 //       they read is as the snapshot writes it (snapshot.mjs SlideModel,
 //       snapshot_text.mjs TextBlock and Run, snapshot_table.mjs TableItem): each
 //       number finite, each colour RRGGBB, each value of a set one of that set,
-//       each text a string; an image item also names a capture that is kept, or
+//       each text a string (a roundCorners shape's radii four corners of two
+//       lengths each, none below 0); an image item also names a capture that is kept, or
 //       none; a native table's cells, spans included, lie inside its grid
 //       and cover each of its slots once;
 //     * the fields: items and captures are lists, background is a raster data:
@@ -39,7 +40,9 @@ const CAPTURE_ID = /^c\d+$/;
 const COLOUR = /^[0-9A-Fa-f]{6}$/;
 const CAPTURE_MODES = new Set(['subtree', 'box', 'ground']);
 const PSEUDO_ELEMENTS = new Set(['before', 'after', 'marker']);
-const GEOMETRIES = new Set(['rect', 'roundRect', 'ellipse', 'path']);
+const GEOMETRIES = new Set(['rect', 'roundRect', 'roundCorners', 'ellipse', 'path']);
+// A roundCorners shape's corners: top left, top right, bottom right, bottom left.
+const CORNER_COUNT = 4;
 const DASHES = new Set(['solid', 'dash', 'dot']);
 // What a shape may be besides itself (snapshot.mjs SlideModel): a shadow shape.
 const SHAPE_ROLES = new Set(['shadow']);
@@ -127,10 +130,16 @@ function isParagraph(paragraph) {
     isListOf(paragraph.lines, isLine);
 }
 
+// A corner's radii {h, v}: two finite lengths, neither below 0.
+function isCorner(corner) {
+  return hasNumbers(corner, ['h', 'v']) && corner.h >= 0 && corner.v >= 0;
+}
+
 function isShape(item) {
   if (!isBox(item) || !GEOMETRIES.has(item.geometry) || !isOptionalNumber(item.rotate)) return false;
   if (item.role !== undefined && !SHAPE_ROLES.has(item.role)) return false;
   if (item.geometry === 'roundRect' ? !isNumber(item.radius) : !isOptionalNumber(item.radius)) return false;
+  if (item.geometry === 'roundCorners' && !(isListOf(item.radii, isCorner) && item.radii.length === CORNER_COUNT)) return false;
   if (item.fill !== null && !isFill(item.fill)) return false;
   if (item.line !== null && !isStroke(item.line)) return false;
   if (item.shadow !== null && !isShadow(item.shadow)) return false;

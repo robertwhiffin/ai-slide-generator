@@ -42,10 +42,14 @@
 //  *   order  its CSS paint-order key, a number[] compared lexicographically.
 //  *
 //  * Item =
-//  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'ellipse'|'path', radius,
-//  *   fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
+//  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'roundCorners'|'ellipse'|'path', radius,
+//  *   radii, fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
-//  *   path:[{x,y}[]], closed:boolean, role?:'shadow'}   (path and closed for geometry
+//  *   path:[{x,y}[]], closed:boolean, role?:'shadow'}   (radius for geometry
+//  *   'roundRect', whose four corners are one circle; radii for 'roundCorners',
+//  *   a box whose corners differ: each corner's radii {h, v}, top left, top
+//  *   right, bottom right, bottom left, {0, 0} for a square one (cornerShape).
+//  *   path and closed for geometry
 //  *   'path' only: the polylines it draws, in px from its top left, each closed or
 //  *   each open; a shape a clip cuts that is not a plain rect, see pushClippedShape.
 //  *   role 'shadow': a shape under a box that casts one of the box's shadow
@@ -83,7 +87,7 @@
 //  * Units: CSS px on the slide. `alpha` is 0..1 and already includes the cumulative
 //  * opacity of the element and its ancestors. A shape's box is where its outline's
 //  * centre runs, so a bordered box is inset by half the border width, and `radius`
-//  * is the radius of that centre line. `rotate` is degrees clockwise, or null.
+//  * (each of `radii`) is the radius of that centre line. `rotate` is degrees clockwise, or null.
 //  * An image's `alpha` is the opacity the emitter still has to apply: 1 for a
 //  * capture, whose pixels already carry it.
 //  */
@@ -1062,20 +1066,40 @@ async function snapshotPage(config, pseudoData, renderer) {
     return used;
   }
 
-  // The preset a box's used corner radii need: an ellipse when every corner
-  // reaches half its side, else a roundRect carrying the largest corner.
+  // The shape a box's used corner radii need: an ellipse when every corner
+  // reaches half its side, and else as cornerGeometry classes its corners.
   function cornerShape(s, box) {
     const corners = usedCornerRadii(s, box);
     let ellipse = true;
+    for (let index = 0; index < corners.length; index++) {
+      if (corners[index].h < box.w / 2 - RADIUS_EPSILON_PX || corners[index].v < box.h / 2 - RADIUS_EPSILON_PX) ellipse = false;
+    }
+    if (ellipse) return { geometry: 'ellipse', radius: 0 };
+    return cornerGeometry(corners);
+  }
+
+  // The geometry of a box whose corners round by `corners` ({h, v} each, top
+  // left first): a rect when none rounds (a corner with either radius 0 is
+  // square); a roundRect carrying the radius when all four are one circle; and
+  // else 'roundCorners', each corner its own radii, a square one {0, 0}
+  // (Task 14 B4, D11: one roundRect rounded all four by the largest).
+  function cornerGeometry(corners) {
     let largest = 0;
+    let sameCircle = true;
+    const radii = [];
     for (let index = 0; index < corners.length; index++) {
       const horizontal = corners[index].h;
       const vertical = corners[index].v;
-      if (horizontal < box.w / 2 - RADIUS_EPSILON_PX || vertical < box.h / 2 - RADIUS_EPSILON_PX) ellipse = false;
+      const rounds = Math.min(horizontal, vertical) > 0;
+      radii.push(rounds ? { h: horizontal, v: vertical } : { h: 0, v: 0 });
       largest = Math.max(largest, Math.min(horizontal, vertical));
+      if (!rounds || Math.abs(horizontal - vertical) > RADIUS_EPSILON_PX ||
+          Math.abs(horizontal - corners[0].h) > RADIUS_EPSILON_PX ||
+          Math.abs(vertical - corners[0].v) > RADIUS_EPSILON_PX) sameCircle = false;
     }
-    if (ellipse) return { geometry: 'ellipse', radius: 0 };
-    return { geometry: largest > 0 ? 'roundRect' : 'rect', radius: largest };
+    if (!(largest > 0)) return { geometry: 'rect', radius: 0 };
+    if (sameCircle) return { geometry: 'roundRect', radius: largest };
+    return { geometry: 'roundCorners', radius: 0, radii };
   }
 
   // ─── borders and rings ───────────────────────────────────────────────
@@ -1086,6 +1110,7 @@ async function snapshotPage(config, pseudoData, renderer) {
     paintedColour,
     normalisedAngle,
     cornerShape,
+    cornerGeometry,
     shownPart,
     boundsOf,
     pushShape,
@@ -1216,6 +1241,7 @@ async function snapshotPage(config, pseudoData, renderer) {
       shadow: shape.shadow,
       rotate: shape.rotate,
     };
+    if (shape.geometry === 'roundCorners') item.radii = shape.radii;
     items.push(item);
     stats.shapes++;
     return item;
@@ -1247,8 +1273,9 @@ async function snapshotPage(config, pseudoData, renderer) {
   }
 
   // A shape's outline as a polygon of slide px, clockwise from its left: each
-  // corner's arc for a roundRect, the ellipse's four quarters, turned about the
-  // centre by its rotation.
+  // corner's arc for a roundRect, each rounded corner's own (elliptical) arc
+  // for roundCorners, the ellipse's four quarters, turned about the centre by
+  // its rotation.
   function outlineOf(shape) {
     const points = [];
     const centreX = shape.x + shape.w / 2;
@@ -1273,6 +1300,12 @@ async function snapshotPage(config, pseudoData, renderer) {
       arc(right - radius, shape.y + radius, radius, radius, Math.PI * 1.5);
       arc(right - radius, bottom - radius, radius, radius, 0);
       arc(shape.x + radius, bottom - radius, radius, radius, Math.PI * 0.5);
+    } else if (shape.geometry === 'roundCorners') {
+      const radii = shape.radii;
+      arc(shape.x + radii[0].h, shape.y + radii[0].v, radii[0].h, radii[0].v, Math.PI);
+      arc(right - radii[1].h, shape.y + radii[1].v, radii[1].h, radii[1].v, Math.PI * 1.5);
+      arc(right - radii[2].h, bottom - radii[2].v, radii[2].h, radii[2].v, 0);
+      arc(shape.x + radii[3].h, bottom - radii[3].v, radii[3].h, radii[3].v, Math.PI * 0.5);
     } else {
       points.push({ x: shape.x, y: bottom }, { x: shape.x, y: shape.y }, { x: right, y: shape.y }, { x: right, y: bottom });
     }

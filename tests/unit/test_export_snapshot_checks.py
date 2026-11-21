@@ -1977,6 +1977,29 @@ def _valid_model() -> dict:
                 "rotate": None,
                 "role": "shadow",
             },
+            {
+                # A box whose corners round by different radii: a card header's
+                # 16 px top corners over square bottom ones, its top left elliptical.
+                "kind": "shape",
+                "id": 10,
+                "order": [9],
+                "x": 300,
+                "y": 420,
+                "w": 360,
+                "h": 60,
+                "geometry": "roundCorners",
+                "radius": 0,
+                "radii": [
+                    {"h": 24, "v": 16},
+                    {"h": 16, "v": 16},
+                    {"h": 0, "v": 0},
+                    {"h": 0, "v": 0},
+                ],
+                "fill": {"color": "0B2026", "alpha": 1},
+                "line": None,
+                "shadow": None,
+                "rotate": None,
+            },
         ],
     }
 
@@ -2090,6 +2113,12 @@ MODEL_DEFECTS = {
     "shape-path-point-nan": (_set("items.1.path.0.1.x", NAN), {1}, 0),
     "shape-path-closed-not-a-boolean": (_set("items.1.closed", "yes"), {1}, 0),
     "shape-role-unknown": (_set("items.8.role", "script"), {9}, 0),
+    # Each corner of a box whose corners differ is its radii {h, v}, top left first.
+    "shape-corner-radii-missing": (_set("items.9.radii", None), {10}, 0),
+    "shape-corner-radii-three": (_remove("items.9.radii", 3), {10}, 0),
+    "shape-corner-radius-nan": (_set("items.9.radii.1.v", NAN), {10}, 0),
+    "shape-corner-radius-negative": (_set("items.9.radii.0.h", -4), {10}, 0),
+    "shape-corner-radius-a-string": (_set("items.9.radii.2.h", "0"), {10}, 0),
     "shape-role-not-a-string": (_set("items.8.role", 1), {9}, 0),
     "line-x1-nan": (_set("items.2.x1", NAN), {2}, 0),
     "line-colour-short": (_set("items.2.color", "F00"), {2}, 0),

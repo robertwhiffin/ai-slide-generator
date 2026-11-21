@@ -59,8 +59,9 @@ function dottedLine(item) {
 }
 
 // A shape item's outline in its own frame (its box, turned with it by its
-// rotation): a path's own polylines; else the rect, rounded rect or ellipse,
-// clockwise from its top left (its left, for an ellipse).
+// rotation): a path's own polylines; else the rect, rounded rect (each corner
+// its own radii, for roundCorners) or ellipse, clockwise from its top left
+// (its left, for an ellipse).
 function dottedOutline(item) {
   const frame = { x: item.x, y: item.y, w: item.w, h: item.h };
   if (item.geometry === 'path') return { frame, polylines: item.path, closed: item.closed };
@@ -75,6 +76,17 @@ function dottedOutline(item) {
   const { w, h } = item;
   if (item.geometry === 'ellipse') {
     for (let quarter = 0; quarter < 4; quarter++) arc(w / 2, h / 2, w / 2, h / 2, Math.PI * (1 + quarter / 2));
+  } else if (item.geometry === 'roundCorners') {
+    const [topLeft, topRight, bottomRight, bottomLeft] = item.radii;
+    // A rounded corner's quarter arc about its centre, or a square one's corner point.
+    const corner = (radii, centreX, centreY, start, cornerX, cornerY) => {
+      if (radii.h > 0 && radii.v > 0) arc(centreX, centreY, radii.h, radii.v, start);
+      else points.push({ x: cornerX, y: cornerY });
+    };
+    corner(topLeft, topLeft.h, topLeft.v, Math.PI, 0, 0);
+    corner(topRight, w - topRight.h, topRight.v, Math.PI * 1.5, w, 0);
+    corner(bottomRight, w - bottomRight.h, h - bottomRight.v, 0, w, h);
+    corner(bottomLeft, bottomLeft.h, h - bottomLeft.v, Math.PI * 0.5, 0, h);
   } else if (item.geometry === 'roundRect' && Math.min(item.radius, w / 2, h / 2) > 0) {
     const radius = Math.min(item.radius, w / 2, h / 2);
     arc(radius, radius, radius, radius, Math.PI);

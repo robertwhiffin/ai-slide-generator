@@ -20,7 +20,9 @@
 // documented there:
 //   paintedColour     (css colour, opacity) -> {color, alpha} | null, as painted;
 //   normalisedAngle   degrees -> the same angle in 0..360;
-//   cornerShape       (style, box) -> {geometry, radius}, the box's corners;
+//   cornerShape       (style, box) -> {geometry, radius, radii}, the box's corners;
+//   cornerGeometry    corners [{h, v}] -> {geometry, radius, radii}, as cornerShape
+//                     classes the four corners of a box that is no ellipse;
 //   shownPart         (bounds, clip) -> what the clip shows of them | null;
 //   boundsOf          box -> its bounds {left, top, right, bottom};
 //   pushShape         shape -> pushes it as a shape item, and returns the item;
@@ -37,6 +39,7 @@ function createBorders(env) {
     paintedColour,
     normalisedAngle,
     cornerShape,
+    cornerGeometry,
     shownPart,
     boundsOf,
     pushShape,
@@ -250,7 +253,7 @@ function createBorders(env) {
     }
     const ownShadow = opaque && !ringOverShadow ? firstShadow : null;
     // What the shadow shapes of a box with no opaque fill cover at most: its border box.
-    const footprint = { x: box.x, y: box.y, w: box.w, h: box.h, geometry: corners.geometry, radius: corners.radius, rotate: box.rotate };
+    const footprint = { x: box.x, y: box.y, w: box.w, h: box.h, geometry: corners.geometry, radius: corners.radius, radii: corners.radii, rotate: box.rotate };
     const pending = !opaque && firstShadow ? { shapes: [], box: [], shadow: firstShadow.shadow, footprint } : null;
     for (let index = layers.length - 1; index >= 0; index--) {
       const layer = layers[index];
@@ -288,39 +291,57 @@ function createBorders(env) {
   function shadowShape(box, corners, layer, fill, order) {
     const inset = layer.spreadPx < 0 ? -layer.spreadPx : 0;
     if (!(box.w - 2 * inset > 0 && box.h - 2 * inset > 0)) return null;
-    return boxShape(box, corners, inset, Math.max(0, corners.radius - inset), { fill, line: null, shadow: layer.shadow, order, extent: box });
+    return boxShape(box, corners, inset, (radius) => Math.max(0, radius - inset), { fill, line: null, shadow: layer.shadow, order, extent: box });
   }
 
   // The shape of a box outlined by `line` (or null), which CSS paints inside
   // the border box: the stroke is centred on the shape's edge, so the shape is
-  // inset by half the width, its corner radius with it.
+  // inset by half the width, each corner's radius with it.
   function borderedShape(box, corners, fill, line, shadow, order) {
     const inset = line ? line.widthPx / 2 : 0;
-    return boxShape(box, corners, inset, corners.radius - inset, { fill, line, shadow, order, extent: box });
+    return boxShape(box, corners, inset, (radius) => radius - inset, { fill, line, shadow, order, extent: box });
   }
 
   // The shape of a box outlined by `ring`, which paints outside the border
-  // box: grown by half the spread, its corner radius to the ring's centre
+  // box: grown by half the spread, each corner's radius to the ring's centre
   // line. What it paints reaches the ring's outer edge.
   function ringedShape(box, corners, fill, ring, shadow, order) {
     const half = ring.widthPx / 2;
     const extent = { x: box.x - ring.widthPx, y: box.y - ring.widthPx, w: box.w + 2 * ring.widthPx, h: box.h + 2 * ring.widthPx, rotate: box.rotate };
-    return boxShape(box, corners, -half, ringRadius(corners.radius, ring.widthPx), { fill, line: ring, shadow, order, extent });
+    return boxShape(box, corners, -half, (radius) => ringRadius(radius, ring.widthPx), { fill, line: ring, shadow, order, extent });
   }
 
   // `box` moved in by `inset` on every side (out, for a negative one), with
-  // the corner geometry and `radius` it keeps. `paint` is {fill, line, shadow,
+  // the corner geometry it keeps: each corner radius r of the box becomes
+  // radiusAt(r) on the moved box (each axis of an elliptical corner alike, a
+  // square corner staying square). The box's used radii fit it (CSS's overlap
+  // rule, usedCornerRadii), and so do they moved: an inset takes from each
+  // radius what it takes from each side, a ring adds at most half its width to
+  // a radius and its width to each side. `paint` is {fill, line, shadow,
   // order, extent}: extent is the box whose bounds a clip is held against.
-  function boxShape(box, corners, inset, radius, paint) {
+  function boxShape(box, corners, inset, radiusAt, paint) {
     const w = box.w - 2 * inset;
     const h = box.h - 2 * inset;
     let geometry = corners.geometry;
     let cornerRadius = 0;
+    let radii = null;
     if (geometry === 'roundRect') {
-      cornerRadius = Math.min(radius, Math.min(w, h) / 2);
+      cornerRadius = Math.min(radiusAt(corners.radius), Math.min(w, h) / 2);
       if (!(cornerRadius > 0)) geometry = 'rect';
+    } else if (geometry === 'roundCorners') {
+      const moved = [];
+      for (let index = 0; index < corners.radii.length; index++) {
+        const corner = corners.radii[index];
+        moved.push(corner.h > 0 && corner.v > 0
+          ? { h: Math.max(0, radiusAt(corner.h)), v: Math.max(0, radiusAt(corner.v)) }
+          : { h: 0, v: 0 });
+      }
+      const shaped = cornerGeometry(moved);
+      geometry = shaped.geometry;
+      cornerRadius = shaped.radius;
+      radii = shaped.radii || null;
     }
-    return {
+    const shape = {
       order: paint.order,
       x: box.x + inset,
       y: box.y + inset,
@@ -334,7 +355,10 @@ function createBorders(env) {
       rotate: box.rotate,
       extent: paint.extent,
     };
+    if (radii) shape.radii = radii;
+    return shape;
   }
+
 
   // A shape cut to its clip: whole when the clip cuts nothing it paints (its
   // extent) and no rounded padding box of the clip cuts it, the part shown of
@@ -488,15 +512,29 @@ function createBorders(env) {
     const inset = item.line ? item.line.widthPx / 2 : 0;
     const inner = { x: item.x + inset, y: item.y + inset, w: item.w - 2 * inset, h: item.h - 2 * inset };
     if (!(inner.w > 0 && inner.h > 0)) return false;
-    const radius = item.geometry === 'roundRect' ? Math.max(0, item.radius - inset) : 0;
+    const corners = cornerRadii(item);
+    const radii = [];
+    for (let index = 0; index < corners.length; index++) {
+      radii.push({ h: Math.max(0, corners[index].h - inset), v: Math.max(0, corners[index].v - inset) });
+    }
     for (let index = 0; index < outline.length; index++) {
-      if (!holds(item.geometry, inner, radius, outline[index])) return false;
+      if (!holds(item.geometry, inner, radii, outline[index])) return false;
     }
     return true;
   }
 
-  // Points on the outline of a footprint ({x, y, w, h, geometry, radius}): a
-  // rect's corners, a rounded rect's corner arcs, an ellipse's arc.
+  // The radii {h, v} of each corner of a shape or footprint that is no
+  // ellipse, top left first: a roundRect's one radius (at most half its short
+  // side) on each, a roundCorners shape's own, a rect's none.
+  function cornerRadii(shape) {
+    if (shape.geometry === 'roundCorners') return shape.radii;
+    const radius = shape.geometry === 'roundRect' ? Math.min(shape.radius, shape.w / 2, shape.h / 2) : 0;
+    const corner = { h: radius, v: radius };
+    return [corner, corner, corner, corner];
+  }
+
+  // Points on the outline of a footprint ({x, y, w, h, geometry, radius,
+  // radii}): a rect's corners, each rounded corner's arc, an ellipse's arc.
   function outlinePoints(footprint) {
     const points = [];
     const right = footprint.x + footprint.w;
@@ -511,26 +549,30 @@ function createBorders(env) {
       }
       return points;
     }
-    const radius = footprint.geometry === 'roundRect' ? Math.min(footprint.radius, footprint.w / 2, footprint.h / 2) : 0;
+    const radii = cornerRadii(footprint);
     const centres = [
-      { x: footprint.x + radius, y: footprint.y + radius, start: Math.PI },
-      { x: right - radius, y: footprint.y + radius, start: 1.5 * Math.PI },
-      { x: right - radius, y: bottom - radius, start: 0 },
-      { x: footprint.x + radius, y: bottom - radius, start: 0.5 * Math.PI },
+      { x: footprint.x + radii[0].h, y: footprint.y + radii[0].v, start: Math.PI },
+      { x: right - radii[1].h, y: footprint.y + radii[1].v, start: 1.5 * Math.PI },
+      { x: right - radii[2].h, y: bottom - radii[2].v, start: 0 },
+      { x: footprint.x + radii[3].h, y: bottom - radii[3].v, start: 0.5 * Math.PI },
     ];
     for (let corner = 0; corner < centres.length; corner++) {
       const centre = centres[corner];
-      const steps = radius > 0 ? ARC_TEST_POINTS : 0;
+      const radius = radii[corner];
+      const steps = radius.h > 0 && radius.v > 0 ? ARC_TEST_POINTS : 0;
       for (let step = 0; step <= steps; step++) {
         const angle = centre.start + (Math.PI / 2) * (steps ? step / steps : 0.5);
-        points.push({ x: centre.x + radius * Math.cos(angle), y: centre.y + radius * Math.sin(angle) });
+        points.push({ x: centre.x + radius.h * Math.cos(angle), y: centre.y + radius.v * Math.sin(angle) });
       }
     }
     return points;
   }
 
-  // Whether the point lies in the rect, rounded rect or ellipse `box`.
-  function holds(geometry, box, radius, point) {
+  // Whether the point lies in the ellipse `box`, or in the rect `box` with
+  // each corner rounded by its `radii` ({h, v}, top left first): inside its
+  // bounds, and inside the arc of any rounded corner it lies beyond the
+  // centre of, on both axes.
+  function holds(geometry, box, radii, point) {
     const right = box.x + box.w;
     const bottom = box.y + box.h;
     if (point.x < box.x - TOUCH_EPSILON_PX || point.x > right + TOUCH_EPSILON_PX ||
@@ -540,10 +582,18 @@ function createBorders(env) {
       const dy = (point.y - (box.y + box.h / 2)) / (box.h / 2);
       return dx * dx + dy * dy <= 1 + TOUCH_EPSILON_PX;
     }
-    if (!(radius > 0)) return true;
-    const centreX = Math.min(Math.max(point.x, box.x + radius), right - radius);
-    const centreY = Math.min(Math.max(point.y, box.y + radius), bottom - radius);
-    return Math.hypot(point.x - centreX, point.y - centreY) <= radius + TOUCH_EPSILON_PX;
+    for (let index = 0; index < radii.length; index++) {
+      const radius = radii[index];
+      if (!(radius.h > 0 && radius.v > 0)) continue;
+      const left = index === 0 || index === 3;
+      const top = index < 2;
+      const centreX = left ? box.x + radius.h : right - radius.h;
+      const centreY = top ? box.y + radius.v : bottom - radius.v;
+      if (!(left ? point.x < centreX : point.x > centreX) || !(top ? point.y < centreY : point.y > centreY)) continue;
+      const reach = Math.hypot((point.x - centreX) / radius.h, (point.y - centreY) / radius.v);
+      if (reach > 1 + TOUCH_EPSILON_PX / Math.min(radius.h, radius.v)) return false;
+    }
+    return true;
   }
 
   // The sides box-decoration-break: slice takes off one fragment of an inline

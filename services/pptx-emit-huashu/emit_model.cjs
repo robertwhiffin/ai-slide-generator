@@ -12,6 +12,15 @@
 // webfonts the page loaded (model.fonts, and model.italicFonts for an italic
 // run), and native tables by emit_table.cjs. The deck for Google Slides writes
 // a dotted line or outline as emit_dotted.cjs draws it, Drive having no 1:1 dot.
+//
+// A box whose corners round by different radii (geometry 'roundCorners', a card
+// header's 16px 16px 0 0) is written as the preset round2SameRect when its top
+// corners are one circle and its bottom ones another, each at most half its
+// short side, and otherwise as a custom path of one quarter arc (arcTo) per
+// rounded corner. PowerPoint and Google Slides draw both as CSS draws the box,
+// within their raster's own rounding, and keep the preset a preset (Drive:
+// ROUND_2_SAME_RECTANGLE), so it resizes with circular corners and keeps its
+// handles (Task 14 B4, D11, measured in both apps).
 
 const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
 const { emitTable } = require('./emit_table.cjs');
@@ -84,6 +93,70 @@ function shadowOptions(shadow) {
   };
 }
 
+// Two corner radii within this of each other, or of half a side, are one (layout rounding).
+const RADIUS_EPSILON_PX = 0.01;
+// A preset's adjustment is a length over the shape's short side, times this.
+const ADJUST_SCALE = 100000;
+// pptxgenjs writes options.angleRange[i] as the preset's adjustment adj(i + 1),
+// times this and rounded (pptxgen.cjs.js:5459), its one way to write a
+// preset's two adjustments: an adjustment a is passed as a / this.
+const PPTXGENJS_ANGLE_UNITS = 60000;
+
+// The top and bottom radii of a roundCorners item that round2SameRect draws
+// exactly, or null: its top corners one circle, its bottom ones another, each
+// at most half its short side, where the preset pins them.
+function sameSideRadii(item) {
+  const [topLeft, topRight, bottomRight, bottomLeft] = item.radii;
+  const near = (a, b) => Math.abs(a - b) <= RADIUS_EPSILON_PX;
+  const circle = (corner) => near(corner.h, corner.v);
+  if (![topLeft, topRight, bottomRight, bottomLeft].every(circle)) return null;
+  if (!near(topLeft.h, topRight.h) || !near(bottomLeft.h, bottomRight.h)) return null;
+  const half = Math.min(item.w, item.h) / 2;
+  if (topLeft.h > half + RADIUS_EPSILON_PX || bottomRight.h > half + RADIUS_EPSILON_PX) return null;
+  return { top: Math.min(topLeft.h, half), bottom: Math.min(bottomRight.h, half) };
+}
+
+// A roundCorners item's outline as pptxgenjs custom-geometry points, in inches
+// from its top left, clockwise from its top edge: a line along each side, and
+// a quarter arc of each rounded corner's own radii (arcTo, angles clockwise
+// from 3 o'clock); a square corner is the corner itself.
+function cornerPathPoints(item) {
+  const [topLeft, topRight, bottomRight, bottomLeft] = item.radii;
+  const { w, h } = item;
+  const points = [{ x: inches(topLeft.h), y: 0, moveTo: true }, { x: inches(w - topRight.h), y: 0 }];
+  const arc = (corner, startAngle) => {
+    if (corner.h > 0 && corner.v > 0) {
+      points.push({ x: 0, y: 0, curve: { type: 'arc', wR: inches(corner.h), hR: inches(corner.v), stAng: startAngle, swAng: 90 } });
+    }
+  };
+  arc(topRight, 270);
+  points.push({ x: inches(w), y: inches(h - bottomRight.v) });
+  arc(bottomRight, 0);
+  points.push({ x: inches(bottomLeft.h), y: inches(h) });
+  arc(bottomLeft, 90);
+  points.push({ x: 0, y: inches(topLeft.v) });
+  arc(topLeft, 180);
+  points.push({ close: true });
+  return points;
+}
+
+// The pptxgenjs shape type and geometry options of a shape item.
+function shapeGeometry(pres, item) {
+  if (item.geometry === 'path') return { shapeType: pres.ShapeType.custGeom, options: { points: pathPoints(item) } };
+  // rectRadius is in inches; pptxgenjs turns it into the preset's adj over the short side.
+  if (item.geometry === 'roundRect') return { shapeType: pres.ShapeType.roundRect, options: { rectRadius: inches(item.radius) } };
+  if (item.geometry === 'roundCorners') {
+    const radii = sameSideRadii(item);
+    if (!radii) return { shapeType: pres.ShapeType.custGeom, options: { points: cornerPathPoints(item) } };
+    const shortSide = Math.min(item.w, item.h);
+    const adjust = (radius) => Math.round((radius / shortSide) * ADJUST_SCALE) / PPTXGENJS_ANGLE_UNITS;
+    return { shapeType: pres.ShapeType.round2SameRect, options: { angleRange: [adjust(radii.top), adjust(radii.bottom)] } };
+  }
+  const shapeType = pres.ShapeType[item.geometry];
+  if (!shapeType) throw new Error(`[html2pptx] unknown shape geometry: ${item.geometry}`);
+  return { shapeType, options: {} };
+}
+
 // A path item's polylines as pptxgenjs custom-geometry points, in inches from
 // the shape's top left: each polyline starts with a move, and a closed one ends
 // with a close.
@@ -128,8 +201,7 @@ function emitShape(slide, pres, item, renderer) {
     emitDottedStroke(slide, pres, item.line, dottedOutline(item), item.rotate);
     return;
   }
-  const shapeType = item.geometry === 'path' ? pres.ShapeType.custGeom : pres.ShapeType[item.geometry];
-  if (!shapeType) throw new Error(`[html2pptx] unknown shape geometry: ${item.geometry}`);
+  const geometry = shapeGeometry(pres, item);
   const options = {
     x: inches(item.x),
     y: inches(item.y),
@@ -137,18 +209,18 @@ function emitShape(slide, pres, item, renderer) {
     h: inches(item.h),
     line: item.line ? lineOptions(item.line) : { type: 'none' },
   };
-  if (item.geometry === 'path') options.points = pathPoints(item);
+  if (geometry.options.points) options.points = geometry.options.points;
   if (item.fill) {
     options.fill = { color: item.fill.color };
     const transparency = transparencyOf(item.fill.alpha);
     if (transparency > 0) options.fill.transparency = transparency;
   }
-  // rectRadius is in inches; pptxgenjs turns it into the preset's adj over the short side.
-  if (item.geometry === 'roundRect') options.rectRadius = inches(item.radius);
+  if (geometry.options.rectRadius !== undefined) options.rectRadius = geometry.options.rectRadius;
+  if (geometry.options.angleRange) options.angleRange = geometry.options.angleRange;
   if (item.shadow) options.shadow = shadowOptions(item.shadow);
   if (item.rotate) options.rotate = item.rotate;
   if (item.role === 'shadow') options.objectName = SHADOW_SHAPE_NAME;
-  slide.addShape(shapeType, options);
+  slide.addShape(geometry.shapeType, options);
 }
 
 // A line runs left to right; one that rises is the same box flipped vertically.

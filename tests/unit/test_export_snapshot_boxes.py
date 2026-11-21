@@ -19,7 +19,13 @@ native shape:
   its settled, opaque state;
 * the page is read as the browser laid it out: nothing that moves layout
   runs before the snapshot, so a monospace code panel keeps each line's own
-  box.
+  box;
+* a box whose corners round by different radii (a card header's
+  ``16px 16px 0 0``) keeps each corner's own: the ``round2SameRect`` preset
+  when its top corners are one circle and its bottom ones another, each at
+  most half the short side, and otherwise a custom path of one quarter arc per
+  rounded corner (Task 14 B4, D11: before, one ``roundRect`` rounded all four
+  by the largest).
 
 Every assertion reads the emitted slide XML (``slide_shapes``) and, where the
 geometry matters, compares it with the browser's own layout of the very same
@@ -32,18 +38,23 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pytest
+from lxml import etree
 
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
+    EMU_PER_PX,
+    NAMESPACES,
     Shape,
     browser_rect,
     export_slides,
     requires_huashu_sidecar,
     slide_background,
     slide_document,
+    slide_shape_elements,
     slide_shapes,
 )
 
@@ -1008,3 +1019,342 @@ class TestShadowLayers:
                 and abs(shadow.angle - 120) <= SHADOW_ANGLE_TOLERANCE_DEG
             )
         ), f"the turned box's own shadow is {shadow}"
+
+
+# ---------------------------------------------------------------------------
+# Corners of different radii (D11)
+# ---------------------------------------------------------------------------
+
+CORNERS = ("top-left", "top-right", "bottom-right", "bottom-left")
+# The corner a custom path's quarter arc rounds, by its start angle (60000ths of
+# a degree, clockwise from 3 o'clock): the path runs clockwise from the top edge.
+ARC_CORNERS = {
+    270 * 60000: "top-right",
+    0: "bottom-right",
+    90 * 60000: "bottom-left",
+    180 * 60000: "top-left",
+}
+QUARTER_TURN = 90 * 60000
+# A preset adjustment agrees with its radius over the short side within EMU rounding.
+ADJ_TOLERANCE = 2
+# Radii and vertices agree with the browser's within EMU and arc rounding.
+RADIUS_TOLERANCE_PX = 0.05
+VERTEX_TOLERANCE_PX = 0.1
+
+
+def _mixed_export(body: str, monkeypatch: pytest.MonkeyPatch, *, target: str | None = None):
+    """(shapes, their XML elements, the browser's document) for one exported slide."""
+    pptx, failures = export_slides([body], css=DECK_CSS, monkeypatch=monkeypatch, target=target)
+    assert failures == [] and pptx, f"the export rejected the slide: {failures}"
+    return slide_shapes(pptx), slide_shape_elements(pptx), _document(body)
+
+
+def _adjustments(element: etree._Element) -> dict[str, int]:
+    """A preset shape's adjustments, by guide name."""
+    guides = element.iterfind("p:spPr/a:prstGeom/a:avLst/a:gd", NAMESPACES)
+    return {guide.get("name"): int(guide.get("fmla").removeprefix("val ")) for guide in guides}
+
+
+def _arc_radii(element: etree._Element) -> dict[str, tuple[float, float]]:
+    """Each corner's (horizontal, vertical) radius as a custom path's quarter arc draws it, px.
+
+    A corner no arc rounds is square, (0, 0). Every arc is a quarter turn clockwise.
+    """
+    radii = {corner: (0.0, 0.0) for corner in CORNERS}
+    for arc in element.iterfind("p:spPr/a:custGeom/a:pathLst/a:path/a:arcTo", NAMESPACES):
+        assert int(arc.get("swAng")) == QUARTER_TURN, f"an arc sweeps {arc.get('swAng')}"
+        corner = ARC_CORNERS[int(arc.get("stAng"))]
+        radii[corner] = (int(arc.get("wR")) / EMU_PER_PX, int(arc.get("hR")) / EMU_PER_PX)
+    return radii
+
+
+def _path_vertices(element: etree._Element, shape: Shape) -> list[tuple[float, float]]:
+    """Every point of a custom path, in slide px (its space is its EMU)."""
+    return [
+        (shape.x + int(point.get("x")) / EMU_PER_PX, shape.y + int(point.get("y")) / EMU_PER_PX)
+        for point in element.iterfind("p:spPr/a:custGeom/a:pathLst/a:path//a:pt", NAMESPACES)
+    ]
+
+
+def _corner_centres(box: dict, radii: dict) -> dict[str, tuple[float, float, float, float]]:
+    """Each rounded corner's arc: (centre x, centre y, horizontal radius, vertical radius)."""
+    centres = {}
+    for corner, (horizontal, vertical) in radii.items():
+        if not (horizontal > 0 and vertical > 0):
+            continue
+        left, top = "left" in corner, "top" in corner
+        centre_x = box["x"] + horizontal if left else box["x"] + box["w"] - horizontal
+        centre_y = box["y"] + vertical if top else box["y"] + box["h"] - vertical
+        centres[corner] = (centre_x, centre_y, horizontal, vertical)
+    return centres
+
+
+def _beyond(corner: str, centre: tuple, point: tuple[float, float]) -> bool:
+    """Whether ``point`` lies past a corner arc's centre on both axes, towards the corner."""
+    centre_x, centre_y = centre[0], centre[1]
+    outward_x = point[0] < centre_x if "left" in corner else point[0] > centre_x
+    outward_y = point[1] < centre_y if "top" in corner else point[1] > centre_y
+    return outward_x and outward_y
+
+
+def _ellipse_distance(centre: tuple, point: tuple[float, float]) -> float:
+    """How far ``point`` lies from a corner's arc, along the ray from its centre, px."""
+    centre_x, centre_y, horizontal, vertical = centre
+    reach = math.hypot((point[0] - centre_x) / horizontal, (point[1] - centre_y) / vertical)
+    return abs(reach - 1) * math.hypot(point[0] - centre_x, point[1] - centre_y) / max(reach, 1e-9)
+
+
+def _inside_corners(point: tuple[float, float], box: dict, radii: dict) -> bool:
+    """Whether ``point`` lies in ``box``, each corner rounded by its own radii, give or take."""
+    x, y = point
+    tolerance = VERTEX_TOLERANCE_PX
+    if not (
+        box["x"] - tolerance <= x <= box["x"] + box["w"] + tolerance
+        and box["y"] - tolerance <= y <= box["y"] + box["h"] + tolerance
+    ):
+        return False
+    for corner, centre in _corner_centres(box, radii).items():
+        if not _beyond(corner, centre, point):
+            continue
+        inside = math.hypot((x - centre[0]) / centre[2], (y - centre[1]) / centre[3]) <= 1
+        if not inside and _ellipse_distance(centre, point) > tolerance:
+            return False
+    return True
+
+
+def _on_outline(point: tuple[float, float], box: dict, radii: dict) -> bool:
+    """Whether ``point`` lies on the outline of ``box`` with its corners rounded by ``radii``."""
+    for corner, centre in _corner_centres(box, radii).items():
+        if _beyond(corner, centre, point):
+            return _ellipse_distance(centre, point) <= VERTEX_TOLERANCE_PX
+    x, y = point
+    edges = (
+        abs(x - box["x"]),
+        abs(x - box["x"] - box["w"]),
+        abs(y - box["y"]),
+        abs(y - box["y"] - box["h"]),
+    )
+    return _inside_corners(point, box, radii) and min(edges) <= VERTEX_TOLERANCE_PX
+
+
+def _has_vertex(points: list[tuple[float, float]], at: tuple[float, float]) -> bool:
+    return any(math.hypot(x - at[0], y - at[1]) <= VERTEX_TOLERANCE_PX for x, y in points)
+
+
+def _circles(*radii: float) -> dict[str, tuple[float, float]]:
+    """Corner radii top left, top right, bottom right, bottom left, each a circle's."""
+    return {corner: (radius, radius) for corner, radius in zip(CORNERS, radii)}
+
+
+# (border-radius, width, height, each corner's (horizontal, vertical) radius): boxes no
+# preset draws exactly, so each is a custom path of one quarter arc per rounded corner.
+CUSTOM_CORNERS = {
+    "left-only": ("16px 0 0 16px", 200, 60, _circles(16, 0, 0, 16)),
+    "all-different": ("4px 12px 24px 36px", 240, 120, _circles(4, 12, 24, 36)),
+    "elliptical": (
+        "48px 0 0 0 / 24px 0 0 0",
+        240,
+        120,
+        {"top-left": (48, 24), "top-right": (0, 0), "bottom-right": (0, 0), "bottom-left": (0, 0)},
+    ),
+    # Its 16 px corners are past half its 20 px height, which round2SameRect pins them to.
+    "top-past-half-the-short-side": ("16px 16px 0 0", 300, 20, _circles(16, 16, 0, 0)),
+}
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestMixedCornerRadii:
+    def test_a_top_rounded_header_is_the_preset_that_rounds_its_top_corners_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 360x60 card header, ``border-radius: 16px 16px 0 0``: ``round2SameRect``.
+
+        Its top corners round by 16 px and its bottom ones are square: adj1 is
+        16 px over the 60 px short side, adj2 0, at the browser rect. Before,
+        one roundRect rounded all four corners by 16 px.
+        """
+        body = (
+            '<div class="slide"><div id="head" style="position: absolute; left: 80px; top: 100px; '
+            'width: 360px; height: 60px; border-radius: 16px 16px 0 0; background: #0B2026;">'
+            "</div></div>"
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch)
+        position, head = _filled(shapes, "0B2026")
+        assert head.geometry == "round2SameRect", (
+            f"the header is a {head.geometry}, not round2SameRect:\n{_describe(shapes)}"
+        )
+        adjustments = _adjustments(elements[position])
+        expected = {"adj1": round(16 / 60 * 100000), "adj2": 0}
+        assert set(adjustments) == set(expected) and all(
+            abs(adjustments[name] - value) <= ADJ_TOLERANCE for name, value in expected.items()
+        ), f"the header's adjustments are {adjustments}, expected {expected}"
+        _assert_box(head, browser_rect(document, "#head"), BOX_TOLERANCE_PX, "the header")
+
+    @pytest.mark.parametrize("case", tuple(CUSTOM_CORNERS))
+    def test_corners_no_preset_draws_are_each_their_own_quarter_arc(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """Left-only, all-different, elliptical and too-deep corners: one arc per rounded corner.
+
+        The box is a custom path at the browser rect whose quarter arcs round
+        exactly the corners CSS rounds, each by its own horizontal and vertical
+        radius, and leave the others square.
+        """
+        radius, width, height, expected = CUSTOM_CORNERS[case]
+        body = (
+            '<div class="slide"><div id="box" style="position: absolute; left: 80px; top: 100px; '
+            f"width: {width}px; height: {height}px; border-radius: {radius}; "
+            'background: #2E7D6B;"></div></div>'
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch)
+        position, box = _filled(shapes, "2E7D6B")
+        assert box.geometry == "custGeom", (
+            f"the {case} box is a {box.geometry}, not a custom path:\n{_describe(shapes)}"
+        )
+        drawn = _arc_radii(elements[position])
+        wrong = {
+            corner: drawn[corner]
+            for corner in CORNERS
+            if any(
+                abs(a - b) > RADIUS_TOLERANCE_PX for a, b in zip(drawn[corner], expected[corner])
+            )
+        }
+        assert not wrong, f"the {case} box rounds its corners {drawn}, expected {expected}"
+        _assert_box(box, browser_rect(document, "#box"), BOX_TOLERANCE_PX, f"the {case} box")
+
+    def test_a_bordered_top_rounded_box_strokes_its_corners_on_the_borders_centre_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 2 px border on ``16px 16px 0 0``: the preset inset by 1 px, its top radius 15 px.
+
+        The stroke is centred on the shape's edge, so the shape is the border
+        box inset by half the border, and each corner's radius the border
+        radius less half the border (the stroke-centre rule, per corner).
+        """
+        body = (
+            '<div class="slide"><div id="card" style="position: absolute; left: 80px; top: 100px; '
+            "box-sizing: border-box; width: 200px; height: 80px; border-radius: 16px 16px 0 0; "
+            'background: #FFFFFF; border: 2px solid #FF3621;"></div></div>'
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch)
+        position, card = _filled(shapes, "FFFFFF")
+        border_box = browser_rect(document, "#card")
+        assert (border_box["w"], border_box["h"]) == (200.0, 80.0), (
+            f"fixture drift: the card's border box measured {border_box}"
+        )
+        inset = {
+            "x": border_box["x"] + 1,
+            "y": border_box["y"] + 1,
+            "w": border_box["w"] - 2,
+            "h": border_box["h"] - 2,
+        }
+        assert card.geometry == "round2SameRect" and card.line == "FF3621", (
+            f"the card is a {card.geometry} outlined {card.line}:\n{_describe(shapes)}"
+        )
+        adjustments = _adjustments(elements[position])
+        expected = round(15 / 78 * 100000)
+        assert abs(adjustments.get("adj1", -1) - expected) <= ADJ_TOLERANCE, adjustments
+        assert adjustments.get("adj2") == 0, adjustments
+        _assert_box(card, inset, INSET_TOLERANCE_PX, "the card, inset by half its border")
+
+    def test_a_clip_cutting_a_top_left_rounded_box_keeps_its_square_corners_square(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An overflow box cuts a box rounded only at its top left: the cut keeps each corner.
+
+        What the clip shows is one custom path whose every vertex lies inside
+        the box with its own corners, with vertices along the 24 px top-left
+        arc and one at the square bottom-left corner itself.
+        """
+        body = (
+            '<div class="slide"><div style="position: absolute; left: 80px; top: 100px; '
+            'width: 300px; height: 200px; overflow: hidden;">'
+            '<div id="cut" style="position: absolute; left: 0; top: 40px; width: 400px; '
+            'height: 100px; border-radius: 24px 0 0 0; background: #2E7D6B;"></div></div></div>'
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch)
+        position, cut = _filled(shapes, "2E7D6B")
+        assert cut.geometry == "custGeom", f"the cut box is a {cut.geometry}:\n{_describe(shapes)}"
+        box = browser_rect(document, "#cut")
+        radii = _circles(24, 0, 0, 0)
+        points = _path_vertices(elements[position], cut)
+        outside = [point for point in points if not _inside_corners(point, box, radii)]
+        centre = _corner_centres(box, radii)["top-left"]
+        on_arc = [
+            point
+            for point in points
+            if _beyond("top-left", centre, point) and _ellipse_distance(centre, point) <= 0.1
+        ]
+        assert not outside and on_arc, f"vertices outside {outside[:4]}, on the arc {len(on_arc)}"
+        assert _has_vertex(points, (box["x"], box["y"] + box["h"])), (
+            f"the square bottom-left corner {(box['x'], box['y'] + box['h'])} is no vertex"
+        )
+
+    @pytest.mark.parametrize(
+        ("frame_place", "frame_radius"),
+        [("left: 0; bottom: 0;", "0"), ("left: 0; top: 0;", "24px 24px 0 0")],
+        ids=["square-frame-at-the-square-corner", "rounded-frame-at-the-rounded-corner"],
+    )
+    def test_a_shadowed_frame_a_top_rounded_panel_covers_takes_the_panels_colour(
+        self, monkeypatch: pytest.MonkeyPatch, frame_place: str, frame_radius: str
+    ) -> None:
+        """An unfilled shadowed frame the panel (``24px 24px 0 0``) covers: layers in its colour.
+
+        A square frame in the panel's square bottom-left corner, and a frame
+        rounded as the panel is in its rounded top-left corner, each lie whole
+        on the panel, judged corner by corner: so the frame's two shadow layers
+        are shapes filled with the panel's colour. Rounding every corner by the
+        largest radius would leave a square corner uncovered, or a rounded
+        frame's corner point outside the panel's arc, and drop both layers.
+        """
+        body = (
+            '<div class="slide"><div style="position: absolute; left: 80px; top: 80px; '
+            'width: 600px; height: 400px; border-radius: 24px 24px 0 0; background: #CDEDE1;">'
+            f'<div style="position: absolute; {frame_place} width: 200px; height: 100px; '
+            f'border-radius: {frame_radius}; overflow: hidden; box-shadow: {SHADOW_SM};">'
+            '<div style="height: 100px; background: #FF5F46;"></div></div></div></div>'
+        )
+        shapes, _, _ = _mixed_export(body, monkeypatch)
+        hidden = _shadow_shapes(shapes)
+        assert len(hidden) == 2 and all(shape.fill == PANEL_FILL for _, shape in hidden), (
+            f"expected two shadow shapes filled {PANEL_FILL}:\n{_describe(shapes)}"
+        )
+
+    def test_the_google_deck_dots_a_top_rounded_border_along_its_own_corners(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """For Google Slides a dotted border is a stroke of its own: along the box's own corners.
+
+        The 2 px dotted border of a ``16px 16px 0 0`` box is drawn twice along
+        its centre line (emit_dotted.cjs): every vertex of that stroke lies on
+        the box inset by 1 px with its top corners rounded by 15 px, and its
+        square bottom corners are vertices.
+        """
+        body = (
+            '<div class="slide"><div id="dotted" style="position: absolute; left: 80px; '
+            "top: 100px; width: 240px; height: 100px; border-radius: 16px 16px 0 0; "
+            'background: #FFFFFF; border: 2px dotted #FF3621;"></div></div>'
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch, target="gslides")
+        strokes = [
+            (position, shape)
+            for position, shape in enumerate(shapes)
+            if shape.geometry == "custGeom" and shape.line == "FF3621" and shape.fill is None
+        ]
+        assert len(strokes) == 1, f"expected one dotted stroke:\n{_describe(shapes)}"
+        position, stroke = strokes[0]
+        border_box = browser_rect(document, "#dotted")
+        centre_line = {
+            "x": border_box["x"] + 1,
+            "y": border_box["y"] + 1,
+            "w": border_box["w"] - 2,
+            "h": border_box["h"] - 2,
+        }
+        radii = _circles(15, 15, 0, 0)
+        points = _path_vertices(elements[position], stroke)
+        off = [point for point in points if not _on_outline(point, centre_line, radii)]
+        assert not off, f"stroke vertices off the box's own outline: {off[:4]}"
+        bottom = centre_line["y"] + centre_line["h"]
+        for corner in ((centre_line["x"], bottom), (centre_line["x"] + centre_line["w"], bottom)):
+            assert _has_vertex(points, corner), f"the square corner {corner} is no stroke vertex"
