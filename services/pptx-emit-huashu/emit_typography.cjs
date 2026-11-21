@@ -17,6 +17,22 @@
 // loaded is 700. A bold request that only a lighter face could meet is the
 // browser's synthetic bold, so it is written as that face plus bold.
 //
+// Italics, in the deck for PowerPoint (target 'pptx'). The static fonts name
+// each italic but Bold Italic a family of its own, with no italic bit ("DM Sans
+// Italic", "DM Sans Medium Italic"), so the one italic member of family "DM
+// Sans" is its Bold Italic, and PowerPoint draws "DM Sans" plus italic as Bold
+// Italic. So an italic run of a loaded webfont is written as its italic static's
+// own family, named as the weight's face is plus "Italic", with italic off; at
+// 700 it is the family plus bold and italic, the family's Bold Italic (measured
+// in PowerPoint for Mac: scripts/export_fidelity/CALIBRATION.md, D1). The
+// italic named is the one the browser painted: CSS matching over the weights of
+// the family's italic faces the page loaded (model.italicFonts), or over its
+// upright faces, which the browser slants, where it loaded no italic. Google
+// Slides (target 'gslides') has no family "DM Sans Italic" (it draws another
+// font) and draws "DM Sans" plus italic as the italic, so its deck keeps the
+// family and the italic flag. A family the page did not load keeps its own
+// name and the flag in both decks.
+//
 // Every option lives on the run. pptxgenjs copies a shape option onto any run
 // whose own value is falsy (bold: false, charSpacing: 0), so the text box
 // carries geometry only.
@@ -95,6 +111,18 @@ function matchedWeight(desired, available) {
   return lighter.length ? lighter[0] : heavier[0];
 }
 
+// The distinct hundreds (100..900) of the weights a model.fonts entry lists;
+// none for anything that is not a list of numbers.
+function loadedHundreds(loadedWeights) {
+  const loaded = [];
+  const reported = Array.isArray(loadedWeights) ? loadedWeights : [];
+  for (const value of reported) {
+    const hundred = cssWeight(value);
+    if (Number.isFinite(Number(value)) && !loaded.includes(hundred)) loaded.push(hundred);
+  }
+  return loaded;
+}
+
 // typefaceFor(family, weight, loadedWeights) -> {fontFace, bold}
 //   family         the run's CSS family;
 //   weight         its CSS weight;
@@ -103,12 +131,7 @@ function matchedWeight(desired, available) {
 function typefaceFor(family, weight, loadedWeights) {
   const name = String(family || '');
   const requested = cssWeight(weight);
-  const loaded = [];
-  const reported = Array.isArray(loadedWeights) ? loadedWeights : [];
-  for (const value of reported) {
-    const hundred = cssWeight(value);
-    if (Number.isFinite(Number(value)) && !loaded.includes(hundred)) loaded.push(hundred);
-  }
+  const loaded = loadedHundreds(loadedWeights);
   if (!loaded.length) {
     const singleWeight = SINGLE_WEIGHT_FAMILIES.has(name.toLowerCase());
     return { fontFace: name, bold: requested >= BOLD_FROM_WEIGHT && !singleWeight };
@@ -122,7 +145,29 @@ function typefaceFor(family, weight, loadedWeights) {
   };
 }
 
-// The weights model.fonts lists for `family`; CSS family names match case-insensitively.
+// italicTypefaceFor(family, weight, loadedWeights, italicWeights)
+//   -> {fontFace, bold, italic}: an italic run in the deck for PowerPoint (see
+//   Italics above). loadedWeights is typefaceFor's; italicWeights the weights
+//   of the family's italic faces the page loaded (model.italicFonts), empty
+//   where it loaded none.
+function italicTypefaceFor(family, weight, loadedWeights, italicWeights) {
+  const loaded = loadedHundreds(loadedWeights);
+  if (!loaded.length) return { ...typefaceFor(family, weight, loadedWeights), italic: true };
+  const italics = loadedHundreds(italicWeights);
+  const requested = cssWeight(weight);
+  const face = matchedWeight(requested, italics.length ? italics : loaded);
+  const name = String(family || '');
+  if (face === BOLD_WEIGHT) return { fontFace: name, bold: true, italic: true };
+  const weightName = WEIGHT_NAMES[face];
+  return {
+    fontFace: `${name} ${weightName ? `${weightName} ` : ''}Italic`,
+    bold: requested >= BOLD_FROM_WEIGHT && face < BOLD_FROM_WEIGHT,
+    italic: false,
+  };
+}
+
+// The weights a family -> weights map (model.fonts, model.italicFonts) lists
+// for `family`; CSS family names match case-insensitively.
 function loadedWeightsOf(fonts, family) {
   if (!fonts || typeof fonts !== 'object') return [];
   if (Object.prototype.hasOwnProperty.call(fonts, family)) return fonts[family];
@@ -156,21 +201,32 @@ function fontSizePt(run, sizing) {
   return capPx > 0 ? Math.min(written, capPx * PT_PER_PX) : written;
 }
 
-// runOptions(run, fonts, sizing) -> the pptxgenjs options of one run.
-//   fonts   model.fonts: family -> the webfont weights the page loaded;
+// The renderer a run is written for: 'gslides', or 'pptx' (also when none is named).
+function targetOf(sizing) {
+  return sizing && sizing.target === 'gslides' ? 'gslides' : 'pptx';
+}
+
+// runOptions(run, faces, sizing) -> the pptxgenjs options of one run.
+//   faces   the webfonts the page loaded, {weights: model.fonts, italicWeights:
+//           model.italicFonts}: each a family -> the weights of its faces (all
+//           of them, and the italic ones);
 //   sizing  {target: 'pptx' | 'gslides', capPx}, or none for 'pptx': the
 //           renderer the deck is written for, and the size (px) the run's
 //           line should be sized by, which a Google Slides script run is
 //           capped at (emit_text.cjs scriptCapPx).
 // The colour is the run's own: the snapshot wrote it pre-blended and solid,
 // because Drive drops text alpha.
-function runOptions(run, fonts, sizing) {
-  const face = typefaceFor(run.family, run.weight, loadedWeightsOf(fonts, run.family));
+function runOptions(run, faces, sizing) {
+  const known = faces && typeof faces === 'object' ? faces : {};
+  const weights = loadedWeightsOf(known.weights, run.family);
+  const face = run.italic && targetOf(sizing) === 'pptx'
+    ? italicTypefaceFor(run.family, run.weight, weights, loadedWeightsOf(known.italicWeights, run.family))
+    : { ...typefaceFor(run.family, run.weight, weights), italic: Boolean(run.italic) };
   const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(run.opticalTrackingPx) || 0);
   return {
     fontFace: xmlAttribute(face.fontFace),
     bold: face.bold,
-    italic: Boolean(run.italic),
+    italic: face.italic,
     fontSize: fontSizePt(run, sizing),
     color: run.color,
     charSpacing: trackingPx * PT_PER_PX,

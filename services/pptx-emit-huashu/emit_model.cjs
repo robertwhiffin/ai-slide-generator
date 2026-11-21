@@ -9,7 +9,8 @@
 // Only raster data: pictures are embedded (SDR-4437): from a capture or from the
 // item's own data: src. Anything else is skipped and announced on stderr. Text
 // items are written by emit_text.cjs, which names each run's typeface from the
-// webfonts the page loaded (model.fonts), and native tables by emit_table.cjs.
+// webfonts the page loaded (model.fonts, and model.italicFonts for an italic
+// run), and native tables by emit_table.cjs.
 
 const { emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
@@ -151,6 +152,8 @@ function inRange(item) {
 //             for (emit_text.cjs emitText); 'pptx' when absent.
 function emitSlide(pres, model, captures, renderer) {
   const slide = pres.addSlide();
+  // The webfonts the page loaded, all faces and the italic ones, which name a run's face.
+  const faces = { weights: model.fonts, italicWeights: model.italicFonts };
   applyBackground(slide, model.background);
   let skippedPictures = 0;
   let outOfRange = 0;
@@ -168,9 +171,9 @@ function emitSlide(pres, model, captures, renderer) {
       if (data) emitImage(slide, item, data);
       else skippedPictures += 1;
     } else if (item.kind === 'text') {
-      emitText(slide, item, model.fonts, renderer);
+      emitText(slide, item, faces, renderer);
     } else if (item.kind === 'table') {
-      emitTable(slide, item, model.fonts, renderer);
+      emitTable(slide, item, faces, renderer);
     } else {
       throw new Error(`[html2pptx] the slide model holds an item kind the emitter does not know: ${item.kind}`);
     }

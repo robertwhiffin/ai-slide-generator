@@ -452,6 +452,63 @@ move of the words of its line (20 px, line-height 29 px for three lines):
 | three lines, line 2 up 3 px | – | −0.12, +3.32, +0.76 | −0.12, +3.32, +3.32 | −0.12, +3.32, +0.76 |
 | three lines in one span, down 4 px | – | −4.12, −3.68, −3.24 | +0.04, +0.48, +0.60 | +0.04, +0.48, +0.60 |
 
+## D1: italic faces
+
+Measured 2026-11-21 (Task 14 B1) with a probe deck written by pptxgenjs, one line per naming,
+24 pt, rendered in PowerPoint for Mac (PDF) and converted through Drive (PDF export). The face is
+the font each line's spans embed in the app's PDF; the width is the line's, less its code, in
+px at 1280 wide.
+
+The static DM Sans installed for PowerPoint names each italic but Bold Italic a family of its
+own, with no italic bit: name ID 1 is "DM Sans Italic", "DM Sans Medium Italic", "DM Sans
+SemiBold Italic" (subfamily Regular); only DMSans-BoldItalic is a member of "DM Sans" itself.
+
+| typeface written | PowerPoint | Google Slides |
+|---|---|---|
+| `DM Sans` + italic | DMSans-BoldItalic, 717.88 | DMSans-Italic, 674.08 |
+| `DM Sans Italic`, italic off | DMSans-Italic, 675.65 | Sansita-Italic, 572.35 |
+| `DM Sans Italic` + italic | DMSans-Italic, 675.65 | Sansita-Italic, 572.35 |
+| `DM Sans Medium` + italic | DMSans-Medium (upright), 699.26 | DMSans-MediumItalic, 686.66 |
+| `DM Sans Medium Italic`, italic off | DMSans-MediumItalic, 689.01 | DMSans-MediumItalic, 686.66 |
+| `DM Sans SemiBold Italic`, italic off | DMSans-SemiBoldItalic, 705.36 | DMSans-SemiBoldItalic, 703.04 |
+| `DM Sans` + bold + italic | DMSans-BoldItalic, 717.88 | DMSans-BoldItalic, 714.94 |
+| `DM Sans` (upright control) | DMSans-Regular, 671.38 | DMSans-Regular, 667.87 |
+| `DM Sans Light Italic` (not installed) | DMSans-Light (upright), 664.34 | DMSans-LightItalic, 664.32 |
+
+**Both static conventions.** Not every family's statics name italics so. DM Mono's are RIBBI
+members of their family (DMMono-Italic: name ID 1 "DM Mono", subfamily Italic, the italic bit
+set; full name "DM Mono Italic"), as most families' are. PowerPoint resolves the italic static's
+name through the face's full name and style as well as name ID 1, so the one naming is right for
+both (a second probe deck, 24 pt; pixel comparisons at 4x):
+
+| typeface written | PowerPoint |
+|---|---|
+| `DM Mono` + italic | DMMono-Italic, 766.75 |
+| `DM Mono Italic`, italic off | DMMono-Italic, 766.75, pixel-identical to the line above |
+| `DM Mono Italic` + italic | DMMono-Italic, 766.75, pixel-identical |
+| `DM Mono Medium` + italic (no Medium Italic installed) | DMMono-Medium (upright), 780.91 |
+| `DM Sans Italic`, italic off | DMSans-Italic, 594.06 |
+| `DM Sans Italic` + italic | DMSans-Italic, 594.06, slanted a second time (80,808 pixels differ) |
+
+So the deck for PowerPoint writes an italic run of a loaded webfont as its italic static's
+name, the weight's face plus "Italic", with italic off, and 700 as the family plus bold and
+italic (its Bold Italic in either convention); the deck for Google Slides keeps the family plus
+italic (`emit_typography.cjs` italicTypefaceFor). The webfonts themselves cannot tell the two
+conventions apart: Google serves every italic webfont as a RIBBI member (`DM Sans 9pt`, Italic).
+PowerPoint for Windows could not be probed here: whether it resolves the italic static's name for
+a RIBBI family (by the full name, "<family> [weight ]Italic" in both conventions) as PowerPoint
+for Mac does is unmeasured, an owner check.
+
+**A variable install.** Google's variable DM Sans (`DMSans[opsz,wght].ttf` and its italic),
+renamed `TellrProbeVar` so it could not meet the installed statics, installed for the probe and
+removed after it, PowerPoint restarted: PowerPoint for Mac shows each file's default instance
+alone, under its legacy name ID 1 (`TellrProbeVar 9pt`, so "DM Sans 9pt" for the real font).
+`… 9pt` + italic is the italic file's default instance; `… 9pt Italic` falls back to the upright;
+no other named instance (`… Medium`, `… Medium Italic`, the PostScript names) resolves, and the
+bare family name is Calibri. With a variable install the deck's family itself does not resolve,
+upright text included, so it cannot decide the italic naming; the statics' naming is the one
+PowerPoint draws as the plain italic.
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |

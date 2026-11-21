@@ -1764,6 +1764,7 @@ def _valid_model() -> dict:
         "height": 720,
         "background": {"color": "F9F7F4"},
         "fonts": {"DM Sans": [400, 700]},
+        "italicFonts": {"DM Sans": [400]},
         "reference": {"hiddenText": "secretword"},
         "stats": {"elements": 12, "pseudoElements": 1, "truncated": False},
         "captures": [
@@ -2104,6 +2105,8 @@ MODEL_FIELD_DEFECTS = {
     ),
     "fonts-not-a-map": (_set("fonts", ["DM Sans"]), "fonts", {}),
     "fonts-weight-nan": (_set("fonts", {"DM Sans": [NAN]}), "fonts", {}),
+    "italic-fonts-not-a-map": (_set("italicFonts", ["DM Sans"]), "italicFonts", {}),
+    "italic-fonts-weight-a-string": (_set("italicFonts", {"DM Sans": ["400"]}), "italicFonts", {}),
     "hidden-text-not-a-string": (
         _set("reference", {"hiddenText": ["Forgedword"]}),
         "reference",

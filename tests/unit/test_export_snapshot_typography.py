@@ -51,6 +51,7 @@ deck's Google Fonts import loading, which the weight tests guard explicitly.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import re
@@ -63,10 +64,13 @@ from lxml import etree
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
+    LATIN_UNICODE_RANGE,
+    PINNED_FONT_DIR,
     Run,
     Shape,
     browser_line_boxes,
     browser_lines,
+    browser_loaded_faces,
     browser_loaded_weights,
     browser_probes,
     browser_style,
@@ -84,6 +88,8 @@ from tests.fixtures.export_snapshot_support import (
 )
 
 TYPOGRAPHY_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.cjs"
+TEXT_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_text.cjs"
+TABLE_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_table.cjs"
 
 PT_PER_PX = 0.75
 HUNDREDTHS = 100
@@ -312,6 +318,25 @@ FILL_IDIOM_SLIDE = (
     "</div>"
 )
 
+# An italic face the page loads: DM Sans italic 400 (the latin file Google
+# serves for an ``ital`` import), pinned as data:, with an <em> at 400 and one
+# at 600, which only that 400 italic can paint.
+LOADED_ITALIC_TEXT = "Loaded italic words"
+LOADED_ITALIC_HEAVY_TEXT = "Heavier italic words"
+_ITALIC_FACE_DATA = base64.b64encode(
+    (PINNED_FONT_DIR / "dm-sans" / "DMSans-Italic-400-latin.woff2").read_bytes()
+).decode("ascii")
+ITALIC_FACE_SLIDE = (
+    "<style>@font-face { font-family: 'DM Sans'; font-style: italic; font-weight: 400; "
+    f"src: url(data:font/woff2;base64,{_ITALIC_FACE_DATA}) format('woff2'); "
+    f"unicode-range: {LATIN_UNICODE_RANGE}; }}</style>"
+    '<div class="slide">'
+    f'<p id="loaded-italic" style="font-size: 24px;"><em>{LOADED_ITALIC_TEXT}</em></p>'
+    '<p id="loaded-italic-heavy" style="font-size: 24px; font-weight: 600;">'
+    f"<em>{LOADED_ITALIC_HEAVY_TEXT}</em></p>"
+    "</div>"
+)
+
 SLIDES = {
     "weights": WEIGHTS_SLIDE,
     "families": FAMILIES_SLIDE,
@@ -324,6 +349,7 @@ SLIDES = {
     "length-stops": LENGTH_STOPS_SLIDE,
     "capitalize": CAPITALIZE_SLIDE,
     "fill-idiom": FILL_IDIOM_SLIDE,
+    "italic-face": ITALIC_FACE_SLIDE,
 }
 
 # ---------------------------------------------------------------------------
@@ -382,6 +408,17 @@ def corpus_pptx() -> Iterator[bytes]:
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx, failures = export_corpus(
             list(CORPUS_PREFIXES), monkeypatch=monkeypatch
+        )
+    assert failures == [], f"the export rejected a corpus slide: {failures}"
+    yield pptx
+
+
+@pytest.fixture(scope="module")
+def corpus_gslides_pptx() -> Iterator[bytes]:
+    """Corpus slides 09 and 13, exported once for Google Slides (``target="gslides"``)."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_corpus(
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, target="gslides"
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx
@@ -965,22 +1002,101 @@ class TestSnapshotRunStyle:
             others
         )
 
-    def test_italic_runs_are_italic(self, corpus_pptx: bytes) -> None:
-        """Fixture 09: ``<em>debt was repaid early</em>`` and the italic ``.dk-source`` line.
+    def test_italic_runs_are_the_italic_static_for_powerpoint(self, corpus_pptx: bytes) -> None:
+        """D1, fixture 09 in the deck written for PowerPoint: ``<em>debt was repaid early</em>``
+        and the italic ``.dk-source`` line.
 
-        Their runs carry ``i="1"``; "Interest expense fell as" before the
-        ``<em>`` does not.
+        The corpus deck loads DM Sans with no italic, so the browser slants
+        its 400 face (guarded). Their runs are typeface ``DM Sans Italic``,
+        the italic static's own family, with ``i`` off and not bold:
+        PowerPoint draws ``DM Sans`` plus ``i`` as Bold Italic, the one italic
+        member of family ``DM Sans`` (CALIBRATION.md D1). "Interest expense
+        fell as" before the ``<em>`` stays upright ``DM Sans``.
         """
+        document = corpus_document("09")
+        _guard_style(document, "em", fontStyle="italic", fontWeight="400")
+        _guard_style(document, ".dk-source", fontStyle="italic", fontWeight="400")
+        slanted = [face for face in browser_loaded_faces(document) if face[1] != "normal"]
+        assert not slanted, f"fixture drift: the corpus deck now loads italic faces: {slanted}"
         shapes = _corpus_shapes(corpus_pptx, "09")
         line = _box(shapes, ITALIC_LINE)
         source = _box(shapes, SOURCE_TEXT)
 
-        assert _run(line, ITALIC_TEXT).italic, f"the <em> run is not italic:\n{_box_runs(line)}"
+        italic = _run(line, ITALIC_TEXT)
+        assert (italic.typeface, italic.italic, italic.bold) == ("DM Sans Italic", False, False), (
+            f"the <em> run is not the DM Sans Italic static, upright-flagged:\n{_box_runs(line)}"
+        )
+        before = [
+            _describe_run(run)
+            for run in _runs_containing(line, ITALIC_LINE)
+            if (run.typeface, run.italic) != ("DM Sans", False)
+        ]
+        assert not before, "the text before the <em> is not upright DM Sans:\n  " + "\n  ".join(
+            before
+        )
+        wrong = [
+            _describe_run(run)
+            for run in _runs(source)
+            if run.text.strip()
+            and (run.typeface, run.italic, run.bold) != ("DM Sans Italic", False, False)
+        ]
+        assert not wrong, "the .dk-source line is not the DM Sans Italic static:\n  " + "\n  ".join(
+            wrong
+        )
+
+    def test_italic_runs_are_italic_for_google(self, corpus_gslides_pptx: bytes) -> None:
+        """D1, fixture 09 in the deck written for Google Slides: the same runs.
+
+        They are ``DM Sans`` with ``i="1"``, as before: Google draws that as
+        the italic, and has no family ``DM Sans Italic`` (it draws another
+        font). "Interest expense fell as" is not italic.
+        """
+        shapes = _corpus_shapes(corpus_gslides_pptx, "09")
+        line = _box(shapes, ITALIC_LINE)
+        source = _box(shapes, SOURCE_TEXT)
+
+        italic = _run(line, ITALIC_TEXT)
+        assert (italic.typeface, italic.italic) == ("DM Sans", True), (
+            f"the <em> run is not italic DM Sans:\n{_box_runs(line)}"
+        )
         assert not any(run.italic for run in _runs_containing(line, ITALIC_LINE)), (
             f"the text before the <em> is italic:\n{_box_runs(line)}"
         )
-        upright = [_describe_run(run) for run in _runs(source) if not run.italic]
-        assert not upright, "the .dk-source line is not italic:\n  " + "\n  ".join(upright)
+        wrong = [
+            _describe_run(run)
+            for run in _runs(source)
+            if run.text.strip() and (run.typeface, run.italic) != ("DM Sans", True)
+        ]
+        assert not wrong, "the .dk-source line is not italic DM Sans:\n  " + "\n  ".join(wrong)
+
+    def test_loaded_italic_face_is_named_with_the_browsers_synthetic_bold(
+        self, typography_pptx: bytes
+    ) -> None:
+        """D1 with an italic face the page loaded: DM Sans italic 400 only, pinned.
+
+        ``<em>`` at 400 is that face: ``DM Sans Italic``, not bold. At 600 the
+        browser has no heavier italic, so it paints the 400 italic in
+        synthetic bold (CSS font matching prefers the italic style to the
+        weight): ``DM Sans Italic`` plus bold, never ``DM Sans SemiBold
+        Italic``, a face the slide never showed. Both with ``i`` off.
+        """
+        document = _document("italic-face")
+        loaded = browser_loaded_faces(document)
+        assert ("DM Sans", "italic", 400) in loaded and not any(
+            style != "normal" and weight != 400 for _, style, weight in loaded
+        ), f"fixture drift: the slide must load DM Sans italic 400 alone, it loads {sorted(loaded)}"
+        shapes = _shapes(typography_pptx, "italic-face")
+        regular = _run(_box(shapes, LOADED_ITALIC_TEXT), LOADED_ITALIC_TEXT)
+        heavy = _run(_box(shapes, LOADED_ITALIC_HEAVY_TEXT), LOADED_ITALIC_HEAVY_TEXT)
+
+        assert (regular.typeface, regular.bold, regular.italic) == (
+            "DM Sans Italic",
+            False,
+            False,
+        ), f"the 400 italic run is {_describe_run(regular)}"
+        assert (heavy.typeface, heavy.bold, heavy.italic) == ("DM Sans Italic", True, False), (
+            f"the 600 italic run is {_describe_run(heavy)}"
+        )
 
     def test_underline_and_strike_through(self, typography_pptx: bytes) -> None:
         """``<u>Underlined</u> then <s>struck</s> then plain``.
@@ -1522,6 +1638,46 @@ def _typeface_for(family: str, weight: int, loaded: list[int]) -> object:
     )
 
 
+def _run_options(run: dict, faces: dict, target: str | None) -> dict:
+    """``runOptions(run, faces, sizing)`` in Node; ``sizing`` names ``target`` when one is given."""
+    sizing = {} if target is None else {"target": target}
+    result = _typography(
+        f"typography.runOptions({json.dumps(run)}, {json.dumps(faces)}, {json.dumps(sizing)})"
+    )
+    assert isinstance(result, dict), f"runOptions returned {result!r}"
+    return result
+
+
+def _plain_run(**style: object) -> dict:
+    """A run as the snapshot writes it (snapshot_text.mjs Run), with ``style`` on top."""
+    run = {
+        "text": "x",
+        "family": "DM Sans",
+        "weight": 400,
+        "italic": False,
+        "sizePx": 20,
+        "color": INK,
+        "letterSpacingPx": 0,
+        "underline": False,
+        "strike": False,
+        "baseline": None,
+        "opticalTrackingPx": 0,
+        "unkernedTrackingPx": 0,
+    }
+    run.update(style)
+    return run
+
+
+# The webfonts a page loaded (emit_typography.cjs runOptions' `faces`):
+# model.fonts and model.italicFonts, each family -> its faces' weights.
+DM_SANS_ITALIC_400 = {"weights": {"DM Sans": DM_SANS_WEIGHTS}, "italicWeights": {"DM Sans": [400]}}
+DM_SANS_NO_ITALIC = {"weights": {"DM Sans": DM_SANS_WEIGHTS}, "italicWeights": {}}
+DM_SANS_EVERY_ITALIC = {
+    "weights": {"DM Sans": ALL_WEIGHTS},
+    "italicWeights": {"DM Sans": ALL_WEIGHTS},
+}
+
+
 @requires_node
 class TestTypographyModule:
     @pytest.mark.parametrize(
@@ -1626,6 +1782,215 @@ class TestTypographyModule:
         assert result == {"fontFace": "Arial Black", "bold": False}, (
             f"typefaceFor('Arial Black', 900, []) is {result}"
         )
+
+    @pytest.mark.parametrize(
+        ("weight", "faces", "expected"),
+        [
+            pytest.param(
+                400,
+                DM_SANS_ITALIC_400,
+                {"fontFace": "DM Sans Italic", "bold": False, "italic": False},
+                id="400-its-italic-face",
+            ),
+            pytest.param(
+                600,
+                DM_SANS_ITALIC_400,
+                {"fontFace": "DM Sans Italic", "bold": True, "italic": False},
+                id="600-synthetic-bold-on-the-400-italic",
+            ),
+            pytest.param(
+                500,
+                DM_SANS_NO_ITALIC,
+                {"fontFace": "DM Sans Medium Italic", "bold": False, "italic": False},
+                id="500-slanted-medium",
+            ),
+            pytest.param(
+                700,
+                DM_SANS_NO_ITALIC,
+                {"fontFace": "DM Sans", "bold": True, "italic": True},
+                id="700-the-familys-bold-italic",
+            ),
+            pytest.param(
+                600,
+                DM_SANS_EVERY_ITALIC,
+                {"fontFace": "DM Sans SemiBold Italic", "bold": False, "italic": False},
+                id="600-its-italic-face",
+            ),
+        ],
+    )
+    def test_italic_webfont_run_is_its_italic_static_for_powerpoint(
+        self, weight: int, faces: dict, expected: dict
+    ) -> None:
+        """D1: an italic run of a webfont the page loaded, in the deck written for PowerPoint.
+
+        The static fonts name each italic its own family, with no italic bit
+        (``DM Sans Italic``, ``DM Sans Medium Italic``), so the one italic
+        member of family ``DM Sans`` is Bold Italic, and PowerPoint draws
+        ``DM Sans`` plus ``i`` as Bold Italic (measured: its PDF embeds
+        DMSans-BoldItalic; ``DM Sans Italic`` with ``i`` off embeds
+        DMSans-Italic). So the run is the italic static's own family with
+        italic off, and 700 is the family plus bold and italic, its Bold
+        Italic. The face named is the italic the browser painted: CSS
+        matching over the family's loaded italic faces (``italicWeights``),
+        or over its upright faces, which the browser slants, when it loaded
+        none; a bold request only a lighter italic meets is that italic plus
+        bold. Both the default target and ``pptx`` write it.
+        """
+        for target in (None, "pptx"):
+            result = _run_options(_plain_run(weight=weight, italic=True), faces, target)
+            assert {key: result.get(key) for key in expected} == expected, (
+                f"an italic DM Sans {weight} run for target {target!r}, with {faces}: "
+                f"{ {key: result.get(key) for key in ('fontFace', 'bold', 'italic')} }, "
+                f"expected {expected}"
+            )
+
+    @pytest.mark.parametrize("weight", ALL_WEIGHTS)
+    def test_italic_static_names_every_loaded_weight(self, weight: int) -> None:
+        """D1 with every weight's italic loaded: ``DM Sans <name> Italic``, italic off.
+
+        400 is ``DM Sans Italic`` and 700 is ``DM Sans`` plus bold and italic
+        (the family's Bold Italic); every other weight is its weight-named
+        italic (``WEIGHT_NAMES`` plus "Italic"), never bold.
+        """
+        name = WEIGHT_NAMES.get(weight)
+        if weight == 700:
+            expected = {"fontFace": "DM Sans", "bold": True, "italic": True}
+        else:
+            face = "DM Sans Italic" if name is None else f"DM Sans {name} Italic"
+            expected = {"fontFace": face, "bold": False, "italic": False}
+
+        result = _run_options(_plain_run(weight=weight, italic=True), DM_SANS_EVERY_ITALIC, "pptx")
+
+        assert {key: result.get(key) for key in expected} == expected, (
+            f"an italic DM Sans {weight} run for PowerPoint is {result}, expected {expected}"
+        )
+
+    @pytest.mark.parametrize(
+        ("weight", "faces", "expected"),
+        [
+            pytest.param(
+                400, DM_SANS_ITALIC_400, {"fontFace": "DM Sans", "bold": False}, id="400"
+            ),
+            pytest.param(
+                500, DM_SANS_NO_ITALIC, {"fontFace": "DM Sans Medium", "bold": False}, id="500"
+            ),
+            pytest.param(700, DM_SANS_NO_ITALIC, {"fontFace": "DM Sans", "bold": True}, id="700"),
+        ],
+    )
+    def test_italic_webfont_run_keeps_its_family_and_flag_for_google(
+        self, weight: int, faces: dict, expected: dict
+    ) -> None:
+        """D1, the deck written for Google Slides: the family plus ``i``, as before.
+
+        Google knows no family ``DM Sans Italic`` (it draws another font,
+        Sansita, measured) and draws ``DM Sans`` plus ``i`` as the italic and
+        ``DM Sans Medium`` plus ``i`` as the Medium Italic. So the typeface is
+        the upright rule's (``typefaceFor``) and the run is italic.
+        """
+        result = _run_options(_plain_run(weight=weight, italic=True), faces, "gslides")
+
+        assert {key: result.get(key) for key in ("fontFace", "bold")} == expected and result.get(
+            "italic"
+        ) is True, f"an italic DM Sans {weight} run for Google is {result}, expected {expected}"
+
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_italic_non_webfont_run_keeps_its_family_and_flag(self, target: str) -> None:
+        """An italic Arial run, a family the page did not load: ``Arial`` plus ``i``, both targets.
+
+        A family that is no loaded webfont is a font on the viewer's machine,
+        whose italic is a member of its own family, so no italic static is
+        named (Review Focus 3 holds for italics too).
+        """
+        result = _run_options(
+            _plain_run(family="Arial", weight=400, italic=True), DM_SANS_NO_ITALIC, target
+        )
+
+        assert (result.get("fontFace"), result.get("bold"), result.get("italic")) == (
+            "Arial",
+            False,
+            True,
+        ), f"an italic Arial run for {target} is {result}"
+
+    @pytest.mark.parametrize(
+        ("target", "typeface", "italic"),
+        [("pptx", "DM Sans Italic", False), ("gslides", "DM Sans", True)],
+    )
+    def test_blank_line_after_an_italic_run_takes_its_targets_face(
+        self, target: str, typeface: str, italic: bool
+    ) -> None:
+        """D1 reaches the NBSP run of a blank line (two ``<br>``) after an italic run.
+
+        ``emit_text.cjs textObjects`` writes the blank line in the run before
+        it's face, so in each deck it is that run's italic as the deck writes
+        it: ``DM Sans Italic`` with ``i`` off for PowerPoint, ``DM Sans`` with
+        ``i`` for Google. Written in the other target's face, the blank line
+        is a face the app lacks (Google) or Bold Italic (PowerPoint).
+        """
+        line = {"runs": [_plain_run(text="Alpha", italic=True)]}
+        paragraph = {
+            "sizePx": 20,
+            "lineHeightPx": 26,
+            "ascentPx": 19,
+            "lines": [line, {"runs": []}, line],
+        }
+        item = {"rtl": False, "paragraphs": [paragraph]}
+        script = (
+            f"const text = require({json.dumps(str(TEXT_MODULE))});"
+            f"const objects = text.textObjects({json.dumps(item)}, "
+            f"{json.dumps(DM_SANS_NO_ITALIC)}, {json.dumps({'target': target})});"
+            "process.stdout.write(JSON.stringify(objects.map((object) => ({text: object.text, "
+            "fontFace: object.options.fontFace, italic: object.options.italic}))));"
+        )
+        objects = node_json(script)
+
+        written = [(entry["fontFace"], entry["italic"]) for entry in objects]
+        assert written == [(typeface, italic)] * 3, (
+            f"every run of the italic block, its blank line's included, must be {typeface!r} "
+            f"with italic={italic} for {target}: {objects}"
+        )
+
+    @pytest.mark.parametrize(
+        ("target", "typeface"), [("pptx", "DM Sans Italic"), ("gslides", "DM Sans")]
+    )
+    def test_table_cell_font_takes_its_targets_italic_face(
+        self, target: str, typeface: str
+    ) -> None:
+        """D1 reaches a native table cell's own font (``emit_table.cjs``): its empty lines' face.
+
+        An italic DM Sans cell font is the italic static for PowerPoint and
+        ``DM Sans`` for Google, as its runs are.
+        """
+        cell = {
+            "row": 0, "col": 0, "rowspan": 1, "colspan": 1, "fill": None,
+            "borders": {"top": None, "right": None, "bottom": None, "left": None},
+            "margin": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+            "valign": "top", "align": "left", "rtl": False,
+            "font": {"family": "DM Sans", "weight": 400, "italic": True, "sizePx": 16},
+            "paragraphs": None,
+        }
+        item = {"x": 10, "y": 10, "colWidths": [100], "rowHeights": [30], "cells": [cell]}
+        script = (
+            f"const table = require({json.dumps(str(TABLE_MODULE))});"
+            "let rows = null; const slide = { addTable: (written) => { rows = written; } };"
+            f"table.emitTable(slide, {json.dumps(item)}, {json.dumps(DM_SANS_NO_ITALIC)}, "
+            f"{json.dumps({'target': target})});"
+            "process.stdout.write(JSON.stringify(rows[0][0].options.fontFace));"
+        )
+
+        assert node_json(script) == typeface, (
+            f"the italic cell font for {target} is not {typeface!r}"
+        )
+
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_upright_run_is_the_same_for_both_targets(self, target: str) -> None:
+        """An upright DM Sans 500 run is ``DM Sans Medium``, not italic, in both decks."""
+        result = _run_options(_plain_run(weight=500), DM_SANS_ITALIC_400, target)
+
+        assert (result.get("fontFace"), result.get("bold"), result.get("italic")) == (
+            "DM Sans Medium",
+            False,
+            False,
+        ), f"an upright DM Sans 500 run for {target} is {result}"
 
     def test_run_options_escape_the_typeface_for_xml(self) -> None:
         """A CSS family named with ``&``, ``"`` and ``<``.

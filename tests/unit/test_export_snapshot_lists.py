@@ -1022,6 +1022,10 @@ class TestMarkerStyle:
         markers are DM Mono, 28 px (21 pt) and italic. Each marker run carries
         the marker's colour, weight, style, size and family, and each item's
         text keeps its own (the deck's ink, DM Sans, 15 pt, upright, regular).
+        This deck is written for PowerPoint, so an italic 400 run of a webfont
+        the page loaded is its italic static, ``DM Mono Italic``, with ``i``
+        off (CALIBRATION.md D1: PowerPoint draws that as DM Mono's own italic,
+        and ``DM Sans`` plus ``i`` as Bold Italic).
         """
         markers = kinds.geometry["markers"][list_id]
         item_style = kinds.geometry["item_styles"][list_id]
@@ -1041,12 +1045,18 @@ class TestMarkerStyle:
                 (marker["style"], self._marker_runs(shapes, marker, label), "marker"),
                 (item_style, self._label_runs(shapes, label), "text"),
             ):
+                italic = style["fontStyle"] == "italic"
+                assert not italic or style["fontWeight"] == "400", (
+                    f"fixture drift: the italic {what} of {label!r} is weight "
+                    f"{style['fontWeight']}, not 400, which its typeface is named for"
+                )
+                family = _first_family(style["fontFamily"])
                 expected = {
                     "color": _hex(style["color"]),
                     "bold": int(style["fontWeight"]) >= 600,
-                    "italic": style["fontStyle"] == "italic",
+                    "italic": False,
                     "size_pt": _px(style["fontSize"]) * PT_PER_PX,
-                    "typeface": _first_family(style["fontFamily"]),
+                    "typeface": f"{family} Italic" if italic else family,
                 }
                 for run in runs:
                     emitted = {

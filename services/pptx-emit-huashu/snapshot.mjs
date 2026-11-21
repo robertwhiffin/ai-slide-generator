@@ -27,6 +27,7 @@
 //  *   captures: Capture[],
 //  *   fonts: {'<family>': number[]},        // the weights (100..900) of its faces in
 //  *                                         // document.fonts that loaded: the page's webfonts
+//  *   italicFonts: {'<family>': number[]},  // the same, of its italic and oblique faces alone
 //  *   reference: {hiddenText: string},      // the words the page reads (its innerText)
 //  *                                         // that the slide does not show whole, each
 //  *                                         // whole, single-spaced: clipped, transparent,
@@ -2234,7 +2235,7 @@ async function snapshotPage(config, pseudoData) {
   // Line spacing and optical-size tracking, from offscreen probes read once
   // the walk has read every rect (snapshot_text.mjs applyMetrics).
   textLayout.applyMetrics();
-  const fonts = textLayout.loadedFonts();
+  const { fonts, italicFonts } = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;
   nameCaptureTargets();
 
@@ -2246,6 +2247,7 @@ async function snapshotPage(config, pseudoData) {
     items,
     captures,
     fonts,
+    italicFonts,
     reference: { hiddenText: textLayout.hiddenText() },
     stats,
   };

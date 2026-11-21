@@ -106,7 +106,8 @@
 //   content: a <b> inside a <u> computes none and is underlined;
 // * super- and subscript, from an inline ancestor's vertical-align.
 // The weights of the webfonts the page loaded go to the slide model as
-// model.fonts (loadedFonts), so the emitter can name a weight's face.
+// model.fonts, and those of their italic faces as model.italicFonts
+// (loadedFonts), so the emitter can name a weight's face and an italic's.
 //
 // Metrics (spec §3 Text, Spacing and Metrics) are read with offscreen probes
 // in the page's own fonts, after the walk (applyMetrics, snapshot_text_metrics.mjs):
@@ -795,16 +796,27 @@ function createTextLayout(env) {
     return weights.length ? weights : [weightOf(low)];
   }
 
-  // loadedFonts() -> model.fonts: family -> the weights (100..900) of its faces
-  // in document.fonts whose status is 'loaded', the webfonts the page painted
-  // with. The emitter names a weight's face only for such a family
-  // (emit_typography.cjs typefaceFor). document.fonts is a FontFaceSet, not a
-  // DOM collection, so it is read with its own iterator. Page script can
-  // replace that iterator too, so the read is bounded by COLLECTION_ITEM_LIMIT,
-  // and a throw keeps the faces read before it.
+  // Adds `weights` to `family`'s list in `map` (a family -> weights map), once each.
+  function addWeights(map, family, weights) {
+    if (!map[family]) map[family] = [];
+    for (let index = 0; index < weights.length; index++) {
+      if (map[family].indexOf(weights[index]) < 0) map[family].push(weights[index]);
+    }
+  }
+
+  // loadedFonts() -> {fonts, italicFonts}: model.fonts, family -> the weights
+  // (100..900) of its faces in document.fonts whose status is 'loaded', the
+  // webfonts the page painted with; and model.italicFonts, the same for its
+  // italic and oblique faces alone. The emitter names a weight's face only for
+  // such a family (emit_typography.cjs typefaceFor), and an italic run's face
+  // by the italic faces among them (italicTypefaceFor). document.fonts is a
+  // FontFaceSet, not a DOM collection, so it is read with its own iterator.
+  // Page script can replace that iterator too, so the read is bounded by
+  // COLLECTION_ITEM_LIMIT, and a throw keeps the faces read before it.
   function loadedFonts() {
     // No prototype, so no family name can reach an inherited property or setter.
     const fonts = Object.create(null);
+    const italicFonts = Object.create(null);
     try {
       const iterator = document.fonts.values();
       let read = 0;
@@ -815,11 +827,9 @@ function createTextLayout(env) {
         if (!face || face.status !== 'loaded') continue;
         const family = String(face.family || '').trim().replace(/^["']|["']$/g, '').trim();
         if (!family) continue;
-        if (!fonts[family]) fonts[family] = [];
         const weights = faceWeights(face.weight);
-        for (let index = 0; index < weights.length; index++) {
-          if (fonts[family].indexOf(weights[index]) < 0) fonts[family].push(weights[index]);
-        }
+        addWeights(fonts, family, weights);
+        if (String(face.style || 'normal') !== 'normal') addWeights(italicFonts, family, weights);
       }
       if (read >= COLLECTION_ITEM_LIMIT) {
         truncated = true;
@@ -829,9 +839,12 @@ function createTextLayout(env) {
       console.warn('[html2pptx] document.fonts could not be read (' + (e && e.message) +
         '); a family whose faces were not read exports without weight-named faces');
     }
-    const families = Object.keys(fonts);
-    for (let index = 0; index < families.length; index++) fonts[families[index]].sort((a, b) => a - b);
-    return fonts;
+    const maps = [fonts, italicFonts];
+    for (let map = 0; map < maps.length; map++) {
+      const families = Object.keys(maps[map]);
+      for (let index = 0; index < families.length; index++) maps[map][families[index]].sort((a, b) => a - b);
+    }
+    return { fonts, italicFonts };
   }
 
   function sameStyle(a, b) {

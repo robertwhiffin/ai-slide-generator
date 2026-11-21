@@ -394,13 +394,18 @@ def export_corpus(
     prefixes: list[str],
     *,
     monkeypatch: pytest.MonkeyPatch,
+    target: str | None = None,
     allow_model_drops: bool = False,
 ) -> tuple[bytes, list[dict]]:
-    """Export corpus slides (by prefix, in the given order) with the corpus deck CSS and scripts."""
+    """Export corpus slides (by prefix, in the given order) with the corpus deck CSS and scripts.
+
+    ``target``, when given, is the renderer the deck is written for.
+    """
     return _export_documents(
         [corpus_document(prefix) for prefix in prefixes],
         title=CORPUS_DECK.get("title", TEST_DECK_TITLE),
         monkeypatch=monkeypatch,
+        target=target,
         allow_model_drops=allow_model_drops,
     )
 

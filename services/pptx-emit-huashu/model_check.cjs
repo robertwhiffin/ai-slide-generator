@@ -25,7 +25,7 @@
 //       and cover each of its slots once;
 //     * the fields: items and captures are lists, background is a raster data:
 //       image or else a colour (as emit_model.cjs applyBackground takes it),
-//       fonts maps families to weights, reference.hiddenText is a
+//       fonts and italicFonts map families to weights, reference.hiddenText is a
 //       string, and stats.elements and stats.pseudoElements are counts.
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
 //     The one log line that says what was dropped; null when nothing was.
@@ -271,6 +271,7 @@ function checkModel(model) {
   };
   const background = kept(isBackground(source.background), source.background, null);
   const fonts = kept(isFonts(source.fonts), source.fonts, {});
+  const italicFonts = kept(isFonts(source.italicFonts), source.italicFonts, {});
   const reference = kept(isObject(source.reference) && typeof source.reference.hiddenText === 'string',
     source.reference, { hiddenText: '' });
   const stats = isObject(source.stats) ? source.stats : {};
@@ -283,6 +284,7 @@ function checkModel(model) {
       items,
       captures,
       fonts,
+      italicFonts,
       reference,
       stats: { ...stats, ...counts },
     },

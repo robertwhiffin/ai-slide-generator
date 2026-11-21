@@ -135,9 +135,10 @@ function lineCount(paragraphs) {
 }
 
 // A run's options in this item: its style and the item's direction.
-// `sizing` is runOptions': the renderer target and the line's size.
-function itemRunOptions(run, item, fonts, sizing) {
-  const options = runOptions(run, fonts, sizing);
+// `faces` and `sizing` are runOptions': the webfonts the page loaded, and the
+// renderer target and the line's size.
+function itemRunOptions(run, item, faces, sizing) {
+  const options = runOptions(run, faces, sizing);
   if (item.rtl) options.rtlMode = true;
   return options;
 }
@@ -183,10 +184,11 @@ function growthBeforePx(line, lineIndex, forPowerPoint) {
 
 // A blank line's NBSP run: the previous run's face and size without its glyph
 // marks, so neither an underline nor a baseline shift, nor the size a script
-// run is enlarged to for the renderer's own shrink.
-function blankLineOptions(run, item, fonts) {
+// run is enlarged to for the renderer's own shrink. Its face is written as
+// `target` writes the run's (emit_typography.cjs: an italic one).
+function blankLineOptions(run, item, faces, target) {
   const plain = { ...run, underline: false, strike: false, baseline: null };
-  return itemRunOptions(plain, item, fonts);
+  return itemRunOptions(plain, item, faces, { target });
 }
 
 // The options of the run that follows a script run at the end of `line`,
@@ -194,7 +196,7 @@ function blankLineOptions(run, item, fonts) {
 // baseline shift moves (on a line of script runs alone, the script run's own,
 // unshifted), with none of what a run could paint past its text (underline,
 // strike-through) and no tracking.
-function lineEndOptions(line, item, fonts) {
+function lineEndOptions(line, item, faces) {
   const runs = line.runs;
   const source = largestUnshiftedRun(line) || runs[runs.length - 1];
   const plain = {
@@ -205,14 +207,14 @@ function lineEndOptions(line, item, fonts) {
     letterSpacingPx: 0,
     opticalTrackingPx: 0,
   };
-  return itemRunOptions(plain, item, fonts);
+  return itemRunOptions(plain, item, faces, { target: 'pptx' });
 }
 
 // The item's written paragraphs, in order: {objects, pct, beforePx}, one per
 // paragraph of the model, or one per line of a loosely spaced one, and for
 // PowerPoint one more at each later line the browser grew (growthBeforePx).
 // `renderer` is {target}: the renderer the deck is written for (emitText).
-function writtenParagraphs(item, fonts, renderer) {
+function writtenParagraphs(item, faces, renderer) {
   const target = renderer && renderer.target;
   const forPowerPoint = target !== 'gslides';
   const paragraphs = item.paragraphs || [];
@@ -239,7 +241,7 @@ function writtenParagraphs(item, fonts, renderer) {
       const runs = line.runs || [];
       if (!runs.length) {
         // A blank line never opens its block, so a run precedes it.
-        const options = previousRun ? blankLineOptions(previousRun, item, fonts) : {};
+        const options = previousRun ? blankLineOptions(previousRun, item, faces, target) : {};
         options.softBreakBefore = !opensParagraph;
         current.objects.push({ text: NBSP, options });
         continue;
@@ -248,13 +250,13 @@ function writtenParagraphs(item, fonts, renderer) {
       // was measured; a paragraph's first line keeps its own size there.
       const sizing = { target, capPx: scriptCapPx(line, lineIndex > 0 ? line.growthPx : 0) };
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
-        const options = itemRunOptions(runs[runIndex], item, fonts, sizing);
+        const options = itemRunOptions(runs[runIndex], item, faces, sizing);
         if (runIndex === 0 && !opensParagraph) options.softBreakBefore = true;
         current.objects.push({ text: xmlText(runs[runIndex].text), options });
         previousRun = runs[runIndex];
       }
       if (forPowerPoint && runs[runs.length - 1].baseline) {
-        current.objects.push({ text: WORD_JOINER, options: lineEndOptions(line, item, fonts) });
+        current.objects.push({ text: WORD_JOINER, options: lineEndOptions(line, item, faces) });
       }
     }
     previousGapPx = spacing.gapPx;
@@ -262,13 +264,14 @@ function writtenParagraphs(item, fonts, renderer) {
   return written;
 }
 
-// textObjects(item, fonts, renderer) -> the pptxgenjs text array of `item`'s
+// textObjects(item, faces, renderer) -> the pptxgenjs text array of `item`'s
 // paragraphs ({paragraphs, rtl}: a text item, or a native table cell,
 // emit_table.cjs): every run carries its paragraph's spacing, and the last run
-// of every paragraph but the final one ends it. `renderer` is emitText's.
-function textObjects(item, fonts, renderer) {
+// of every paragraph but the final one ends it. `faces` and `renderer` are
+// emitText's.
+function textObjects(item, faces, renderer) {
   const objects = [];
-  const written = writtenParagraphs(item, fonts, renderer);
+  const written = writtenParagraphs(item, faces, renderer);
   for (let index = 0; index < written.length; index++) {
     const paragraph = written[index];
     for (const object of paragraph.objects) {
@@ -315,15 +318,17 @@ function placementOf(item) {
   };
 }
 
-// emitText(slide, item, fonts, renderer): one text item as one text box.
-//   fonts     model.fonts, the webfont weights the page loaded per family;
+// emitText(slide, item, faces, renderer): one text item as one text box.
+//   faces     the webfonts the page loaded, {weights: model.fonts,
+//             italicWeights: model.italicFonts} (emit_typography.cjs runOptions);
 //   renderer  {target: 'pptx' | 'gslides'}: the renderer the deck is written
-//             for (emit_deck.mjs payload.target), 'pptx' when absent. A script
-//             run's written size depends on it (emit_typography.cjs), and so
-//             do the space before the lines the browser grew and the run
-//             after a script run that ends its line (writtenParagraphs).
-function emitText(slide, item, fonts, renderer) {
-  const objects = textObjects(item, fonts, renderer);
+//             for (emit_deck.mjs payload.target), 'pptx' when absent. An italic
+//             run's face and a script run's written size depend on it
+//             (emit_typography.cjs), and so do the space before the lines the
+//             browser grew and the run after a script run that ends its line
+//             (writtenParagraphs).
+function emitText(slide, item, faces, renderer) {
+  const objects = textObjects(item, faces, renderer);
   if (!objects.length) return;
   const placement = placementOf(item);
   const options = {

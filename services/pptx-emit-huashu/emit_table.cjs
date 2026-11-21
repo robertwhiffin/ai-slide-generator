@@ -67,8 +67,9 @@ function fillOf(fill) {
   return options;
 }
 
-// One cell as a pptxgenjs table cell: {text, options}. `renderer` is emitText's.
-function cellObject(cell, fonts, renderer) {
+// One cell as a pptxgenjs table cell: {text, options}. `faces` and `renderer`
+// are emitText's.
+function cellObject(cell, faces, renderer) {
   const options = {
     border: [borderOf(cell.borders.top), borderOf(cell.borders.right), borderOf(cell.borders.bottom), borderOf(cell.borders.left)],
     margin: marginOf(cell.margin),
@@ -79,25 +80,29 @@ function cellObject(cell, fonts, renderer) {
   if (cell.rowspan > 1) options.rowspan = cell.rowspan;
   if (cell.fill) options.fill = fillOf(cell.fill);
   if (cell.font && cell.font.sizePx > 0) {
-    const face = runOptions({ family: cell.font.family, weight: cell.font.weight, italic: cell.font.italic, sizePx: cell.font.sizePx }, fonts);
+    const face = runOptions(
+      { family: cell.font.family, weight: cell.font.weight, italic: cell.font.italic, sizePx: cell.font.sizePx },
+      faces,
+      { target: renderer && renderer.target },
+    );
     options.fontFace = face.fontFace;
     options.fontSize = face.fontSize;
   }
   const paragraphs = cell.paragraphs || [];
-  const text = paragraphs.length ? textObjects({ paragraphs, rtl: cell.rtl }, fonts, renderer) : [];
+  const text = paragraphs.length ? textObjects({ paragraphs, rtl: cell.rtl }, faces, renderer) : [];
   return { text: text.length ? text : '', options };
 }
 
-// emitTable(slide, item, fonts, renderer): one table item as one pptxgenjs table.
-//   fonts     model.fonts, the webfont weights the page loaded per family;
+// emitTable(slide, item, faces, renderer): one table item as one pptxgenjs table.
+//   faces     the webfonts the page loaded (emit_text.cjs emitText);
 //   renderer  the renderer the deck is written for (emit_text.cjs emitText).
-function emitTable(slide, item, fonts, renderer) {
+function emitTable(slide, item, faces, renderer) {
   const rows = item.rowHeights.map(() => []);
   for (const cell of item.cells) rows[cell.row].push(cell);
   const tableRows = rows.map((cells) => cells
     .slice()
     .sort((a, b) => a.col - b.col)
-    .map((cell) => cellObject(cell, fonts, renderer)));
+    .map((cell) => cellObject(cell, faces, renderer)));
   const colW = item.colWidths.map(sizeOf);
   const rowH = item.rowHeights.map(sizeOf);
   slide.addTable(tableRows, {
