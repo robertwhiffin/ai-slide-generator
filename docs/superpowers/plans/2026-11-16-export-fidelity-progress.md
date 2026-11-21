@@ -696,3 +696,204 @@ px). `slide-medallion`'s corners are right in both apps and score the same to th
 
 The baseline, intermediate-run and probe presentations were deleted by id and confirmed gone
 (`files.get` 404).
+
+
+## Phase B, batch B4: the harness raster, summary.md, mixed corner radii and B3's leftovers (H1, D11), engine `bbd78cdc`
+
+Commits:
+- `c5789a80` the harness draws an app's PDF at 4×, box-filtered, and writes `summary.md` (H1);
+- `c172eac3` the model check keeps a ground picture only as the slide's one ground capture (B3 Minor 5);
+- `918cf0bf` a failed dotted-cell rewrite writes the deck dashed instead of failing it (B3 Minors 3 and 4);
+- `3beb5dc8` a native table's own background is cut by its clip snapped with the grid (B3 Minor 1);
+- `bbd78cdc` a box whose corners round by different radii keeps each corner's own (D11).
+
+Both corpora were re-run at `bbd78cdc` with `run.py --pin-fonts --powerpoint --gslides
+--baseline`. The baseline is a fresh run at `09ceb289`, identical to B3's final run on every slide
+in both apps; its PowerPoint PDFs were rasterised again with the new method (`rasterise_pdf`) and
+scored with the harness's own `compare`, so both sides of every table below are on one raster.
+
+### H1: the harness's raster of PowerPoint's PDF
+
+`rasterise_pdf` draws each page at 4× the slide (5120 × 2880) with MuPDF and box-filters it to
+1280 × 720; LibreOffice's PDF is drawn the same way. Measured on the same PDFs (engine
+`09ceb289`), so only the raster differs:
+
+| PowerPoint mean | 1× (before) | 4×, box-filtered |
+|---|---|---|
+| in-repo corpus (17) | 1.865 | 1.824 |
+| design-system corpus (27) | 1.706 | 1.615 |
+
+Google Slides is unchanged. The new raster lowers 12 of 17 and 20 of 27 PowerPoint scores, most
+on slides with pictures (`slide-data-table` −0.34, `slide-lakehouse-blueprint` −0.32, corpus 03
+and 13 −0.22). It **raises** eight by more than 0.05, because of the raster alone: corpus 05
++0.14, 08 +0.10, 09 +0.12, 15 +0.13, 16 +0.17; `slide-medallion` +0.20, `slide-journey` +0.09,
+`slide-executive-summary` +0.07. The rises lie at text and shape edges (edge pixels carry them:
+corpus 05 +0.149 a slide pixel, flat pixels −0.002), where neither raster's anti-aliasing is
+Chrome's. Against Apple's Quartz drawing the same PDF, the 4× raster is closer on 6 of 9 slides
+probed and within 0.01 on the other 3, those risen included (09: 2.11 → 1.74; 16: 0.84 → 0.77;
+`slide-medallion` 2.01 → 1.70). Corpus slide 03's gridline, EBEBEB on two rows in the UI: 1×
+B2B2B1 and B4B4B2; 4× E9EAE9 and D0D1D0 (`scripts/export_fidelity/CALIBRATION.md` H1).
+
+**`summary.md`** (`run.py`, every run): one row per slide with each app's score, `baseline → now`
+with `--baseline`, each deck's text loss, MODEL DROPS and captures taken / failed; a mean row over
+the slides both runs scored; every slide more than 0.05 worse; and a note when the baseline's
+`harness.json` records another raster. The tables below are the two runs' `summary.md`, as written.
+
+### Scores, baseline (`09ceb289`, on the new raster) → B4 (`bbd78cdc`)
+
+All four decks (two corpora, written for PowerPoint and for Google Slides) are byte-identical to
+the baseline's, slide XML and media: neither corpus holds a painted box whose corners differ
+(probed in the browser: only the design system's collapsed table header cells, whose radius CSS
+does not apply), or a table ground in a rounded wrapper between pixels. Every score is unchanged
+to the hundredth. No text loss in either deck, no MODEL DROPS, no export or capture failures.
+
+In-repo corpus (17 slides):
+
+| Slide | PowerPoint | Google Slides | Text loss (pptx / gslides) | MODEL DROPS (pptx / gslides) | Captures taken / failed (pptx; gslides) |
+|---|---|---|---|---|---|
+| 01-cover-gradient-svg-art | 3.23 → 3.23 | 2.82 → 2.82 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| 02-agenda-grid-rules | 1.15 → 1.15 | 1.78 → 1.78 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 03-svg-combo-chart-legend-callout | 2.06 → 2.06 | 2.67 → 2.67 | none / none | 0 / 0 | 3 / 0; 3 / 0 |
+| 04-harvey-table-caption | 2.08 → 2.08 | 2.97 → 2.97 | none / none | 0 / 0 | 9 / 0; 9 / 0 |
+| 05-balance-sheet-two-tables | 2.14 → 2.14 | 1.80 → 1.80 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 06-delta-pills-table-callout | 1.75 → 1.75 | 2.72 → 2.72 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 07-timeline-dots-mono-dates | 2.51 → 2.51 | 2.57 → 2.57 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 08-kpi-cards-grid | 2.26 → 2.26 | 3.26 → 3.26 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 09-pseudo-bullets-accent-quote | 2.14 → 2.14 | 3.55 → 3.55 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 10-svg-waterfall | 1.41 → 1.41 | 2.13 → 2.13 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| 11-chartjs-canvas | 1.06 → 1.06 | 1.63 → 1.63 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| 12-progress-bars-icons | 1.29 → 1.29 | 1.96 → 1.96 | none / none | 0 / 0 | 9 / 0; 9 / 0 |
+| 13-code-gradtext-rotated | 1.38 → 1.38 | 1.82 → 1.82 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 14-two-col-text-image-overlap | 1.76 → 1.76 | 2.15 → 2.15 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| 15-dense-table-badges-zebra | 1.51 → 1.51 | 2.56 → 2.56 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 16-closing-cta | 1.74 → 1.74 | 1.59 → 1.59 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| 17-mixed-content-hidden-graphics | 1.54 → 1.54 | 2.79 → 2.79 | none / none | 0 / 0 | 6 / 0; 6 / 0 |
+| **mean** | **1.82 → 1.82** | **2.40 → 2.40** |  |  |  |
+
+Design-system corpus (27 slides):
+
+| Slide | PowerPoint | Google Slides | Text loss (pptx / gslides) | MODEL DROPS (pptx / gslides) | Captures taken / failed (pptx; gslides) |
+|---|---|---|---|---|---|
+| slide-2x2-matrix | 1.97 → 1.97 | 1.73 → 1.73 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-action-title | 1.48 → 1.48 | 2.27 → 2.27 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-agenda | 0.87 → 0.87 | 0.96 → 0.96 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-azure-flow-example | 1.55 → 1.55 | 1.25 → 1.25 | none / none | 0 / 0 | 14 / 0; 14 / 0 |
+| slide-bold-title | 1.58 → 1.58 | 1.43 → 1.43 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| slide-charts | 0.79 → 0.79 | 0.83 → 0.83 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| slide-closing | 0.81 → 0.81 | 0.71 → 0.71 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-comparison | 1.22 → 1.22 | 1.44 → 1.44 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-content | 2.20 → 2.20 | 1.75 → 1.75 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-cover | 2.31 → 2.31 | 1.83 → 1.83 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| slide-data-table | 1.65 → 1.65 | 1.17 → 1.17 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-event-cover | 2.07 → 2.07 | 1.27 → 1.27 | none / none | 0 / 0 | 2 / 0; 2 / 0 |
+| slide-executive-summary | 4.04 → 4.04 | 2.59 → 2.59 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-industry-title | 2.34 → 2.34 | 2.93 → 2.93 | none / none | 0 / 0 | 3 / 0; 3 / 0 |
+| slide-journey | 1.30 → 1.30 | 0.75 → 0.75 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-kpi-dashboard | 2.05 → 2.05 | 1.93 → 1.93 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-lakehouse-blueprint | 2.40 → 2.40 | 2.04 → 2.04 | none / none | 0 / 0 | 9 / 0; 9 / 0 |
+| slide-medallion | 1.97 → 1.97 | 1.93 → 1.93 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-milestones | 1.03 → 1.03 | 0.86 → 0.86 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-reference-architecture | 1.77 → 1.77 | 1.96 → 1.96 | none / none | 0 / 0 | 7 / 0; 7 / 0 |
+| slide-section | 0.74 → 0.74 | 1.38 → 1.38 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-statement | 1.67 → 1.67 | 2.39 → 2.39 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| slide-stats | 1.05 → 1.05 | 1.09 → 1.09 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-three-cards | 1.06 → 1.06 | 0.99 → 0.99 | none / none | 0 / 0 | 3 / 0; 3 / 0 |
+| slide-timeline | 0.62 → 0.62 | 0.82 → 0.82 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-two-column | 1.82 → 1.82 | 1.44 → 1.44 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| slide-waterfall | 1.24 → 1.24 | 1.15 → 1.15 | none / none | 0 / 0 | 1 / 0; 1 / 0 |
+| **mean** | **1.61 → 1.61** | **1.51 → 1.51** |  |  |  |
+
+### D11: corners of different radii, measured
+
+**The construct probe** (12 boxes, CSS truth; full table in `CALIBRATION.md` D11): PowerPoint draws
+`round2SameRect`, an `arcTo` custom path and a polygon path within 0.01–0.02 of the UI, Google at
+its thumbnail floor (0.28–0.29, a uniform roundRect's), where one roundRect with the largest
+radius scored 0.71 / 0.97 with 118 px off (16 px top corners) and 4.32 / 4.57 with about 720 px
+off (4, 12, 24 and 36 px corners).
+
+**The D11 probe corpus** through the harness (three slides of mixed-corner boxes: card headers
+and footers, a 24/6 px header, a shadowed top-rounded card, a segmented control, a progress fill,
+a speech bubble, an elliptical box, bordered and dotted boxes, a clipped box, a ringed chip, a
+turned leaf, a shadowed diagonal box), baseline → B4:
+
+| Slide | PowerPoint | Google Slides | Text loss (pptx / gslides) | MODEL DROPS (pptx / gslides) | Captures taken / failed (pptx; gslides) |
+|---|---|---|---|---|---|
+| 01-card-headers | 0.71 → 0.64 | 1.23 → 1.17 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| 02-tabs-bars-bubbles | 1.26 → 1.06 | 1.84 → 1.78 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| 03-clipped-and-ringed | 1.23 → 1.08 | 1.44 → 1.29 | none / none | 0 / 0 | 0 / 0; 0 / 0 |
+| **mean** | **1.07 → 0.93** | **1.50 → 1.41** |  |  |  |
+
+| D11 corpus, pixels off by more than 48 levels in the 17 boxes' corner squares | PowerPoint | Google |
+|---|---|---|
+| 01 card headers | 358 → 0 | 366 → 1 |
+| 02 tabs, bars and bubbles | 804 → 192 | 872 → 432 |
+| 03 clipped, ringed and turned | 1035 → 36 | 1049 → 39 |
+
+What is left on slide 02 is no corner's shape (crops at 5×): the dotted box's dot phase, Google's
+softer stroke edges (the same before and after), and text inside the elliptical box's 64 px corner
+square. Every square corner is square and every rounded one rounds by its own radii, in both apps.
+
+### B3's leftovers
+
+- **Minor 1** (`3beb5dc8`): the table's own box in the PowerPoint deck is cut by its clip snapped
+  with the grid (`snappedClip`, shared with the corner cells). A ground-filled table in a rounded
+  wrapper at 160.4 px: its ground started 0.39 px below the grid (y 160.39 against 160); now it
+  spans the frame exactly, on the snapped arcs. Neither corpus holds the case.
+- **Minor 3** (`918cf0bf`): a failed dotted-cell rewrite ended the sidecar `[huashu] fatal`, exit
+  99, every slide lost; now one `[huashu]` line, and the deck written dashed.
+- **Minor 4** (`918cf0bf`): `pptxgenjsZipPath()` is the very jszip file pptxgenjs loads (test).
+- **Minor 5** (`c172eac3`): a background's `captureId` must name the model's one `ground` capture.
+
+### Rulings and corrections from B4
+
+- **Ruling (H1, measured):** every PDF the harness reads (PowerPoint's, and LibreOffice's, the
+  same artefact) is drawn by MuPDF at 4× the slide (5120 × 2880) and box-filtered to 1280 × 720,
+  each pixel the mean of the 16 it covers; each run records the method as `pdfRaster` in
+  `harness.json`, and `summary.md` flags a baseline that does not record the same one. The
+  artefact reproduces from the embedding alone: a 2× picture with an alpha mask and
+  `/Interpolate true` (as PowerPoint embeds Chrome's captures, clear pixels black), placed
+  0.36 px off the grid, drew its EBEBEB 1 px rule over two rows at seven times its weight at 1×
+  (`test_export_fidelity_harness.py`, with pymupdf).
+- **Correction (H1, commit `c5789a80`'s message):** against Quartz the 4× raster is closer on 6
+  of the 9 slides probed and within 0.01 on the other 3 (corpus 05 and 13 0.01 further,
+  `slide-journey` equal), not "as close or closer on every slide".
+- **Ruling (summary.md):** the Google deck's text loss is checked too
+  (`text_loss-gslides.json`): the summary reports each deck, and "text loss is empty
+  everywhere" includes the deck Google converts. Captures are counted per deck as taken
+  (named less failed) / failed.
+- **Ruling (D11, measured):** a box whose corners differ is the preset `round2SameRect` when its
+  top corners are one circle and its bottom ones another, each at most half the short side
+  (the preset pins its adjustments there), and otherwise a custom path of one `arcTo` quarter
+  arc per rounded corner, elliptical where CSS's is. Both apps draw both constructs exactly
+  (the probe above, `CALIBRATION.md` D11), so one construct serves both decks (R11g: no target branch). The preset is
+  chosen for editability: Drive keeps it as `ROUND_2_SAME_RECTANGLE` and PowerPoint as its
+  rounded-top rectangle, handles and all; the path is `CUSTOM` in Drive and a freeform with
+  four arcs in PowerPoint (a polygon path would draw as well, with dozens of edit points).
+  pptxgenjs writes a preset's two adjustments only through `angleRange` (each value × 60000),
+  so adj1 and adj2 are passed as `adj / 60000`.
+- **Ruling (D11):** the per-corner radii follow every shape a box makes: the border's centre
+  line (each radius less half the border, the stroke-centre ruling per corner), a spread ring's
+  (`ringRadius` per axis), a shadow spread's, the outline a clip cuts, the footprint and cover
+  tests that fill shadow shapes, and Google's dotted stroke. A corner with either radius 0 is
+  square, as CSS draws it. Four corners of one circle stay the `roundRect` they were, byte for byte.
+- **Ruling (B3 Minor 3):** the guard is in `emit_deck.mjs`, which owns writing the deck and its
+  `[huashu]` lines: a failed rewrite logs `[huashu] dotted table borders left dashed: their
+  rewrite failed: <reason>` and writes the deck as pptxgenjs wrote it.
+- **Ruling (B3 Minor 5):** a model with two ground captures came from no snapshot (it takes one
+  at most), so both are dropped, as two captures sharing an id are, and a background naming
+  either is reset as one naming an unknown capture is (to null: no ground of the slide's own).
+- **Owner-facing notes:**
+  - PowerPoint scores from runs before B4 are on the old raster: compare a new run with one of
+    them only after rasterising its kept `powerpoint/export.pdf` again (`rasterise_pdf`);
+    `summary.md` says so when a baseline's raster differs.
+  - A box whose corners differ is a preset when one draws it exactly (a rounded-top card header
+    keeps its handles), and otherwise a custom shape: it moves and recolours whole, but scales
+    its corners with it when resized.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1Bezr8mS5WksUXdLffGfGLO_1IFRr0oKgR7GnvxRKcBE/edit
+- Design-system corpus: https://docs.google.com/presentation/d/15Phr83mi5I7MhGlX89nHZC1h5ER5N7nWBz2-IyzPjuY/edit
+
+The baseline, probe and D11-corpus presentations were deleted by id and confirmed gone
+(`files.get` 404).

@@ -743,6 +743,70 @@ fell between its pixels (`slide-data-table` 1.17 → 1.57). So, as built:
 Corpus 05's 1 px rule at 403 px, down x = 300: UI DCE0E2 on one pixel row; before, two blended
 rows; after, DCE0E2 on that one row.
 
+## D11: corners of different radii
+
+Measured 2026-11-21 (Task 14 B4). Twelve 240 × 120 px boxes on a white slide, each written by
+pptxgenjs as one construct and as CSS (`border-radius` per corner) for the truth, every edge on
+a multiple of 4 CSS px so that it is a whole pixel of Google's 1.25× thumbnail too (a row at
+y = 270 px, between its pixels, scored about 1.1 in Google whatever its construct). Each box,
+grown by 6 px, is scored as the harness scores a slide (mean difference from the UI), with the
+pixels off by more than 64 levels: PowerPoint's PDF at 4× box-filtered (H1), Google's LARGE
+thumbnail.
+
+| box | construct | PowerPoint | Google Slides | Drive keeps it as |
+|---|---|---|---|---|
+| 16 px top corners | one roundRect, the largest radius (before) | 0.71, 118 px off | 0.97, 118 px off | ROUND_RECTANGLE |
+| | `round2SameRect` (adj1, adj2) | 0.01, 0 | 0.29, 0 | ROUND_2_SAME_RECTANGLE |
+| | custom path, `arcTo` | 0.01, 0 | 0.29, 0 | CUSTOM |
+| | custom path, polygon | 0.01, 0 | 0.28, 0 | custom |
+| 4, 12, 24 and 36 px corners | one roundRect (before) | 4.32, 710 | 4.57, 728 | ROUND_RECTANGLE |
+| | custom path, `arcTo` | 0.02, 0 | 0.29, 0 | CUSTOM |
+| | custom path, polygon | 0.02, 0 | 0.28, 0 | custom |
+| 16 px left corners | custom path, `arcTo` | 0.01, 0 | 0.28, 0 | CUSTOM |
+| 48 × 24 px top-left ellipse | custom path, `arcTo` | 0.01, 0 | 0.29, 0 | CUSTOM |
+| 16 px top corners, 4 px border | `round2SameRect` | 0.10, 2 | 0.43, 2 | ROUND_2_SAME_RECTANGLE |
+| | custom path, `arcTo` | 0.10, 2 | 0.42, 2 | CUSTOM |
+
+A uniform 16 px roundRect scores 0.01 in PowerPoint and 0.29 in Google on the same rows: both
+apps draw every per-corner construct to that floor. So the deck writes, for both apps, the
+preset where it fits exactly (top corners one circle, bottom ones another, each at most half
+the short side, where `round2SameRect` pins its adjustments), which stays a preset with its
+handles in both, and a custom path of one quarter `arcTo` per rounded corner otherwise
+(`emit_model.cjs`). pptxgenjs writes a preset's two adjustments only through `angleRange`,
+each value × 60000.
+
+**Result** (a probe corpus of three slides through the harness: card headers and footers, a
+24/6 px header, a shadowed top-rounded card, a segmented control, a progress bar's fill, a
+speech bubble, an elliptical box, bordered and dotted boxes, a box a frame clips, a ringed chip,
+a turned leaf and a shadowed diagonal box), baseline engine → B4, PowerPoint / Google: slide
+scores 0.71 → 0.64 / 1.23 → 1.17, 1.26 → 1.06 / 1.84 → 1.78 and 1.23 → 1.08 / 1.44 → 1.29;
+pixels off by more than 48 levels in the squares of the 17 boxes' corners 2197 → 228 in
+PowerPoint and 2287 → 472 in Google. What is left is not the corners' shape (crops at 5×): a
+dotted border's dot phase, Google's softer stroke edges (the same before and after), and text
+inside a large corner's square.
+
+## H1: rasterising an app's PDF
+
+Measured 2026-11-21 (Task 14 B4) on the PDFs PowerPoint saved of both corpora at `09ceb289`.
+PowerPoint embeds each picture at twice its slide size, with an alpha mask and
+`/Interpolate true`. MuPDF drawing a page at 1280 px draws such a picture's light rules dark:
+corpus slide 03's gridline, EBEBEB on two pixel rows in the UI, is B2B2B1 and B4B4B2; drawn at
+4× (5120 px) and box-filtered to 1280 px it is E9EAE9 and D0D1D0, the first row the UI's grey. A synthetic page reproduces it from the embedding alone (a 2× masked
+picture 0.36 px off the grid: a rule's weight 140 at 1×, 49 at 4×, its own 20).
+
+| PowerPoint mean, same PDFs | 1× | 4×, box-filtered |
+|---|---|---|
+| in-repo corpus (17) | 1.865 | 1.824 |
+| design-system corpus (27) | 1.706 | 1.615 |
+
+Google Slides is unchanged (its thumbnails are not rasterised by the harness). The 4× raster
+lowers 12 of 17 and 20 of 27 slides' scores; it raises 8 by more than 0.05 (corpus 05, 08, 09,
+15 and 16 by 0.10 to 0.17; `slide-medallion` 0.20, `slide-journey` 0.09,
+`slide-executive-summary` 0.07), all at the edges of text and shapes, where neither raster's
+anti-aliasing is Chrome's. Against Apple's Quartz drawing the same PDF, the 4× raster is closer
+on 6 of the 9 slides probed (03 1.70 → 1.48, 09 2.11 → 1.74, 15 1.37 → 1.15, 16 0.84 → 0.77,
+`slide-data-table` 1.65 → 1.23, `slide-medallion` 2.01 → 1.70) and within 0.01 on the other 3.
+
 ## Runs behind this record
 
 | run | engine state | Google Slides presentation |
@@ -758,7 +822,8 @@ through Drive, whose presentation was deleted by id once read, and on the two co
 (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1). D4, D5 and D6 (B2) were
 measured the same way, on probe decks of shapes and lines and on Chrome screenshots at device
 scale 4. D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
-PowerPoint PDFs.
+PowerPoint PDFs. D11 (B4) was measured on a probe deck of
+boxes and on a probe corpus through the harness, H1 (B4) on the two corpora's PowerPoint PDFs.
 
 To re-run (PowerPoint will briefly open a window):
 

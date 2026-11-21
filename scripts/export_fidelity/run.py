@@ -71,15 +71,15 @@ SLIDE_HEIGHT_PX = 720
 
 # PowerPoint's PDF embeds each picture at twice its slide size, with an alpha
 # mask and /Interpolate true. MuPDF drawing such a page at the slide's own
-# 1280 px draws a picture's 1 px rules dark, over two rows (corpus slide 03's
-# EBEBEB gridlines at B2B2B1), and a fringe round a mark in the ground's own
-# colour, which neither the UI nor Apple's Quartz drawing the same PDF shows:
-# an artefact of the harness's raster, not of the export (Task 14 Phase A,
-# H1). Drawn at this many times the slide's size and box-filtered down, each
-# pixel the mean of the 16 it covers, they come out as Quartz draws them. The
-# method is recorded in each run's harness.json (HARNESS_RECORD), so a summary
-# can tell a baseline rasterised another way, whose PowerPoint scores do not
-# compare.
+# 1280 px draws a picture's light rules dark (corpus slide 03's two rows of
+# EBEBEB gridline at B2B2B1 and B4B4B2) and a fringe round a mark in the
+# ground's own colour, which neither the UI nor Apple's Quartz drawing the same
+# PDF shows: an artefact of the harness's raster, not of the export (Task 14
+# Phase A, H1). Drawn at this many times the slide's size and box-filtered
+# down, each pixel the mean of the 16 it covers, the page comes out closer to
+# Quartz's (E9EAE9 and D0D1D0; CALIBRATION.md H1). The method is recorded in
+# each run's harness.json (HARNESS_RECORD), so a summary can tell a baseline
+# rasterised another way, whose PowerPoint scores do not compare.
 PDF_RASTER_SCALE = 4
 PDF_RASTER = f"MuPDF at {PDF_RASTER_SCALE}x, box-filtered to {SLIDE_WIDTH_PX}x{SLIDE_HEIGHT_PX}"
 HARNESS_RECORD = "harness.json"
