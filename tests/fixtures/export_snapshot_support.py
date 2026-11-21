@@ -1149,6 +1149,75 @@ def browser_probes(document_html: str, probes: list[tuple[str, str]]) -> list[di
     return [{key: float(size[key]) for key in ("w", "h")} for size in sizes]
 
 
+# The static cut PowerPoint and Google Slides draw an optical-size face (DM Sans)
+# at, and how far a run's width there may differ from the browser's before the
+# deck for Google Slides compensates it (scripts/export_fidelity/CALIBRATION.md A1).
+EXPORT_CUT_OPTICAL_SIZE = 14
+OPTICAL_SIZE_THRESHOLD = 0.005
+
+
+@dataclass(frozen=True)
+class CutWidths:
+    """One text's widths in an element's face, with its letter-spacing, from page probes.
+
+    ``browser``: at the automatic optical size, as the page draws it;
+    ``export``: at ``'opsz' 14``, the static cut the apps draw, kerned as the
+    element sets it; ``unkerned``: the same with ``font-kerning: none``, as
+    PowerPoint draws it (CALIBRATION.md X1).
+    """
+
+    browser: float
+    export: float
+    unkerned: float
+
+
+def cut_widths(document_html: str, style: dict[str, str], texts: list[str]) -> list[CutWidths]:
+    """``CutWidths`` of each text, in the face of the element whose computed style is ``style``.
+
+    The ``font`` shorthand resets ``font-kerning``, so the element's own is set after it.
+    """
+    face = (
+        f"font: {style['fontStyle']} {style['fontWeight']} {style['fontSize']} "
+        f"{style['fontFamily']}; letter-spacing: {style['letterSpacing']}; "
+        f"font-kerning: {style['fontKerning']}"
+    )
+    export_cut = f"{face}; font-variation-settings: 'opsz' {EXPORT_CUT_OPTICAL_SIZE}"
+    variants = (face, export_cut, f"{export_cut}; font-kerning: none")
+    sizes = browser_probes(document_html, [(text, css) for text in texts for css in variants])
+    return [
+        CutWidths(*(sizes[position + offset]["w"] for offset in range(len(variants))))
+        for position in range(0, len(sizes), len(variants))
+    ]
+
+
+def google_tracking_px(drawn: float, widths: CutWidths, characters: int) -> float:
+    """The tracking (px per character) the deck for Google Slides adds to a run's CSS tracking.
+
+    CALIBRATION.md A1: the width the browser drew less the kerned export cut's,
+    per character, where the two differ by more than OPTICAL_SIZE_THRESHOLD;
+    else none.
+    """
+    if abs(widths.export - drawn) / drawn <= OPTICAL_SIZE_THRESHOLD:
+        return 0.0
+    return (drawn - widths.export) / characters
+
+
+def powerpoint_tracking_px(
+    drawn: float, widths: CutWidths, characters: int, ends_line: bool
+) -> float:
+    """The tracking (px per character) the deck for PowerPoint adds to a run's CSS tracking.
+
+    CALIBRATION.md X1: PowerPoint draws the export cut with no pair kerning,
+    and puts a run's tracking after each of its characters. So the run carries
+    the optical-size delta per character (A1, with no dead band) plus its
+    kerning per gap that tracking can close: the gaps between its characters,
+    and the one after its last when another run follows it on its line.
+    """
+    gaps = characters - 1 if ends_line else characters
+    kerning = (widths.export - widths.unkerned) / gaps if gaps > 0 else 0.0
+    return (drawn - widths.export) / characters + kerning
+
+
 def browser_natural_line_height(
     document_html: str, family: str, weight: int, size_px: float, style: str = "normal"
 ) -> float:

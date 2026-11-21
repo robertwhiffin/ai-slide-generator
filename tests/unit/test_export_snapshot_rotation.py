@@ -97,6 +97,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_tables,
     browser_text,
     corpus_document,
+    cut_widths,
     delete_drive_file,
     drive_file_exists,
     emit_text_constant,
@@ -107,6 +108,7 @@ from tests.fixtures.export_snapshot_support import (
     google_slides_presentation,
     node_json,
     pinned_font_css,
+    powerpoint_tracking_px,
     requires_google_slides,
     requires_huashu_sidecar,
     single_line_box_top,
@@ -752,6 +754,15 @@ def corpus_pptx() -> Iterator[bytes]:
     yield pptx
 
 
+@pytest.fixture(scope="module")
+def corpus_gslides_pptx() -> Iterator[bytes]:
+    """Corpus slide 13, exported once for Google Slides (``target="gslides"``)."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_corpus(["13"], monkeypatch=monkeypatch, target="gslides")
+    assert failures == [], f"the export rejected corpus slide 13: {failures}"
+    yield pptx
+
+
 def _slide_index(name: str) -> int:
     return list(SLIDES).index(name)
 
@@ -1202,16 +1213,24 @@ class TestRotatedText:
         _assert_one_line(label, GOVERNED_TEXT, "the fixture 13 label")
         _assert_turned_box(label, layout, 270.0, "the fixture 13 label")
 
-    def test_fixture_13_label_keeps_its_typography_under_rotation(self, corpus_pptx: bytes) -> None:
-        """A guard: the turned label keeps the run rules of unturned text.
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_fixture_13_label_keeps_its_typography_under_rotation(
+        self, request: pytest.FixtureRequest, target: str
+    ) -> None:
+        """A guard: the turned label keeps the run rules of unturned text, in each deck.
 
         Its runs read "GOVERNED DATA", upper-cased by ``text-transform`` as the
-        browser renders it (``innerText``); each run's letter spacing is the
-        computed 0.2em (2.4 px) as ``spc`` in points, 1.8 pt, with no
-        optical-size delta (the two optical cuts agree within 0.5%, guarded);
-        each is the computed ``--ink-2`` colour, 9 pt DM Sans, not bold. A
+        browser renders it (``innerText``); each is the computed ``--ink-2``
+        colour, 9 pt DM Sans, not bold. Each run's letter spacing is the
+        computed 0.2em (2.4 px) as ``spc`` in points, 1.8 pt, plus what its
+        target measures: for Google, no optical-size delta (the two optical
+        cuts agree within 0.5%, guarded: A1); for PowerPoint, the delta with
+        no dead band and the run's kerning per gap (X1,
+        ``powerpoint_tracking_px``), with the browser's width of a turned run
+        its probe at the browser's own cut, as the snapshot reads it. A
         rotated text path that builds its runs anew must not lose any of it.
         """
+        deck = request.getfixturevalue("corpus_pptx" if target == "pptx" else "corpus_gslides_pptx")
         document = corpus_document("13")
         style = browser_style(document, GOVERNED_LABEL)
         rendered = browser_text(document, GOVERNED_LABEL)
@@ -1249,24 +1268,31 @@ class TestRotatedText:
         family = style["fontFamily"].split(",")[0].strip().strip("\"'")
         expected_colour = _hex(style["color"])
 
-        _, label = _text_item(slide_shapes(corpus_pptx, 0), "GOVERNED", "the fixture 13 label")
+        _, label = _text_item(slide_shapes(deck, 0), "GOVERNED", "the fixture 13 label")
         runs = [run for paragraph in label.paras for run in paragraph.runs if run.text.strip()]
         assert _normalised(" ".join(run.text for run in runs)) == GOVERNED_TEXT, (
             f"the label's runs read {[run.text for run in runs]}, expected {GOVERNED_TEXT!r}"
         )
-        expected_spc = tracking_px * PT_PER_PX
+        expected = {}
+        for run, widths in zip(runs, cut_widths(document, style, [run.text for run in runs])):
+            measured = (
+                powerpoint_tracking_px(widths.browser, widths, len(run.text), True)
+                if target == "pptx"
+                else 0.0
+            )
+            expected[run.text] = (tracking_px + measured) * PT_PER_PX
         wrong = [
             _describe_run(run)
             for run in runs
             if not run.text.isupper()
-            or abs(run.spc_pt - expected_spc) > SPC_TOLERANCE_PT
+            or abs(run.spc_pt - expected[run.text]) > SPC_TOLERANCE_PT
             or run.color != expected_colour
             or run.typeface != family
             or not math.isclose(run.size_pt or 0.0, size_px * PT_PER_PX, abs_tol=0.01)
             or run.bold
         ]
         assert not wrong, (
-            f"every run must be upper case, spc {expected_spc:.2f} pt, colour {expected_colour}, "
+            f"{target}: every run must be upper case, spc {expected} pt, colour {expected_colour}, "
             f"{family} at {size_px * PT_PER_PX:g} pt and not bold; these are not:\n  "
             + "\n  ".join(wrong)
         )
@@ -2102,19 +2128,25 @@ class TestScriptRunsPerRenderer:
             f"written at {expected:.2f} pt for Google; it is {_describe_run(run)}"
         )
 
-    def test_a_deck_with_no_script_runs_is_the_same_for_both_targets(
+    def test_a_deck_with_no_script_runs_differs_only_in_its_runs_tracking(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With no script run, the decks written for PowerPoint and for Google Slides are one.
+        """With no script run, the decks for PowerPoint and for Google Slides differ in
+        their runs' tracking alone.
 
-        Every part identical, ``docProps/core.xml`` canonicalised
-        (``structural_manifest``): a turned label, a turned label of two lines,
-        a paragraph whose second line opens a paragraph of its own in the
-        slide model (its 24 px run) where its spacing puts it, and the three
+        Every part but the slides identical, ``docProps/core.xml`` canonicalised
+        (``structural_manifest``), and every slide holds the same shapes, at
+        the same places, with the same lines and runs, once each run's ``spc``
+        is taken out: what each target measures for a run (CALIBRATION.md A1
+        for Google; X1, its kerning folded in, for PowerPoint, which kerns no
+        DM Sans). The slides: a turned label, a turned label of two lines, a
+        paragraph whose second line opens a paragraph of its own in the slide
+        model (its 24 px run) where its spacing puts it, and the three
         paragraphs whose later lines the browser grew (``PLAIN_GROWTH_LINES``):
         both decks write a line's growth as space before wherever no script
         run's size writes it (Google: −11.6 px high without, +0.4 with;
-        CALIBRATION.md A4).
+        CALIBRATION.md A4). None holds an italic run or a hyphen the targets
+        write apart.
         """
         bodies = [SLIDES["tag"], SLIDES["br-lines"], _script_line_body("later-paragraph-plain")]
         bodies += PLAIN_GROWTH_BODIES
@@ -2128,9 +2160,23 @@ class TestScriptRunsPerRenderer:
             )
             assert failures == [], failures
 
-        assert structural_manifest(exports["gslides"]) == structural_manifest(exports["pptx"]), (
-            "with no script run, the Google deck must be the PowerPoint deck, byte for byte"
+        manifests = {target: structural_manifest(deck) for target, deck in exports.items()}
+        slide_part = re.compile(r"ppt/slides/slide\d+\.xml")
+        assert manifests["pptx"]["entries"] == manifests["gslides"]["entries"]
+        differing = [
+            name
+            for name in manifests["pptx"]["entries"]
+            if manifests["pptx"]["sha256"][name] != manifests["gslides"]["sha256"][name]
+        ]
+        assert all(slide_part.fullmatch(name) for name in differing), (
+            f"with no script run, the decks may differ in their slides alone; they differ in "
+            f"{differing}"
         )
+        for index in range(len(bodies)):
+            shapes = {target: slide_shapes(deck, index) for target, deck in exports.items()}
+            assert [_without_tracking(shape) for shape in shapes["pptx"]] == [
+                _without_tracking(shape) for shape in shapes["gslides"]
+            ], f"slide {index + 1}: the decks differ beyond their runs' tracking"
 
     def test_a_deck_with_script_runs_differs_only_where_the_targets_write_apart(
         self, script_line_decks: dict[str, bytes]
@@ -2141,6 +2187,8 @@ class TestScriptRunsPerRenderer:
         shapes, at the same places, with the same lines and runs, once these
         are taken out:
         * every script run's size (capped at its line's for Google);
+        * every run's tracking, which each target measures (CALIBRATION.md A1
+          for Google, X1 for PowerPoint);
         * in the PowerPoint deck, the word joiner after a script run that ends
           its line (CALIBRATION.md A5);
         * a later line the browser grew within its paragraph: in the PowerPoint
@@ -2181,14 +2229,25 @@ class TestScriptRunsPerRenderer:
                 ), f"{name}: the decks' shapes differ: {pptx_shape} / {google_shape}"
 
 
+def _without_tracking(shape: Shape) -> Shape:
+    """``shape`` with every run's ``spc`` taken out: what each target measures for a run
+    (CALIBRATION.md A1 for Google Slides, X1 for PowerPoint)."""
+    paras = [
+        dataclasses.replace(para, runs=[dataclasses.replace(run, spc_pt=0.0) for run in para.runs])
+        for para in shape.paras
+    ]
+    return dataclasses.replace(shape, paras=paras)
+
+
 def _written_lines(shape: Shape, target: str) -> list[dict]:
     """``shape``'s lines with what the two targets write apart taken out.
 
     Each line is ``{opens, before, align, pct, rtl, runs}``: whether it opens
     a paragraph, that paragraph's space before (None for a line a soft break
     starts), its paragraph's properties and its runs. A script run's size is
-    taken out, and so, in the deck for PowerPoint, is the run holding a word
-    joiner that follows a script run at the end of its line.
+    taken out, and so is every run's tracking (``_without_tracking``), and, in
+    the deck for PowerPoint, the run holding a word joiner that follows a
+    script run at the end of its line.
     """
     lines: list[dict] = []
     for paragraph in shape.paras:
@@ -2212,7 +2271,10 @@ def _written_lines(shape: Shape, target: str) -> list[dict]:
                 continue
             runs.append(
                 dataclasses.replace(
-                    run, size_pt=None if run.baseline else run.size_pt, soft_break_before=False
+                    run,
+                    size_pt=None if run.baseline else run.size_pt,
+                    soft_break_before=False,
+                    spc_pt=0.0,
                 )
             )
     return lines

@@ -835,7 +835,7 @@ const STYLE_PROPERTIES = [
   'fontFamily', 'fontWeight', 'fontStyle', 'fontSize', 'letterSpacing', 'textTransform',
   'textDecorationLine', 'verticalAlign', 'direction', 'color', 'webkitTextFillColor', 'opacity',
   'backgroundColor', 'backgroundImage', 'backgroundClip', 'webkitBackgroundClip',
-  'lineHeight', 'fontOpticalSizing', 'fontVariationSettings', 'textAlign',
+  'lineHeight', 'fontOpticalSizing', 'fontVariationSettings', 'textAlign', 'fontKerning',
 ];
 
 // What --mode=each-pseudo reports of a pseudo-element's computed style: the

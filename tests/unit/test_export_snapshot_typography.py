@@ -76,9 +76,12 @@ from tests.fixtures.export_snapshot_support import (
     browser_style,
     browser_text,
     corpus_document,
+    cut_widths,
     export_corpus,
     export_slides,
+    google_tracking_px,
     node_json,
+    powerpoint_tracking_px,
     requires_huashu_sidecar,
     requires_node,
     slide_document,
@@ -812,16 +815,17 @@ class TestSnapshotRunStyle:
             pytest.param(CORPUS_TITLE, CORPUS_TITLE_TEXT, 42, -0.01, True, id="title"),
         ],
     )
-    def test_letter_spacing_is_spc(
+    def test_letter_spacing_is_spc_for_google(
         self,
-        corpus_pptx: bytes,
+        corpus_gslides_pptx: bytes,
         selector: str,
         text: str,
         size_px: float,
         em: float,
         optical_size_delta: bool,
     ) -> None:
-        """Fixture 09: ``letter-spacing`` as ``spc``, in hundredths of a point.
+        """Fixture 09 in the deck for Google Slides: ``letter-spacing`` as ``spc``, in
+        hundredths of a point, plus A1's optical-size delta where it is due.
 
         * the ``.dk-eyebrow`` (13 px, ``.16em``) has ``spc`` = round(13 x 0.16 x
           0.75 x 100) = 156, within 1. At 13 px the browser's automatic
@@ -836,8 +840,9 @@ class TestSnapshotRunStyle:
           the run's text at ``'opsz' 14`` with its own letter-spacing (a probe
           in the same page), and n its characters.
 
-        Every run of the block carries it; a run without ``spc`` is untracked
-        in PowerPoint.
+        Every run of the block carries it; a run without ``spc`` is untracked.
+        Google kerns DM Sans, so this deck tracks no kerning in (the deck for
+        PowerPoint does: test_letter_spacing_is_spc_for_powerpoint).
         """
         document = corpus_document("09")
         style = _guard_style(document, selector, fontSize=f"{size_px}px")
@@ -846,7 +851,7 @@ class TestSnapshotRunStyle:
             f"fixture drift: {selector}'s letter-spacing is {style['letterSpacing']}, expected "
             f"{size_px * em:.2f}px"
         )
-        box = _box(_corpus_shapes(corpus_pptx, "09"), text)
+        box = _box(_corpus_shapes(corpus_gslides_pptx, "09"), text)
         runs = _runs(box)
         widths = _tracked_cut_widths(document, style, [run.text for run in runs])
         differences = [
@@ -893,6 +898,52 @@ class TestSnapshotRunStyle:
         assert not wrong, (
             f"{selector}: every run's spc must be {expected:.1f} hundredths of a point, within "
             f"{SPC_TOLERANCE_HUNDREDTHS:g}; these are not:\n  " + "\n  ".join(wrong)
+        )
+
+    @pytest.mark.parametrize(
+        ("selector", "text"),
+        [
+            pytest.param(EYEBROW, EYEBROW_SOURCE_TEXT.upper(), id="eyebrow"),
+            pytest.param(CORPUS_TITLE, CORPUS_TITLE_TEXT, id="title"),
+        ],
+    )
+    def test_letter_spacing_is_spc_for_powerpoint(
+        self, corpus_pptx: bytes, selector: str, text: str
+    ) -> None:
+        """X1, fixture 09 in the deck for PowerPoint: the eyebrow and the title.
+
+        PowerPoint for Mac draws DM Sans with no pair kerning, and the static
+        opsz-14 cut. So each one-run line's ``spc`` is its CSS letter-spacing
+        plus the optical-size delta per character, with no dead band (the 13 px
+        eyebrow's too), plus its kerning per gap between its characters
+        (``powerpoint_tracking_px``; CALIBRATION.md X1), within 1 hundredth of
+        a point. The widths are probes in the same page; the drawn width is
+        the browser's line.
+        """
+        document = corpus_document("09")
+        style = browser_style(document, selector)
+        lines = browser_line_boxes(document, selector)
+        box = _box(_corpus_shapes(corpus_pptx, "09"), text)
+        runs = _runs(box)
+        # The lines read the source text, the runs the painted (upper-cased) text.
+        read = [line["text"].casefold() for line in lines]
+        assert read == [text.casefold()] and [run.text for run in runs] == [text], (
+            f"fixture drift: {selector} must render as one line and export as one run; it "
+            f"renders {lines} and exports {[run.text for run in runs]}"
+        )
+        assert text.isascii(), f"fixture drift: {text!r} is not ASCII, so not its characters"
+        (widths,) = cut_widths(document, style, [text])
+        tracking_px = float(style["letterSpacing"].removesuffix("px"))
+        expected = (
+            (tracking_px + powerpoint_tracking_px(lines[0]["w"], widths, len(text), True))
+            * PT_PER_PX
+            * HUNDREDTHS
+        )
+
+        assert abs(runs[0].spc_pt * HUNDREDTHS - expected) <= SPC_TOLERANCE_HUNDREDTHS, (
+            f"{selector}: spc must be {expected:.1f} hundredths of a point within "
+            f"{SPC_TOLERANCE_HUNDREDTHS:g} (drawn {lines[0]['w']:.2f} px, {widths}); it is "
+            f"{_describe_run(runs[0])}"
         )
 
     def test_uppercase_transform_is_applied_to_the_run_text(self, corpus_pptx: bytes) -> None:
@@ -1150,6 +1201,128 @@ class TestSnapshotRunStyle:
 
         lost = {prefix: words for prefix, words in zip(CORPUS_PREFIXES, missing) if words}
         assert not lost, f"words the browser renders are missing from the export: {lost}"
+
+
+# ---------------------------------------------------------------------------
+# Kerning: folded into the tracking of the deck for PowerPoint (CALIBRATION.md X1)
+# ---------------------------------------------------------------------------
+
+# Text dense with kerning pairs. (element id, the run's text, whether it ends
+# its line, whether the browser kerns it.) kern-first and kern-second are two
+# runs of one line (a colour change), so the first does not end it.
+KERNING_CASES = (
+    ("kern-title", "AVATAR Toyota WAVE", True, True),
+    ("kern-first", "AVAWAY", False, True),
+    ("kern-second", "Tea", True, True),
+    ("kern-arial", "Arial AVATAR Today", True, True),
+    ("kern-none", "Unkerned WAVY Toyota", True, False),
+    ("kern-feature", "Featured WAVY Today", True, True),
+)
+KERNING_SLIDE = (
+    '<div class="slide">'
+    '<h2 id="kern-title" style="font-size: 48px; font-weight: 600; letter-spacing: -0.01em; '
+    'margin: 0;">AVATAR Toyota WAVE</h2>'
+    '<p id="kern-pair" style="font-size: 32px; margin: 0;"><span id="kern-first">AVAWAY</span>'
+    '<span id="kern-second" style="color: #FF3621;">Tea</span></p>'
+    '<p id="kern-arial" style="font-family: Arial; font-size: 32px; margin: 0;">'
+    "Arial AVATAR Today</p>"
+    '<p id="kern-none" style="font-size: 32px; font-kerning: none; margin: 0;">'
+    "Unkerned WAVY Toyota</p>"
+    """<p id="kern-feature" style="font-size: 32px; font-feature-settings: 'kern' 1; """
+    'margin: 0;">Featured WAVY Today</p>'
+    "</div>"
+)
+# Pair kerning must move a kerned case by more than this, or the case tests nothing.
+KERNING_GUARD_PX = 1.0
+
+
+@pytest.fixture(scope="module")
+def kerning_decks() -> Iterator[dict[str, bytes]]:
+    """The kerning slide, exported once for each target."""
+    decks = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            decks[target], failures = export_slides(
+                [KERNING_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [], f"the export rejected the kerning slide: {failures}"
+    yield decks
+
+
+def _kerning_document() -> str:
+    return slide_document(KERNING_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotRunKerning:
+    @pytest.mark.parametrize(
+        ("element_id", "text", "ends_line", "kerned"),
+        [pytest.param(*case, id=case[0]) for case in KERNING_CASES],
+    )
+    def test_kerning_is_tracking_for_powerpoint_alone(
+        self,
+        kerning_decks: dict[str, bytes],
+        element_id: str,
+        text: str,
+        ends_line: bool,
+        kerned: bool,
+    ) -> None:
+        """X1: PowerPoint for Mac draws DM Sans with no pair kerning, so its deck tracks it in.
+
+        Every run is one run of the deck in each target, and its ``spc`` is its
+        CSS letter-spacing plus:
+
+        * for PowerPoint: the optical-size delta per character, with no dead
+          band, plus the run's kerning (its kerned export cut less its
+          ``font-kerning: none`` one) per gap its tracking can close, which is
+          one fewer than its characters where the run ends its line
+          (``powerpoint_tracking_px``). PowerPoint writes ``kern="0"`` with
+          every ``spc``, so it kerns Arial no more than DM Sans (measured);
+        * for Google Slides, which kerns: the A1 delta, as before
+          (``google_tracking_px``).
+
+        The kerned cases differ from their unkerned cut by more than
+        KERNING_GUARD_PX (guarded), so the deck for PowerPoint is tighter;
+        ``font-kerning: none`` measures none, and its two decks differ by the
+        dead band alone. A ``"kern" 1`` feature the element sets does not keep
+        kerning on in the unkerned cut. The width the browser drew is the union
+        of the run's character rects, as the snapshot reads it.
+        """
+        document = _kerning_document()
+        selector = f"#{element_id}"
+        style = browser_style(document, selector)
+        assert browser_text(document, selector) == text, f"fixture drift: {selector}'s text"
+        lines = browser_line_boxes(document, selector)
+        assert [line["text"] for line in lines] == [text], (
+            f"fixture drift: {selector} renders {lines}, not one line {text!r}"
+        )
+        drawn = lines[0]["w"]
+        (widths,) = cut_widths(document, style, [text])
+        kerning = widths.unkerned - widths.export
+        if kerned:
+            assert kerning > KERNING_GUARD_PX, (
+                f"fixture drift: {selector}'s kerning moves it {kerning:.2f} px, under "
+                f"{KERNING_GUARD_PX} px ({widths})"
+            )
+        else:
+            assert abs(kerning) < 0.01, f"fixture drift: {selector} is kerned ({widths})"
+        spacing = style["letterSpacing"]
+        tracking_px = 0.0 if spacing == "normal" else float(spacing.removesuffix("px"))
+        expected = {
+            "pptx": tracking_px + powerpoint_tracking_px(drawn, widths, len(text), ends_line),
+            "gslides": tracking_px + google_tracking_px(drawn, widths, len(text)),
+        }
+
+        for target, deck in kerning_decks.items():
+            box = _box(slide_shapes(deck, 0), text)
+            run = _run(box, text)
+            want = expected[target] * PT_PER_PX * HUNDREDTHS
+            assert abs(run.spc_pt * HUNDREDTHS - want) <= SPC_TOLERANCE_HUNDREDTHS, (
+                f"{selector} for {target}: spc must be {want:.1f} hundredths of a point "
+                f"within {SPC_TOLERANCE_HUNDREDTHS:g} (drawn {drawn:.2f} px, {widths}); "
+                f"it is {_describe_run(run)}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1979,6 +2152,37 @@ class TestTypographyModule:
 
         assert node_json(script) == typeface, (
             f"the italic cell font for {target} is not {typeface!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("target", "measured_px"),
+        [
+            pytest.param(None, 3.0, id="default-powerpoint"),
+            pytest.param("pptx", 3.0, id="pptx"),
+            pytest.param("gslides", 2.0, id="gslides"),
+        ],
+    )
+    def test_tracking_is_the_targets_measured_tracking(
+        self, target: str | None, measured_px: float
+    ) -> None:
+        """X1: a run's ``charSpacing`` is its CSS tracking plus the tracking its target measured.
+
+        The snapshot measures two per run: ``opticalTrackingPx`` (A1: the
+        optical-size delta, kerned, with its dead band), which Google Slides
+        draws right, and ``unkernedTrackingPx`` (X1: the delta with no dead band
+        plus the run's kerning), which restores the width PowerPoint draws
+        without pair kerning. With 1 px CSS, 2 px optical and 3 px unkerned
+        tracking, the deck for PowerPoint writes (1 + 3) x 0.75 pt and the deck
+        for Google (1 + 2) x 0.75 pt.
+        """
+        run = _plain_run(letterSpacingPx=1, opticalTrackingPx=2, unkernedTrackingPx=3)
+
+        result = _run_options(run, {}, target)
+
+        expected = (1 + measured_px) * PT_PER_PX
+        assert math.isclose(result.get("charSpacing", 0), expected, abs_tol=1e-9), (
+            f"the run's charSpacing for {target!r} is {result.get('charSpacing')}, "
+            f"expected {expected}"
         )
 
     @pytest.mark.parametrize("target", ["pptx", "gslides"])

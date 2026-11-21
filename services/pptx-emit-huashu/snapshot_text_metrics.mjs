@@ -4,7 +4,7 @@
 // (createTextMetrics). Its header's "Metrics" says what is read and why;
 // here are the probes themselves (measureProbes) and what is made of them:
 // * after the walk, every queued paragraph's line height and ascent and every
-//   queued run's optical-size tracking (applyMetrics);
+//   queued run's optical-size and unkerned tracking (applyMetrics);
 // * before the walk, every list marker's advance (measureMarkers);
 // * while the walk reads, a face's content area, once per face
 //   (contentHeightOf, for turned text), and the probe CSS of a face as the
@@ -43,7 +43,8 @@ function createTextMetrics(layout) {
     'margin:0;padding:0;border:0;';
   // The optical size of the static cut PowerPoint and Google Slides draw (DM Sans
   // ships it as its text cut), and how far a run's width there may differ from
-  // the browser's before it is compensated (CALIBRATION.md A1).
+  // the browser's before the deck for Google Slides compensates it
+  // (CALIBRATION.md A1; the deck for PowerPoint has no band, X1).
   const EXPORT_CUT_OPTICAL_SIZE = 14;
   const OPTICAL_SIZE_THRESHOLD = 0.005;
   // Characters a renderer spaces as one with the character before them: combining
@@ -158,6 +159,18 @@ function createTextMetrics(layout) {
       '"opsz" ' + EXPORT_CUT_OPTICAL_SIZE + ';';
   }
 
+  // The width PowerPoint for Mac draws it at: the export cut with no pair
+  // kerning. It kerns no DM Sans (its kerning is GPOS alone), and the deck
+  // for it turns PowerPoint's kerning off with every spc it writes (pptxgenjs
+  // kern="0"), Arial's too (scripts/export_fidelity/CALIBRATION.md X1). The
+  // later font-kerning wins over the element's; a "kern" feature the element
+  // sets would turn kerning back on, so one turning it off follows its own (a
+  // repeated feature takes its last value).
+  function unkernedCutCss(face) {
+    const own = face.features === 'normal' ? '' : face.features + ',';
+    return exportCutCss(face) + 'font-kerning:none;font-feature-settings:' + own + '"kern" 0;';
+  }
+
   // The distinct probes of one measureProbes pass: probe(css, text, baseline)
   // adds one unless it is there already, and returns its index in `probes`.
   function probeList() {
@@ -227,6 +240,15 @@ function createTextMetrics(layout) {
   //   width differ by more than OPTICAL_SIZE_THRESHOLD: the browser's width
   //   less the export cut's, per character. Both widths carry the run's CSS
   //   tracking, which the emitter writes on top, so it is not counted twice.
+  //   The deck for Google Slides, which kerns, writes it;
+  // * every run's unkernedTrackingPx, which the deck for PowerPoint writes:
+  //   the same per-character delta with no band, plus the run's kerning (its
+  //   export cut's width less the unkerned cut's) per gap its tracking can
+  //   close. PowerPoint puts a run's tracking after each of its characters,
+  //   the last included, so a run another follows on its line spreads its
+  //   kerning over all of them, and the run after it starts where the
+  //   browser's does; a run that ends its line over the gaps between them,
+  //   so its last glyph ends where the browser's does (CALIBRATION.md X1).
   // Each distinct probe is measured once.
   function applyMetrics() {
     const list = probeList();
@@ -242,11 +264,12 @@ function createTextMetrics(layout) {
       const pending = pendingRuns[index];
       runProbes.push({
         exportCut: probe(exportCutCss(pending.face), pending.run.text, false),
+        unkernedCut: probe(unkernedCutCss(pending.face), pending.run.text, false),
         browserCut: pending.width === null ? probe(browserCutCss(pending.face), pending.run.text, false) : -1,
       });
     }
     const sizes = probes.length
-      ? measureProbes(probes, 'this slide exports without line spacing and optical-size tracking')
+      ? measureProbes(probes, 'this slide exports without line spacing, optical-size and kerning tracking')
       : [];
     if (!sizes) return;
 
@@ -266,10 +289,14 @@ function createTextMetrics(layout) {
       const scale = pending.face.scale;
       const drawn = pending.width === null ? sizes[runProbes[index].browserCut].w * scale : pending.width;
       const exportCut = sizes[runProbes[index].exportCut].w * scale;
-      if (!(drawn > 0 && exportCut > 0)) continue;
-      if (Math.abs(exportCut - drawn) / drawn <= OPTICAL_SIZE_THRESHOLD) continue;
+      const unkernedCut = sizes[runProbes[index].unkernedCut].w * scale;
       const characters = characterCount(pending.run.text);
-      if (characters > 0) pending.run.opticalTrackingPx = (drawn - exportCut) / characters;
+      if (!(drawn > 0 && exportCut > 0 && characters > 0)) continue;
+      const delta = (drawn - exportCut) / characters;
+      if (Math.abs(exportCut - drawn) / drawn > OPTICAL_SIZE_THRESHOLD) pending.run.opticalTrackingPx = delta;
+      const gaps = pending.endsLine ? characters - 1 : characters;
+      const kerning = unkernedCut > 0 && gaps > 0 ? (exportCut - unkernedCut) / gaps : 0;
+      pending.run.unkernedTrackingPx = delta + kerning;
     }
   }
 

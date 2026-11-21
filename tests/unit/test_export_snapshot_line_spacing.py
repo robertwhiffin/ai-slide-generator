@@ -118,8 +118,10 @@ from tests.fixtures.export_snapshot_support import (
     browser_style,
     browser_text,
     corpus_document,
+    cut_widths,
     export_corpus,
     export_slides,
+    powerpoint_tracking_px,
     requires_huashu_sidecar,
     slide_document,
     slide_shape_elements,
@@ -277,6 +279,37 @@ def metrics_pptx() -> Iterator[bytes]:
     yield pptx
 
 
+@pytest.fixture(scope="module")
+def corpus_gslides_pptx() -> Iterator[bytes]:
+    """Corpus slides 01 and 09, exported once for Google Slides (``target="gslides"``)."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_corpus(
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, target="gslides"
+        )
+    assert failures == [], f"the export rejected a corpus slide: {failures}"
+    yield pptx
+
+
+@pytest.fixture(scope="module")
+def metrics_gslides_pptx() -> Iterator[bytes]:
+    """The custom metrics slide, exported once for Google Slides (``target="gslides"``)."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_slides(
+            [METRICS_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target="gslides"
+        )
+    assert failures == [], f"the export rejected the metrics slide: {failures}"
+    yield pptx
+
+
+# The module fixture holding each source's deck, per target.
+SOURCE_DECKS = {
+    ("cover", "pptx"): "corpus_pptx",
+    ("cover", "gslides"): "corpus_gslides_pptx",
+    ("metrics", "pptx"): "metrics_pptx",
+    ("metrics", "gslides"): "metrics_gslides_pptx",
+}
+
+
 def _metrics_document() -> str:
     """The document ``metrics_pptx`` exported, with its slide id."""
     return slide_document(METRICS_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
@@ -298,12 +331,14 @@ def _ascent(document: str, family: str, weight: int, size_px: float, style: str)
     return browser_ascent(document, family, weight, size_px, style)
 
 
-def _sources(request: pytest.FixtureRequest, source: str) -> tuple[str, bytes, int]:
-    """(document, pptx, slide index) of a source: "cover" (fixture 01) or "metrics"."""
-    if source == "cover":
-        return corpus_document("01"), request.getfixturevalue("corpus_pptx"), 0
-    assert source == "metrics", f"unknown source {source!r}"
-    return _metrics_document(), request.getfixturevalue("metrics_pptx"), 0
+def _sources(
+    request: pytest.FixtureRequest, source: str, target: str = "pptx"
+) -> tuple[str, bytes, int]:
+    """(document, pptx, slide index) of a source, "cover" (fixture 01) or "metrics", in the
+    deck written for ``target``."""
+    assert (source, target) in SOURCE_DECKS, f"unknown source {source!r} or target {target!r}"
+    document = corpus_document("01") if source == "cover" else _metrics_document()
+    return document, request.getfixturevalue(SOURCE_DECKS[(source, target)]), 0
 
 
 def _runs(shape: Shape) -> list[Run]:
@@ -911,6 +946,46 @@ def _cut_widths(
     ]
 
 
+def _unkerned_cut_widths(document: str, style: dict[str, str], texts: list[str]) -> list[float]:
+    """The export cut's advance width of each text, untracked and with ``font-kerning: none``:
+    what PowerPoint for Mac draws before ``spc`` (CALIBRATION.md X1)."""
+    css = (
+        f"{_font_css(style)}; font-variation-settings: 'opsz' {EXPORT_CUT_OPTICAL_SIZE}; "
+        "font-kerning: none"
+    )
+    return [size["w"] for size in browser_probes(document, [(text, css) for text in texts])]
+
+
+def _assert_powerpoint_tracking(
+    document: str, selector: str, style: dict[str, str], runs: list[Run]
+) -> None:
+    """X1: each run of a block whose every line is one run carries, in the deck for
+    PowerPoint, its CSS tracking plus ``powerpoint_tracking_px`` of its line (the
+    optical-size delta with no dead band, plus its kerning per gap), within 1."""
+    lines = _line_boxes(document, selector)
+    # The lines read the source text, the runs the painted text (text-transform applied).
+    read = [line["text"].casefold() for line in lines]
+    assert read == [run.text.casefold() for run in runs], (
+        f"fixture drift: {selector}'s lines {[line['text'] for line in lines]} are not its "
+        f"runs {[run.text for run in runs]}, one each"
+    )
+    assert all(run.text.isascii() for run in runs), (
+        f"fixture drift: {selector} is no longer ASCII, so its characters are not its graphemes"
+    )
+    widths = cut_widths(document, style, [run.text for run in runs])
+    wrong = []
+    for run, line, width in zip(runs, lines, widths):
+        tracking = powerpoint_tracking_px(line["w"], width, len(run.text), True)
+        expected = _css_spc(style) + tracking * PT_PER_PX * HUNDREDTHS
+        if abs(run.spc_pt * HUNDREDTHS - expected) > SPC_TOLERANCE_HUNDREDTHS:
+            wrong.append(f"{_describe_run(run)} (expected {expected:.1f}; {width})")
+    assert not wrong, (
+        f"{selector}, the deck for PowerPoint: every run's spc must be its CSS tracking plus "
+        f"its optical-size delta and kerning, within {SPC_TOLERANCE_HUNDREDTHS:g}; these are "
+        "not:\n  " + "\n  ".join(wrong)
+    )
+
+
 def _relative_difference(browser_cut: float, export_cut: float) -> float:
     return abs(export_cut - browser_cut) / browser_cut
 
@@ -965,21 +1040,27 @@ def _assert_compensated_control(
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestSnapshotOpticalSizeCompensation:
-    def test_cover_title_tracking_restores_the_browsers_run_width(self, corpus_pptx: bytes) -> None:
-        """A1 (a): fixture 01's cover title, 64 px DM Sans 600, letter-spacing -.01em.
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_cover_title_tracking_restores_the_browsers_run_width(
+        self, request: pytest.FixtureRequest, target: str
+    ) -> None:
+        """A1 (a) and X1: fixture 01's cover title, 64 px DM Sans 600, letter-spacing -.01em.
 
         The browser draws it at the automatic optical size, so the static
         opsz-14 cut PowerPoint and Google Slides use is about 9% wider. Every
         run therefore carries a negative ``spc`` delta on top of its CSS
-        tracking (-0.48 pt). The width a renderer draws from the run is
-        exportCutWidth + n x spc: the untracked opsz-14 advance width of its
-        text, read with a probe in the same page, plus the emitted tracking
-        after each of its n characters. Summed over each line's runs, that is
-        within 1% of the browser's own line width. Without the delta the line
-        is about 9% wider and re-wraps in Slides. Counting the CSS tracking
-        twice leaves it about 2% short.
+        tracking (-0.48 pt). The width a renderer draws from the run is its
+        cut's advance width plus n x spc: the untracked opsz-14 advance width
+        of its text, read with a probe in the same page, plus the emitted
+        tracking after each of its n characters. Google kerns, so its cut is
+        the kerned one; PowerPoint for Mac draws DM Sans with no pair kerning,
+        so for the deck written for it the cut is the ``font-kerning: none``
+        one (X1). Summed over each line's runs, that is within 1% of the
+        browser's own line width. Without the delta the line is about 9% wider
+        and re-wraps in Slides. Counting the CSS tracking twice leaves it
+        about 2% short.
         """
-        document = corpus_document("01")
+        document, pptx, slide = _sources(request, "cover", target)
         style = _guard_style(
             document,
             COVER_TITLE,
@@ -993,7 +1074,7 @@ class TestSnapshotOpticalSizeCompensation:
         assert [line["text"] for line in browser_lines] == list(COVER_TITLE_LINES), (
             f"fixture drift: the title renders {[line['text'] for line in browser_lines]}"
         )
-        _, box = _box_reading(slide_shapes(corpus_pptx, 0), "\n".join(COVER_TITLE_LINES))
+        _, box = _box_reading(slide_shapes(pptx, slide), "\n".join(COVER_TITLE_LINES))
         lines = _emitted_lines(box)
         assert ["".join(run.text for run in line) for line in lines] == list(COVER_TITLE_LINES), (
             f"the title box's lines read {[[run.text for run in line] for line in lines]}"
@@ -1012,7 +1093,12 @@ class TestSnapshotOpticalSizeCompensation:
             f"tracking ({css_spc:.1f} hundredths of a point); these do not:\n  "
             + "\n  ".join(untightened)
         )
-        export_widths = iter(export_cut for _, export_cut in widths)
+        drawn_cuts = (
+            _unkerned_cut_widths(document, style, [run.text for run in runs])
+            if target == "pptx"
+            else [export_cut for _, export_cut in widths]
+        )
+        export_widths = iter(drawn_cuts)
         mismatched = []
         for line, browser_line in zip(lines, browser_lines):
             implied = sum(
@@ -1024,8 +1110,8 @@ class TestSnapshotOpticalSizeCompensation:
                     f"{browser_line['w']:.2f} px ({implied / browser_line['w'] - 1:+.2%})"
                 )
         assert not mismatched, (
-            f"each line's width at the export cut plus its emitted tracking must be within "
-            f"{WIDTH_TOLERANCE:.0%} of the browser's:\n  "
+            f"{target}: each line's width at the export cut plus its emitted tracking must be "
+            f"within {WIDTH_TOLERANCE:.0%} of the browser's:\n  "
             + "\n  ".join(mismatched)
             + "\nruns:\n  "
             + "\n  ".join(_describe_run(run) for run in runs)
@@ -1052,7 +1138,8 @@ class TestSnapshotOpticalSizeCompensation:
             ),
         ],
     )
-    def test_13px_run_keeps_its_css_tracking(
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_13px_run_keeps_its_css_tracking_for_google(
         self,
         request: pytest.FixtureRequest,
         source: str,
@@ -1060,21 +1147,29 @@ class TestSnapshotOpticalSizeCompensation:
         text: str,
         control_selector: str,
         control_text: str,
+        target: str,
     ) -> None:
-        """A1 (b): a 13 px DM Sans run gets no delta beyond its CSS letter-spacing.
+        """A1 (b): in the deck for Google Slides a 13 px DM Sans run gets no delta beyond its
+        CSS letter-spacing; in the deck for PowerPoint it carries X1's tracking.
 
         At 13 px the automatic optical size is 13, next to the export cut's
         14, so the two widths differ by well under 0.5% (guarded here with the
-        page's own probes) and the run's ``spc`` is exactly its CSS tracking:
+        page's own probes), and for Google, which kerns, the run's ``spc`` is
+        exactly its CSS tracking:
 
         * fixture 01's eyebrow (700, ``.16em``): 156;
         * a 13 px body paragraph (400, ``.02em``): 19.5, within 1.
 
+        For PowerPoint, which kerns no DM Sans, the run carries its CSS
+        tracking plus its optical-size delta, with no dead band, and its
+        kerning per gap (``_assert_powerpoint_tracking``; CALIBRATION.md X1).
+
         The control is a large DM Sans block on the same slide (the cover
-        title; a 64 px headline), which is tightened. So the compensation is
-        present, and only skipped where it is not due.
+        title; a 64 px headline), which is tightened in both decks. So the
+        compensation is present, and for Google only skipped where it is not
+        due.
         """
-        document, pptx, slide = _sources(request, source)
+        document, pptx, slide = _sources(request, source, target)
         style = _guard_style(
             document,
             selector,
@@ -1097,6 +1192,9 @@ class TestSnapshotOpticalSizeCompensation:
             f"{OPTICAL_SIZE_THRESHOLD:.1%}; these do (text, browser px, export px): {wide}"
         )
         _assert_compensated_control(document, control_selector, shapes, control_text)
+        if target == "pptx":
+            _assert_powerpoint_tracking(document, selector, style, runs)
+            return
 
         expected = _css_spc(style)
         wrong = [
@@ -1110,16 +1208,24 @@ class TestSnapshotOpticalSizeCompensation:
             + "\n  ".join(wrong)
         )
 
-    def test_arial_run_never_gets_a_delta(self, metrics_pptx: bytes) -> None:
-        """A1 (c): a 64 px Arial headline keeps its CSS tracking, -0.48 pt.
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_arial_run_never_gets_a_delta(
+        self, request: pytest.FixtureRequest, target: str
+    ) -> None:
+        """A1 (c): a 64 px Arial headline gets no optical-size delta: for Google its CSS
+        tracking, -0.48 pt; for PowerPoint that plus its kerning.
 
         Arial has no optical-size axis: the page's probes measure the same
         width at the automatic optical size and at ``'opsz' 14`` (guarded
-        here). So its ``spc`` is exactly its CSS letter-spacing, -.01em at
-        64 px = -48 hundredths of a point. The control is the same headline
-        style in DM Sans on the same slide, which is tightened.
+        here). So for Google its ``spc`` is exactly its CSS letter-spacing,
+        -.01em at 64 px = -48 hundredths of a point. The deck for PowerPoint
+        writes ``kern="0"`` with every ``spc``, so PowerPoint kerns Arial no
+        more than DM Sans (measured, CALIBRATION.md X1), and the run carries
+        its kerning per gap besides (``_assert_powerpoint_tracking``). The
+        control is the same headline style in DM Sans on the same slide, which
+        is tightened.
         """
-        document = _metrics_document()
+        document, metrics_pptx, _ = _sources(request, "metrics", target)
         style = _guard_style(
             document,
             "#arial-headline",
@@ -1145,6 +1251,9 @@ class TestSnapshotOpticalSizeCompensation:
             f"(text, browser px, export px): {varied}"
         )
         _assert_compensated_control(document, "#dm-sans-headline", shapes, DM_SANS_HEADLINE_TEXT)
+        if target == "pptx":
+            _assert_powerpoint_tracking(document, "#arial-headline", style, runs)
+            return
 
         expected = _css_spc(style)
         wrong = [

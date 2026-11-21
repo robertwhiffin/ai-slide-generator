@@ -281,7 +281,8 @@ Ink width per line, browser -> renderer:
 No title wraps in either app, and every line count matches the browser. Google is within 0.26%.
 PowerPoint draws runs that carry `spc` up to 0.78% wider. That is consistent with the `kern="0"`
 pptxgenjs writes beside every `spc`: PowerPoint stops kerning, Google keeps it. The box's 6% slack
-absorbs it.
+absorbs it. The deck for PowerPoint now tracks the kerning in, with no band (X1 below); the deck
+for Google Slides keeps this rule.
 
 ## A2: superscript and subscript size
 
@@ -451,6 +452,43 @@ move of the words of its line (20 px, line-height 29 px for three lines):
 | three lines, line 1 down 4 px | – | −4.12, +0.32, +0.76 | +0.04, +4.48, +4.60 | −4.12, +0.32, +0.76 |
 | three lines, line 2 up 3 px | – | −0.12, +3.32, +0.76 | −0.12, +3.32, +3.32 | −0.12, +3.32, +0.76 |
 | three lines in one span, down 4 px | – | −4.12, −3.68, −3.24 | +0.04, +0.48, +0.60 | +0.04, +0.48, +0.60 |
+
+## X1: kerning in PowerPoint
+
+Measured 2026-11-21 (Task 14 B1). PowerPoint for Mac draws DM Sans with no pair kerning: a probe
+deck of `AVAVAVAV To Ty Yo Wa LT` at 30 pt measured 508.28 px with `kern` absent, `kern="0"` and
+`kern="1200"` alike. It kerns Arial and Times New Roman (legacy `kern` tables) unless the run
+says `kern="0"`: Arial 478.09 px absent, 515.80 with `kern="0"`, 478.09 with `kern="1200"`
+(Times 466.20, 523.09, 466.20). pptxgenjs writes `kern="0"` beside every `spc`, so a run the deck
+tracks is unkerned in PowerPoint whatever its face. PowerPoint puts a run's `spc` after each of
+its characters, the last included: a run of ten H at `spc` 10 pt moves the run after it by ten
+times 13.38 px.
+
+So the deck for PowerPoint writes each run's tracking as its CSS letter-spacing plus
+`unkernedTrackingPx`: the optical-size delta per character, (browser width − export cut) / n
+with no dead band, plus the run's kerning, (export cut − export cut with `font-kerning: none`)
+/ gaps, where gaps is n − 1 for a run that ends its line (its last character's tracking moves
+nothing) and n for a run another follows on its line (its last character's tracking places the
+next run where the browser does; the browser kerns no pair across two runs). Both cuts are probes
+in the page (`snapshot_text_metrics.mjs`). The deck for Google Slides, which kerns, keeps A1.
+
+**Measured on both corpora** (`run.py --pin-fonts --powerpoint`; every matched line of each
+slide's PowerPoint PDF against the browser's, upright lines; px at 1280 wide, PowerPoint minus
+browser; the browser's width less the letter space its last character's Range rect holds, which
+a PDF glyph box does not):
+
+| corpus | engine | median | median of \|error\| | largest \|error\| |
+|---|---|---|---|---|
+| in-repo (306 lines) | before (A1, kerning untracked) | +0.56 | 0.60 | 15.99 |
+| in-repo | X1 with A1's 0.5% band kept | +0.19 | 0.27 | 4.32 |
+| in-repo | X1, no band (shipped) | +0.16 | 0.23 | 2.73 |
+| design system (391 lines) | before | +0.76 | 0.79 | 11.14 |
+| design system | X1 with the band kept | +0.16 | 0.30 | 3.32 |
+| design system | X1, no band (shipped) | +0.16 | 0.30 | 3.32 |
+
+The band changes nothing on the design-system deck, whose DM Sans has no optical-size axis, and
+dropping it helps the in-repo deck's, so the deck for PowerPoint has none. The tracked 64 px
+event title (`letter-spacing: .18em`) went from +11.14 to −1.12 px.
 
 ## D1: italic faces
 

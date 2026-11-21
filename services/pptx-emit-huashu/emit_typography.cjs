@@ -37,11 +37,15 @@
 // whose own value is falsy (bold: false, charSpacing: 0), so the text box
 // carries geometry only.
 //
-// Tracking is the run's CSS letter-spacing plus its optical-size tracking: the
-// browser draws a variable font with an opsz axis (DM Sans) at the automatic
-// optical size, PowerPoint and Google Slides the static opsz-14 cut, about 9%
-// wider at title sizes, so the snapshot measured what restores the browser's
-// width (snapshot_text.mjs applyMetrics).
+// Tracking is the run's CSS letter-spacing plus what the snapshot measured
+// restores the browser's width in the deck's renderer (snapshot_text_metrics.mjs
+// applyMetrics). The browser draws a variable font with an opsz axis (DM Sans)
+// at the automatic optical size, PowerPoint and Google Slides the static
+// opsz-14 cut, about 9% wider at title sizes. Google Slides kerns, so its deck
+// adds that width's delta (opticalTrackingPx; CALIBRATION.md A1). PowerPoint
+// for Mac kerns no DM Sans, and pptxgenjs turns its kerning off with every spc
+// it writes (kern="0"), Arial's too, so the deck for PowerPoint adds the delta
+// with the run's kerning folded in (unkernedTrackingPx; CALIBRATION.md X1).
 //
 // Super- and subscript size. PowerPoint and Google Slides draw a run with a
 // baseline shift at a fraction of its size, on top of the size the browser
@@ -222,7 +226,8 @@ function runOptions(run, faces, sizing) {
   const face = run.italic && targetOf(sizing) === 'pptx'
     ? italicTypefaceFor(run.family, run.weight, weights, loadedWeightsOf(known.italicWeights, run.family))
     : { ...typefaceFor(run.family, run.weight, weights), italic: Boolean(run.italic) };
-  const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(run.opticalTrackingPx) || 0);
+  const measuredPx = targetOf(sizing) === 'pptx' ? run.unkernedTrackingPx : run.opticalTrackingPx;
+  const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(measuredPx) || 0);
   return {
     fontFace: xmlAttribute(face.fontFace),
     bold: face.bold,

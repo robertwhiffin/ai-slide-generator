@@ -106,7 +106,8 @@ function isRun(run) {
     typeof run.underline === 'boolean' &&
     typeof run.strike === 'boolean' &&
     (run.baseline === null || BASELINES.has(run.baseline)) &&
-    isNumber(run.opticalTrackingPx);
+    isNumber(run.opticalTrackingPx) &&
+    isNumber(run.unkernedTrackingPx);
 }
 
 function isLine(line) {

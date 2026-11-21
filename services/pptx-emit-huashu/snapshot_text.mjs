@@ -117,7 +117,9 @@
 // * a run whose width at the export cut (the static opsz-14 face PowerPoint and
 //   Google Slides draw) differs from the width the browser drew by more than
 //   0.5% carries the difference per character as tracking
-//   (scripts/export_fidelity/CALIBRATION.md A1).
+//   (scripts/export_fidelity/CALIBRATION.md A1); and every run carries the
+//   tracking that makes it as wide drawn at the export cut with no pair
+//   kerning, as PowerPoint draws it (CALIBRATION.md X1).
 //
 // /**
 //  * InlineGroup = {follows:Element|null, decorations:Decoration[], blocks:TextBlock[]}
@@ -131,7 +133,8 @@
 //  *                           lines:[{runs:Run[], growthPx?}]}],
 //  *              inset?: {left, top, right, bottom}}
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
-//  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx}
+//  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx,
+//  *        unkernedTrackingPx}
 //  *
 //  * growthPx how much further down than its spacing the browser set a line
 //  *          after the block's first (a raised inline grew its line box;
@@ -165,7 +168,11 @@
 //  *          layer by layer over the backdrop (Drive drops text alpha);
 //  * opticalTrackingPx    tracking added to letterSpacingPx after every character,
 //  *          so the run is as wide at the export cut as the browser drew it; 0
-//  *          when the two widths agree within 0.5%.
+//  *          when the two widths agree within 0.5%;
+//  * unkernedTrackingPx   the same for the export cut drawn with no pair
+//  *          kerning, with no 0.5% band: the width delta per character plus
+//  *          the run's kerning per gap its tracking can close (one fewer than
+//  *          its characters where the run ends its line); 0 where unread.
 //  */
 
 import { ELLIPSIS_SOURCE } from './snapshot_text_ellipsis.mjs';
@@ -280,7 +287,7 @@ function createTextLayout(env) {
   // while the walk reads its Range rects:
   //   paragraphs  {paragraph, face, lineHeight}
   //   runs        {run, face, width: the browser's px | null (a justified line,
-  //                whose drawn width includes the stretch)}
+  //                whose drawn width includes the stretch), endsLine}
   const pendingParagraphs = [];
   const pendingRuns = [];
   // The slide's hidden text (hiddenText), in the order it is recorded: the
@@ -729,6 +736,8 @@ function createTextLayout(env) {
   //                page has no such face the probe falls back as the text did;
   //   typesetting  what else sets the width: tracking, word spacing, kerning,
   //                features and variants;
+  //   features     its font-feature-settings alone, which a probe that turns
+  //                kerning off appends to;
   //   variation    the element's font-variation-settings;
   //   optical      its font-optical-sizing;
   //   scale        the block's transform scale: probes are set at the computed,
@@ -741,6 +750,7 @@ function createTextLayout(env) {
       typesetting: 'letter-spacing:' + ps.letterSpacing + ';word-spacing:' + ps.wordSpacing +
         ';font-kerning:' + ps.fontKerning + ';font-feature-settings:' + ps.fontFeatureSettings +
         ';font-variant:' + ps.fontVariant + ';',
+      features: String(ps.fontFeatureSettings || 'normal'),
       variation: String(ps.fontVariationSettings || 'normal'),
       optical: String(ps.fontOpticalSizing || 'auto'),
       scale,
@@ -1422,6 +1432,7 @@ function createTextLayout(env) {
           created[RUN_STYLE_FIELDS[field]] = token.style[RUN_STYLE_FIELDS[field]];
         }
         created.opticalTrackingPx = 0;
+        created.unkernedTrackingPx = 0;
         runs.push(created);
         extents.push({
           face: token.face,
@@ -1724,7 +1735,8 @@ function createTextLayout(env) {
   // under a turn, where they bound the turned glyphs. A justified line is drawn
   // stretched, a symbol marker is drawn as a shape, and turned text's rects are
   // no widths, so their natural width at the browser's own cut is probed
-  // instead (width null).
+  // instead (width null). `endsLine` says no run follows it on its line, so
+  // the tracking after its last character moves nothing.
   function queueRuns(lines, align, advancesRead) {
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
@@ -1734,6 +1746,7 @@ function createTextLayout(env) {
           run: line.runs[run],
           face: extent.face,
           width: align === 'justify' || !extent.advance || !advancesRead ? null : extent.right - extent.left,
+          endsLine: run === line.runs.length - 1,
         });
       }
     }

@@ -1722,6 +1722,7 @@ def _run(text: str, **style: object) -> dict:
         "strike": False,
         "baseline": None,
         "opticalTrackingPx": 0,
+        "unkernedTrackingPx": 0,
     }
     run.update(style)
     return run
@@ -2037,6 +2038,11 @@ MODEL_DEFECTS = {
     ),
     "text-run-colour-injected": (
         _set("items.5.paragraphs.0.lines.0.runs.0.color", INJECTED_COLOUR),
+        {5},
+        0,
+    ),
+    "text-run-unkerned-tracking-nan": (
+        _set("items.5.paragraphs.0.lines.0.runs.0.unkernedTrackingPx", NAN),
         {5},
         0,
     ),

@@ -206,6 +206,7 @@ function lineEndOptions(line, item, faces) {
     baseline: null,
     letterSpacingPx: 0,
     opticalTrackingPx: 0,
+    unkernedTrackingPx: 0,
   };
   return itemRunOptions(plain, item, faces, { target: 'pptx' });
 }
