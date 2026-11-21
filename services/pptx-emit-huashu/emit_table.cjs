@@ -106,10 +106,20 @@ function dottedSlideXml(xml, tables) {
   });
 }
 
+// The zip library pptxgenjs writes the deck with, resolved as pptxgenjs's own
+// require resolves it, so the rewrite reads and writes the deck with the very
+// module pptxgenjs loads (it ships in the committed node_modules with
+// pptxgenjs; package.json names no zip library of the sidecar's own).
+function pptxgenjsZipPath() {
+  return require.resolve('jszip', { paths: [path.dirname(require.resolve('pptxgenjs'))] });
+}
+
 // The deck pptxgenjs wrote (a .pptx Buffer), each dotted side of each table
 // on `slides` (pres.slides, in order) written sysDot. A deck with none is
 // returned as it is. The parts are rewritten with the zip library pptxgenjs
-// writes with, as it writes them: in order, stored, each part's date kept.
+// writes with (pptxgenjsZipPath), as it writes them: in order, stored, each
+// part's date kept. It throws when the deck cannot be read or written back,
+// and emit_deck.mjs then writes the deck as pptxgenjs wrote it.
 async function dotTableBorders(deck, slides) {
   const pending = [];
   slides.forEach((slide, index) => {
@@ -117,7 +127,7 @@ async function dotTableBorders(deck, slides) {
     if (tables && tables.some((sides) => sides.size)) pending.push({ name: `ppt/slides/slide${index + 1}.xml`, tables });
   });
   if (!pending.length) return deck;
-  const JSZip = require(require.resolve('jszip', { paths: [path.dirname(require.resolve('pptxgenjs'))] }));
+  const JSZip = require(pptxgenjsZipPath());
   const zip = await JSZip.loadAsync(deck);
   for (const { name, tables } of pending) {
     const part = zip.file(name);
@@ -199,4 +209,4 @@ function emitTable(slide, item, faces, renderer) {
   });
 }
 
-module.exports = { emitTable, dotTableBorders };
+module.exports = { emitTable, dotTableBorders, pptxgenjsZipPath };

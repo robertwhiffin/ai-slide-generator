@@ -21,7 +21,8 @@
 //
 // pptxgenjs writes the deck; its dotted table-cell borders are then written
 // sysDot, a dash pptxgenjs cannot write a table border in (emit_table.cjs
-// dotTableBorders).
+// dotTableBorders). A rewrite that fails costs only that dash: the deck is
+// written as pptxgenjs wrote it, those borders dashed, with one [huashu] line.
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
@@ -153,7 +154,14 @@ async function main() {
   // As pptxgenjs's writeFile names the file: with .pptx added when it lacks one.
   const fileName = outArg.toLowerCase().endsWith('.pptx') ? outArg : outArg + '.pptx';
   const deck = await pres.write({ outputType: 'nodebuffer' });
-  await fs.writeFile(fileName, await dotTableBorders(deck, pres.slides));
+  let written = deck;
+  try {
+    written = await dotTableBorders(deck, pres.slides);
+  } catch (e) {
+    console.error('[huashu] dotted table borders left dashed: their rewrite failed: ' +
+      oneLine((e && e.message) || e));
+  }
+  await fs.writeFile(fileName, written);
   console.error(`[huashu] wrote ${outArg} (${succeeded}/${slides.length} slides)`);
   console.error('__HUASHU_RESULT__ ' + logJson({
     totalSlides: slides.length, succeeded, failed, tmpDir,

@@ -81,9 +81,11 @@ from __future__ import annotations
 import json
 import math
 import re
+import subprocess
 from collections import Counter
 from collections.abc import Callable, Iterator
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -116,6 +118,7 @@ from tests.fixtures.export_snapshot_support import (
     export_documents,
     export_slides,
     google_slides_presentation,
+    node_json,
     overlaps,
     requires_google_slides,
     requires_huashu_sidecar,
@@ -3763,6 +3766,123 @@ class TestDottedCellBorders:
             if border is not None and border.dash not in (None, "solid")
         ]
         assert not wrong, f"the {target} deck's dotted tables: " + "; ".join(wrong)
+
+
+# The rewrite that writes the dotted sides sysDot (emit_table.cjs dotTableBorders), and the
+# deck script that runs it once pptxgenjs has written the deck.
+EMIT_TABLE_MODULE = pptx_from_html_huashu.SIDECAR_DIR / "emit_table.cjs"
+# A module node preloads (--require) before emit_deck.mjs: it makes the zip library the
+# rewrite reads the deck with refuse to read one. pptxgenjs writes a deck with it but never
+# reads one (JSZip.loadAsync), so the rewrite alone fails.
+FAILING_REWRITE_PRELOAD = """
+const path = require('path');
+const sidecar = process.cwd();
+const pptxgenjs = require.resolve('pptxgenjs', { paths: [sidecar] });
+const JSZip = require(require.resolve('jszip', { paths: [path.dirname(pptxgenjs)] }));
+JSZip.loadAsync = () => Promise.reject(new Error('the test refuses to read the deck'));
+"""
+REWRITE_FAILURE_REASON = "the test refuses to read the deck"
+
+
+@requires_huashu_sidecar
+class TestDottedRewriteZip:
+    def test_the_rewrite_resolves_the_zip_library_pptxgenjs_loads(self) -> None:
+        """The rewrite's jszip, resolved from pptxgenjs, is the very file pptxgenjs loads.
+
+        ``package.json`` names no jszip: the rewrite reads and writes the deck
+        with the zip library pptxgenjs writes it with, resolved from
+        pptxgenjs's own directory. Imported as ``emit_deck.mjs`` imports it,
+        pptxgenjs loads one jszip module, and it is that file.
+        """
+        found = node_json(
+            "(async () => {"
+            "const path = require('path');"
+            f"const {{ pptxgenjsZipPath }} = require({json.dumps(str(EMIT_TABLE_MODULE))});"
+            "await import('pptxgenjs');"
+            "const loader = require.cache[require.resolve('pptxgenjs')];"
+            "const loaded = loader.children.map((child) => child.filename)"
+            ".filter((file) => file.split(path.sep).includes('jszip'));"
+            "process.stdout.write(JSON.stringify({ resolved: pptxgenjsZipPath(), loaded }));"
+            "})();"
+        )
+        assert found["loaded"] == [found["resolved"]], (
+            f"the rewrite resolves {found['resolved']}; pptxgenjs loads {found['loaded']}"
+        )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestFailedDottedRewrite:
+    def test_a_failed_rewrite_writes_the_deck_with_its_dotted_sides_dashed(
+        self, tmp_path: Path
+    ) -> None:
+        """The rewrite fails: one ``[huashu]`` line, and the deck as pptxgenjs wrote it.
+
+        ``emit_deck.mjs`` runs as the wrapper runs it, with the rewrite's zip
+        library refusing to read the deck. The export still succeeds: exit 0,
+        its one slide written, and the slide's dotted sides dashed (``sysDash``,
+        as pptxgenjs writes a dotted side), its solid ones solid. The failure is
+        one ``[huashu]`` line naming the dotted borders and its reason.
+        """
+        preload = tmp_path / "failing_rewrite.cjs"
+        preload.write_text(FAILING_REWRITE_PRELOAD, encoding="utf-8")
+        out_path = tmp_path / "out.pptx"
+        payload = {
+            "title": "dotted",
+            "slides": [
+                {"html": slide_document(DOTTED_BODY, css=TABLES_CSS, slide_id="snapshot-1")}
+            ],
+            "bypassValidation": True,
+            "target": "pptx",
+        }
+        process = subprocess.run(
+            [
+                "node",
+                "--require",
+                str(preload),
+                str(pptx_from_html_huashu.SIDECAR_SCRIPT),
+                str(out_path),
+            ],
+            input=json.dumps(payload).encode("utf-8"),
+            cwd=pptx_from_html_huashu.SIDECAR_DIR,
+            env=pptx_from_html_huashu.sidecar_subprocess_env(),
+            capture_output=True,
+            timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS,
+            check=False,
+        )
+        stderr = process.stderr.decode("utf-8", errors="replace")
+        assert process.returncode == 0 and out_path.is_file(), (
+            f"the deck was not written (exit {process.returncode}):\n{stderr[-2000:]}"
+        )
+        result = json.loads(
+            next(
+                line
+                for line in reversed(stderr.splitlines())
+                if line.startswith("__HUASHU_RESULT__")
+            ).removeprefix("__HUASHU_RESULT__")
+        )
+        assert result["succeeded"] == 1 and result["failed"] == [], result
+        reported = [
+            line for line in stderr.splitlines() if line.startswith("[huashu]") and "dotted" in line
+        ]
+        assert len(reported) == 1 and REWRITE_FAILURE_REASON in reported[0], (
+            f"expected one [huashu] line for the failed rewrite, got {reported}"
+        )
+        document = slide_document(DOTTED_BODY, css=TABLES_CSS, slide_id="snapshot-1")
+        shapes = slide_shapes(out_path.read_bytes())
+        (table,) = browser_tables(document, "#dotted")
+        _, frame = _frame_for(shapes, _grid_rect(table), "#dotted")
+        dashes = {
+            (row, col, side): border.dash
+            for row, cells in enumerate(frame.table.rows)
+            for col, cell in enumerate(cells)
+            for side, border in cell.borders.items()
+            if border is not None
+        }
+        assert dashes[(0, 0, "bottom")] == "sysDash" and dashes[(0, 0, "right")] == "sysDash", (
+            f"a dotted side is not written dashed, as pptxgenjs writes it: {dashes}"
+        )
+        assert "sysDot" not in dashes.values(), f"the deck was rewritten after all: {dashes}"
 
 
 def _with_table(name: str) -> str:
