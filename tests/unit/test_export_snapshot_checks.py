@@ -1937,6 +1937,29 @@ def _valid_model() -> dict:
                     _cell(0, 1, paragraphs=None),
                 ],
             },
+            {
+                # A shadow layer the box over it cannot carry, on a shape of its own.
+                "kind": "shape",
+                "id": 9,
+                "order": [8],
+                "x": 80,
+                "y": 420,
+                "w": 200,
+                "h": 80,
+                "geometry": "roundRect",
+                "radius": 8,
+                "fill": {"color": "FFFFFF", "alpha": 1},
+                "line": None,
+                "shadow": {
+                    "color": "1B3139",
+                    "alpha": 0.08,
+                    "blurPx": 20,
+                    "offsetPx": 8,
+                    "angle": 90,
+                },
+                "rotate": None,
+                "role": "shadow",
+            },
         ],
     }
 
@@ -2030,6 +2053,8 @@ MODEL_DEFECTS = {
     "shape-shadow-angle-not-a-number": (_set("items.0.shadow.angle", "90"), {0}, 0),
     "shape-path-point-nan": (_set("items.1.path.0.1.x", NAN), {1}, 0),
     "shape-path-closed-not-a-boolean": (_set("items.1.closed", "yes"), {1}, 0),
+    "shape-role-unknown": (_set("items.8.role", "script"), {9}, 0),
+    "shape-role-not-a-string": (_set("items.8.role", 1), {9}, 0),
     "line-x1-nan": (_set("items.2.x1", NAN), {2}, 0),
     "line-colour-short": (_set("items.2.color", "F00"), {2}, 0),
     "text-x-infinite": (_set("items.5.x", INFINITY), {5}, 0),

@@ -43,9 +43,11 @@
 //  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'ellipse'|'path', radius,
 //  *   fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
-//  *   path:[{x,y}[]], closed:boolean}   (path and closed for geometry 'path' only: the
-//  *   polylines it draws, in px from its top left, each closed or each open; a
-//  *   shape a clip cuts that is not a plain rect, see pushClippedShape)
+//  *   path:[{x,y}[]], closed:boolean, role?:'shadow'}   (path and closed for geometry
+//  *   'path' only: the polylines it draws, in px from its top left, each closed or
+//  *   each open; a shape a clip cuts that is not a plain rect, see pushClippedShape.
+//  *   role 'shadow': a shape under a box that casts one of the box's shadow
+//  *   layers and shows nothing else, snapshot_borders.mjs shadowShape)
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}   (one painted side of a
 //  *   border that differs between sides, along its centre line; see pushSideLines)
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
@@ -1023,7 +1025,7 @@ async function snapshotPage(config, pseudoData) {
   // What a painted box draws beyond its fill (snapshot_borders.mjs): its
   // border as an outline or a line per side, its outline rings and its outer
   // shadow, each a shape or a line pushed here.
-  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf } = createBorders({
+  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, resolveShadowShapes, sliceOf } = createBorders({
     paintedColour,
     normalisedAngle,
     cornerShape,
@@ -1123,7 +1125,7 @@ async function snapshotPage(config, pseudoData) {
   }
 
   function pushShape(shape) {
-    items.push({
+    const item = {
       kind: 'shape',
       id: nextItemId++,
       order: shape.order,
@@ -1137,8 +1139,10 @@ async function snapshotPage(config, pseudoData) {
       line: shape.line,
       shadow: shape.shadow,
       rotate: shape.rotate,
-    });
+    };
+    items.push(item);
     stats.shapes++;
+    return item;
   }
 
   // ─── clipped shapes ──────────────────────────────────────────────────
@@ -1326,11 +1330,13 @@ async function snapshotPage(config, pseudoData) {
     return { pieces, closed: false };
   }
 
+  // Returns the items pushed.
   function pushClippedShape(shape, clip) {
+    const pushed = [];
     const outline = outlineOf(shape);
     if (shape.fill || shape.shadow) {
       const region = clipPolygon(outline, clip);
-      if (region.length >= 3) pushPath(shape.order, [region], true, shape.fill, null, shape.shadow);
+      if (region.length >= 3) pushed.push(pushPath(shape.order, [region], true, shape.fill, null, shape.shadow));
     }
     if (shape.line) {
       // Widened by the rounding a clip edge may differ by, so an outline that
@@ -1341,11 +1347,12 @@ async function snapshotPage(config, pseudoData) {
         right: clip.right + CUT_EPSILON_PX,
         bottom: clip.bottom + CUT_EPSILON_PX,
       });
-      if (visible.pieces.length) pushPath(shape.order, visible.pieces, visible.closed, null, shape.line, null);
+      if (visible.pieces.length) pushed.push(pushPath(shape.order, visible.pieces, visible.closed, null, shape.line, null));
     }
+    return pushed;
   }
 
-  // A path item over `polylines` (slide px), placed at their bounds.
+  // A path item over `polylines` (slide px), placed at their bounds. Returns the item.
   function pushPath(order, polylines, closed, fill, line, shadow) {
     let left = Infinity;
     let top = Infinity;
@@ -1367,7 +1374,7 @@ async function snapshotPage(config, pseudoData) {
       }
       path.push(relative);
     }
-    items.push({
+    const item = {
       kind: 'shape',
       id: nextItemId++,
       order,
@@ -1383,8 +1390,10 @@ async function snapshotPage(config, pseudoData) {
       rotate: null,
       path,
       closed,
-    });
+    };
+    items.push(item);
     stats.shapes++;
+    return item;
   }
 
   // ─── captures ────────────────────────────────────────────────────────
@@ -2245,11 +2254,15 @@ async function snapshotPage(config, pseudoData) {
   nameCaptureTargets();
 
   items.sort(compareItems);
+  // A shadow shape under a box with no opaque fill is filled with what lies
+  // beneath it, or dropped where no one colour does (snapshot_borders.mjs).
+  const shadowed = resolveShadowShapes(items, background);
+  stats.shapes -= shadowed.dropped;
   return {
     width: SLIDE_WIDTH,
     height: SLIDE_HEIGHT,
     background,
-    items,
+    items: shadowed.items,
     captures,
     fonts,
     italicFonts,

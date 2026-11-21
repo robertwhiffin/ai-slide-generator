@@ -421,6 +421,9 @@ BORDERS_BODY = (
     '<div id="ringed-dot" style="position: absolute; left: 600px; top: 460px; width: 28px; '
     "height: 28px; border-radius: 50%; background: #FF5F46; border: 5px solid #F9F7F4; "
     'box-shadow: 0 0 0 1px #DCE0E2;"></div>'
+    '<div id="ringed-halo" style="position: absolute; left: 900px; top: 470px; width: 14px; '
+    "height: 14px; border-radius: 50%; background: #FF3621; "
+    'box-shadow: 0 0 0 4px rgba(255, 54, 33, 0.18);"></div>'
     "</div>"
 )
 SIDED_FILL = "CDEDE1"
@@ -493,12 +496,20 @@ class Ring:
     colour: str
     alpha: float | None  # None for an opaque ring
     spread_px: float
-    radius_px: float
+    radius_px: float  # its border radius; 0 for a square box
+    geometry: str = "roundRect"  # its shape when radius_px is not 0: 'roundRect' | 'ellipse'
 
 
+# An opaque ring is the box's own outline, on the box grown by half the spread.
 RINGS = {
     "ringed": Ring("FFFFFF", "1B3139", None, 2.0, 0.0),
+}
+# A translucent ring shows what lies under it, which is never the box's fill:
+# box-shadow paints outside the border box only. ``#ringed-halo`` is the
+# design system's 2x2-matrix dot: a 14 px dot ringed 4 px at alpha 0.18.
+TRANSLUCENT_RINGS = {
     "ringed-round": Ring("F8D3D0", "FF3621", 0.18, 6.0, 12.0),
+    "ringed-halo": Ring("FF3621", "FF3621", 0.18, 4.0, 7.0, "ellipse"),
 }
 
 # Pseudo-elements added to the hostile-realm fixtures: text before the heading
@@ -950,7 +961,7 @@ def borders() -> Iterator[Exported]:
     with pytest.MonkeyPatch.context() as monkeypatch:
         pptx = _export(BORDERS_BODY, monkeypatch)
     document = _document(BORDERS_BODY)
-    names = (*SINGLE_SIDES, "sided", *RINGS, RINGED_DOT)
+    names = (*SINGLE_SIDES, "sided", *RINGS, *TRANSLUCENT_RINGS, RINGED_DOT)
     yield Exported(
         shapes=slide_shapes(pptx),
         elements=slide_shape_elements(pptx),
@@ -1136,8 +1147,10 @@ class TestPseudoElementBoxes:
         untouched page. A dot with a 4 px paper ring is an ellipse with that
         outline (3 pt F9F7F4), its box inset by half the ring. The current
         milestone's dot has a halo instead, ``box-shadow: 0 0 0 4px
-        rgba(27, 81, 98, 0.2)``: an outline of 3 pt at alpha 0.2, outside the
-        dot, its box grown by 2 px.
+        rgba(27, 81, 98, 0.2)``: the dot is its ellipse at its border box with
+        no outline, and the halo, translucent, an unfilled ellipse of its own
+        under it, outlined 3 pt at alpha 0.2 outside the dot, its box grown by
+        2 px.
         """
         _assert_deck_rule("accent", "accent-2", "paper", "good")
         dots = pseudo_dots.geometry["milestone_dots"]
@@ -1158,48 +1171,68 @@ class TestPseudoElementBoxes:
             assert (ring is not None) == (index == CURRENT_MILESTONE) and (border_px > 0) == (
                 index != CURRENT_MILESTONE
             ), f"fixture drift: milestone {index + 1}'s dot has ring {ring}, border {border_px}"
+            # (the ellipse, its expected box, outline colour, width and alpha, its fill)
+            expected = []
             if ring is None:
-                expected_box = _grown(dot, -border_px / 2)
                 outline, outline_alpha = _hex(style["borderTopColor"])
-                outline_pt = border_px * PT_PER_PX
+                expected.append(
+                    (
+                        _grown(dot, -border_px / 2),
+                        outline,
+                        border_px * PT_PER_PX,
+                        outline_alpha,
+                        fill,
+                    )
+                )
             else:
-                expected_box = _grown(dot, ring[1] / 2)
-                outline, outline_alpha = _hex(ring[0])
-                outline_pt = ring[1] * PT_PER_PX
+                halo, halo_alpha = _hex(ring[0])
+                expected.append((dot, None, None, 1.0, fill))
+                expected.append(
+                    (_grown(dot, ring[1] / 2), halo, ring[1] * PT_PER_PX, halo_alpha, None)
+                )
 
-            found = _centred_on(shapes, dot, kind="shape", fill=fill)
-            if len(found) != 1:
+            positions = []
+            for expected_box, outline, outline_pt, outline_alpha, shape_fill in expected:
+                what = f"milestone {index + 1}'s {'dot' if shape_fill else 'halo'}"
+                found = _centred_on(shapes, dot, kind="shape", fill=shape_fill)
+                if shape_fill is None:
+                    found = [position for position in found if shapes[position].line == outline]
+                if len(found) != 1:
+                    wrong.append(f"{what}: {len(found)} shapes centred on {_rect(dot)}")
+                    continue
+                positions.append(found[0])
+                shape = shapes[found[0]]
+                emitted_alpha = _outline_alpha(elements[found[0]])
+                off = _off(shape, expected_box)
+                if shape.geometry != "ellipse":
+                    wrong.append(f"{what}: a {shape.geometry}, not an ellipse")
+                if any(abs(delta) > RECT_TOLERANCE_PX for delta in off.values()):
+                    wrong.append(f"{what}: box off {expected_box} by {off}")
+                if shape.line != outline or (
+                    outline_pt is not None
+                    and (
+                        shape.line_w_pt is None
+                        or abs(shape.line_w_pt - outline_pt) > LINE_WIDTH_TOLERANCE_PT
+                    )
+                ):
+                    wrong.append(
+                        f"{what}: outline {shape.line} {shape.line_w_pt} pt, "
+                        f"expected {outline} {outline_pt} pt"
+                    )
+                expected_alpha = None if outline is None or outline_alpha >= 1 else outline_alpha
+                if (emitted_alpha is None) != (expected_alpha is None) or (
+                    expected_alpha is not None
+                    and abs(emitted_alpha - expected_alpha) > ALPHA_TOLERANCE
+                ):
+                    wrong.append(
+                        f"{what}: outline alpha {emitted_alpha}, expected {expected_alpha}"
+                    )
+                if shape.shadow is not None:
+                    wrong.append(f"{what}: carries a shadow {shape.shadow}")
+            if len(positions) == 2 and positions[1] > positions[0]:
                 wrong.append(
-                    f"milestone {index + 1}: {len(found)} {fill} shapes centred on {_rect(dot)}"
-                )
-                continue
-            shape = shapes[found[0]]
-            emitted_alpha = _outline_alpha(elements[found[0]])
-            off = _off(shape, expected_box)
-            if shape.geometry != "ellipse":
-                wrong.append(f"milestone {index + 1}: a {shape.geometry}, not an ellipse")
-            if any(abs(delta) > RECT_TOLERANCE_PX for delta in off.values()):
-                wrong.append(f"milestone {index + 1}: box off {expected_box} by {off}")
-            if (
-                shape.line != outline
-                or shape.line_w_pt is None
-                or (abs(shape.line_w_pt - outline_pt) > LINE_WIDTH_TOLERANCE_PT)
-            ):
-                wrong.append(
-                    f"milestone {index + 1}: outline {shape.line} {shape.line_w_pt} pt, "
-                    f"expected {outline} {outline_pt} pt"
-                )
-            expected_alpha = None if outline_alpha >= 1 else outline_alpha
-            if (emitted_alpha is None) != (expected_alpha is None) or (
-                expected_alpha is not None and abs(emitted_alpha - expected_alpha) > ALPHA_TOLERANCE
-            ):
-                wrong.append(
-                    f"milestone {index + 1}: outline alpha {emitted_alpha}, "
-                    f"expected {expected_alpha}"
-                )
-            if index == CURRENT_MILESTONE and shape.shadow is not None:
-                wrong.append(
-                    f"milestone {index + 1}: its halo is a shadow {shape.shadow}, not an outline"
+                    f"milestone {index + 1}: the halo (spTree {positions[1]}) paints over its dot "
+                    f"({positions[0]})"
                 )
         assert not wrong, "the milestone dots differ from the browser:\n" + "\n".join(
             [*wrong, _describe(shapes)]
@@ -1881,15 +1914,14 @@ class TestOutlineShadows:
     def test_spread_only_shadow_is_an_outline_outside_the_box(
         self, borders: Exported, name: str
     ) -> None:
-        """``box-shadow: 0 0 0 Npx C`` is the shape's outline: N px of C, outside the box.
+        """An opaque ``box-shadow: 0 0 0 Npx C`` is the shape's outline: N px of C, outside the box.
 
         ``#ringed`` is ringed by ``0 0 0 2px #1B3139``: an outline of 1.5 pt.
-        ``#ringed-round`` is a 12 px-radius card with a translucent halo,
-        ``0 0 0 6px rgba(255, 54, 33, 0.18)``: 4.5 pt of FF3621 at alpha 0.18.
-        Each shape keeps its fill, its box is the border box grown by N/2 on
+        The shape keeps its fill, its box is the border box grown by N/2 on
         every side (so the stroke's inner edge is the box's edge), a rounded
         box's corner grows with it (radius + N/2 over the grown short side),
-        and the ring is no shadow.
+        and the ring is no shadow. The fill reaching under the ring is hidden
+        by it, because the ring is opaque.
         """
         ring = RINGS[name]
         rect = borders.geometry[name]
@@ -1938,6 +1970,84 @@ class TestOutlineShadows:
             )
         else:
             assert shape.geometry == "rect", f"#{name}: a square box's ring is a {shape.geometry}"
+
+    @pytest.mark.parametrize("name", tuple(TRANSLUCENT_RINGS))
+    def test_a_translucent_ring_is_its_own_shape_around_the_box_fill(
+        self, borders: Exported, name: str
+    ) -> None:
+        """A translucent spread ring is an unfilled shape of its own; the fill stays at the box.
+
+        ``#ringed-round`` is a 12 px-radius card ringed ``0 0 0 6px rgba(255,
+        54, 33, 0.18)``, and ``#ringed-halo`` a 14 px FF3621 dot ringed ``0 0 0
+        4px`` of the same colour at alpha 0.18. The browser paints the ring
+        outside the border box only, over the slide, so a fill reaching under
+        it would show through it: the 14 px dot would read as an 18 px one.
+
+        * The fill is one shape at the border box, within 0.1 px, with no
+          outline and no shadow: a roundRect of the box's radius over its short
+          side, or the dot's ellipse.
+        * The ring is one unfilled shape centred on the box: its box the
+          border box grown by half the spread, its outline the ring's colour
+          at its alpha and the spread's width, solid, no shadow, its corner the
+          ring's centre line (radius + spread / 2 over the grown short side).
+        * It paints under the fill (CSS paints a box's shadows under its
+          background).
+        """
+        ring = TRANSLUCENT_RINGS[name]
+        rect = borders.geometry[name]
+        shapes = borders.shapes
+        elements = borders.elements
+
+        fills = _centred_on(shapes, rect, kind="shape", fill=ring.fill)
+        rings = [
+            position
+            for position in _centred_on(shapes, rect, kind="shape", fill=None)
+            if shapes[position].line == ring.colour
+        ]
+        assert len(fills) == 1 and len(rings) == 1, (
+            f"#{name}: expected its {ring.fill} fill once and its {ring.colour} ring once, got "
+            f"fills {fills} and rings {rings}:\n{_describe(shapes)}"
+        )
+        fill, outline = shapes[fills[0]], shapes[rings[0]]
+
+        assert fill.line is None and fill.shadow is None, (
+            f"#{name}: the fill carries outline {fill.line} {fill.line_w_pt} pt and shadow "
+            f"{fill.shadow}; the ring is a shape of its own"
+        )
+        _assert_box(fill, rect, OUTLINE_TOLERANCE_PX, f"#{name}'s fill, at its border box")
+        grown = _grown(rect, ring.spread_px / 2)
+        _assert_box(outline, grown, OUTLINE_TOLERANCE_PX, f"#{name}'s ring, grown by half of it")
+        if ring.geometry == "ellipse":
+            assert fill.geometry == "ellipse" and outline.geometry == "ellipse", (
+                f"#{name}: the dot is a {fill.geometry} and its ring a {outline.geometry}"
+            )
+        else:
+            for shape, radius, box, what in (
+                (fill, ring.radius_px, rect, "fill"),
+                (outline, ring.radius_px + ring.spread_px / 2, grown, "ring"),
+            ):
+                expected_adj = round(radius / min(box["w"], box["h"]) * 100000)
+                assert (
+                    shape.geometry == "roundRect"
+                    and shape.adj is not None
+                    and abs(shape.adj - expected_adj) <= ADJ_TOLERANCE
+                ), (
+                    f"#{name}: its {what} is a {shape.geometry} with adj {shape.adj}, "
+                    f"expected roundRect adj {expected_adj}"
+                )
+        assert outline.line_w_pt is not None and (
+            abs(outline.line_w_pt - ring.spread_px * PT_PER_PX) <= LINE_WIDTH_TOLERANCE_PT
+        ), f"#{name}: a {ring.spread_px} px ring is a {outline.line_w_pt} pt outline"
+        assert (outline.line_dash or "solid") == "solid" and outline.shadow is None, (
+            f"#{name}: the ring is dashed {outline.line_dash} with shadow {outline.shadow}"
+        )
+        alpha = _outline_alpha(elements[rings[0]])
+        assert alpha is not None and abs(alpha - ring.alpha) <= ALPHA_TOLERANCE, (
+            f"#{name}: the ring's alpha is {alpha}, expected {ring.alpha}"
+        )
+        assert rings[0] < fills[0], (
+            f"#{name}: the ring (spTree {rings[0]}) paints over the fill ({fills[0]})"
+        )
 
     def test_a_ring_around_a_bordered_box_is_a_second_shape(self, borders: Exported) -> None:
         """A box with a uniform border and a spread-only ring is two shapes, one outline each.
