@@ -210,9 +210,11 @@ ${helpers.map((helper) => helper.toString()).join('\n')}
           bodyDimensions: withDomAccess(pageBodyDimensions),
           renderedText: withDomAccess(pageRenderedText, [pageFinishAnimations]),
           preprocess: preprocess.PREPROCESS_SOURCE,
-          // The snapshot page function applied to what pseudo.mjs read: JSON is
-          // a JavaScript expression, so the data is the call's argument.
-          snapshotOf: (pseudoData) => `${snapshot.SNAPSHOT_SOURCE}(${JSON.stringify(pseudoData)})`,
+          // The snapshot page function applied to what pseudo.mjs read and to
+          // the renderer the deck is written for: JSON is a JavaScript
+          // expression, so each is an argument of the call.
+          snapshotOf: (pseudoData, renderer) =>
+            `${snapshot.SNAPSHOT_SOURCE}(${JSON.stringify(pseudoData)}, ${JSON.stringify(renderer)})`,
           readPseudoElements: pseudo.readPseudoElements,
         };
       });
@@ -539,7 +541,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
       // Read from the settled page the snapshot reads, just before it.
       pseudoData = await sources.readPseudoElements(page);
       // Checked before the captures and everything after use any of it.
-      ({ model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData))));
+      ({ model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData, { target }))));
       const drops = dropLine(dropped);
       if (drops) console.error(drops);
       // Capture id -> data: PNG for the targets the model names in model.captures,

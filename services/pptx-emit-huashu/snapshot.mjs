@@ -105,9 +105,10 @@ import { TEXT_SOURCE } from './snapshot_text.mjs';
 // two limits, splitTopLevelCommas, parseLinearGradient, createBorders,
 // createTextLayout, createTableLayout and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
-// from here arrives in `config`, and what pseudo.mjs read of the page's
-// pseudo-elements in `pseudoData` (PseudoData).
-async function snapshotPage(config, pseudoData) {
+// from here arrives in `config`, what pseudo.mjs read of the page's
+// pseudo-elements in `pseudoData` (PseudoData), and the renderer the deck is
+// written for in `renderer`, {target: 'pptx' | 'gslides'} ('pptx' when absent).
+async function snapshotPage(config, pseudoData, renderer) {
   const SLIDE_WIDTH = 1280;
   const SLIDE_HEIGHT = 720;
   // Replaced elements paint content the walker cannot read as boxes, so they are
@@ -118,6 +119,14 @@ async function snapshotPage(config, pseudoData) {
   const RASTER_DATA_URI = /^data:image\/(png|jpe?g|gif);base64,/i;
   // Radii within this of half a side count as reaching it (layout rounding).
   const RADIUS_EPSILON_PX = 0.01;
+  // PowerPoint's PDF anti-aliases two cell fills that meet between pixels
+  // into a light seam, and PowerPoint shows a CSS px as a whole pixel at 100 %
+  // zoom: the deck for it lays a native table's grid on whole px, as Chrome
+  // paints it (snapshot_table.mjs snappedLines). Google Slides draws no seam,
+  // and none of its views shows a CSS px as a whole pixel (its thumbnails are
+  // 1.25 px to one), so its deck keeps the browser's own grid
+  // (scripts/export_fidelity/CALIBRATION.md D7).
+  const WHOLE_PIXEL_TABLES = !(renderer && renderer.target === 'gslides');
 
   const dom = domAccess();
   const html = queryOne('html');
@@ -2331,6 +2340,7 @@ async function snapshotPage(config, pseudoData) {
     layoutCell: textLayout.layoutCell,
     collectText,
     placeGroups,
+    wholePixelGrid: WHOLE_PIXEL_TABLES,
   });
 
   // The TableLayout of a <table> drawn as a native table, its parts now owned
@@ -2354,7 +2364,7 @@ async function snapshotPage(config, pseudoData) {
   // corner of the clip cuts (its rounds, overflowClipOf): an a:tc cannot be
   // clipped, so such a cell is unfilled in the table and its fill is a shape
   // under the table, the cell's grid rect cut to each rounded padding box.
-  // The grid lies on whole px (snapshot_table.mjs snappedLines), and so does
+  // In the deck whose grid lies on whole px (WHOLE_PIXEL_TABLES), so does
   // each rounded box here, as Chrome paints a clip: a grid line snapped past a
   // box's edge by a part of a px still lies on it, and a corner cell's shape
   // meets its neighbours' fills on whole px.
@@ -2362,7 +2372,9 @@ async function snapshotPage(config, pseudoData) {
     const item = layout.item;
     const rounds = [];
     const given = clip.rounds || [];
-    for (let index = 0; index < given.length && index < WALK_STEP_LIMIT; index++) rounds.push(snappedRound(given[index]));
+    for (let index = 0; index < given.length && index < WALK_STEP_LIMIT; index++) {
+      rounds.push(WHOLE_PIXEL_TABLES ? snappedRound(given[index]) : given[index]);
+    }
     if (rounds.length) {
       const columns = [item.x];
       const rows = [item.y];
@@ -2396,9 +2408,10 @@ async function snapshotPage(config, pseudoData) {
     return { left: Math.round(round.left), top: Math.round(round.top), right: Math.round(round.right), bottom: Math.round(round.bottom), radii: round.radii };
   }
 
-  // A native table's own box on whole px, as its grid is: each edge where
-  // Chrome paints it, the whole px nearest it, so the background under its
-  // cells meets their grid and shows no sliver past it.
+  // A native table's own box on whole px, as its grid is in the deck that lays
+  // it so (WHOLE_PIXEL_TABLES): each edge where Chrome paints it, the whole px
+  // nearest it, so the background under its cells meets their grid and shows
+  // no sliver past it.
   function snappedBox(box) {
     const left = Math.round(box.x);
     const top = Math.round(box.y);
@@ -2520,8 +2533,8 @@ async function snapshotPage(config, pseudoData) {
           Boolean(table && table.collapse));
       } else if (box) {
         if (element === slideRoot && !groundCapture && paintsImageGround(s)) pushGroundCapture(element, s);
-        emitBox(s, table ? snappedBox(box) : box, opacity, place.box, element === slideRoot, clips.box, null,
-          Boolean(table && table.collapse));
+        const ownBox = table && WHOLE_PIXEL_TABLES ? snappedBox(box) : box;
+        emitBox(s, ownBox, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
       }
       // Over the table's own box, under everything its cells hold.
       if (table) pushTable(table, place.box, clips.box);
@@ -2642,10 +2655,11 @@ async function snapshotPage(config, pseudoData) {
   };
 }
 
-// A page function of one argument, the PseudoData pseudo.mjs read: render_slide.cjs
-// evaluates it applied to that data.
+// A page function of two arguments, the PseudoData pseudo.mjs read and the
+// renderer the deck is written for ({target}): render_slide.cjs evaluates it
+// applied to them.
 export const SNAPSHOT_SOURCE = `
-(async function (pseudoData) {
+(async function (pseudoData, renderer) {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
@@ -2659,6 +2673,6 @@ ${blendOver.toString()}
     hiddenAttribute: HIDDEN_ATTRIBUTE,
     pseudoHostAttribute: PSEUDO_HOST_ATTRIBUTE,
     coverageFont: { family: COVERAGE_FONT_FAMILY, advanceEm: COVERAGE_ADVANCE_EM, bytes: COVERAGE_FONT_BYTES },
-  })}, pseudoData);
+  })}, pseudoData, renderer);
 })
 `;

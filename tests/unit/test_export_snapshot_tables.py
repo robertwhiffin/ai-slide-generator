@@ -81,6 +81,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator
 from io import BytesIO
 from types import SimpleNamespace
@@ -317,6 +318,8 @@ TABLES_CSS = (
 .snap th { background: #FF5F46; color: #FFFFFF; padding: 9.3px 13.4px; text-align: left; }
 .snap td { padding: 7.7px 13.4px; border-bottom: 1px solid #DCE0E2; }
 .snap tr.total td { background: #1B3139; color: #FFFFFF; border-bottom: 0; }
+#snap-tie td { border-bottom: 0; }
+#snap-tie tr.ruled-half td:last-child { border-bottom: 1px solid #DCE0E2; }
 .ground-table { border-collapse: collapse; width: 100%; font-size: 16px; background: #F3F3F3; }
 .ground-table td { padding: 13px 18px; }
 .dotted { position: absolute; border-collapse: collapse; font-size: 18px; }
@@ -783,8 +786,20 @@ SNAP_BODY = """<div class="slide">
       <tr class="total"><td>Net income</td><td>97.8</td><td>88.1</td></tr>
     </tbody>
   </table>
+  <table id="snap-tie" class="snap"
+         style="left: 860.6px; top: 120.4px; width: 320.3px; background: none;">
+    <tbody>
+      <tr class="ruled-half"><td>Margin</td><td>34.9%</td></tr>
+      <tr><td>Growth</td><td>10.7%</td></tr>
+    </tbody>
+  </table>
 </div>"""
 SNAP_TABLE = "#snap"
+# Beside it, a two-column table with no ground of its own, whose one rule runs
+# under its second column only: along that line its first slot is not ruled and
+# its second is, 1 px.
+SNAP_TIE_TABLE = "#snap-tie"
+SNAP_TIE_LINE = 1
 # A table whose rules are dotted (row 0's bottom, 2 px; the column rule, 1 px)
 # and dashed (row 1's bottom, 2 px); below it a second, whose dotted rule runs
 # under a cell spanning both columns; and, ahead of both in paint order, a
@@ -812,8 +827,9 @@ DOTTED_BODY = """<div class="slide">
 </div>"""
 # The snapped table's own background, under its unfilled body cells.
 SNAP_GROUND = "F7F5F2"
-# A grid line, a margin and a content edge agree within this (EMU rounding is 1/9525 px).
-WHOLE_PX_TOLERANCE = 1e-6
+# A grid line agrees with where it belongs within this: EMU rounding, 1/9525 px a
+# value, which a half px (4762.5 EMU) meets only to the EMU, row after row.
+WHOLE_PX_TOLERANCE = 0.001
 CONTENT_TOLERANCE_PX = 0.05
 
 INLINE_BODIES = {
@@ -3345,7 +3361,7 @@ class TestRoundedWrapper:
                     for shape in shapes[:frame_position]
                     if shape.geometry == "custGeom"
                     and shape.fill == fill
-                    and _same_rect(_box(shape), rect, WHOLE_PX_TOLERANCE + 1e-3)
+                    and _same_rect(_box(shape), rect, WHOLE_PX_TOLERANCE)
                 ]
                 if len(under) != 1:
                     wrong.append(f"slot ({row}, {col}): {len(under)} {fill} shapes at {rect}")
@@ -3435,22 +3451,48 @@ def _nearest_px(value: float) -> float:
     return float(math.floor(value + 0.5))
 
 
+def _line_widths(frame: Shape, horizontal: bool) -> list[float]:
+    """The width of the border written along each grid line, in CSS px: the width most of its
+    slots carry (none counting as 0), the wider on a tie. Each slot's border is read from the
+    cell after the line (below it, or right of it), or before it on the table's last line."""
+    assert frame.table is not None
+    table = frame.table
+    rows, columns = len(table.row_heights), len(table.col_widths)
+    lines, slots = (rows, columns) if horizontal else (columns, rows)
+    widths = []
+    for line in range(lines + 1):
+        tally: Counter[float] = Counter()
+        for slot in range(slots):
+            after = line < lines
+            index = line if after else line - 1
+            row, col = (index, slot) if horizontal else (slot, index)
+            side = ("top" if after else "bottom") if horizontal else ("left" if after else "right")
+            owner_row, owner_col = table_slot_owner(table, row, col)
+            border = table.rows[owner_row][owner_col].borders[side]
+            tally[0.0 if border is None else round((border.width_pt or 0.0) / PT_PER_PX, 4)] += 1
+        widths.append(max(tally.items(), key=lambda item: (item[1], item[0]))[0])
+    return widths
+
+
 def _off_the_snapped_grid(frame: Shape, table: BrowserTable, what: str) -> list[str]:
-    """Every emitted grid line that is not the whole px nearest the browser's line."""
+    """Every emitted grid line whose border does not start on the whole px nearest the
+    browser's: a line with no border on that px, one with a border of width w w/2 past it."""
     columns, rows = _browser_grid_lines(table)
     problems = []
-    for axis, emitted, measured in (
-        ("column", table_column_edges(frame), columns),
-        ("row", table_row_edges(frame), rows),
+    for axis, emitted, measured, widths in (
+        ("column", table_column_edges(frame), columns, _line_widths(frame, False)),
+        ("row", table_row_edges(frame), rows, _line_widths(frame, True)),
     ):
         assert len(emitted) == len(measured), (
             f"{what}: {len(emitted)} {axis} lines emitted, the browser has {len(measured)}"
         )
-        for index, (line, browser) in enumerate(zip(emitted, measured)):
-            if abs(line - _nearest_px(browser)) > WHOLE_PX_TOLERANCE:
+        for index, (line, browser, width) in enumerate(zip(emitted, measured, widths)):
+            expected = _nearest_px(browser - width / 2) + width / 2
+            if abs(line - expected) > WHOLE_PX_TOLERANCE:
                 problems.append(
-                    f"{what}: {axis} line {index} at {line:.4f} px; the browser's is at "
-                    f"{browser:.4f}, nearest the whole px {_nearest_px(browser):g}"
+                    f"{what}: {axis} line {index} (a {width:g} px border) at {line:.4f} px; the "
+                    f"browser's is at {browser:.4f}, so its border starts on the whole px "
+                    f"{_nearest_px(browser - width / 2):g} and the line lies at {expected:g}"
                 )
     return problems
 
@@ -3458,19 +3500,23 @@ def _off_the_snapped_grid(frame: Shape, table: BrowserTable, what: str) -> list[
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestWholePixelGrid:
-    def test_grid_lines_lie_on_the_whole_px_nearest_the_browsers(
+    def test_grid_lines_lie_where_chrome_paints_them(
         self, inline_export: Callable[[str], bytes]
     ) -> None:
-        """A table laid out between pixels: every grid line on the whole px nearest the browser's.
+        """A table laid out between pixels: each grid line where Chrome paints it, on whole px.
 
         Cell fills that meet between two pixels anti-alias into a light seam in
         PowerPoint's PDF, under Quartz and MuPDF alike, where Chrome snaps each box
-        edge to a whole pixel and paints none. So every grid line, the frame's
-        first column and row lines included, is the whole px nearest the
-        browser's line, each snapped where it lies rather than each width
-        rounded: the frame stands at the snapped first lines, every ``gridCol``
-        and ``a:tr`` spans two snapped lines, and the table's width and height
-        are its snapped outer lines apart, however many columns and rows it has.
+        edge to a whole pixel and paints none. So in the deck for PowerPoint
+        every grid line, the frame's first column and row lines included, lies
+        where Chrome puts it: a line with no border on the whole px nearest the
+        browser's line, and one whose border is w px wide w/2 past the whole px
+        nearest that border's edge (a 1 px rule's centre half a px past it), so
+        the rule covers whole pixels. Each line is snapped where it lies rather
+        than each width rounded: the frame stands at the snapped first lines,
+        every ``gridCol`` and ``a:tr`` spans two snapped lines, and the table's
+        width and height are its snapped outer lines apart, however many columns
+        and rows it has.
         """
         document = _inline_document("snap")
         (table,) = browser_tables(document, SNAP_TABLE)
@@ -3482,6 +3528,9 @@ class TestWholePixelGrid:
         shapes = slide_shapes(inline_export("snap"))
         _, frame = _frame_for(shapes, _grid_rect(table), "the snapped table")
         problems = _off_the_snapped_grid(frame, table, "the snapped table")
+        assert 1.0 in _line_widths(frame, True), (
+            "fixture drift: no row line of the snapped table carries its 1 px rule"
+        )
         extent = table_extent(frame)
         for size, emitted, lines in (
             ("width", extent["w"], columns),
@@ -3494,6 +3543,29 @@ class TestWholePixelGrid:
                     f"{snapped:g} px apart"
                 )
         assert not problems, "the grid does not lie on whole px:\n  " + "\n  ".join(problems)
+
+    def test_a_line_ruled_on_half_its_slots_lies_as_its_rule_does(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A line one slot of which is ruled 1 px and one not: it lies as the rule does.
+
+        A line takes the width most of its slots draw, the wider on a tie, so
+        this one's 1 px rule covers a whole pixel: the line lies half a px past
+        a whole one.
+        """
+        document = _inline_document("snap")
+        (table,) = browser_tables(document, SNAP_TIE_TABLE)
+        shapes = slide_shapes(inline_export("snap"))
+        _, frame = _frame_for(shapes, _grid_rect(table), "the tie table")
+        assert _line_widths(frame, True)[SNAP_TIE_LINE] == 1.0, (
+            f"the tie line carries {_line_widths(frame, True)}, not its 1 px rule"
+        )
+        line = table_row_edges(frame)[SNAP_TIE_LINE]
+        assert abs(line - math.floor(line) - 0.5) <= WHOLE_PX_TOLERANCE, (
+            f"the tie line lies at {line:.4f} px, not half a px past a whole one"
+        )
+        problems = _off_the_snapped_grid(frame, table, "the tie table")
+        assert not problems, "the tie table's grid:\n  " + "\n  ".join(problems)
 
     def test_cell_text_starts_where_the_browser_starts_it(
         self, inline_export: Callable[[str], bytes]
@@ -3567,15 +3639,43 @@ class TestWholePixelGrid:
             f"the table's ground {_rect(ground)} is off its snapped grid {extent} by {off}"
         )
 
+    def test_the_deck_for_google_slides_keeps_the_browsers_grid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The deck for Google Slides lays the snapped table on the browser's own lines.
+
+        Google Slides draws no seam between cell fills, and none of its views
+        shows a CSS px as a whole pixel, so its deck keeps every grid line where
+        the browser put it, within 0.01 px.
+        """
+        document = _inline_document("snap")
+        (table,) = browser_tables(document, SNAP_TABLE)
+        columns, rows = _browser_grid_lines(table)
+        pptx, failures = export_slides(
+            [SNAP_BODY], css=TABLES_CSS, monkeypatch=monkeypatch, target="gslides"
+        )
+        assert failures == [], failures
+        _, frame = _frame_for(slide_shapes(pptx), _grid_rect(table), "the Google table")
+        off = [
+            f"{axis} line {index} at {line:.4f}; the browser's at {browser:.4f}"
+            for axis, emitted, measured in (
+                ("column", table_column_edges(frame), columns),
+                ("row", table_row_edges(frame), rows),
+            )
+            for index, (line, browser) in enumerate(zip(emitted, measured))
+            if abs(line - browser) > 0.01
+        ]
+        assert not off, "the Google deck's grid is not the browser's:\n  " + "\n  ".join(off)
+
     @pytest.mark.parametrize("prefix", ["05", "15"])
     def test_corpus_tables_lie_on_whole_px(
         self, corpus_export: Callable[[str], list[Shape]], prefix: str
     ) -> None:
-        """Fixtures 05 (two balance sheets) and 15 (the zebra table): each grid on whole px.
+        """Fixtures 05 (two balance sheets) and 15 (the zebra table): grids where Chrome paints.
 
         Their header and total rows are the filled cells that showed seams in
-        PowerPoint; every line of each table is the whole px nearest the
-        browser's.
+        PowerPoint; every line of each table lies as the snapped table's do, its
+        1 px rules on whole pixels.
         """
         document = corpus_document(prefix)
         tables = browser_tables(document, BALANCE_TABLES)

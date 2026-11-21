@@ -4,7 +4,7 @@
 // snapshot.mjs composes TABLE_SOURCE into its page IIFE and calls collectTable
 // when its walk visits a <table>. For a table it returns, the walk draws the
 // table's own background, radius and shadow as a shape under the table, its
-// box on whole px as the grid is and cut to any round corners its clip has
+// box on whole px where the grid is and cut to any round corners its clip has
 // (its border too, in the separated model, where it frames the cells from outside),
 // pushes the table item over it, draws no box of the table's rows, row groups,
 // columns and cells (the item holds their fills and borders), gives each
@@ -21,10 +21,10 @@
 // then every other group and row in document order, then the first footer
 // group. Columns run left to right on the slide, so a right-to-left table's
 // first column is its rightmost. Each grid line is where the browser put the
-// cell edges on it, on the whole px nearest it, as Chrome paints a box edge
-// (snappedLines): under border-collapse: collapse adjacent cells' boxes share
-// their edges (each the centre line of the collapsed border between them);
-// under separate, the line is the middle of the gap between them.
+// cell edges on it, in the deck for PowerPoint where Chrome paints a box edge,
+// on a whole px (snappedLines): under border-collapse: collapse adjacent
+// cells' boxes share their edges (each the centre line of the collapsed border
+// between them); under separate, the line is the middle of the gap between them.
 //
 // The fill of a cell is what its table's renderer paints in it: its column
 // group's, its column's, its row group's, its row's and its own backgrounds,
@@ -93,7 +93,8 @@
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
-//  *              every grid line is on a whole px, so are x, y and each size;
+//  *              in the deck for PowerPoint each line's border starts on a
+//  *              whole px, so a line with none lies on one (snappedLines);
 //  *   cells      one per cell, row by row, left to right, spans included, plus an
 //  *              empty one for each grid slot no cell covers (a short row).
 //  * TableCell = {row, col, rowspan, colspan, fill:{color,alpha}|null,
@@ -128,7 +129,9 @@
 //   layoutCell       (element, style, walk) -> a cell's CellText (snapshot_text.mjs layoutCell);
 //   collectText      (element, style, paint, seq, walk) -> lays out an element's text as
 //                    overlay text items, as anywhere on the slide (snapshot.mjs);
-//   placeGroups      (groups, paint, seq) -> places inline groups as overlay items (snapshot.mjs).
+//   placeGroups      (groups, paint, seq) -> places inline groups as overlay items (snapshot.mjs);
+//   wholePixelGrid   whether the deck lays a native table's grid on whole px
+//                    (snapshot.mjs WHOLE_PIXEL_TABLES, snappedLines).
 function createTableLayout(env) {
   const TEXT_NODE = 3;
   const dom = domAccess();
@@ -945,28 +948,81 @@ function createTableLayout(env) {
     return { left, top, right: left + Number(rect.width), bottom: top + Number(rect.height) };
   }
 
-  // Grid lines where Chrome paints them: each on the whole px nearest the
-  // browser's line, a half rounding up. Chrome snaps every box edge to a whole
+  // Grid lines where Chrome paints them, in the deck that lays its grid on
+  // whole px (env.wholePixelGrid): Chrome snaps every box edge to a whole
   // pixel, so two cell fills meet on a pixel boundary; meeting between two
   // pixels, they anti-alias into a light seam in PowerPoint's PDF, under Quartz
-  // and MuPDF alike. Each line is snapped where it lies rather than each width
-  // rounded, so the widths add up to the snapped outer lines' distance however
-  // many there are, and a cell's margins, measured from its snapped lines,
-  // keep its text where the browser set it (layoutOf).
-  function snappedLines(lines) {
+  // and MuPDF alike. A border is centred on its line, and Chrome snaps the
+  // border's own edges: so each line is placed where its border's first edge
+  // lies on the whole px nearest the browser's (a line with no border on that
+  // px itself, a 1 px rule half a px past it), with `widths[k]` the width of
+  // line k's border (lineWidths). Each line is snapped where it lies rather
+  // than each width rounded, so the widths add up to the snapped outer lines'
+  // distance however many there are, and a cell's margins, measured from its
+  // snapped lines, keep its text where the browser set it (layoutOf).
+  function snappedLines(lines, widths) {
     const snapped = [];
-    for (let index = 0; index < lines.length; index++) snapped.push(Math.round(lines[index]));
+    for (let index = 0; index < lines.length; index++) {
+      const half = widths[index] / 2;
+      snapped.push(Math.round(lines[index] - half) + half);
+    }
     return snapped;
+  }
+
+  // The width of the border drawn along each grid line, between rows when
+  // `horizontal`, else between columns: the width most of its slots draw (a
+  // slot with no line counting as 0), the wider on a tie. A cell writes its
+  // side's line on every slot its span gives that side.
+  function lineWidths(model, horizontal) {
+    const count = horizontal ? model.rows.length : model.columns;
+    // Per line, {width, slots} for each width drawn on it, in a list (no Map
+    // is iterated here: slide script can replace its iteration).
+    const tallies = [];
+    for (let line = 0; line <= count; line++) tallies.push([]);
+    const tally = (line, side, slots) => {
+      const width = side && side.widthPx > 0 ? side.widthPx : 0;
+      const counts = tallies[line];
+      for (let index = 0; index < counts.length; index++) {
+        if (counts[index].width === width) {
+          counts[index].slots += slots;
+          return;
+        }
+      }
+      counts.push({ width, slots });
+    };
+    for (let index = 0; index < model.cells.length; index++) {
+      const cell = model.cells[index];
+      const start = horizontal ? cell.row : cell.visualCol;
+      const span = horizontal ? cell.rowspan : cell.colspan;
+      const slots = horizontal ? cell.colspan : cell.rowspan;
+      tally(start, horizontal ? cell.lines.top : cell.lines.left, slots);
+      tally(start + span, horizontal ? cell.lines.bottom : cell.lines.right, slots);
+    }
+    const widths = [];
+    for (let line = 0; line <= count; line++) {
+      let width = 0;
+      let most = -1;
+      const counts = tallies[line];
+      for (let index = 0; index < counts.length; index++) {
+        const candidate = counts[index];
+        if (candidate.slots > most || (candidate.slots === most && candidate.width > width)) {
+          width = candidate.width;
+          most = candidate.slots;
+        }
+      }
+      widths.push(width);
+    }
+    return widths;
   }
 
   // The TableLayout of a table whose grid and borders are read: each cell's
   // margins and the item it is drawn as. `parts` are the elements whose
   // boxes it draws, `s` the table's computed style. The grid is the browser's,
-  // on whole px (snappedLines).
+  // on whole px in the deck that lays it so (snappedLines).
   function layoutOf(model, grid, parts, s, frame) {
     const collapse = model.collapse;
-    const columnLines = snappedLines(grid.columnLines);
-    const rowLines = snappedLines(grid.rowLines);
+    const columnLines = env.wholePixelGrid ? snappedLines(grid.columnLines, lineWidths(model, false)) : grid.columnLines;
+    const rowLines = env.wholePixelGrid ? snappedLines(grid.rowLines, lineWidths(model, true)) : grid.rowLines;
     const colWidths = [];
     const rowHeights = [];
     for (let index = 0; index < model.columns; index++) colWidths.push(Math.max(0, columnLines[index + 1] - columnLines[index]));
