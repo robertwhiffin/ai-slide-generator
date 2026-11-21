@@ -776,6 +776,12 @@ GROUND_BODY = (
     '<table class="ground-table"><tbody><tr><td>UC 1</td><td>Batch load</td><td>$184</td></tr>'
     "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
 )
+# The same wrapper 0.4 px below a whole px: its padding box, the table's own
+# ground and the grid's first line start there, and the grid snaps up to 160.
+GROUND_OFFSET_WRAPPER = "#ground-offset-wrapper"
+GROUND_OFFSET_BODY = GROUND_BODY.replace("top: 160px;", "top: 160.4px;").replace(
+    'id="ground-wrapper"', 'id="ground-offset-wrapper"'
+)
 
 # A filled header and total row on a table the browser lays out at fractional
 # px on both axes: its offset, its width, its font size and its padding all
@@ -858,6 +864,7 @@ INLINE_BODIES = {
     "captured": CAPTURED_BODY,
     "snap": SNAP_BODY,
     "ground": GROUND_BODY,
+    "ground-offset": GROUND_OFFSET_BODY,
 }
 
 # A two-cell table added to the hostile-realm fixtures, after the prose.
@@ -3159,6 +3166,31 @@ def _inside_rounded(point: tuple[float, float], box: dict, radius: float, tolera
     return ((x - centre_x) ** 2 + (y - centre_y) ** 2) ** 0.5 <= radius + tolerance
 
 
+def _against_rounded_box(
+    points: list[tuple[float, float]], box: dict, radius: float
+) -> tuple[list[tuple[float, float]], dict[str, int]]:
+    """The points outside ``box`` rounded by ``radius``, and how many lie on each corner's arc."""
+    outside = [
+        point for point in points if not _inside_rounded(point, box, radius, ARC_TOLERANCE_PX)
+    ]
+    arcs = {}
+    for corner in ("top-left", "top-right", "bottom-left", "bottom-right"):
+        corner_x, corner_y = _corner_of(box, corner)
+        centre_x = corner_x + (radius if "left" in corner else -radius)
+        centre_y = corner_y + (radius if "top" in corner else -radius)
+        arcs[corner] = len(
+            [
+                point
+                for point in points
+                if abs(math.hypot(point[0] - centre_x, point[1] - centre_y) - radius)
+                <= ARC_TOLERANCE_PX
+                and abs(point[0] - centre_x) > ARC_TOLERANCE_PX
+                and abs(point[1] - centre_y) > ARC_TOLERANCE_PX
+            ]
+        )
+    return outside, arcs
+
+
 def _corner_of(rect: dict, corner: str) -> tuple[float, float]:
     vertical, horizontal = corner.split("-")
     return (
@@ -3405,27 +3437,56 @@ class TestRoundedWrapper:
             f"the table's ground is at {_rect(ground)}, the table at {table.rect}"
         )
         points = _custom_geometry_points(elements[position], ground)
-        outside = [
-            point
-            for point in points
-            if not _inside_rounded(point, wrapper, GROUND_RADIUS_PX, ARC_TOLERANCE_PX)
-        ]
-        arcs = {}
-        for corner in ("top-left", "top-right", "bottom-left", "bottom-right"):
-            corner_x, corner_y = _corner_of(wrapper, corner)
-            centre_x = corner_x + (GROUND_RADIUS_PX if "left" in corner else -GROUND_RADIUS_PX)
-            centre_y = corner_y + (GROUND_RADIUS_PX if "top" in corner else -GROUND_RADIUS_PX)
-            arcs[corner] = [
-                point
-                for point in points
-                if abs(math.hypot(point[0] - centre_x, point[1] - centre_y) - GROUND_RADIUS_PX)
-                <= ARC_TOLERANCE_PX
-                and abs(point[0] - centre_x) > ARC_TOLERANCE_PX
-                and abs(point[1] - centre_y) > ARC_TOLERANCE_PX
-            ]
+        outside, arcs = _against_rounded_box(points, wrapper, GROUND_RADIUS_PX)
         assert not outside and all(arcs.values()), (
             f"the table's ground has vertices outside the wrapper's rounded box {outside[:4]}; "
-            f"on its arcs: { {corner: len(found) for corner, found in arcs.items()} }"
+            f"on its arcs: {arcs}"
+        )
+
+    def test_a_wrapper_between_pixels_cuts_the_tables_own_ground_on_the_snapped_grid(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The grounded table's wrapper 0.4 px below a whole px: its ground still meets the grid.
+
+        The grid's first line snaps up to the whole px above the wrapper's
+        padding box, and Chrome paints the wrapper's clip on whole px as well.
+        So in the deck for PowerPoint the table's own background is cut by the
+        clip as snapped: its path spans the frame's extent exactly, leaving no
+        sliver of the grid unpainted along its top, and its corners are the
+        snapped wrapper's arcs, the boxes that cut the corner cells too.
+        """
+        document = _inline_document("ground-offset")
+        (table,) = browser_tables(document, "table")
+        wrapper = browser_rect(document, GROUND_OFFSET_WRAPPER)
+        assert abs(wrapper["y"] - round(wrapper["y"])) > 0.3, (
+            f"fixture drift: the wrapper {wrapper} lies on a whole px"
+        )
+        shapes = slide_shapes(inline_export("ground-offset"))
+        elements = slide_shape_elements(inline_export("ground-offset"))
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the offset grounded table")
+        grounds = [
+            (position, shape) for position, shape in enumerate(shapes) if shape.fill == GROUND_FILL
+        ]
+        assert len(grounds) == 1 and grounds[0][0] < frame_position, (
+            f"expected the table's {GROUND_FILL} ground under its frame:\n{_describe(shapes)}"
+        )
+        position, ground = grounds[0]
+        extent = table_extent(frame)
+        off = {key: round(_box(ground)[key] - extent[key], 4) for key in ("x", "y", "w", "h")}
+        assert all(abs(delta) <= WHOLE_PX_TOLERANCE for delta in off.values()), (
+            f"the table's ground {_rect(ground)} is off its snapped grid {extent} by {off}"
+        )
+        snapped = {
+            "x": round(wrapper["x"]),
+            "y": round(wrapper["y"]),
+            "w": round(wrapper["x"] + wrapper["w"]) - round(wrapper["x"]),
+            "h": round(wrapper["y"] + wrapper["h"]) - round(wrapper["y"]),
+        }
+        points = _custom_geometry_points(elements[position], ground)
+        outside, arcs = _against_rounded_box(points, snapped, GROUND_RADIUS_PX)
+        assert not outside and all(arcs.values()), (
+            f"the table's ground has vertices outside the snapped wrapper {snapped} "
+            f"{outside[:4]}; on its arcs: {arcs}"
         )
 
 

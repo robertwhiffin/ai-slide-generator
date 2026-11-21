@@ -2365,16 +2365,12 @@ async function snapshotPage(config, pseudoData, renderer) {
   // clipped, so such a cell is unfilled in the table and its fill is a shape
   // under the table, the cell's grid rect cut to each rounded padding box.
   // In the deck whose grid lies on whole px (WHOLE_PIXEL_TABLES), so does
-  // each rounded box here, as Chrome paints a clip: a grid line snapped past a
-  // box's edge by a part of a px still lies on it, and a corner cell's shape
-  // meets its neighbours' fills on whole px.
+  // each rounded box here, as Chrome paints a clip (snappedClip): a grid line
+  // snapped past a box's edge by a part of a px still lies on it, and a corner
+  // cell's shape meets its neighbours' fills, and the table's own box, on whole px.
   function pushTable(layout, order, clip) {
     const item = layout.item;
-    const rounds = [];
-    const given = clip.rounds || [];
-    for (let index = 0; index < given.length && index < WALK_STEP_LIMIT; index++) {
-      rounds.push(WHOLE_PIXEL_TABLES ? snappedRound(given[index]) : given[index]);
-    }
+    const rounds = (WHOLE_PIXEL_TABLES ? snappedClip(clip) : clip).rounds || [];
     if (rounds.length) {
       const columns = [item.x];
       const rows = [item.y];
@@ -2406,6 +2402,21 @@ async function snapshotPage(config, pseudoData, renderer) {
   // A rounded padding box with its edges on the whole px nearest them, its radii kept.
   function snappedRound(round) {
     return { left: Math.round(round.left), top: Math.round(round.top), right: Math.round(round.right), bottom: Math.round(round.bottom), radii: round.radii };
+  }
+
+  // A clip as Chrome paints it around a native table in the deck that lays the
+  // table's grid on whole px (WHOLE_PIXEL_TABLES): each edge on the whole px
+  // nearest it (one at infinity stays there), and each rounded box it holds
+  // snapped so (snappedRound). The table's own box and its corner cells' fills
+  // are cut by it, so they meet the snapped grid, and each other.
+  function snappedClip(clip) {
+    const snapped = { left: Math.round(clip.left), top: Math.round(clip.top), right: Math.round(clip.right), bottom: Math.round(clip.bottom) };
+    if (!clip.rounds) return snapped;
+    snapped.rounds = [];
+    for (let index = 0; index < clip.rounds.length && index < WALK_STEP_LIMIT; index++) {
+      snapped.rounds.push(snappedRound(clip.rounds[index]));
+    }
+    return snapped;
   }
 
   // A native table's own box on whole px, as its grid is in the deck that lays
@@ -2533,8 +2544,11 @@ async function snapshotPage(config, pseudoData, renderer) {
           Boolean(table && table.collapse));
       } else if (box) {
         if (element === slideRoot && !groundCapture && paintsImageGround(s)) pushGroundCapture(element, s);
+        // A native table's own box, in the deck whose grid lies on whole px,
+        // lies on them too, and is cut by its clip as snapped with it.
         const ownBox = table && WHOLE_PIXEL_TABLES ? snappedBox(box) : box;
-        emitBox(s, ownBox, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
+        const ownClip = table && WHOLE_PIXEL_TABLES ? snappedClip(clips.box) : clips.box;
+        emitBox(s, ownBox, opacity, place.box, element === slideRoot, ownClip, null, Boolean(table && table.collapse));
       }
       // Over the table's own box, under everything its cells hold.
       if (table) pushTable(table, place.box, clips.box);
