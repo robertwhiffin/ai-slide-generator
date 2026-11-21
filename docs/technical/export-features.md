@@ -56,10 +56,10 @@ Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line wh
 
 ### The export summary line
 
-Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-21; no cgroup there, so `containerPeakMb` is `null`):
+Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-21; no cgroup there, so both container keys are `null`):
 
 ```text
-[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.703,"secondsPerSlide":1.335,"peakRssMb":838.8,"containerPeakMb":null,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
+[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.834,"secondsPerSlide":1.343,"peakRssMb":837.6,"containerPeakMb":null,"containerWorkingSetMb":null,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
 ```
 
 | Key | What it holds |
@@ -73,30 +73,32 @@ Every export logs one line once it ends, however it ends, so export times and me
 | `runSeconds` | The sidecar's wall time; `null` when no sidecar ran (`busy`) |
 | `secondsPerSlide` | `runSeconds / slides`; `null` with it |
 | `peakRssMb` | The most resident memory (RSS, in MiB) the sidecar's process tree held at once: node and every Chromium it launched. Playwright starts each browser in a process group of its own, so the tree is found through the parent chain, not the group. It is read every 0.25 s while the sidecar runs, in one pass of `/proc` (Linux) or `ps` (macOS), and the largest reading is kept. `null` when no sidecar ran or a reading failed |
-| `containerPeakMb` | The most memory the whole container held during the export, in MiB, as its cgroup counts it: cgroup v2's `/sys/fs/cgroup/memory.current`, else cgroup v1's `/sys/fs/cgroup/memory/memory.usage_in_bytes`. It is read in the same passes as `peakRssMb`, and the largest reading during the export is kept, not the cgroup's lifetime `memory.peak`. `null` where neither file exists (macOS), when no sidecar ran, or when a reading failed |
+| `containerPeakMb` | The most memory the whole container's cgroup held during the export, in MiB: its `memory.current` (cgroup v2), else its `memory.usage_in_bytes` (v1), page cache included. It is read in the same passes as `peakRssMb`, and the largest reading during the export is kept, not the cgroup's lifetime `memory.peak`. `null` where there is no cgroup (macOS), when no sidecar ran, or when the cgroup could not be read |
+| `containerWorkingSetMb` | The most the container's working set reached during the export, in MiB: its usage less the page cache nothing has used lately (`memory.stat`'s `inactive_file`, v1's `total_inactive_file`), never below 0, as the kubelet and cAdvisor count it. Each reading is taken whole in one pass, so its peak need not fall where the usage peaked. `null` as for `containerPeakMb`, and where `memory.stat` gives no inactive file figure |
 | `pptxBytes` | The size of the deck; 0 when it wrote none |
 | `sidecarConcurrency` | `TELLR_SIDECAR_CONCURRENCY` for the worker |
 | `queueBound` | `TELLR_SIDECAR_QUEUE` for the worker |
 
-The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503). A memory reading that fails never fails or slows the export: both readings are `null`, and a `[huashu] export memory not read` warning says why, unless the export had logged its line already.
+The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503). A memory reading that fails never fails or slows the export. The process tree and the cgroup are read apart, and fail apart. A process table that cannot be read nulls `peakRssMb` only, and a cgroup that cannot be read or parsed nulls the two container keys only. A `[huashu] export memory of … not read` warning says which and why, unless the export had logged its line already.
 
-**`peakRssMb` and `containerPeakMb`.** They answer different questions:
+**The three memory figures.** Each answers its own question:
 - **`peakRssMb` compares builds.** It is this export's own processes only, summed per process. Memory the processes share (Chromium's shared libraries and its shared memory between its processes) is counted in each, so it is an upper bound for the export, measured the same way on every build.
-- **`containerPeakMb` judges headroom.** It is everything in the container at once: every worker of the app, every export running then, shared pages counted once, and the page cache, file data the kernel keeps in memory and gives back under pressure. That total is what the container's limit is charged against. So it can be below `peakRssMb`, with shared pages counted once, or above it, with the app and the cache included.
+- **`containerPeakMb` is the container's whole usage.** It covers every worker of the app and every export running then, with shared pages counted once. It also holds the page cache, file data the kernel keeps in memory and gives back under pressure. So it can read high, and only bounds the others from above.
+- **`containerWorkingSetMb` judges headroom.** It is that usage less the inactive page cache: the memory the container cannot give back quickly. This is the figure the kubelet and cAdvisor watch against the limit.
 
-To judge whether memory is comfortable, read `containerPeakMb` against the container's limit. Each worker logs the limit once, when it starts:
+To judge whether memory is comfortable, read `containerWorkingSetMb` against the container's limit. Each worker logs the limit once, when it starts:
 
 ```text
 [huashu] container memory limit 4096.0 MB
 ```
 
-The limit is read from cgroup v2's `memory.max`, else cgroup v1's `memory.limit_in_bytes`. The line says `none` when the cgroup sets no limit, or when there is no cgroup (macOS).
+**Which cgroup is read.** The container's own cgroup, as `/proc/self/cgroup` names it: the `0::<path>` line under cgroup v2, the memory controller's line under v1. The path is looked for under `/sys/fs/cgroup` (v2) or `/sys/fs/cgroup/memory` (v1), where a host's whole tree is mounted. Where it is not there, the container sees its own cgroup as that root, through a private cgroup namespace or a bind-mounted view, and the root is read. A path that climbs out (`..`) is not followed. The limit is the smallest set on that cgroup or on any cgroup above it in view, since each of them charges it: a pod's limit sits on the pod's cgroup, above its container's. It is read from `memory.max` (`max` means none), else `memory.limit_in_bytes` (v1's largest value means none). The line says `none` when no limit is set, or when there is no cgroup (macOS).
 
-**Reading the lines on Apps.** These were measured on 2026-11-21 with the Databricks CLI v1.20.0, read-only, against a deployed app:
+**Reading the lines on Apps.** These were measured on 2026-11-21 with the Databricks CLI v1.20.0, read-only, against a deployed app. `databricks apps logs` needs an OAuth (U2M) profile. It refuses a PAT profile with "OAuth Token not supported for current auth type pat". Sign in with `databricks auth login --host <workspace-host> -p <oauth-profile>`, as for reading deploy logs (`.claude/skills/deploy-tellr-dev`).
 - **To collect every summary the log service holds,** about 5 days back, run:
 
   ```bash
-  databricks apps logs <app> --profile <profile> --search "huashu] export summary" --tail-lines 100000 \
+  databricks apps logs <app> --profile <oauth-profile> --search "huashu] export summary" --tail-lines 100000 \
     | grep "huashu] export summary"
   ```
 
@@ -106,7 +108,7 @@ The limit is read from cgroup v2's `memory.max`, else cgroup v1's `memory.limit_
 - **To watch exports as they run,** run:
 
   ```bash
-  databricks apps logs <app> --profile <profile> --follow | grep --line-buffered "huashu] export summary"
+  databricks apps logs <app> --profile <oauth-profile> --follow | grep --line-buffered "huashu] export summary"
   ```
 
 - **To keep what a command shows in a file as well,** add `--output-file <path>`.
@@ -115,7 +117,7 @@ The limit is read from cgroup v2's `memory.max`, else cgroup v1's `memory.limit_
   ```bash
   … | sed -n 's/.*huashu] export summary //p' | jq -c .
   … | sed -n 's/.*huashu] export summary //p' \
-      | jq -r '[.target, .outcome, .slides, .runSeconds, .peakRssMb, .containerPeakMb] | @tsv'
+      | jq -r '[.target, .outcome, .slides, .runSeconds, .peakRssMb, .containerWorkingSetMb] | @tsv'
   ```
 
 The summary and the limit lines have their own logger, `src.services.pptx_from_html_huashu.telemetry` at INFO, which writes each record to stderr as one line. It does not go through the app's root handler. In a worker, that handler is FastMCP's `RichHandler`, which wraps a long message into narrow pieces where stderr is not a terminal, as on Apps. Through it, even the line's prefix would be split.

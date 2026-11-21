@@ -54,9 +54,11 @@ summary {json}`` (``_ExportSummary``), counts and timings only, never a slide's
 content, a user or a path. Its ``peakRssMb`` is the most memory the sidecar's
 process tree held, node and every Chromium it launched, read from the process
 table about every ``MEMORY_SAMPLE_SECONDS`` while it runs
-(``_TreeMemorySampler``); ``containerPeakMb`` is the most the whole container
-held meanwhile, as its cgroup counts it (``CGROUP_ROOT``), null where there is
-none. A reading that fails is null, and never fails or slows the export. The
+(``_TreeMemorySampler``); ``containerPeakMb`` and ``containerWorkingSetMb``
+are the most the whole container held meanwhile, as its own cgroup counts it
+(``_container_cgroup``): its usage, and that less the page cache nothing has
+used lately, null where there is no cgroup. A reading that fails is null,
+the other source still read, and never fails or slows the export. The
 container's memory limit is logged once, when a worker starts
 (``log_sidecar_bounds``). Both lines have a logger of their own that writes
 each record as one line to stderr (``telemetry_logger``), not through the
@@ -105,7 +107,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -285,7 +287,7 @@ def log_sidecar_bounds() -> None:
     already about any bound that defeats what it is for, so with the startup
     loading it a misconfiguration shows when a worker starts, not on its first
     export. The limit, ``[huashu] container memory limit <MB or none>``, is what
-    the exports' ``containerPeakMb`` is read against (module docstring,
+    the exports' ``containerWorkingSetMb`` is read against (module docstring,
     Telemetry); one that cannot be read is logged as none, and never stops the
     startup.
     """
@@ -666,42 +668,134 @@ def _tree_resident_bytes(root: int, table: list[_ProcessRow]) -> int | None:
     return total
 
 
-# The container's own memory, as its cgroup charges it against its limit:
-# cgroup v2's memory.current and memory.max, else cgroup v1's usage and limit.
-# A container sees its own cgroup at this root; a machine with neither file
-# (macOS, a host's root cgroup) has no reading. Tests point it at a fake one.
+# The container's own memory, as its cgroup charges it against its limit. The
+# cgroup is this process's own, named in /proc/self/cgroup: under cgroup v2 its
+# "0::<path>" line, under cgroup v1 its memory controller's line. That path is
+# looked for under the cgroup root (v2) or its memory/ hierarchy (v1), where a
+# host's whole tree is mounted; where it is not there, the container sees its
+# own cgroup as that root (a private cgroup namespace, or a bind-mounted view),
+# and the root is read. A host-wide view's root is the whole machine: under v1
+# it has the usage file, and would read the machine's usage. So the root is
+# read only where the process's own path is not in view, and there the root is
+# the container's own cgroup. A machine with neither (macOS) has no reading.
+# Tests point both at fakes.
 CGROUP_ROOT = Path("/sys/fs/cgroup")
-_CGROUP_MEMORY_FILES = (
-    ("memory.current", "memory.max"),
-    ("memory/memory.usage_in_bytes", "memory/memory.limit_in_bytes"),
-)
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 # A cgroup v1 limit this large is none: v1 says "no limit" with the largest
 # page-aligned 63-bit number, v2 with "max".
 _CGROUP_UNLIMITED_BYTES = 1 << 62
 
 
-def _cgroup_memory_files() -> tuple[Path, Path] | None:
-    """The container's cgroup memory usage and limit files, v2 before v1; None for neither."""
-    for usage, limit in _CGROUP_MEMORY_FILES:
-        if (CGROUP_ROOT / usage).is_file():
-            return CGROUP_ROOT / usage, CGROUP_ROOT / limit
+class _CgroupMemory(NamedTuple):
+    """Where a cgroup's memory files are, and their names in its cgroup version."""
+
+    # The cgroup's directory, and the top of its hierarchy as this process sees it.
+    directory: Path
+    top: Path
+    usage: str
+    limit: str
+    # The memory.stat line for the page cache nothing has used lately.
+    inactive_file: str
+
+
+# Per cgroup version: its line in /proc/self/cgroup (v2's hierarchy is "0" with no
+# controllers, v1's the one whose controllers include memory), where its hierarchy
+# is mounted under CGROUP_ROOT, and its memory files.
+_CGROUP_VERSIONS = (
+    ("v2", "", "memory.current", "memory.max", "inactive_file"),
+    ("v1", "memory", "memory.usage_in_bytes", "memory.limit_in_bytes", "total_inactive_file"),
+)
+
+
+def _own_cgroup_paths() -> dict[str, str]:
+    """This process's cgroup path per version, from ``PROC_SELF_CGROUP``; {} without the file."""
+    try:
+        lines = PROC_SELF_CGROUP.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    paths: dict[str, str] = {}
+    for line in lines:
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        hierarchy, controllers, path = fields
+        if hierarchy == "0" and not controllers:
+            paths.setdefault("v2", path)
+        elif "memory" in controllers.split(","):
+            paths.setdefault("v1", path)
+    return paths
+
+
+def _container_cgroup() -> _CgroupMemory | None:
+    """This process's own cgroup with memory files, v2 before v1; None for neither."""
+    own = _own_cgroup_paths()
+    for version, mount, usage, limit, inactive_file in _CGROUP_VERSIONS:
+        top = CGROUP_ROOT / mount if mount else CGROUP_ROOT
+        candidates = []
+        path = own.get(version)
+        # A path that climbs (".."), as for a process outside the namespace's root
+        # cgroup, would leave the hierarchy: not followed.
+        if path is not None and ".." not in PurePosixPath(path).parts:
+            candidates.append(top / path.lstrip("/"))
+        candidates.append(top)
+        for directory in candidates:
+            if (directory / usage).is_file():
+                return _CgroupMemory(directory, top, usage, limit, inactive_file)
     return None
+
+
+def _limit_bytes(text: str) -> int | None:
+    """A cgroup memory limit file's limit, or None for no limit."""
+    value = text.strip()
+    if value == "max":
+        return None
+    limit = int(value)
+    return None if limit >= _CGROUP_UNLIMITED_BYTES else limit
 
 
 def _container_memory_limit_bytes() -> int | None:
     """The container's memory limit, or None: no limit, or no cgroup memory files.
 
-    A limit file that cannot be read, or does not hold a number, raises
-    ``OSError`` or ``ValueError``.
+    The smallest limit set on its cgroup or on any cgroup above it that this
+    process sees, since each charges it (a pod's limit sits on the pod's
+    cgroup, its container's below it). A limit file that cannot be read, or
+    does not hold a number, raises ``OSError`` or ``ValueError``.
     """
-    files = _cgroup_memory_files()
-    if files is None:
+    cgroup = _container_cgroup()
+    if cgroup is None:
         return None
-    value = files[1].read_text(encoding="ascii").strip()
-    if value == "max":
-        return None
-    limit = int(value)
-    return None if limit >= _CGROUP_UNLIMITED_BYTES else limit
+    limits = []
+    directory = cgroup.directory
+    while True:
+        file = directory / cgroup.limit
+        if file.is_file():
+            limit = _limit_bytes(file.read_text(encoding="ascii"))
+            if limit is not None:
+                limits.append(limit)
+        if directory == cgroup.top or directory == directory.parent:
+            break
+        directory = directory.parent
+    return min(limits, default=None)
+
+
+def _container_memory(cgroup: _CgroupMemory) -> tuple[int, int | None]:
+    """The cgroup's usage and working set, in bytes; the working set None without memory.stat.
+
+    The working set as the kubelet and cAdvisor count it: usage less the page
+    cache nothing has used lately (memory.stat's inactive file pages), never
+    below 0. A file that cannot be read or parsed raises ``OSError`` or
+    ``ValueError``.
+    """
+    usage = int((cgroup.directory / cgroup.usage).read_text(encoding="ascii"))
+    try:
+        stat = (cgroup.directory / "memory.stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return usage, None
+    for line in stat.splitlines():
+        name, _, value = line.partition(" ")
+        if name == cgroup.inactive_file:
+            return usage, max(usage - int(value), 0)
+    return usage, None
 
 
 class _MemoryPeaks(NamedTuple):
@@ -709,8 +803,9 @@ class _MemoryPeaks(NamedTuple):
 
     # The sidecar's process tree: node and every Chromium it launched, RSS summed.
     tree_mb: float | None
-    # The whole container, as its cgroup counts it.
+    # The whole container, as its cgroup counts it: its usage, and its working set.
     container_mb: float | None
+    working_set_mb: float | None
 
 
 def _megabytes(held: int | None) -> float | None:
@@ -723,22 +818,29 @@ class _TreeMemorySampler:
     ``watch`` (``run_sidecar_process``'s ``on_spawn``) starts a daemon thread
     that reads, every ``MEMORY_SAMPLE_SECONDS`` and in one pass each, the
     process table (``_read_process_table``) and, where there is one, the
-    container's cgroup memory usage (``_cgroup_memory_files``). It keeps the
-    largest resident size of the tree (``_tree_resident_bytes``) and the largest
-    usage of the container. It stops once the sidecar has ended, or at
-    ``stop``. It is telemetry: a thread that cannot start, or a pass that fails
-    before ``stop``, leaves no readings (None, not the part read before it), and
-    nothing here raises into the export or waits on the thread. A pass that
-    fails after ``stop`` changes nothing: the export has logged its readings.
+    container's cgroup (``_container_cgroup``, ``_container_memory``). It keeps
+    the largest resident size of the tree (``_tree_resident_bytes``), and the
+    largest usage and working set of the container. It stops once the sidecar
+    has ended, or at ``stop``.
+
+    It is telemetry. The two sources fail apart: one that fails before ``stop``
+    leaves its own readings None, not the part read before it, and the other is
+    still read. A thread that cannot start leaves none. Nothing here raises
+    into the export or waits on the thread, and a failure after ``stop``
+    changes nothing: the export has logged its readings.
     """
 
     def __init__(self) -> None:
         # Guards what the thread records against ``stop`` reading it.
         self._lock = threading.Lock()
         self._stopped = threading.Event()
-        self._peak_bytes: int | None = None
-        self._container_peak_bytes: int | None = None
-        self._failed = False
+        self._tree_peak: int | None = None
+        self._container_peak: int | None = None
+        self._working_set_peak: int | None = None
+        # A pass that read the container's usage but no working set.
+        self._working_set_unread = False
+        self._tree_failed = False
+        self._container_failed = False
 
     def watch(self, process: subprocess.Popen) -> None:
         """Start reading ``process``'s tree, in a thread of its own."""
@@ -747,49 +849,95 @@ class _TreeMemorySampler:
                 target=self._sample, args=(process,), name="huashu-memory", daemon=True
             ).start()
         except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
-            self._fail(error)
+            self._fail_tree(error)
+            self._fail_container(error)
 
     def _sample(self, process: subprocess.Popen) -> None:
         try:
-            cgroup = _cgroup_memory_files()
+            cgroup = _container_cgroup()
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail_container(error)
+            cgroup = None
+        reading_tree = True
+        try:
             while not self._stopped.is_set() and process.returncode is None:
-                held = _tree_resident_bytes(process.pid, _read_process_table())
-                if held is None:
-                    return  # the sidecar has ended: no process has its id
-                container = None
+                if reading_tree:
+                    try:
+                        held = _tree_resident_bytes(process.pid, _read_process_table())
+                    except Exception as error:  # noqa: BLE001
+                        self._fail_tree(error)
+                        reading_tree = False
+                    else:
+                        if held is None:
+                            return  # the sidecar has ended: no process has its id
+                        self._record_tree(held)
                 if cgroup is not None:
-                    container = int(cgroup[0].read_text(encoding="ascii"))
-                with self._lock:
-                    if self._peak_bytes is None or held > self._peak_bytes:
-                        self._peak_bytes = held
-                    if container is not None and (
-                        self._container_peak_bytes is None
-                        or container > self._container_peak_bytes
-                    ):
-                        self._container_peak_bytes = container
+                    try:
+                        usage, working_set = _container_memory(cgroup)
+                    except Exception as error:  # noqa: BLE001
+                        self._fail_container(error)
+                        cgroup = None
+                    else:
+                        self._record_container(usage, working_set)
+                if not reading_tree and cgroup is None:
+                    return  # nothing left to read
                 self._stopped.wait(MEMORY_SAMPLE_SECONDS)
         except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
-            self._fail(error)
+            self._fail_tree(error)
+            self._fail_container(error)
 
-    def _fail(self, error: Exception) -> None:
+    def _record_tree(self, held: int) -> None:
         with self._lock:
-            if self._stopped.is_set():
-                return  # the export has its readings already, and has logged them
-            self._failed = True
-        logger.warning("[huashu] export memory not read, its summary says null: %s", error)
+            if self._tree_peak is None or held > self._tree_peak:
+                self._tree_peak = held
+
+    def _record_container(self, usage: int, working_set: int | None) -> None:
+        with self._lock:
+            if self._container_peak is None or usage > self._container_peak:
+                self._container_peak = usage
+            if working_set is None:
+                self._working_set_unread = True
+            elif self._working_set_peak is None or working_set > self._working_set_peak:
+                self._working_set_peak = working_set
+
+    def _fail_tree(self, error: Exception) -> None:
+        with self._lock:
+            if self._stopped.is_set() or self._tree_failed:
+                return  # logged once; and after stop, the export has its readings
+            self._tree_failed = True
+        logger.warning(
+            "[huashu] export memory of the sidecar's processes not read, "
+            "its summary's peakRssMb is null: %s",
+            error,
+        )
+
+    def _fail_container(self, error: Exception) -> None:
+        with self._lock:
+            if self._stopped.is_set() or self._container_failed:
+                return  # logged once; and after stop, the export has its readings
+            self._container_failed = True
+        logger.warning(
+            "[huashu] export memory of the container not read, "
+            "its summary's containerPeakMb and containerWorkingSetMb are null: %s",
+            error,
+        )
 
     def stop(self) -> _MemoryPeaks:
         """Stop reading, without waiting: the most the tree and the container held, in MB.
 
-        Each is None when it was not read, or when a pass failed.
+        Each is None when it was not read, or when its source failed.
         """
         with self._lock:
             self._stopped.set()
-            if self._failed:
-                return _MemoryPeaks(tree_mb=None, container_mb=None)
+            container = not self._container_failed
             return _MemoryPeaks(
-                tree_mb=_megabytes(self._peak_bytes),
-                container_mb=_megabytes(self._container_peak_bytes),
+                tree_mb=None if self._tree_failed else _megabytes(self._tree_peak),
+                container_mb=_megabytes(self._container_peak) if container else None,
+                working_set_mb=(
+                    _megabytes(self._working_set_peak)
+                    if container and not self._working_set_unread
+                    else None
+                ),
             )
 
 
@@ -846,6 +994,7 @@ class _ExportSummary:
     # The sidecar's process tree, and the whole container (_TreeMemorySampler).
     peak_rss_mb: float | None = None
     container_peak_mb: float | None = None
+    container_working_set_mb: float | None = None
     pptx_bytes: int = 0
 
     def exported(self, pptx_bytes: bytes, failures: list[dict[str, Any]]) -> None:
@@ -873,6 +1022,7 @@ class _ExportSummary:
             "secondsPerSlide": seconds_per_slide,
             "peakRssMb": self.peak_rss_mb,
             "containerPeakMb": self.container_peak_mb,
+            "containerWorkingSetMb": self.container_working_set_mb,
             "pptxBytes": self.pptx_bytes,
             "sidecarConcurrency": _sidecar_cap,
             "queueBound": _sidecar_queue,
@@ -968,7 +1118,11 @@ def _run_measured(
         ) from e
     finally:
         summary.run_seconds = time.monotonic() - started
-        summary.peak_rss_mb, summary.container_peak_mb = sampler.stop()
+        (
+            summary.peak_rss_mb,
+            summary.container_peak_mb,
+            summary.container_working_set_mb,
+        ) = sampler.stop()
 
 
 def _export_deck(

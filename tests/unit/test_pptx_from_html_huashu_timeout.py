@@ -1363,6 +1363,7 @@ SUMMARY_KEYS = [
     "secondsPerSlide",
     "peakRssMb",
     "containerPeakMb",
+    "containerWorkingSetMb",
     "pptxBytes",
     "sidecarConcurrency",
     "queueBound",
@@ -1377,7 +1378,15 @@ SUMMARY_COUNTS = (
     "queueBound",
 )
 # Read once the sidecar has run: null for an export refused before it ran.
-SUMMARY_RUN_READINGS = ("runSeconds", "secondsPerSlide", "peakRssMb", "containerPeakMb")
+SUMMARY_RUN_READINGS = (
+    "runSeconds",
+    "secondsPerSlide",
+    "peakRssMb",
+    "containerPeakMb",
+    "containerWorkingSetMb",
+)
+# The container's own readings, from its cgroup.
+CONTAINER_KEYS = ("containerPeakMb", "containerWorkingSetMb")
 SUMMARY_OUTCOMES = ("ok", "partial", "failed", "timeout", "busy")
 SUMMARY_TARGETS = ("pptx", "gslides")
 
@@ -1488,6 +1497,43 @@ CGROUP_BEFORE_MB = 100
 CGROUP_READINGS_MB = (300, 500, 200)
 CGROUP_LIFETIME_PEAK_MB = 900
 CGROUP_HOLD_MS = 600
+# The working-set stub's cgroup, (memory.current, inactive_file) in MiB: before it
+# runs, then at each of its steps. The working sets, 100, 100, 400 and 200, peak at
+# 400, neither at the usage's peak (500) nor last.
+WORKING_SET_BEFORE = (100, 0)
+WORKING_SET_STEPS = ((500, 400), (450, 50), (200, 0))
+# What memory.stat's other lines hold, in MiB.
+STAT_NOISE_MB = 7
+
+# A sidecar that moves the fake cgroup's memory.current and memory.stat through
+# WORKING_SET_STEPS, each file written whole, holding each step longer than two
+# samples. Two files cannot change at once, so each step writes them in the order
+# under which a sample taken between the two writes reads no larger working set,
+# and no larger usage, than the steps on either side of it.
+STUB_CGROUP_WORKING_SET = """
+import fs from 'node:fs';
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const MB = 1048576;
+const write = (path, text) => {
+  fs.writeFileSync(path + '.next', text);
+  fs.renameSync(path + '.next', path);
+};
+const usage = (mb) => write(%(usage)s, String(mb * MB) + '\\n');
+const noise = %(noise_mb)d * MB;
+const stat = (mb) => write(
+  %(stat)s,
+  `anon ${noise}\\ninactive_anon ${noise}\\ninactive_file ${mb * MB}\\nactive_file ${noise}\\n`,
+);
+let inactive = %(before)d;
+for (const [current, next] of %(steps)s) {
+  if (next > inactive) { stat(next); usage(current); } else { usage(current); stat(next); }
+  inactive = next;
+  await new Promise((resolve) => setTimeout(resolve, %(hold_ms)d));
+}
+fs.writeFileSync(process.argv[2], 'PK');
+console.error('__HUASHU_RESULT__ ' + JSON.stringify({ totalSlides: 1, succeeded: 1, failed: [] }));
+"""
 # cgroup v1's "no limit": the largest page-aligned 63-bit value.
 CGROUP_V1_UNLIMITED = 9223372036854771712
 # The startup line for the container's memory limit.
@@ -1507,6 +1553,37 @@ def _cgroup(root: Path, files: dict[str, str]) -> Path:
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(contents, encoding="utf-8")
     return root
+
+
+def _use_cgroup(
+    monkeypatch: pytest.MonkeyPatch,
+    base: Path,
+    files: dict[str, str],
+    membership: str | None = None,
+) -> Path:
+    """The cgroup the export reads made a fake one, under ``base``; returns its filesystem's root.
+
+    The filesystem, ``base / "cgroup"``, holds ``files``. This process's
+    ``/proc/self/cgroup`` reads ``membership``, or, for None, there is no such
+    file, as on macOS.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    root = _cgroup(base / "cgroup", files)
+    own = base / "proc-self-cgroup"
+    if membership is not None:
+        own.write_text(membership, encoding="utf-8")
+    monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", root)
+    monkeypatch.setattr(pptx_from_html_huashu, "PROC_SELF_CGROUP", own)
+    return root
+
+
+def _memory_stat(key: str, megabytes: int) -> str:
+    """A cgroup ``memory.stat`` giving ``key`` in MiB, among neighbours whose names start alike."""
+    noise = STAT_NOISE_MB * BYTES_PER_MB
+    return (
+        f"anon {noise}\ninactive_anon {noise}\n{key} {megabytes * BYTES_PER_MB}\n"
+        f"active_file {noise}\n"
+    )
 
 
 def _sidecar_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
@@ -1591,18 +1668,21 @@ def _assert_ran(summary: dict, *, at_least: float, slides: int) -> None:
 
 def _assert_never_ran(summary: dict) -> None:
     """No sidecar ran: no run time, no time per slide, no memory reading."""
-    assert [summary[key] for key in SUMMARY_RUN_READINGS] == [None] * 4, summary
+    assert [summary[key] for key in SUMMARY_RUN_READINGS] == [None] * len(SUMMARY_RUN_READINGS), (
+        summary
+    )
 
 
 @requires_node
 class TestEveryExportLogsOneSummary:
     """One ``[huashu] export summary {json}`` line per export, once it ends, however it ends.
 
-    The owner reads them from the app's logs on Databricks Apps (``databricks apps
-    logs <app> | grep "huashu] export summary"``), and a build that launches one
-    browser per deck will be measured against this one by the same line. So the
-    line is one physical line, its keys fixed, each of a fixed type: whole-number
-    counts, seconds as numbers, and the run's readings null when no sidecar ran.
+    The owner reads them from the app's logs on Databricks Apps (the recipe is in
+    docs/technical/export-features.md, under "Reading the lines on Apps"), and a
+    build that launches one browser per deck will be measured against this one by
+    the same line. So the line is one physical line, its keys fixed, each of a
+    fixed type: whole-number counts, seconds as numbers, and the run's readings
+    null when no sidecar ran.
     """
 
     @pytest.fixture(autouse=True)
@@ -2084,14 +2164,18 @@ class TestASamplerThatFailsNeverFailsTheExport:
 
 @requires_node
 class TestTheContainerMemory:
-    """``containerPeakMb``: the most memory the container's own cgroup held during the export.
+    """The container's own memory, as its cgroup counts it, during the export.
 
-    The whole container, as its memory limit counts it: every worker and every
-    export at once, shared pages once each. Read from cgroup v2's
-    ``memory.current``, else cgroup v1's ``memory.usage_in_bytes``, by the same
-    sampler and in the same passes as the process tree: the largest reading during
-    the export, never the cgroup's lifetime ``memory.peak``. Null where neither
-    file is (macOS). The container's limit is logged once, when a worker starts.
+    ``containerPeakMb`` is the most its cgroup's usage read (cgroup v2's
+    ``memory.current``, else v1's ``memory.usage_in_bytes``), and
+    ``containerWorkingSetMb`` the most its working set did: that usage less the
+    page cache nothing has used lately (``memory.stat``'s ``inactive_file``, v1's
+    ``total_inactive_file``), as the kubelet and cAdvisor count it. Both are read
+    by the sampler in the same passes as the process tree, the largest reading of
+    the export kept, never the cgroup's lifetime ``memory.peak``; null where there
+    is no cgroup (macOS). The cgroup is this process's own: its path in
+    ``/proc/self/cgroup`` under the cgroup root, else the root itself. Its limit
+    is logged once, when a worker starts.
     """
 
     @pytest.fixture(autouse=True)
@@ -2102,12 +2186,12 @@ class TestTheContainerMemory:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _summarised_sidecar(tmp_path, monkeypatch)
-        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", _cgroup(tmp_path / "cg", {}))
+        _use_cgroup(monkeypatch, tmp_path, {})
 
         assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
 
         summary = _the_summary(capsys)
-        assert summary["containerPeakMb"] is None, summary
+        assert [summary[key] for key in CONTAINER_KEYS] == [None, None], summary
         assert summary["peakRssMb"] is not None, "the tree is read without a cgroup"
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS has no cgroup filesystem")
@@ -2119,21 +2203,25 @@ class TestTheContainerMemory:
         assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
 
         summary = _the_summary(capsys)
-        assert "containerPeakMb" in summary and summary["containerPeakMb"] is None, summary
+        assert [summary.get(key, "absent") for key in CONTAINER_KEYS] == [None, None], summary
 
     def test_it_is_the_largest_cgroup_v2_reading_during_the_export(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """memory.current moves 100, 300, 500, 200 MB: 500, not the last, nor memory.peak's 900."""
-        cgroup = _cgroup(
-            tmp_path / "cg",
+        """memory.current moves 100, 300, 500, 200 MB: 500, not the last, nor memory.peak's 900.
+
+        No memory.stat: the working set cannot be read, so it is null.
+        """
+        cgroup = _use_cgroup(
+            monkeypatch,
+            tmp_path,
             {
                 "memory.current": f"{CGROUP_BEFORE_MB * BYTES_PER_MB}\n",
                 "memory.peak": f"{CGROUP_LIFETIME_PEAK_MB * BYTES_PER_MB}\n",
                 "memory.max": "max\n",
             },
+            membership="0::/\n",
         )
-        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", cgroup)
         _sidecar_script(
             tmp_path,
             monkeypatch,
@@ -2149,35 +2237,242 @@ class TestTheContainerMemory:
 
         summary = _the_summary(capsys)
         assert summary["containerPeakMb"] == float(max(CGROUP_READINGS_MB)), summary
+        assert summary["containerWorkingSetMb"] is None, summary
 
-    def test_cgroup_v1_is_read_where_v2_is_not(
+    def test_the_working_set_is_its_own_peak(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        _summarised_sidecar(tmp_path, monkeypatch)
-        cgroup = _cgroup(
-            tmp_path / "cg",
+        """Usage less inactive file cache, at its largest: 400, though usage peaks at 500."""
+        cgroup = _use_cgroup(
+            monkeypatch,
+            tmp_path,
             {
-                "memory/memory.usage_in_bytes": f"{256 * BYTES_PER_MB}\n",
-                "memory/memory.limit_in_bytes": f"{CGROUP_V1_UNLIMITED}\n",
+                "memory.current": f"{WORKING_SET_BEFORE[0] * BYTES_PER_MB}\n",
+                "memory.stat": _memory_stat("inactive_file", WORKING_SET_BEFORE[1]),
+            },
+            membership="0::/\n",
+        )
+        _sidecar_script(
+            tmp_path,
+            monkeypatch,
+            STUB_CGROUP_WORKING_SET
+            % {
+                "usage": json.dumps(str(cgroup / "memory.current")),
+                "stat": json.dumps(str(cgroup / "memory.stat")),
+                "before": WORKING_SET_BEFORE[1],
+                "steps": json.dumps([list(step) for step in WORKING_SET_STEPS]),
+                "noise_mb": STAT_NOISE_MB,
+                "hold_ms": CGROUP_HOLD_MS,
             },
         )
-        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", cgroup)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", [{"html": "x"}]) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert summary["containerPeakMb"] == 500.0, summary
+        assert summary["containerWorkingSetMb"] == 400.0, summary
+
+    @pytest.mark.parametrize(
+        ("files", "membership", "peak", "working_set"),
+        [
+            (
+                {
+                    "memory/memory.usage_in_bytes": f"{256 * BYTES_PER_MB}\n",
+                    "memory/memory.stat": _memory_stat("total_inactive_file", 56)
+                    + f"inactive_file {6 * BYTES_PER_MB}\n",
+                },
+                "12:memory:/\n",
+                256.0,
+                200.0,
+            ),
+            (
+                {
+                    "memory.current": f"{100 * BYTES_PER_MB}\n",
+                    "memory.stat": _memory_stat("inactive_file", 150),
+                },
+                "0::/\n",
+                100.0,
+                0.0,
+            ),
+        ],
+        ids=["v1, its total_inactive_file", "more inactive cache than usage"],
+    )
+    def test_the_working_set_as_the_kubelet_counts_it(
+        self,
+        files: dict[str, str],
+        membership: str,
+        peak: float,
+        working_set: float,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+        _use_cgroup(monkeypatch, tmp_path, files, membership=membership)
 
         assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
 
-        assert _the_summary(capsys)["containerPeakMb"] == 256.0
+        summary = _the_summary(capsys)
+        assert [summary[key] for key in CONTAINER_KEYS] == [peak, working_set], summary
 
     @pytest.mark.parametrize(
-        ("files", "limit"),
+        ("membership", "files", "found"),
         [
-            ({"memory.current": "1\n", "memory.max": f"{4096 * BYTES_PER_MB}\n"}, "4096.0 MB"),
+            # A private cgroup namespace: the container's own cgroup is the root.
+            ("0::/\n", {"memory.current": "1"}, "."),
+            # A host's view: the root is the machine's, the container's is nested.
+            (
+                "0::/kubepods/pod1/container\n",
+                {"memory.current": "1", "kubepods/pod1/container/memory.current": "2"},
+                "kubepods/pod1/container",
+            ),
+            # The path names a cgroup this view does not show (a bind-mounted one).
+            ("0::/kubepods/pod1/container\n", {"memory.current": "1"}, "."),
+            # cgroup v1, the memory controller's line, among others and a v2 line.
+            (
+                "12:memory:/docker/abc\n4:cpu,cpuacct:/docker/abc\n0::/\n",
+                {
+                    "memory/memory.usage_in_bytes": "1",
+                    "memory/docker/abc/memory.usage_in_bytes": "2",
+                },
+                "memory/docker/abc",
+            ),
+            (
+                "7:hugetlb,memory:/docker/abc\n",
+                {
+                    "memory/memory.usage_in_bytes": "1",
+                    "memory/docker/abc/memory.usage_in_bytes": "2",
+                },
+                "memory/docker/abc",
+            ),
+            # A path that climbs out of the cgroup filesystem is not followed.
+            ("0::/../outside\n", {"memory.current": "1", "../outside/memory.current": "2"}, "."),
+            # No /proc/self/cgroup (macOS, here with a cgroup filesystem anyway).
+            (None, {"memory.current": "1"}, "."),
+            (None, {}, None),
+        ],
+        ids=[
+            "private namespace",
+            "host view, nested",
+            "nested, not in this view",
+            "v1 memory line",
+            "v1 memory among controllers",
+            "climbs out",
+            "no proc file",
+            "nothing",
+        ],
+    )
+    def test_the_cgroup_is_this_processs_own(
+        self,
+        membership: str | None,
+        files: dict[str, str],
+        found: str | None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _use_cgroup(monkeypatch, tmp_path / "fs", files, membership=membership)
+
+        cgroup = pptx_from_html_huashu._container_cgroup()
+
+        if found is None:
+            assert cgroup is None, cgroup
+        else:
+            assert cgroup is not None, f"no cgroup found, {found!r} expected"
+            assert cgroup.directory.resolve() == (root / found).resolve(), cgroup
+
+    def test_the_export_reads_its_own_cgroup_not_the_machines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A host's view: the root cgroup holds the machine's 7000 MB, the container's 300."""
+        _summarised_sidecar(tmp_path, monkeypatch)
+        _use_cgroup(
+            monkeypatch,
+            tmp_path,
+            {
+                "memory.current": f"{7000 * BYTES_PER_MB}\n",
+                "kubepods/pod1/container/memory.current": f"{300 * BYTES_PER_MB}\n",
+            },
+            membership="0::/kubepods/pod1/container\n",
+        )
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        assert _the_summary(capsys)["containerPeakMb"] == 300.0
+
+    @pytest.mark.parametrize("failure", ["unparsable", "unreadable"])
+    def test_a_cgroup_that_fails_nulls_only_the_container(
+        self,
+        failure: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A cgroup read or parse error: the container's keys null, the process tree still read."""
+        _summarised_sidecar(tmp_path, monkeypatch)
+        _use_cgroup(
+            monkeypatch,
+            tmp_path,
+            {"memory.current": "not a number\n" if failure == "unparsable" else "1\n"},
+            membership="0::/\n",
+        )
+        if failure == "unreadable":
+
+            def unreadable(*_: object) -> tuple:
+                raise OSError("Input/output error")
+
+            monkeypatch.setattr(pptx_from_html_huashu, "_container_memory", unreadable)
+
+        with caplog.at_level("WARNING", logger=pptx_from_html_huashu.__name__):
+            assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert [summary[key] for key in CONTAINER_KEYS] == [None, None], summary
+        assert summary["peakRssMb"] is not None and summary["peakRssMb"] > 0, summary
+        warned = [record.message for record in caplog.records if "memory" in record.message]
+        assert len(warned) == 1 and "container" in warned[0], warned
+
+    def test_a_process_table_that_fails_nulls_only_the_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _summarised_sidecar(tmp_path, monkeypatch)
+        _use_cgroup(
+            monkeypatch,
+            tmp_path,
+            {
+                "memory.current": f"{256 * BYTES_PER_MB}\n",
+                "memory.stat": _memory_stat("inactive_file", 56),
+            },
+            membership="0::/\n",
+        )
+
+        def unreadable(*_: object) -> list:
+            raise OSError("no process table here")
+
+        monkeypatch.setattr(pptx_from_html_huashu, "_read_process_table", unreadable)
+
+        assert pptx_from_html_huashu.build_pptx_huashu("deck", THREE_SLIDES) == (b"PK", [])
+
+        summary = _the_summary(capsys)
+        assert summary["peakRssMb"] is None, summary
+        assert [summary[key] for key in CONTAINER_KEYS] == [256.0, 200.0], summary
+
+    @pytest.mark.parametrize(
+        ("files", "membership", "limit"),
+        [
+            (
+                {"memory.current": "1\n", "memory.max": f"{4096 * BYTES_PER_MB}\n"},
+                None,
+                "4096.0 MB",
+            ),
             # cgroup v2 says "no limit" with "max": a reading, not an error.
-            ({"memory.current": "1\n", "memory.max": "max\n"}, "none"),
+            ({"memory.current": "1\n", "memory.max": "max\n"}, None, "none"),
             (
                 {
                     "memory/memory.usage_in_bytes": "1\n",
                     "memory/memory.limit_in_bytes": f"{2048 * BYTES_PER_MB}\n",
                 },
+                None,
                 "2048.0 MB",
             ),
             (
@@ -2185,16 +2480,48 @@ class TestTheContainerMemory:
                     "memory/memory.usage_in_bytes": "1\n",
                     "memory/memory.limit_in_bytes": f"{CGROUP_V1_UNLIMITED}\n",
                 },
+                None,
                 "none",
             ),
-            ({}, "none"),
-            ({"memory.current": "1\n", "memory.max": "not a number\n"}, "none"),
+            ({}, None, "none"),
+            ({"memory.current": "1\n", "memory.max": "not a number\n"}, None, "none"),
+            # A host's view: the container's own cgroup's limit, not the machine's root.
+            (
+                {
+                    "memory.current": "1\n",
+                    "kubepods/pod1/container/memory.current": "1\n",
+                    "kubepods/pod1/container/memory.max": f"{2048 * BYTES_PER_MB}\n",
+                },
+                "0::/kubepods/pod1/container\n",
+                "2048.0 MB",
+            ),
+            # The limit is the pod's, set on a parent the container's cgroup sits in.
+            (
+                {
+                    "memory.current": "1\n",
+                    "kubepods/pod1/memory.max": f"{1024 * BYTES_PER_MB}\n",
+                    "kubepods/pod1/container/memory.current": "1\n",
+                    "kubepods/pod1/container/memory.max": "max\n",
+                },
+                "0::/kubepods/pod1/container\n",
+                "1024.0 MB",
+            ),
         ],
-        ids=["v2 limit", "v2 no limit", "v1 limit", "v1 no limit", "no cgroup", "unreadable"],
+        ids=[
+            "v2 limit",
+            "v2 no limit",
+            "v1 limit",
+            "v1 no limit",
+            "no cgroup",
+            "unreadable",
+            "own nested cgroup",
+            "a parent's limit",
+        ],
     )
     def test_the_limit_is_logged_when_a_worker_starts(
         self,
         files: dict[str, str],
+        membership: str | None,
         limit: str,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -2203,7 +2530,7 @@ class TestTheContainerMemory:
         request: pytest.FixtureRequest,
     ) -> None:
         """Once, in MB or as none; only a limit file that cannot be read is warned about."""
-        monkeypatch.setattr(pptx_from_html_huashu, "CGROUP_ROOT", _cgroup(tmp_path / "cg", files))
+        _use_cgroup(monkeypatch, tmp_path, files, membership=membership)
 
         with caplog.at_level("WARNING", logger=pptx_from_html_huashu.__name__):
             pptx_from_html_huashu.log_sidecar_bounds()
@@ -2223,7 +2550,9 @@ class _NoSampler:
         return None
 
     def stop(self) -> pptx_from_html_huashu._MemoryPeaks:
-        return pptx_from_html_huashu._MemoryPeaks(tree_mb=None, container_mb=None)
+        return pptx_from_html_huashu._MemoryPeaks(
+            tree_mb=None, container_mb=None, working_set_mb=None
+        )
 
 
 def _deck_text(pptx: bytes) -> str:
