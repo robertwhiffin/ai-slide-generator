@@ -173,8 +173,8 @@ function scriptCapPx(line, growthPx) {
 // (`forPowerPoint`), every line's. For Google Slides, every line's but that
 // of a line within its paragraph holding a script run, which Google grows by
 // the run's written size instead (scriptCapPx); so the first line of a
-// later paragraph holding one takes its growth here, and a deck with
-// no script run is the same for both apps.
+// later paragraph holding one takes its growth here, and a line with no
+// script run takes its growth alike in both decks.
 function growthBeforePx(line, lineIndex, forPowerPoint) {
   const growth = Number(line.growthPx) || 0;
   if (forPowerPoint) return growth;

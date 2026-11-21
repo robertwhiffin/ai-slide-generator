@@ -321,9 +321,9 @@ trailing letter space its Range rect holds):
 | design system, after | +0.16 | 0.30 | 3.34 |
 
 Over all lines, italic included, the largest error goes from 41.86 to 2.73 px (in-repo) and from
-37.57 to 3.34 px (design system). Keeping A1's 0.5 % band for PowerPoint measured +0.19 / 0.27 /
-4.32 in-repo against +0.16 / 0.23 / 2.73 without, and the same on the design system, so the
-band is dropped for PowerPoint. Google's line widths are unchanged.
+37.57 to 3.34 px (design system). An A/B before D8 kept A1's 0.5 % band for PowerPoint: +0.19 /
+0.27 / 4.32 in-repo against +0.16 / 0.23 / 2.73 without, and +0.15 / 0.30 / 3.32 both ways on
+the design system, so the band is dropped for PowerPoint. Google's line widths are unchanged.
 
 ### D8: characters a webfont lacks
 
@@ -363,6 +363,11 @@ browser's Hiragino Sans 0.90 em: the nearest the three apps share.
   them out as they take out script sizes.
 - **Owner check:** PowerPoint for Windows was not probed: the italic static's name for a RIBBI
   family, and `kern="0"` turning DM Sans kerning off, are measured on PowerPoint for Mac only.
+- **Owner-facing note:** the PowerPoint download names an italic `DM Sans Italic`, which Google
+  draws as Sansita. A user who uploads the downloaded .pptx to Drive by hand, rather than using
+  the Google Slides export, gets the wrong italic face there.
+- **Owner-facing note:** the Google Slides deck writes U+2011 as U+002D, so text copied out of
+  it carries a plain hyphen, which a line may break after.
 
 ### Google Slides decks kept for the owner
 

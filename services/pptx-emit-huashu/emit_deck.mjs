@@ -11,8 +11,12 @@
 //
 // target is the renderer the deck is written for: 'pptx' (the default) for
 // PowerPoint, 'gslides' for the Google Slides conversion. The engine writes
-// the few constructs the two apps place apart for it (around script runs:
-// their size, and for PowerPoint the lines they end or grow; emit_text.cjs).
+// the few constructs the two apps draw apart for it: around script runs,
+// their size, and for PowerPoint the lines they end or grow (emit_text.cjs);
+// each run's tracking, which for PowerPoint folds in its kerning; an italic
+// webfont run's typeface, for PowerPoint its italic static's name; and
+// U+2011, written as U+002D for Google Slides (emit_typography.cjs;
+// scripts/export_fidelity/CALIBRATION.md X1, D1 and D8).
 //
 // argv:  emit_deck.mjs <out.pptx>
 //

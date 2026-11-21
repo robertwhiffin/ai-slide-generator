@@ -6,7 +6,11 @@
 // their pictures), once the captures are taken, and logs what this module
 // formats. The export fidelity harness (scripts/export_fidelity/run.py
 // check_text_loss) makes the same comparison on the written .pptx, with the
-// same normalisation, so the two report the same words.
+// same normalisation but one fold: it reads U+2010 HYPHEN (which NFKC also
+// makes of U+2011) as U+002D, because the decks write those hyphens as U+002D
+// where an app would draw them from another font (emit_typography.cjs
+// runText). This check reads the slide model, which keeps the page's own
+// characters, so it needs no fold, and the two report the same words.
 //
 //   missingWords(reference, emitted, hidden) -> string[]
 //     The reference's words, as it spells them and in its order, whose

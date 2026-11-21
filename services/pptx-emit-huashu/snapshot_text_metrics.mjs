@@ -508,6 +508,12 @@ function createTextMetrics(layout) {
       if (!(drawn > 0 && exportCut > 0 && characters > 0)) continue;
       const delta = (drawn - exportCut) / characters;
       if (Math.abs(exportCut - drawn) / drawn > OPTICAL_SIZE_THRESHOLD) pending.run.opticalTrackingPx = delta;
+      // The two divide differently. The optical-size delta is a difference of
+      // advances, every glyph's, the last one's included: spread over all n
+      // characters it puts each glyph where the browser has it, and only the
+      // last glyph's ink ends its share wide. Kerning lies between characters
+      // alone, so it is spread over the gaps it closes (a review A/B with
+      // n - 1 for both made fixture 01's PowerPoint score 0.64 worse).
       const gaps = pending.endsLine ? characters - 1 : characters;
       const kerning = unkernedCut > 0 && gaps > 0 ? (exportCut - unkernedCut) / gaps : 0;
       pending.run.unkernedTrackingPx = delta + kerning;

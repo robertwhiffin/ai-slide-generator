@@ -386,14 +386,17 @@ kinds, image items that reference a capture that exists, a table grid of at leas
 and one column. An invalid item is dropped and counted in the slide summary's
 `modelDrops`; the rest of the slide exports.
 
-**Renderer target** (as built). PowerPoint and Google Slides place a few constructs
-differently, all on lines that hold a superscript or subscript run: the size of a script
-run, a word joiner after a script run that ends its line (PowerPoint only), and a later
-line's growth as space before. `build_pptx_huashu(..., target=...)` names the app the deck
-is for: `"pptx"` (the download) or `"gslides"` (the Google Slides route). Only those
-constructs branch, so a deck with no script run is byte-identical for both targets. In the
-Google deck a script glyph on a line the browser did not grow is drawn at 0.8 of its size,
-an accepted trade-off: the line sits where the browser has it.
+**Renderer target** (as built). PowerPoint and Google Slides draw a few constructs
+differently. On lines that hold a superscript or subscript run: the size of a script run, a
+word joiner after a script run that ends its line (PowerPoint only), and a later line's
+growth as space before. In any text: each run's tracking (PowerPoint for Mac kerns no DM
+Sans, so its deck folds each run's kerning in, with no optical-size band; Google's keeps
+A1), an italic webfont run's typeface (for PowerPoint its italic static's own name with
+italic off; for Google the family plus italic), and U+2011 (written as U+002D for Google).
+`build_pptx_huashu(..., target=...)` names the app the deck is for: `"pptx"` (the download)
+or `"gslides"` (the Google Slides route). Only those constructs branch. In the Google deck a
+script glyph on a line the browser did not grow is drawn at 0.8 of its size, an accepted
+trade-off: the line sits where the browser has it.
 
 **Pictures.** These become capture targets:
 - `<img>` (`data:` only), `<canvas>`, `<video>` posters and inline `<svg>`;

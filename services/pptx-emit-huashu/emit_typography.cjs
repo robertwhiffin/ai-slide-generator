@@ -61,16 +61,19 @@
 // emit_text.cjs), which keeps the line where the browser has it, the script
 // glyph up to some 20% small (measured in both apps; CALIBRATION.md A4).
 //
-// Hyphens a face lacks. The browser draws U+2010 HYPHEN and U+2011
-// NON-BREAKING HYPHEN with the face's own hyphen-minus where the face has
-// neither (DM Sans has neither). PowerPoint draws U+2011 so too, but U+2010
-// from another font (Cambria Math, 20 px short over two hyphens at 48 px), and
-// Google Slides both from MS PGothic (U+2011 22 px short over "end-to-end"),
-// and U+2010 there too. Written as U+002D, either is the face's own hyphen in
-// every app, the glyph the browser drew (measured: CALIBRATION.md D8). So the
-// deck for PowerPoint writes U+2010 as U+002D and keeps U+2011, which keeps its
+// Hyphens. The browser draws U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN
+// with the face's own hyphen-minus where the face has neither (DM Sans has
+// neither). PowerPoint draws U+2011 so too, but U+2010 from another font
+// (Cambria Math, 20 px short over two hyphens at 48 px), and Google Slides
+// both from MS PGothic (U+2011 22 px short over "end-to-end"), and U+2010
+// there too. Written as U+002D, either is the face's own hyphen in every app,
+// the glyph the browser drew (measured: CALIBRATION.md D8). So the deck for
+// PowerPoint writes U+2010 as U+002D and keeps U+2011, which keeps its
 // no-break meaning when the text is edited; the deck for Google Slides writes
-// both as U+002D.
+// both as U+002D. This is done in every face, whether it has the hyphens or
+// not: the snapshot cannot tell, since the browser draws both as the face's
+// own glyph either way, and a face that has them (Office's Times New Roman)
+// draws them as its hyphen-minus, so writing U+002D changes no glyph there.
 
 const { PT_PER_PX } = require('./units.cjs');
 
@@ -102,7 +105,7 @@ const SINGLE_WEIGHT_FAMILIES = new Set(['impact', 'arial black']);
 // surrogate. One of them in a run would make the slide part unreadable.
 const XML_UNSAFE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const XML_ATTRIBUTE_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
-// The hyphens each target writes as U+002D (see Hyphens a face lacks).
+// The hyphens each target writes as U+002D (see Hyphens).
 const HYPHENS_WRITTEN_AS_MINUS = { pptx: /\u2010/g, gslides: /[\u2010\u2011]/g };
 
 // A CSS weight as one of 100..900: a variable font's 450 is 500. Unreadable is 400.

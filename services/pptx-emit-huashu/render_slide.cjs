@@ -37,8 +37,9 @@
 // (scripts/export_fidelity/run.py export_pptx). A slide that fails logs
 // neither.
 // target is the renderer the deck is written for, 'pptx' (the default) or
-// 'gslides': emit_model.cjs writes the few constructs the two place apart
-// for it (emit_text.cjs writtenParagraphs, emit_typography.cjs fontSizePt).
+// 'gslides': emit_model.cjs writes the few constructs the two draw apart
+// for it (emit_text.cjs writtenParagraphs; emit_typography.cjs fontSizePt,
+// the tracking, italic typefaces and hyphens of runOptions and runText).
 // emit_deck.mjs attaches the speaker notes to the returned `slide`.
 
 const path = require('path');

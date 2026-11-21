@@ -1343,6 +1343,8 @@ FALLBACK_SLIDE = (
     '<p id="fallback-georgia" style="font-family: Georgia; font-size: 24px; margin: 0;">'
     "Georgia \u25b2 stays</p>"
     '<p id="fallback-joined" style="font-size: 24px; margin: 0;">Joined \u25b2\ufe0e here</p>'
+    '<p id="fallback-tracked" style="font-size: 40px; letter-spacing: 0.05em; margin: 0;">'
+    "Tracked \u25b2 AVATAR</p>"
     f'<p id="fallback-nbh" style="font-size: 24px; margin: 0;">end{NBH}to{NBH}end</p>'
     f'<p id="fallback-hyphen" style="font-size: 24px; margin: 0;">left{HYPHEN}to{HYPHEN}right</p>'
     "</div>"
@@ -1506,6 +1508,64 @@ class TestSnapshotFallbackFaces:
             assert _written_runs(box) == [("Georgia \u25b2 stays", "Georgia")], (
                 f"{target}: the Georgia paragraph is {_written_runs(box)}"
             )
+
+    def test_each_split_piece_carries_its_own_tracking(
+        self, fallback_decks: dict[str, bytes]
+    ) -> None:
+        """D8 with X1 and A1: ``Tracked ▲ AVATAR`` at 40 px, ``letter-spacing: .05em``.
+
+        The run is cut into ``Tracked `` (DM Sans), ``▲`` (Arial) and ``
+        AVATAR`` (DM Sans), and each is tracked as a run of its own, in both
+        decks:
+
+        * the ▲ carries its CSS letter-spacing alone: its width in the export
+          is Arial's, which no probe in the page measures;
+        * each DM Sans piece carries its CSS letter-spacing plus the tracking
+          its target measures for THAT piece, from probes of its own text at
+          the browser's cut (the snapshot's width for a piece: the browser
+          drew the run whole): for PowerPoint ``powerpoint_tracking_px``, its
+          kerning over the gaps its tracking can close (``Tracked `` is
+          followed by the ▲, `` AVATAR`` ends its line); for Google
+          ``google_tracking_px``.
+
+        Each is within 1 hundredth of a point.
+        """
+        document = _fallback_document()
+        selector = "#fallback-tracked"
+        style = browser_style(document, selector)
+        assert style["letterSpacing"] == "2px" and _lacks(document, selector, "▲"), (
+            f"fixture drift: {selector} is tracked {style['letterSpacing']}, or its face has ▲"
+        )
+        css_px = 2.0
+        pieces = (("Tracked ", False), (" AVATAR", True))
+        texts = [text for text, _ in pieces]
+        widths = dict(zip(texts, cut_widths(document, style, texts)))
+        expected = {
+            "pptx": {
+                text: css_px
+                + powerpoint_tracking_px(widths[text].browser, widths[text], len(text), ends)
+                for text, ends in pieces
+            },
+            "gslides": {
+                text: css_px + google_tracking_px(widths[text].browser, widths[text], len(text))
+                for text, _ in pieces
+            },
+        }
+        for target, deck in fallback_decks.items():
+            runs = _runs(_box(slide_shapes(deck, 0), "Tracked"))
+            assert [(run.text, run.typeface) for run in runs] == [
+                ("Tracked ", "DM Sans"),
+                ("\u25b2", "Arial"),
+                (" AVATAR", "DM Sans"),
+            ], f"{target}: the tracked paragraph is {[(run.text, run.typeface) for run in runs]}"
+            wanted = {"\u25b2": css_px, **expected[target]}
+            wrong = [
+                f"{_describe_run(run)} (expected {wanted[run.text] * PT_PER_PX * HUNDREDTHS:.1f})"
+                for run in runs
+                if abs(run.spc_pt - wanted[run.text] * PT_PER_PX) * HUNDREDTHS
+                > SPC_TOLERANCE_HUNDREDTHS
+            ]
+            assert not wrong, f"{target}: these pieces are tracked wrong:\n  " + "\n  ".join(wrong)
 
     def test_a_joining_character_stays_with_the_character_before_it(
         self, fallback_decks: dict[str, bytes]

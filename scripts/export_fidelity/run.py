@@ -499,12 +499,15 @@ _HYPHEN_AS_MINUS = {0x2010: "-"}
 
 
 def _normalise_text(text: str) -> str:
-    """``text`` as the text-loss check compares it, the way text_check.cjs normalises.
+    """``text`` as the text-loss check compares it: text_check.cjs's normalisation, and a fold.
 
     Compatibility forms are folded (NFKC: a literal "¹" is "1", a ligature its
-    letters, a fullwidth form its ASCII), a hyphen is the hyphen-minus the decks
-    may write it as, then white space and default-ignorable code points are
-    removed, then the rest is lower-cased.
+    letters, a fullwidth form its ASCII), then white space and default-ignorable
+    code points are removed, then the rest is lower-cased, as text_check.cjs
+    does. Besides, U+2010 (which NFKC also makes of U+2011) is the hyphen-minus
+    the decks may write it as (emit_typography.cjs runText): this check reads
+    the written deck, where text_check.cjs reads the slide model, which keeps
+    the page's own characters and so needs no fold.
     """
     folded = unicodedata.normalize("NFKC", text).translate(_HYPHEN_AS_MINUS)
     folded = folded.translate(_DEFAULT_IGNORABLE)

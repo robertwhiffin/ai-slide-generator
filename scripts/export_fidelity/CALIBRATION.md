@@ -377,7 +377,8 @@ probes `plain-*`, a 16 px paragraph; offsets of each line after the first):
 | line-height 1.6, a 20 px run on line 2 | −3.13, −5.97, −5.97 | +0.87, +0.43, +0.43 |
 | line-height 26 px, a 20 px run on line 2 | −0.14, −1.58, −1.58 | −0.14, +0.42, +0.42 |
 
-So a deck with no script run is the same for both apps. A 28 px line opening a paragraph whose
+So a line with no script run takes its growth alike in both decks (the decks still differ in
+tracking, italics and U+2011: X1, D1 and D8 below). A 28 px line opening a paragraph whose
 spacing is tighter than single (66.7%) still sits 2.6 px high, in PowerPoint 3.6 px: that is
 the two apps' spacing between paragraphs of different sizes, which no growth changes.
 
@@ -469,8 +470,14 @@ So the deck for PowerPoint writes each run's tracking as its CSS letter-spacing 
 with no dead band, plus the run's kerning, (export cut − export cut with `font-kerning: none`)
 / gaps, where gaps is n − 1 for a run that ends its line (its last character's tracking moves
 nothing) and n for a run another follows on its line (its last character's tracking places the
-next run where the browser does; the browser kerns no pair across two runs). Both cuts are probes
-in the page (`snapshot_text_metrics.mjs`). The deck for Google Slides, which kerns, keeps A1.
+next run where the browser does; the browser kerns no pair across two runs). The two divide
+differently because one is advance and the other is ink: the optical-size delta is a difference
+of every glyph's advance at two optical sizes, the last glyph's included, so spread over all n
+characters it puts each glyph where the browser has it, with only the last glyph's ink ending its
+share wide; kerning lies between characters alone, so it is spread over the gaps it closes. A
+review A/B with n − 1 for both made fixture 01's PowerPoint score 0.64 worse. Both cuts are
+probes in the page (`snapshot_text_metrics.mjs`). The deck for Google Slides, which kerns, keeps
+A1.
 
 **Measured on both corpora** (`run.py --pin-fonts --powerpoint`; every matched line of each
 slide's PowerPoint PDF against the browser's, upright lines; px at 1280 wide, PowerPoint minus
@@ -481,13 +488,17 @@ a PDF glyph box does not):
 |---|---|---|---|---|
 | in-repo (306 lines) | before (A1, kerning untracked) | +0.56 | 0.60 | 15.99 |
 | in-repo | X1 with A1's 0.5% band kept | +0.19 | 0.27 | 4.32 |
-| in-repo | X1, no band (shipped) | +0.16 | 0.23 | 2.73 |
-| design system (391 lines) | before | +0.76 | 0.79 | 11.14 |
-| design system | X1 with the band kept | +0.16 | 0.30 | 3.32 |
-| design system | X1, no band (shipped) | +0.16 | 0.30 | 3.32 |
+| in-repo | X1, no band | +0.16 | 0.23 | 2.73 |
+| in-repo | the shipped engine (X1, D1 and D8) | +0.16 | 0.23 | 2.73 |
+| design system (392 lines) | before | +0.76 | 0.79 | 11.14 |
+| design system | X1 with the band kept | +0.15 | 0.30 | 3.32 |
+| design system | X1, no band | +0.15 | 0.30 | 3.32 |
+| design system | the shipped engine (X1, D1 and D8) | +0.16 | 0.30 | 3.34 |
 
-The band changes nothing on the design-system deck, whose DM Sans has no optical-size axis, and
-dropping it helps the in-repo deck's, so the deck for PowerPoint has none. The tracked 64 px
+The two X1 rows of each corpus are one A/B, before D8. The shipped engine also writes → in
+Arial (D8), which lengthens the design-system deck's lines that hold one. The band changes
+nothing on the design-system deck, whose DM Sans has no optical-size axis, and dropping it
+helps the in-repo deck's, so the deck for PowerPoint has none. The tracked 64 px
 event title (`letter-spacing: .18em`) went from +11.14 to −1.12 px.
 
 ## D1: italic faces

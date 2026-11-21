@@ -68,10 +68,10 @@ the JSON would reach the logs in pieces.
 
 Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
 is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
-``"gslides"`` for the Google Slides conversion. The two place a few constructs
-apart, and only those are written differently, all on lines that hold a
-superscript or subscript run (measured in both apps;
-``scripts/export_fidelity/CALIBRATION.md`` A2, A4 and A5):
+``"gslides"`` for the Google Slides conversion. The two draw a few constructs
+apart, and only those are written differently (measured in both apps;
+``scripts/export_fidelity/CALIBRATION.md``). On lines that hold a superscript
+or subscript run (A2, A4 and A5):
 
 * a script run's size. PowerPoint shrinks a script run and places its line by
   its other runs, so the run is written enlarged and PowerPoint draws it at the
@@ -88,7 +88,21 @@ superscript or subscript run (measured in both apps;
   size instead (a later paragraph's first line holding one takes the space
   before).
 
-So a deck with no script run is the same for both targets.
+And in any deck:
+
+* each run's tracking. PowerPoint for Mac kerns no DM Sans, and pptxgenjs
+  turns its kerning off with every ``spc``, so the deck for PowerPoint adds
+  the run's kerning to its tracking, with no optical-size band (X1); the deck
+  for Google Slides, which kerns, adds the optical-size delta alone (A1);
+* an italic run of a webfont the page loaded: for PowerPoint its italic
+  static's own name with italic off, since PowerPoint draws the family plus
+  italic as Bold Italic; for Google Slides the family plus italic, since
+  Google has no family named for the italic static (D1);
+* U+2011 NON-BREAKING HYPHEN: kept for PowerPoint, which draws it as the
+  face's hyphen; written as U+002D for Google Slides, which draws it from MS
+  PGothic (D8; U+2010 is U+002D in both decks).
+
+So the two decks differ wherever text is tracked, kerned or italic.
 """
 
 from __future__ import annotations
