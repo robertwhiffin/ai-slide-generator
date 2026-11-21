@@ -26,6 +26,8 @@
 //   pushShape         shape -> pushes it as a shape item, and returns the item;
 //   pushClippedShape  (shape, clip) -> pushes the part of it the clip shows, and
 //                     returns the items pushed;
+//   roundsCut         (shape, clip) -> whether the clip's rounded padding boxes
+//                     (its rounds) cut what its rect shows of the shape;
 //   pushSideLines     (box, sides, order, clip) -> pushes a line per painted side.
 // It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox,
 // resolveShadowShapes and sliceOf.
@@ -39,6 +41,7 @@ function createBorders(env) {
     boundsOf,
     pushShape,
     pushClippedShape,
+    roundsCut,
     pushSideLines,
   } = env;
   // A border that is the same on all four sides is the shape's outline. A
@@ -333,14 +336,16 @@ function createBorders(env) {
   }
 
   // A shape cut to its clip: whole when the clip cuts nothing it paints (its
-  // extent), the part shown of a plain rect, or else the part shown of its
+  // extent) and no rounded padding box of the clip cuts it, the part shown of
+  // a plain rect the clip's rect alone cuts, or else the part shown of its
   // outline (pushClippedShape). Nothing when the clip hides it. Returns the
   // items pushed.
   function pushBoxShape(shape, clip) {
     const shown = shownPart(boundsOf(shape.extent), clip);
     if (!shown) return [];
-    if (!shown.cut) return [pushShape(shape)];
-    if (shape.geometry === 'rect' && !shape.rotate && !shape.line) {
+    const rounded = roundsCut(shape, clip);
+    if (!shown.cut && !rounded) return [pushShape(shape)];
+    if (shape.geometry === 'rect' && !shape.rotate && !shape.line && !rounded) {
       // A plain rect the clip cuts is the rect it shows (no line, so no inset).
       return [pushShape({
         ...shape,

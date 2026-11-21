@@ -3,8 +3,9 @@
 // browser's own grid, spans, fills, collapsed borders and cell margins.
 // snapshot.mjs composes TABLE_SOURCE into its page IIFE and calls collectTable
 // when its walk visits a <table>. For a table it returns, the walk draws the
-// table's own background, radius and shadow as a shape under the table (its
-// border too, in the separated model, where it frames the cells from outside),
+// table's own background, radius and shadow as a shape under the table, its
+// box on whole px as the grid is and cut to any round corners its clip has
+// (its border too, in the separated model, where it frames the cells from outside),
 // pushes the table item over it, draws no box of the table's rows, row groups,
 // columns and cells (the item holds their fills and borders), gives each
 // cell's text to collectCellText, which makes it that cell's paragraphs where

@@ -13,7 +13,10 @@ narrowed by the padding box of every ``overflow`` ancestor and by
   slide's right edge stops at the edge. A cut plain rect stays a preset rect;
   a cut shape a rect cannot draw (a disc, a rounded or bordered card) is a
   custom-geometry path, the part of it the clip shows, with its border drawn
-  only where its own edge remains;
+  only where its own edge remains. An ``overflow`` box with round corners
+  clips to its rounded padding box: a shape its arcs cut (a Harvey ball's
+  fill, a card's header band) is such a path cut to the arcs, a side line ends
+  where its arcs meet it, and a picture they cut is the browser's own, cut;
 * a text token whose rect meets the clip by less than 2 px is dropped, so a
   screen-reader-only table and the lines a card cuts off are not slide text;
 * content cut to nothing, or lying wholly off the slide, produces no shape, no
@@ -46,13 +49,16 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import base64
 import math
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
+from io import BytesIO
 
 import pytest
 from lxml import etree
+from PIL import Image
 
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
@@ -62,6 +68,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_hit_id,
     browser_line_boxes,
     browser_padding_box,
+    browser_pixels,
     browser_rect,
     browser_text,
     corpus_document,
@@ -373,6 +380,74 @@ CUT_PLAIN_RECTS = {
         DECORATION_FILL,
     ),
 }
+
+# A rounded overflow: hidden box clips what it holds to its padding box with its
+# inner radii. The design system's Harvey balls (slide-comparison): a white
+# 22 px round padding box that clips (overflow: hidden), in a 2 px border, filled
+# by an absolutely positioned ::after: the bottom left quarter, the left half or
+# the whole of that padding box. Each ball's fill has a colour of its own here.
+HARVEY_RADIUS_PX = 11.0
+# A vertex within this of an arc lies on it (an arc is drawn as a polygon).
+ARC_TOLERANCE_PX = 0.1
+HARVEY_LINE = "1B3139"
+HARVEY_FILLS = {"#ball-quarter": "00A972", "#ball-half": "FF5F46", "#ball-full": "5A6F77"}
+HARVEY_BALLS = (
+    '<div class="slide">' + LEAD + "<style>"
+    ".hb { display: inline-block; width: 22px; height: 22px; border-radius: 50%; "
+    f"border: 2px solid #{HARVEY_LINE}; position: relative; vertical-align: middle; "
+    "background: #FFFFFF; overflow: hidden; margin-right: 24px; }"
+    '.hb::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; }'
+    "#ball-quarter::after { width: 50%; height: 50%; top: 50%; background: #00A972; }"
+    "#ball-half::after { width: 50%; background: #FF5F46; }"
+    "#ball-full::after { width: 100%; background: #5A6F77; }"
+    '</style><p style="font-size: 18px;">Coverage '
+    '<span class="hb" id="ball-quarter"></span><span class="hb" id="ball-half"></span>'
+    '<span class="hb" id="ball-full"></span></p></div>'
+)
+# A card that rounds its corners by clipping, holding a header band with its text,
+# a strip across its middle that no corner reaches, a 6 px rule down its left
+# edge, whose ends its corner arcs cut, a bordered tag in its bottom right
+# corner, whose fill and border the corner's arc cuts, and a bordered box that
+# spills out of its bottom left corner, which its bottom edge cuts as well.
+ROUNDED_CARD_RADIUS_PX = 24.0
+ROUNDED_CARD_FILL = "F1EFEB"
+BAND_FILL = "1B3139"
+BAND_TEXT = "Lakehouse platform"
+STRIP_FILL = "DCE0E2"
+RULE_LINE = "FF5F46"
+RULE_WIDTH_PX = 6.0
+TAG_FILL = "FFFFFF"
+TAG_LINE = "5A2D82"
+TAG_BORDER_PX = 3.0
+SPILL_TAG_FILL = "FFE3DE"
+SPILL_TAG_LINE = "00A972"
+ROUNDED_CARD = (
+    '<div class="slide">' + LEAD + '<div id="rounded-card" style="position: absolute; '
+    "left: 120px; top: 160px; width: 420px; height: 260px; border-radius: 24px; "
+    f'overflow: hidden; background: #{ROUNDED_CARD_FILL};">'
+    f'<div id="card-band" style="height: 72px; background: #{BAND_FILL}; color: #FFFFFF; '
+    f'font-size: 22px; padding: 22px 28px; box-sizing: border-box;">{BAND_TEXT}</div>'
+    f'<div id="card-strip" style="margin-top: 60px; height: 32px; background: #{STRIP_FILL};">'
+    '</div><div id="card-rule" style="position: absolute; left: 0; top: 0; bottom: 0; '
+    f'width: 0; border-left: {RULE_WIDTH_PX:g}px solid #{RULE_LINE};"></div>'
+    '<div id="card-tag" style="position: absolute; right: 0; bottom: 0; width: 80px; '
+    f"height: 40px; box-sizing: border-box; border: {TAG_BORDER_PX:g}px solid #{TAG_LINE}; "
+    f'background: #{TAG_FILL};"></div>'
+    '<div id="card-spill" style="position: absolute; left: 0; bottom: -20px; width: 80px; '
+    f"height: 50px; box-sizing: border-box; border: {TAG_BORDER_PX:g}px solid #{SPILL_TAG_LINE}; "
+    f'background: #{SPILL_TAG_FILL};"></div></div></div>'
+)
+# A picture filling a frame that rounds its corners by clipping, and a badge in
+# the same frame that no corner reaches: a raster data: <img> each.
+PHOTO_FILL = (0, 169, 114)
+FRAMED = (
+    '<div class="slide">' + LEAD + '<div id="photo-frame" style="position: absolute; '
+    "left: 640px; top: 160px; width: 320px; height: 200px; border-radius: 32px; "
+    'overflow: hidden;"><img id="photo" src="{photo}" alt="" style="display: block; '
+    'width: 320px; height: 200px;"><img id="badge" src="{badge}" alt="" '
+    'style="position: absolute; left: 120px; top: 70px; width: 80px; height: 50px;">'
+    "</div></div>"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1291,3 +1366,281 @@ class TestSnapshotClippedShapeGeometry:
             f"\n{_describe(shapes)}"
         )
         _assert_at(shape, visible, f"{case}: the cut plain rect")
+
+
+# ---------------------------------------------------------------------------
+# Rounded overflow clips
+# ---------------------------------------------------------------------------
+
+
+def _solid_png(colour: tuple[int, int, int], size: tuple[int, int]) -> str:
+    """A raster ``data:`` PNG of one colour."""
+    buffer = BytesIO()
+    Image.new("RGB", size, colour).save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _inside_rounded(point: tuple[float, float], box: dict, radius: float, tolerance: float) -> bool:
+    """Whether ``point`` lies in ``box``, corners rounded by ``radius``, within ``tolerance``."""
+    x, y = point
+    left, top = box["x"], box["y"]
+    right, bottom = left + box["w"], top + box["h"]
+    if not (
+        left - tolerance <= x <= right + tolerance and top - tolerance <= y <= bottom + tolerance
+    ):
+        return False
+    centre_x = min(max(x, left + radius), right - radius)
+    centre_y = min(max(y, top + radius), bottom - radius)
+    return math.hypot(x - centre_x, y - centre_y) <= radius + tolerance
+
+
+def _on_corner_arc(
+    points: list[tuple[float, float]], box: dict, radius: float, corner: str
+) -> list[tuple[float, float]]:
+    """The points on the arc rounding ``box``'s ``corner`` ('top-left', …), inside its quarter."""
+    vertical, horizontal = corner.split("-")
+    centre_x = box["x"] + radius if horizontal == "left" else box["x"] + box["w"] - radius
+    centre_y = box["y"] + radius if vertical == "top" else box["y"] + box["h"] - radius
+    return [
+        (x, y)
+        for x, y in points
+        if abs(math.hypot(x - centre_x, y - centre_y) - radius) <= ARC_TOLERANCE_PX
+        and (
+            x < centre_x - ARC_TOLERANCE_PX
+            if horizontal == "left"
+            else x > centre_x + ARC_TOLERANCE_PX
+        )
+        and (
+            y < centre_y - ARC_TOLERANCE_PX
+            if vertical == "top"
+            else y > centre_y + ARC_TOLERANCE_PX
+        )
+    ]
+
+
+def _colour_distance(pixel: tuple[int, int, int], fill: str) -> int:
+    expected = tuple(int(fill[index : index + 2], 16) for index in (0, 2, 4))
+    return max(abs(channel - want) for channel, want in zip(pixel, expected))
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotRoundedClip:
+    def test_harvey_ball_fills_are_cut_to_their_circles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each Harvey ball's ``::after`` fill is cut to the circle its ball clips it to.
+
+        The browser shows the quarter, the half and the full fill inside the
+        ball's 22 px round padding box, never at the square corners of their
+        own rects. So each fill is one ``a:custGeom`` path: its box the part of
+        the padding box its rect covers, within 0.5 px, every vertex inside the
+        circle and some on its arc. The balls themselves stay preset ellipses,
+        white, outlined in their border colour.
+        """
+        document = _document(HARVEY_BALLS)
+        paddings = {selector: browser_padding_box(document, selector) for selector in HARVEY_FILLS}
+        regions = {}
+        corners = []
+        for selector, box in paddings.items():
+            assert (
+                abs(box["w"] - 2 * HARVEY_RADIUS_PX) < 0.01 and abs(box["w"] - box["h"]) < 0.01
+            ), f"fixture drift: {selector}'s padding box {box} is not a 22 px circle"
+            half = box["w"] / 2
+            regions[selector] = {
+                "#ball-quarter": {"x": box["x"], "y": box["y"] + half, "w": half, "h": half},
+                "#ball-half": {"x": box["x"], "y": box["y"], "w": half, "h": box["h"]},
+                "#ball-full": dict(box),
+            }[selector]
+            corner = {
+                "#ball-quarter": (box["x"] + 1, box["y"] + box["h"] - 1),
+                "#ball-half": (box["x"] + 1, box["y"] + 1),
+                "#ball-full": (box["x"] + box["w"] - 1, box["y"] + 1),
+            }[selector]
+            corners.append((selector, corner))
+        shown = browser_pixels(document, [point for _, point in corners])
+        for (selector, point), pixel in zip(corners, shown):
+            assert _colour_distance(pixel, HARVEY_FILLS[selector]) > 40, (
+                f"fixture drift: the browser shows {selector}'s fill {pixel} at {point}, a "
+                "square corner of its rect outside the circle"
+            )
+
+        pptx = _export_one(HARVEY_BALLS, monkeypatch)
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        for selector, fill in HARVEY_FILLS.items():
+            shape = _filled(shapes, fill, f"{selector}'s fill")
+            assert shape.geometry == "custGeom", (
+                f"{selector}'s fill is a {shape.geometry}, not a path cut to its circle:\n"
+                f"{_describe(shapes)}"
+            )
+            _assert_at(shape, regions[selector], f"{selector}'s fill")
+            path = _assert_path_fills_its_frame(elements[shapes.index(shape)], selector)
+            centre_x, centre_y = _centre(paddings[selector])
+            points = _path_points(path, shape)
+            distances = [math.hypot(x - centre_x, y - centre_y) for x, y in points]
+            outside = [
+                (round(x, 2), round(y, 2))
+                for (x, y), distance in zip(points, distances)
+                if distance > HARVEY_RADIUS_PX + ARC_TOLERANCE_PX
+            ]
+            on_arc = [
+                distance
+                for distance in distances
+                if abs(distance - HARVEY_RADIUS_PX) <= ARC_TOLERANCE_PX
+            ]
+            assert not outside and len(on_arc) >= 3, (
+                f"{selector}'s fill path has {len(outside)} vertices outside its circle "
+                f"({outside[:4]}) and {len(on_arc)} on its arc, of {len(points)}"
+            )
+        balls = [
+            shape
+            for shape in shapes
+            if shape.geometry == "ellipse" and shape.line == HARVEY_LINE and shape.fill == "FFFFFF"
+        ]
+        assert len(balls) == len(HARVEY_FILLS), (
+            f"expected the {len(HARVEY_FILLS)} balls as white outlined ellipses:\n"
+            f"{_describe(shapes)}"
+        )
+
+    def test_a_rounded_cards_band_and_rule_are_cut_to_its_corners(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A card that rounds its corners by clipping: its header band and edge rule round with it.
+
+        * The band's fill is one ``a:custGeom`` path at the band's rect within
+          0.5 px, every vertex inside the card's rounded padding box, its top
+          corners on the card's 24 px arcs; the band's words stay one native
+          text item.
+        * The rule down the card's left edge (a 6 px left border) is one line
+          whose ends lie where its centre line meets the card's arcs, within
+          0.5 px.
+        * The tag in the card's bottom right corner is two paths: its fill,
+          and its border's centre line, open where the arc cuts it, every
+          vertex of each inside the card's rounded box. So is the box spilling
+          out of its bottom left corner, which the card's bottom edge cuts too.
+        * The strip across the card's middle, which no corner reaches, stays a
+          preset rect at its rect; the card itself stays a preset roundRect.
+        """
+        document = _document(ROUNDED_CARD)
+        card = browser_padding_box(document, "#rounded-card")
+        band = browser_rect(document, "#card-band")
+        strip = browser_rect(document, "#card-strip")
+        radius = ROUNDED_CARD_RADIUS_PX
+        assert abs(band["y"] - card["y"]) < 0.01 and abs(band["w"] - card["w"]) < 0.01, (
+            f"fixture drift: the band {band} does not run along the card's top {card}"
+        )
+        assert strip["y"] > card["y"] + radius and strip["y"] + strip["h"] < (
+            card["y"] + card["h"] - radius
+        ), f"fixture drift: the strip {strip} reaches a corner of the card {card}"
+        (corner_pixel,) = browser_pixels(document, [(card["x"] + card["w"] - 2, card["y"] + 2)])
+        assert _colour_distance(corner_pixel, BAND_FILL) > 40, (
+            f"fixture drift: the browser paints the band {corner_pixel} at the card's square corner"
+        )
+
+        pptx = _export_one(ROUNDED_CARD, monkeypatch)
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        shape = _filled(shapes, BAND_FILL, "the band")
+        assert shape.geometry == "custGeom", (
+            f"the band is a {shape.geometry}, not a path cut to the card's corners:\n"
+            f"{_describe(shapes)}"
+        )
+        _assert_at(shape, band, "the band")
+        points = _path_points(
+            _assert_path_fills_its_frame(elements[shapes.index(shape)], "band"), shape
+        )
+        outside = [
+            (round(x, 2), round(y, 2))
+            for x, y in points
+            if not _inside_rounded((x, y), card, radius, ARC_TOLERANCE_PX)
+        ]
+        arcs = {
+            corner: _on_corner_arc(points, card, radius, corner)
+            for corner in ("top-left", "top-right")
+        }
+        assert not outside and all(len(found) >= 3 for found in arcs.values()), (
+            f"the band's path has vertices outside the card's rounded box {outside[:4]}, and "
+            f"{ {corner: len(found) for corner, found in arcs.items()} } on its top arcs"
+        )
+        texts = [
+            item for item in shapes if item.kind == "text" and _normalised(item.text) == BAND_TEXT
+        ]
+        assert len(texts) == 1, f"the band's words are not one text item:\n{_describe(shapes)}"
+
+        rules = [item for item in shapes if item.kind == "line" and item.line == RULE_LINE]
+        assert len(rules) == 1, f"expected the rule as one line:\n{_describe(shapes)}"
+        offset = radius - RULE_WIDTH_PX / 2
+        cut = radius - math.sqrt(radius**2 - offset**2)
+        top, bottom = rules[0].y, rules[0].y + rules[0].h
+        assert (
+            abs(top - (card["y"] + cut)) <= RECT_TOLERANCE_PX
+            and abs(bottom - (card["y"] + card["h"] - cut)) <= RECT_TOLERANCE_PX
+        ), (
+            f"the rule runs {top:.2f}..{bottom:.2f}; its centre line meets the card's arcs at "
+            f"{card['y'] + cut:.2f} and {card['y'] + card['h'] - cut:.2f}"
+        )
+
+        strip_shape = _filled(shapes, STRIP_FILL, "the strip")
+        assert strip_shape.geometry == "rect", (
+            f"the strip no corner reaches is a {strip_shape.geometry}:\n{_describe(shapes)}"
+        )
+        _assert_at(strip_shape, strip, "the strip")
+        assert _filled(shapes, ROUNDED_CARD_FILL, "the card").geometry == "roundRect"
+
+        for tag, fill, line in (
+            ("the tag", TAG_FILL, TAG_LINE),
+            ("the spilling box", SPILL_TAG_FILL, SPILL_TAG_LINE),
+        ):
+            outlines = [item for item in shapes if item.line == line]
+            assert len(outlines) == 1, f"expected {tag}'s border as one path:\n{_describe(shapes)}"
+            for what, item in (("fill", _filled(shapes, fill, tag)), ("border", outlines[0])):
+                element = elements[shapes.index(item)]
+                assert item.geometry == "custGeom", f"{tag}'s {what} is a {item.geometry}"
+                stray = [
+                    (round(x, 2), round(y, 2))
+                    for x, y in _path_points(_assert_path_fills_its_frame(element, what), item)
+                    if not _inside_rounded((x, y), card, radius, ARC_TOLERANCE_PX)
+                ]
+                assert not stray, f"{tag}'s {what} leaves the card's rounded box at {stray[:4]}"
+            border_path = _custom_path(elements[shapes.index(outlines[0])], f"{tag}'s border")
+            assert border_path.find("a:close", NAMESPACES) is None, (
+                f"{tag}'s border path is closed, so it runs along the arc's cut"
+            )
+
+    def test_a_picture_a_rounded_corner_cuts_is_its_picture_cut_to_the_corner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raster picture filling a frame with 32 px clipped corners is the picture shown.
+
+        Embedded as it is, the source would show its square corners, so it is
+        captured: one picture at the frame's padding box, its PNG transparent at
+        a corner and the source's green at its centre. The badge in the same
+        frame, which no corner reaches, is still the source embedded as it is.
+        """
+        photo = _solid_png(PHOTO_FILL, (64, 40))
+        badge = _solid_png((255, 95, 70), (32, 20))
+        body = FRAMED.format(photo=photo, badge=badge)
+        document = _document(body)
+        frame = browser_padding_box(document, "#photo-frame")
+        badge_rect = browser_rect(document, "#badge")
+
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+        pictures = [shape for shape in shapes if shape.kind == "picture"]
+        assert len(pictures) == 2, f"expected the photo and the badge:\n{_describe(shapes)}"
+        photo_shape = max(pictures, key=lambda shape: shape.w)
+        _assert_at(photo_shape, frame, "the photo")
+        image = Image.open(BytesIO(photo_shape.image)).convert("RGBA")
+        corner = image.getpixel((1, 1))
+        centre = image.getpixel((image.width // 2, image.height // 2))
+        assert corner[3] <= 10, (
+            f"the photo's PNG is not cut at its corner: pixel (1, 1) is {corner}"
+        )
+        assert centre[3] >= 250 and max(abs(a - b) for a, b in zip(centre, PHOTO_FILL)) <= 6, (
+            f"the photo's PNG shows {centre} at its centre, not the source's {PHOTO_FILL}"
+        )
+        badge_shape = next(shape for shape in pictures if shape is not photo_shape)
+        _assert_at(badge_shape, badge_rect, "the badge")
+        assert badge_shape.image == base64.b64decode(badge.split(",", 1)[1]), (
+            "the badge no corner reaches is not its source embedded as it is"
+        )

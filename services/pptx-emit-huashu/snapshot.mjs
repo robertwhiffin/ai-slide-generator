@@ -773,8 +773,12 @@ async function snapshotPage(config, pseudoData) {
   // radii (CSS Backgrounds 3), so a clip may also carry `rounds`, each such
   // padding box in effect, {left, top, right, bottom, radii: [{h, v}] top left,
   // top right, bottom right, bottom left}; its bounds are the rect around them
-  // all, which is what shownPart reads. A native table's cells read the rounds
-  // (pushTable).
+  // all, which is what shownPart reads. What the rounds cut is cut to them as
+  // well: a shape's fill and outline (pushClippedShape, through
+  // snapshot_borders.mjs pushBoxShape), a side line (pushSideLines), a native
+  // table's corner cells (pushTable) and its own background, and a picture,
+  // which is then the browser's own, cut (emitReplaced). Text is never cut: a
+  // text box cannot clip its glyphs, and a slide keeps it clear of its corners.
   const SLIDE_CLIP = { left: 0, top: 0, right: SLIDE_WIDTH, bottom: SLIDE_HEIGHT };
   const NO_CLIP = { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
   const VIEWPORT_CLIPS = { tree: NO_CLIP, flow: SLIDE_CLIP, absolute: SLIDE_CLIP, fixed: SLIDE_CLIP };
@@ -1072,6 +1076,7 @@ async function snapshotPage(config, pseudoData) {
     boundsOf,
     pushShape,
     pushClippedShape,
+    roundsCut,
     pushSideLines,
   });
 
@@ -1079,7 +1084,8 @@ async function snapshotPage(config, pseudoData) {
   // Each painted side of a border that differs between sides is one line item
   // along its centre line: half its width in from its edge, over the box's
   // whole side, so neighbouring sides overlap at their corners. It is turned
-  // with the box, cut to the clip, and painted over the box's fill (the same
+  // with the box, cut to the clip (its rect, then any rounded padding box of it
+  // the line leaves), and painted over the box's fill (the same
   // order, emitted after it). A side with no inner edge left (a box that is
   // all border along it, as in the CSS triangle of an arrowhead) cannot be a
   // line along it: it is the region CSS paints for it, the triangle between
@@ -1129,13 +1135,15 @@ async function snapshotPage(config, pseudoData) {
         // The diagonals from both corners meet at `reach` along the side.
         const reach = frame.length / corners;
         const apex = offset(offset(frame.from, frame.along, reach * frame.before), frame.inward, reach * side.widthPx);
-        const region = clipPolygon([turned(frame.from), turned(apex), turned(frame.to)], clip);
+        let region = clipPolygon([turned(frame.from), turned(apex), turned(frame.to)], clip);
+        const rounds = cuttingRounds(clip, region, 0);
+        for (let round = 0; round < rounds.length && region.length; round++) region = clipConvex(region, rounds[round]);
         if (region.length >= 3) pushPath(order, [region], true, { color: side.color, alpha: side.alpha }, null, null);
         continue;
       }
       const start = turned(offset(frame.from, frame.inward, side.widthPx / 2));
       const end = turned(offset(frame.to, frame.inward, side.widthPx / 2));
-      const shown = clipSegment(start, end, lineClip);
+      const shown = roundedSegment(clipSegment(start, end, lineClip), clip);
       if (!shown) continue;
       if ((shown.cutsStart || shown.cutsEnd) &&
           Math.hypot(shown.to.x - shown.from.x, shown.to.y - shown.from.y) < MINIMUM_VISIBLE_PX) continue;
@@ -1144,6 +1152,21 @@ async function snapshotPage(config, pseudoData) {
         (Math.abs(shown.from.x - shown.to.x) <= SAME_POINT_PX && shown.from.y <= shown.to.y);
       pushLine(order, forward ? shown.from : shown.to, forward ? shown.to : shown.from, side);
     }
+  }
+
+  // What a clip's rounded padding boxes that cut it show of a segment the
+  // clip's rect shows ({from, to, cutsStart, cutsEnd}, or null), each widened
+  // by the rounding a clip edge may differ by.
+  function roundedSegment(segment, clip) {
+    if (!segment) return null;
+    let shown = segment;
+    const rounds = cuttingRounds(clip, [segment.from, segment.to], CUT_EPSILON_PX);
+    for (let index = 0; index < rounds.length; index++) {
+      const cut = clipSegmentConvex(shown.from, shown.to, rounds[index]);
+      if (!cut) return null;
+      shown = { from: cut.from, to: cut.to, cutsStart: shown.cutsStart || cut.cutsStart, cutsEnd: shown.cutsEnd || cut.cutsEnd };
+    }
+    return shown;
   }
 
   function pushLine(order, from, to, side) {
@@ -1186,10 +1209,13 @@ async function snapshotPage(config, pseudoData) {
 
   // ─── clipped shapes ──────────────────────────────────────────────────
   // A shape a clip cuts that is not a plain rect (round corners, an ellipse, a
-  // rotation or an outline) is drawn as the part of it the clip shows: its
-  // outline as a polygon (outlineOf), cut to the clip. The cut polygon is one
-  // closed path holding the fill and the shadow. The line runs only along what
-  // is left of the shape's own outline, never along the cut, as the browser
+  // rotation or an outline), and any shape a rounded padding box of the clip
+  // cuts (its rounds: a Harvey ball's fill in its circle, a card's header band
+  // under its round corners), is drawn as the part of it the clip shows: its
+  // outline as a polygon (outlineOf), cut to the clip's rect and then to each
+  // rounded box that cuts it (roundedPolygon). The cut polygon is one closed
+  // path holding the fill and the shadow. The line runs only along what is
+  // left of the shape's own outline, never along the cut, as the browser
   // draws a clipped border: a second path, open where the clip cuts it, with
   // no fill, painted over the first.
   // Arcs become polygons that stray from them by at most ARC_TOLERANCE_PX.
@@ -1326,30 +1352,80 @@ async function snapshotPage(config, pseudoData) {
     return points;
   }
 
-  // Whether a rounded padding box holds the rect `bounds` whole.
-  function roundHolds(round, bounds) {
-    const corners = [
-      { x: bounds.left, y: bounds.top },
-      { x: bounds.right, y: bounds.top },
-      { x: bounds.right, y: bounds.bottom },
-      { x: bounds.left, y: bounds.bottom },
-    ];
-    for (let index = 0; index < corners.length; index++) {
-      const point = corners[index];
-      if (point.x < round.left - CUT_EPSILON_PX || point.x > round.right + CUT_EPSILON_PX ||
-          point.y < round.top - CUT_EPSILON_PX || point.y > round.bottom + CUT_EPSILON_PX) return false;
+  // Whether a rounded padding box holds the point {x, y}, to within layout
+  // rounding: inside its rect, and inside the arc of any corner it lies beyond
+  // the centre of, on both axes.
+  function roundHoldsPoint(round, point) {
+    if (point.x < round.left - CUT_EPSILON_PX || point.x > round.right + CUT_EPSILON_PX ||
+        point.y < round.top - CUT_EPSILON_PX || point.y > round.bottom + CUT_EPSILON_PX) return false;
+    for (let index = 0; index < round.radii.length; index++) {
       const radii = round.radii[index];
       if (!(radii.h > 0 && radii.v > 0)) continue;
-      const centreX = index === 0 || index === 3 ? round.left + radii.h : round.right - radii.h;
-      const centreY = index < 2 ? round.top + radii.v : round.bottom - radii.v;
-      const outwardX = index === 0 || index === 3 ? point.x < centreX : point.x > centreX;
-      const outwardY = index < 2 ? point.y < centreY : point.y > centreY;
+      const left = index === 0 || index === 3;
+      const top = index < 2;
+      const centreX = left ? round.left + radii.h : round.right - radii.h;
+      const centreY = top ? round.top + radii.v : round.bottom - radii.v;
+      const outwardX = left ? point.x < centreX : point.x > centreX;
+      const outwardY = top ? point.y < centreY : point.y > centreY;
       if (!outwardX || !outwardY) continue;
       const dx = (point.x - centreX) / radii.h;
       const dy = (point.y - centreY) / radii.v;
       if (dx * dx + dy * dy > 1 + CUT_EPSILON_PX) return false;
     }
     return true;
+  }
+
+  // Whether a rounded padding box holds the rect `bounds` whole: its corners
+  // do, the box being convex.
+  function roundHolds(round, bounds) {
+    return roundHoldsPoint(round, { x: bounds.left, y: bounds.top }) &&
+      roundHoldsPoint(round, { x: bounds.right, y: bounds.top }) &&
+      roundHoldsPoint(round, { x: bounds.right, y: bounds.bottom }) &&
+      roundHoldsPoint(round, { x: bounds.left, y: bounds.bottom });
+  }
+
+  // The rounded padding boxes of a clip (its rounds) that do not hold every
+  // one of `points`, each as its polygon (roundedPolygon): what cuts what
+  // those points bound, the clip's rect aside. `grow` widens each box by that
+  // much on every side and its radii with it, so an outline that only touches
+  // it is not cut.
+  function cuttingRounds(clip, points, grow) {
+    const polygons = [];
+    const rounds = clip.rounds || [];
+    for (let index = 0; index < rounds.length && index < WALK_STEP_LIMIT; index++) {
+      const round = grow ? grownRound(rounds[index], grow) : rounds[index];
+      let held = true;
+      for (let point = 0; point < points.length && held; point++) held = roundHoldsPoint(round, points[point]);
+      if (!held) polygons.push(roundedPolygon(round));
+    }
+    return polygons;
+  }
+
+  function grownRound(round, grow) {
+    const radii = [];
+    for (let index = 0; index < round.radii.length; index++) {
+      const corner = round.radii[index];
+      radii.push(corner.h > 0 && corner.v > 0 ? { h: corner.h + grow, v: corner.v + grow } : corner);
+    }
+    return { left: round.left - grow, top: round.top - grow, right: round.right + grow, bottom: round.bottom + grow, radii };
+  }
+
+  // Whether the rounded padding boxes of a clip cut what its rect shows of a
+  // shape: its outline, cut to that rect (snapshot_borders.mjs pushBoxShape).
+  function roundsCut(shape, clip) {
+    if (!clip.rounds || !clip.rounds.length) return false;
+    return cuttingRounds(clip, clipPolygon(outlineOf(shape), clip), 0).length > 0;
+  }
+
+  // Whether they cut the rect `bounds`.
+  function roundsCutBounds(bounds, clip) {
+    if (!clip.rounds || !clip.rounds.length) return false;
+    return cuttingRounds(clip, [
+      { x: bounds.left, y: bounds.top },
+      { x: bounds.right, y: bounds.top },
+      { x: bounds.right, y: bounds.bottom },
+      { x: bounds.left, y: bounds.bottom },
+    ], 0).length > 0;
   }
 
   // The convex polygon `points` cut to the convex polygon `clipper`, one of
@@ -1418,17 +1494,48 @@ async function snapshotPage(config, pseudoData) {
     return { from: enter > 0 ? point(enter) : from, to: leave < 1 ? point(leave) : to, cutsStart: enter > 0, cutsEnd: leave < 1 };
   }
 
-  // What the clip shows of the closed outline `points`, as polylines in order:
+  // What the convex polygon `polygon` shows of the segment from -> to
+  // (Cyrus-Beck): {from, to, cutsStart, cutsEnd}, or null for none of it, as
+  // clipSegment gives it. The polygon may run either way round.
+  function clipSegmentConvex(from, to, polygon) {
+    let area = 0;
+    for (let index = 0; index < polygon.length; index++) {
+      const a = polygon[index];
+      const b = polygon[(index + 1) % polygon.length];
+      area += a.x * b.y - b.x * a.y;
+    }
+    const sign = area < 0 ? -1 : 1;
+    let enter = 0;
+    let leave = 1;
+    for (let edge = 0; edge < polygon.length; edge++) {
+      const a = polygon[edge];
+      const b = polygon[(edge + 1) % polygon.length];
+      const side = (point) => sign * ((b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x));
+      const start = side(from);
+      const end = side(to);
+      if (start < 0 && end < 0) return null;
+      if (start >= 0 && end >= 0) continue;
+      const at = start / (start - end);
+      if (start < 0) enter = Math.max(enter, at);
+      else leave = Math.min(leave, at);
+    }
+    if (!(leave > enter)) return null;
+    const point = (at) => ({ x: from.x + (to.x - from.x) * at, y: from.y + (to.y - from.y) * at });
+    return { from: enter > 0 ? point(enter) : from, to: leave < 1 ? point(leave) : to, cutsStart: enter > 0, cutsEnd: leave < 1 };
+  }
+
+  // What `show` (a segment clip: clipSegment or clipSegmentConvex over its
+  // clip) shows of the closed outline `points`, as polylines in order:
   // {pieces, closed}. `closed` when it cuts none of it: then the one piece is
   // the outline itself. Otherwise each piece is open, ending where it is cut.
-  function clipOutline(points, clip) {
+  function cutLoop(points, show) {
     const pieces = [];
     let piece = null;
     let cut = false;
     let leavesFirstUncut = false;
     let reachesFirstUncut = false;
     for (let index = 0; index < points.length; index++) {
-      const segment = clipSegment(points[index], points[(index + 1) % points.length], clip);
+      const segment = show(points[index], points[(index + 1) % points.length]);
       if (!segment || segment.cutsStart) {
         piece = null;
         cut = true;
@@ -1456,23 +1563,63 @@ async function snapshotPage(config, pseudoData) {
     return { pieces, closed: false };
   }
 
-  // Returns the items pushed.
+  // What the clip shows of the closed outline `points` (cutLoop).
+  function clipOutline(points, clip) {
+    return cutLoop(points, (from, to) => clipSegment(from, to, clip));
+  }
+
+  // What `show` shows of an outline's pieces ({pieces, closed}, as cutLoop
+  // gives them): a closed outline is cut as a loop, each open piece where it
+  // leaves the clip, in order.
+  function cutPieces(visible, show) {
+    if (visible.closed) return cutLoop(visible.pieces[0], show);
+    const pieces = [];
+    for (let index = 0; index < visible.pieces.length && index < COLLECTION_ITEM_LIMIT; index++) {
+      const points = visible.pieces[index];
+      let piece = null;
+      for (let point = 0; point + 1 < points.length; point++) {
+        const segment = show(points[point], points[point + 1]);
+        if (!segment || segment.cutsStart) piece = null;
+        if (!segment) continue;
+        if (!piece) {
+          piece = [segment.from];
+          pieces.push(piece);
+        }
+        piece.push(segment.to);
+        if (segment.cutsEnd) piece = null;
+      }
+    }
+    return { pieces, closed: false };
+  }
+
+  // The shape cut to the clip: its fill and shadow a closed path of what the
+  // clip's rect and then each rounded padding box that cuts it show of its
+  // outline, its line the pieces of its outline they show. Returns the items
+  // pushed.
   function pushClippedShape(shape, clip) {
     const pushed = [];
     const outline = outlineOf(shape);
+    const shown = clipPolygon(outline, clip);
     if (shape.fill || shape.shadow) {
-      const region = clipPolygon(outline, clip);
+      let region = shown;
+      const rounds = cuttingRounds(clip, shown, 0);
+      for (let index = 0; index < rounds.length && region.length; index++) region = clipConvex(region, rounds[index]);
       if (region.length >= 3) pushed.push(pushPath(shape.order, [region], true, shape.fill, null, shape.shadow));
     }
     if (shape.line) {
       // Widened by the rounding a clip edge may differ by, so an outline that
       // only touches the clip is not cut into pieces.
-      const visible = clipOutline(outline, {
+      let visible = clipOutline(outline, {
         left: clip.left - CUT_EPSILON_PX,
         top: clip.top - CUT_EPSILON_PX,
         right: clip.right + CUT_EPSILON_PX,
         bottom: clip.bottom + CUT_EPSILON_PX,
       });
+      const rounds = cuttingRounds(clip, shown, CUT_EPSILON_PX);
+      for (let index = 0; index < rounds.length && visible.pieces.length; index++) {
+        const polygon = rounds[index];
+        visible = cutPieces(visible, (from, to) => clipSegmentConvex(from, to, polygon));
+      }
       if (visible.pieces.length) pushed.push(pushPath(shape.order, visible.pieces, visible.closed, null, shape.line, null));
     }
     return pushed;
@@ -1855,7 +2002,8 @@ async function snapshotPage(config, pseudoData) {
 
   // A replaced element's box and picture. An image embedded as it is sits on
   // its native box (emitBox), at its cumulative opacity; a picture its clip
-  // hides is not on the slide, and one the clip cuts is captured cut. A
+  // hides is not on the slide, and one the clip cuts (its rect, or a rounded
+  // padding box of it) is captured cut, as the browser cuts it. A
   // capture holds the element's own box as well, so that box is no shape.
   function emitReplaced(element, name, s, box, opacity, place, seq, clip) {
     const order = place.paint.concat([4, 0, seq, 0]);
@@ -1864,7 +2012,7 @@ async function snapshotPage(config, pseudoData) {
       const area = contentBox(s, box);
       const embedded = area ? embeddedImage(element, s, area) : null;
       const shown = embedded && shownPart(boundsOf({ ...embedded.area, rotate: box.rotate }), clip);
-      if (embedded && !(shown && shown.cut)) {
+      if (embedded && !(shown && (shown.cut || roundsCutBounds(shown, clip)))) {
         emitBox(s, box, opacity, place.box, isSlideRoot, clip);
         if (shown) pushImage(order, embedded.area, embedded.src, opacity, box.rotate);
         return;
@@ -2166,9 +2314,15 @@ async function snapshotPage(config, pseudoData) {
   // corner of the clip cuts (its rounds, overflowClipOf): an a:tc cannot be
   // clipped, so such a cell is unfilled in the table and its fill is a shape
   // under the table, the cell's grid rect cut to each rounded padding box.
+  // The grid lies on whole px (snapshot_table.mjs snappedLines), and so does
+  // each rounded box here, as Chrome paints a clip: a grid line snapped past a
+  // box's edge by a part of a px still lies on it, and a corner cell's shape
+  // meets its neighbours' fills on whole px.
   function pushTable(layout, order, clip) {
     const item = layout.item;
-    const rounds = clip.rounds || [];
+    const rounds = [];
+    const given = clip.rounds || [];
+    for (let index = 0; index < given.length && index < WALK_STEP_LIMIT; index++) rounds.push(snappedRound(given[index]));
     if (rounds.length) {
       const columns = [item.x];
       const rows = [item.y];
@@ -2195,6 +2349,20 @@ async function snapshotPage(config, pseudoData) {
     }
     items.push({ ...item, id: nextItemId++, order });
     stats.tables++;
+  }
+
+  // A rounded padding box with its edges on the whole px nearest them, its radii kept.
+  function snappedRound(round) {
+    return { left: Math.round(round.left), top: Math.round(round.top), right: Math.round(round.right), bottom: Math.round(round.bottom), radii: round.radii };
+  }
+
+  // A native table's own box on whole px, as its grid is: each edge where
+  // Chrome paints it, the whole px nearest it, so the background under its
+  // cells meets their grid and shows no sliver past it.
+  function snappedBox(box) {
+    const left = Math.round(box.x);
+    const top = Math.round(box.y);
+    return { ...box, x: left, y: top, w: Math.round(box.x + box.w) - left, h: Math.round(box.y + box.h) - top };
   }
 
   // The walk is about to visit an element at `depth`, so every open subtree at
@@ -2311,7 +2479,8 @@ async function snapshotPage(config, pseudoData) {
         picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box,
           Boolean(table && table.collapse));
       } else if (box) {
-        emitBox(s, box, opacity, place.box, element === slideRoot, clips.box, null, Boolean(table && table.collapse));
+        emitBox(s, table ? snappedBox(box) : box, opacity, place.box, element === slideRoot, clips.box, null,
+          Boolean(table && table.collapse));
       }
       // Over the table's own box, under everything its cells hold.
       if (table) pushTable(table, place.box, clips.box);

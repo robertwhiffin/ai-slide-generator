@@ -312,10 +312,12 @@ TABLES_CSS = (
 .doubled tr.upper td { border-bottom: 2px solid #1B3139; }
 #alike tr.lower td { border-top: 2px solid #1B3139; }
 #unlike tr.lower td { border-top: 2px solid #FF5F46; }
-.snap { position: absolute; border-collapse: collapse; font-size: 17.3px; }
+.snap { position: absolute; border-collapse: collapse; font-size: 17.3px; background: #F7F5F2; }
 .snap th { background: #FF5F46; color: #FFFFFF; padding: 9.3px 13.4px; text-align: left; }
 .snap td { padding: 7.7px 13.4px; border-bottom: 1px solid #DCE0E2; }
 .snap tr.total td { background: #1B3139; color: #FFFFFF; border-bottom: 0; }
+.ground-table { border-collapse: collapse; width: 100%; font-size: 16px; background: #F3F3F3; }
+.ground-table td { padding: 13px 18px; }
 """
 )
 
@@ -739,12 +741,29 @@ ROUNDED_CORNERS = {
     (2, 0): "bottom-left",
     (2, 2): "bottom-right",
 }
+# The same wrapper laid out between pixels: its padding box, and so the table's
+# first grid line, start 0.4 px below a whole px, which the grid snaps up to.
+OFFSET_BODY = ROUNDED_BODY.replace("top: 160px;", "top: 160.4px;").replace(
+    'id="rounded-wrapper"', 'id="offset-wrapper"'
+)
 # The same table in a wrapper whose padding keeps every cell clear of its corners.
 CLEAR_BODY = ROUNDED_BODY.replace(
     "overflow: hidden; ", "overflow: hidden; padding: 12px; background: #FFFFFF; "
 ).replace('id="rounded-wrapper"', 'id="clear-wrapper"')
 # A vertex within this of the corner arc lies on it (the arc is drawn as a polygon).
 ARC_TOLERANCE_PX = 0.1
+# A table whose own background (F3F3F3, under unfilled cells) fills a wrapper
+# that rounds its 12 px corners by clipping: the browser shows that ground cut
+# to the wrapper's corners.
+GROUND_WRAPPER = "#ground-wrapper"
+GROUND_RADIUS_PX = 12.0
+GROUND_FILL = "F3F3F3"
+GROUND_BODY = (
+    '<div class="slide"><div id="ground-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 12px; overflow: hidden;">'
+    '<table class="ground-table"><tbody><tr><td>UC 1</td><td>Batch load</td><td>$184</td></tr>'
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
 
 # A filled header and total row on a table the browser lays out at fractional
 # px on both axes: its offset, its width, its font size and its padding all
@@ -760,6 +779,8 @@ SNAP_BODY = """<div class="slide">
   </table>
 </div>"""
 SNAP_TABLE = "#snap"
+# The snapped table's own background, under its unfilled body cells.
+SNAP_GROUND = "F7F5F2"
 # A grid line, a margin and a content edge agree within this (EMU rounding is 1/9525 px).
 WHOLE_PX_TOLERANCE = 1e-6
 CONTENT_TOLERANCE_PX = 0.05
@@ -778,6 +799,7 @@ INLINE_BODIES = {
     "origin": ORIGIN_BODY,
     "clip": CLIP_BODY,
     "rounded": ROUNDED_BODY,
+    "offset": OFFSET_BODY,
     "clear": CLEAR_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
@@ -785,6 +807,7 @@ INLINE_BODIES = {
     "loose": LOOSE_BODY,
     "captured": CAPTURED_BODY,
     "snap": SNAP_BODY,
+    "ground": GROUND_BODY,
 }
 
 # A two-cell table added to the hostile-realm fixtures, after the prose.
@@ -3255,6 +3278,106 @@ class TestRoundedWrapper:
             f"a custom shape was drawn for a cell no corner cuts:\n{_describe(shapes)}"
         )
 
+    def test_a_wrapper_between_pixels_still_cuts_only_its_corner_cells(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The rounded wrapper 0.4 px off a whole px: still only its four corner cells are cut.
+
+        The table's grid lies on whole px, and the wrapper's clip is drawn where
+        Chrome paints it, on whole px too, so the grid's first line, snapped
+        0.4 px above the wrapper's padding box, still lies on the clip. Every
+        cell but the four corner ones keeps its own fill on its ``a:tc``, and
+        each corner cell's custom shape stands on the cell's snapped grid
+        rect, its edges on whole px.
+        """
+        document = _inline_document("offset")
+        (table,) = browser_tables(document, "table")
+        wrapper = browser_rect(document, "#offset-wrapper")
+        assert abs(wrapper["y"] - round(wrapper["y"])) > 0.3, (
+            f"fixture drift: the wrapper {wrapper} lies on a whole px"
+        )
+        shapes = slide_shapes(inline_export("offset"))
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the offset table")
+        wrong = []
+        for row, fills in enumerate(ROUNDED_FILLS):
+            for col, fill in enumerate(fills):
+                corner = ROUNDED_CORNERS.get((row, col))
+                cell = frame.table.rows[row][col]
+                expected = None if corner else fill
+                if cell.fill != expected:
+                    wrong.append(f"slot ({row}, {col}): a:tc fill {cell.fill}, expected {expected}")
+                if not corner:
+                    continue
+                rect = table_cell_rect(frame, row, col)
+                under = [
+                    shape
+                    for shape in shapes[:frame_position]
+                    if shape.geometry == "custGeom"
+                    and shape.fill == fill
+                    and _same_rect(_box(shape), rect, WHOLE_PX_TOLERANCE + 1e-3)
+                ]
+                if len(under) != 1:
+                    wrong.append(f"slot ({row}, {col}): {len(under)} {fill} shapes at {rect}")
+        assert not wrong, "the offset wrapper cuts other cells than its corners:\n" + "\n".join(
+            [*wrong, _describe(shapes)]
+        )
+
+    def test_the_tables_own_ground_is_cut_to_the_wrappers_corners(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A table's own background in a rounded wrapper rounds with the wrapper, as its cells do.
+
+        The table paints F3F3F3 under unfilled cells, which the wrapper clips to
+        its 12 px rounded padding box. Under the frame, that ground is one
+        ``a:custGeom`` path at the table's rect within 0.5 px, every vertex
+        inside the wrapper's rounded box and vertices on each of its four corner
+        arcs; the table stays one native frame with unfilled cells.
+        """
+        document = _inline_document("ground")
+        (table,) = browser_tables(document, "table")
+        wrapper = browser_rect(document, GROUND_WRAPPER)
+        shapes = slide_shapes(inline_export("ground"))
+        elements = slide_shape_elements(inline_export("ground"))
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the grounded table")
+        assert all(cell.fill is None for _, _, cell in _origin_cells(frame)), (
+            f"a cell of the grounded table is filled:\n{_describe(shapes)}"
+        )
+        grounds = [
+            (position, shape) for position, shape in enumerate(shapes) if shape.fill == GROUND_FILL
+        ]
+        assert len(grounds) == 1, f"expected one {GROUND_FILL} ground:\n{_describe(shapes)}"
+        position, ground = grounds[0]
+        assert ground.geometry == "custGeom" and position < frame_position, (
+            f"the table's ground is a {ground.geometry} at spTree {position}, not a path cut to "
+            f"the wrapper's corners under the frame ({frame_position}):\n{_describe(shapes)}"
+        )
+        assert _same_rect(_box(ground), table.rect, INSIDE_TOLERANCE_PX), (
+            f"the table's ground is at {_rect(ground)}, the table at {table.rect}"
+        )
+        points = _custom_geometry_points(elements[position], ground)
+        outside = [
+            point
+            for point in points
+            if not _inside_rounded(point, wrapper, GROUND_RADIUS_PX, ARC_TOLERANCE_PX)
+        ]
+        arcs = {}
+        for corner in ("top-left", "top-right", "bottom-left", "bottom-right"):
+            corner_x, corner_y = _corner_of(wrapper, corner)
+            centre_x = corner_x + (GROUND_RADIUS_PX if "left" in corner else -GROUND_RADIUS_PX)
+            centre_y = corner_y + (GROUND_RADIUS_PX if "top" in corner else -GROUND_RADIUS_PX)
+            arcs[corner] = [
+                point
+                for point in points
+                if abs(math.hypot(point[0] - centre_x, point[1] - centre_y) - GROUND_RADIUS_PX)
+                <= ARC_TOLERANCE_PX
+                and abs(point[0] - centre_x) > ARC_TOLERANCE_PX
+                and abs(point[1] - centre_y) > ARC_TOLERANCE_PX
+            ]
+        assert not outside and all(arcs.values()), (
+            f"the table's ground has vertices outside the wrapper's rounded box {outside[:4]}; "
+            f"on its arcs: { {corner: len(found) for corner, found in arcs.items()} }"
+        )
+
 
 # ---------------------------------------------------------------------------
 # The grid on whole pixels
@@ -3386,6 +3509,32 @@ class TestWholePixelGrid:
                         f"{margin:.3f}); the browser's at {browser:.3f}"
                     )
         assert not problems, "the cells' text moved with the grid:\n  " + "\n  ".join(problems)
+
+    def test_the_tables_own_ground_lies_on_its_snapped_grid(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The table's own background, under its unfilled body cells, stands on its whole-px grid.
+
+        Chrome paints the table's box and its cells' on whole px alike, so the
+        ground shows nowhere past the grid: its shape under the frame is the
+        frame's own extent, exactly.
+        """
+        document = _inline_document("snap")
+        (table,) = browser_tables(document, SNAP_TABLE)
+        shapes = slide_shapes(inline_export("snap"))
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "the snapped table")
+        grounds = [
+            (position, shape) for position, shape in enumerate(shapes) if shape.fill == SNAP_GROUND
+        ]
+        assert len(grounds) == 1 and grounds[0][0] < frame_position, (
+            f"expected the table's {SNAP_GROUND} ground under its frame:\n{_describe(shapes)}"
+        )
+        ground = grounds[0][1]
+        extent = table_extent(frame)
+        off = {key: round(_box(ground)[key] - extent[key], 4) for key in ("x", "y", "w", "h")}
+        assert all(abs(delta) <= WHOLE_PX_TOLERANCE for delta in off.values()), (
+            f"the table's ground {_rect(ground)} is off its snapped grid {extent} by {off}"
+        )
 
     @pytest.mark.parametrize("prefix", ["05", "15"])
     def test_corpus_tables_lie_on_whole_px(
