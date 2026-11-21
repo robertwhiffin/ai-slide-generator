@@ -5,18 +5,19 @@ native PowerPoint table: a ``p:graphicFrame`` holding ``a:tbl``, editable in
 PowerPoint and after Drive converts it for Google Slides. Its grid is the
 browser's own:
 
-* the column and row lines are where the browser put the cells' edges, so each
-  ``gridCol`` width and ``a:tr`` height is the browser's, and the frame stands
-  at the table's rect;
+* the column and row lines are where the browser put the cells' edges, each on
+  the whole px nearest it (as Chrome paints a box edge, so abutting fills meet
+  on a pixel and show no seam), so each ``gridCol`` width and ``a:tr`` height is
+  the browser's to within a px, and the frame stands at the table's rect;
 * ``colspan`` is a cell with ``gridSpan`` and ``hMerge`` placeholders after it;
   ``rowspan`` a cell with ``rowSpan`` and ``vMerge`` placeholders below it, its
   text written once;
 * a cell's margin on each side (``marL`` ``marR`` ``marT`` ``marB``) is its
-  padding plus half the collapsed border on that side, which is where the
-  browser puts the cell's content. The margins go in the unit pptxgenjs reads
-  them in: it reads all four as points when the TOP one is at least 1, and as
-  inches otherwise, so a cell whose top margin is an inch or more passes
-  points, and every other cell inches, uncapped;
+  padding plus half the collapsed border on that side, from the browser's cell
+  edge, which is where the browser puts the cell's content. The margins go in
+  the unit pptxgenjs reads them in: it reads all four as points when the TOP
+  one is at least 1, and as inches otherwise, so a cell whose top margin is an
+  inch or more passes points, and every other cell inches, uncapped;
 * ``vertical-align`` is the cell's ``anchor`` (``t``, ``ctr``, ``b``);
 * the fill is the cell's own, else its row's, else its row group's; the
   table's own background (and its radius and shadow) is a shape under the
@@ -77,6 +78,7 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterator
 from io import BytesIO
@@ -310,6 +312,10 @@ TABLES_CSS = (
 .doubled tr.upper td { border-bottom: 2px solid #1B3139; }
 #alike tr.lower td { border-top: 2px solid #1B3139; }
 #unlike tr.lower td { border-top: 2px solid #FF5F46; }
+.snap { position: absolute; border-collapse: collapse; font-size: 17.3px; }
+.snap th { background: #FF5F46; color: #FFFFFF; padding: 9.3px 13.4px; text-align: left; }
+.snap td { padding: 7.7px 13.4px; border-bottom: 1px solid #DCE0E2; }
+.snap tr.total td { background: #1B3139; color: #FFFFFF; border-bottom: 0; }
 """
 )
 
@@ -740,6 +746,24 @@ CLEAR_BODY = ROUNDED_BODY.replace(
 # A vertex within this of the corner arc lies on it (the arc is drawn as a polygon).
 ARC_TOLERANCE_PX = 0.1
 
+# A filled header and total row on a table the browser lays out at fractional
+# px on both axes: its offset, its width, its font size and its padding all
+# fall between whole pixels, so its grid lines do too.
+SNAP_BODY = """<div class="slide">
+  <table id="snap" class="snap" style="left: 88.3px; top: 120.4px; width: 700.7px;">
+    <thead><tr><th>Line</th><th>FY24</th><th>FY23</th></tr></thead>
+    <tbody>
+      <tr><td>Revenue</td><td>1,240.0</td><td>1,120.0</td></tr>
+      <tr><td>Cost of goods sold</td><td>806.0</td><td>750.4</td></tr>
+      <tr class="total"><td>Net income</td><td>97.8</td><td>88.1</td></tr>
+    </tbody>
+  </table>
+</div>"""
+SNAP_TABLE = "#snap"
+# A grid line, a margin and a content edge agree within this (EMU rounding is 1/9525 px).
+WHOLE_PX_TOLERANCE = 1e-6
+CONTENT_TOLERANCE_PX = 0.05
+
 INLINE_BODIES = {
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
@@ -760,6 +784,7 @@ INLINE_BODIES = {
     "dots": DOTS_BODY,
     "loose": LOOSE_BODY,
     "captured": CAPTURED_BODY,
+    "snap": SNAP_BODY,
 }
 
 # A two-cell table added to the hostile-realm fixtures, after the prose.
@@ -1573,19 +1598,30 @@ class TestBalanceSheet:
 
         On each side of each cell the margin is its computed padding plus half
         the width of the border written on that side (the collapsed edge's
-        winner, which the edge tests hold to the screen), within 1 %: that is
-        where the browser puts the cell's content. The indented rows' first
-        cells (``padding-left: 26px``, no border on the table's left edge) have
-        ``marL`` equal to 26 px in EMU within 1 %, and every margin is under an
-        inch.
+        winner, which the edge tests hold to the screen), within 1 %, measured
+        from the browser's cell edge: that is where the browser puts the cell's
+        content. The grid line lies on the whole px nearest that edge
+        (``TestWholePixelGrid``), so the margin also takes up the part of a px
+        between the two. The indented rows' first cells (``padding-left:
+        26px``, no border on the table's left edge) have ``marL`` equal to that
+        26 px in EMU within 1 %, and every margin is under an inch.
         """
         shapes = corpus_export("05")
         indented = 0
         problems = []
         for _, frame, table in _balance_frames(shapes, balance_tables):
+            columns = table_column_edges(frame)
+            rows = table_row_edges(frame)
             for cell in table.cells:
                 origin = frame.table.rows[cell.row][cell.col]
                 label = f"{_normalised(cell.text)!r}"
+                # How far each side's grid line lies outside the browser's cell edge.
+                snap = {
+                    "left": cell.x - columns[cell.col],
+                    "right": columns[cell.col + cell.col_span] - (cell.x + cell.w),
+                    "top": cell.y - rows[cell.row],
+                    "bottom": rows[cell.row + cell.row_span] - (cell.y + cell.h),
+                }
                 for side in SIDES:
                     margin = origin.margins_px[side]
                     padding = cell.padding[side]
@@ -1600,18 +1636,19 @@ class TestBalanceSheet:
                     half_border = (
                         0.0 if border is None else (border.width_pt or 0.0) / PT_PER_PX / 2
                     )
-                    expected = padding + half_border
+                    expected = padding + half_border + snap[side]
                     tolerance = max(expected * MARGIN_TOLERANCE_FRACTION, MARGIN_TOLERANCE_FLOOR_PX)
                     if abs(margin - expected) > tolerance:
                         problems.append(
                             f"{label}: {side} margin {margin:.3f} px; padding {padding:g} px plus "
-                            f"half the {2 * half_border:g} px border written there is "
+                            f"half the {2 * half_border:g} px border written there, from a grid "
+                            f"line {snap[side]:+.3f} px outside the browser's edge, is "
                             f"{expected:g} px"
                         )
                 if cell.padding["left"] == INDENT_PADDING_PX:
                     indented += 1
                     margin_emu = (origin.margins_px["left"] or 0.0) * EMU_PER_PX
-                    expected_emu = INDENT_PADDING_PX * EMU_PER_PX
+                    expected_emu = (INDENT_PADDING_PX + snap["left"]) * EMU_PER_PX
                     if abs(margin_emu - expected_emu) > expected_emu * MARGIN_TOLERANCE_FRACTION:
                         problems.append(
                             f"{label}: marL {margin_emu:.0f} EMU; the 26 px indent is "
@@ -3216,6 +3253,161 @@ class TestRoundedWrapper:
                 )
         assert [shape for shape in shapes if shape.geometry == "custGeom"] == [], (
             f"a custom shape was drawn for a cell no corner cuts:\n{_describe(shapes)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The grid on whole pixels
+# ---------------------------------------------------------------------------
+
+
+def _browser_grid_lines(table: BrowserTable) -> tuple[list[float], list[float]]:
+    """The browser's column and row lines, left to right and top to bottom: its cells' box edges."""
+    columns: list[float | None] = [None] * (table.columns + 1)
+    rows: list[float | None] = [None] * (len(table.rows) + 1)
+    for cell in table.cells:
+        columns[cell.col] = cell.x
+        columns[cell.col + cell.col_span] = cell.x + cell.w
+        rows[cell.row] = cell.y
+        rows[cell.row + cell.row_span] = cell.y + cell.h
+    assert None not in columns and None not in rows, (
+        f"fixture drift: a grid line no cell edge lies on: {columns} {rows}"
+    )
+    return columns, rows
+
+
+def _nearest_px(value: float) -> float:
+    """The whole px nearest ``value``, a half rounding up (as Chrome snaps a box edge)."""
+    return float(math.floor(value + 0.5))
+
+
+def _off_the_snapped_grid(frame: Shape, table: BrowserTable, what: str) -> list[str]:
+    """Every emitted grid line that is not the whole px nearest the browser's line."""
+    columns, rows = _browser_grid_lines(table)
+    problems = []
+    for axis, emitted, measured in (
+        ("column", table_column_edges(frame), columns),
+        ("row", table_row_edges(frame), rows),
+    ):
+        assert len(emitted) == len(measured), (
+            f"{what}: {len(emitted)} {axis} lines emitted, the browser has {len(measured)}"
+        )
+        for index, (line, browser) in enumerate(zip(emitted, measured)):
+            if abs(line - _nearest_px(browser)) > WHOLE_PX_TOLERANCE:
+                problems.append(
+                    f"{what}: {axis} line {index} at {line:.4f} px; the browser's is at "
+                    f"{browser:.4f}, nearest the whole px {_nearest_px(browser):g}"
+                )
+    return problems
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestWholePixelGrid:
+    def test_grid_lines_lie_on_the_whole_px_nearest_the_browsers(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A table laid out between pixels: every grid line on the whole px nearest the browser's.
+
+        Cell fills that meet between two pixels anti-alias into a light seam in
+        PowerPoint's PDF, under Quartz and MuPDF alike, where Chrome snaps each box
+        edge to a whole pixel and paints none. So every grid line, the frame's
+        first column and row lines included, is the whole px nearest the
+        browser's line, each snapped where it lies rather than each width
+        rounded: the frame stands at the snapped first lines, every ``gridCol``
+        and ``a:tr`` spans two snapped lines, and the table's width and height
+        are its snapped outer lines apart, however many columns and rows it has.
+        """
+        document = _inline_document("snap")
+        (table,) = browser_tables(document, SNAP_TABLE)
+        columns, rows = _browser_grid_lines(table)
+        between = [line for line in columns + rows if abs(line - round(line)) > 0.05]
+        assert len(between) >= 4, (
+            f"fixture drift: the browser lays the table's lines {columns} {rows} on whole px"
+        )
+        shapes = slide_shapes(inline_export("snap"))
+        _, frame = _frame_for(shapes, _grid_rect(table), "the snapped table")
+        problems = _off_the_snapped_grid(frame, table, "the snapped table")
+        extent = table_extent(frame)
+        for size, emitted, lines in (
+            ("width", extent["w"], columns),
+            ("height", extent["h"], rows),
+        ):
+            snapped = _nearest_px(lines[-1]) - _nearest_px(lines[0])
+            if abs(emitted - snapped) > WHOLE_PX_TOLERANCE:
+                problems.append(
+                    f"the table's {size} is {emitted:.4f} px; its snapped outer lines are "
+                    f"{snapped:g} px apart"
+                )
+        assert not problems, "the grid does not lie on whole px:\n  " + "\n  ".join(problems)
+
+    def test_cell_text_starts_where_the_browser_starts_it(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """The snap moves the grid lines, not the text: each cell's margins take up the difference.
+
+        On every side of every cell, the emitted grid line and the margin on that
+        side meet where the browser starts the cell's content: its box edge, in
+        by half the collapsed border written there and by its padding, within
+        0.05 px.
+        """
+        document = _inline_document("snap")
+        (table,) = browser_tables(document, SNAP_TABLE)
+        shapes = slide_shapes(inline_export("snap"))
+        _, frame = _frame_for(shapes, _grid_rect(table), "the snapped table")
+        columns = table_column_edges(frame)
+        rows = table_row_edges(frame)
+        problems = []
+        for cell in table.cells:
+            origin = frame.table.rows[cell.row][cell.col]
+            half = {
+                side: 0.0
+                if origin.borders[side] is None
+                else (origin.borders[side].width_pt or 0.0) / PT_PER_PX / 2
+                for side in SIDES
+            }
+            edges = {
+                "left": (columns[cell.col], cell.x, 1),
+                "right": (columns[cell.col + cell.col_span], cell.x + cell.w, -1),
+                "top": (rows[cell.row], cell.y, 1),
+                "bottom": (rows[cell.row + cell.row_span], cell.y + cell.h, -1),
+            }
+            for side, (line, box_edge, inward) in edges.items():
+                margin = origin.margins_px[side]
+                if margin is None:
+                    problems.append(f"cell ({cell.row}, {cell.col}): no {side} margin")
+                    continue
+                browser = box_edge + inward * (half[side] + cell.padding[side])
+                emitted = line + inward * margin
+                if abs(emitted - browser) > CONTENT_TOLERANCE_PX:
+                    problems.append(
+                        f"cell ({cell.row}, {cell.col}) {_normalised(cell.text)!r}: its {side} "
+                        f"content edge is at {emitted:.3f} px (line {line:.3f}, margin "
+                        f"{margin:.3f}); the browser's at {browser:.3f}"
+                    )
+        assert not problems, "the cells' text moved with the grid:\n  " + "\n  ".join(problems)
+
+    @pytest.mark.parametrize("prefix", ["05", "15"])
+    def test_corpus_tables_lie_on_whole_px(
+        self, corpus_export: Callable[[str], list[Shape]], prefix: str
+    ) -> None:
+        """Fixtures 05 (two balance sheets) and 15 (the zebra table): each grid on whole px.
+
+        Their header and total rows are the filled cells that showed seams in
+        PowerPoint; every line of each table is the whole px nearest the
+        browser's.
+        """
+        document = corpus_document(prefix)
+        tables = browser_tables(document, BALANCE_TABLES)
+        assert tables, f"fixture drift: corpus slide {prefix} has no {BALANCE_TABLES}"
+        shapes = corpus_export(prefix)
+        problems = []
+        for index, table in enumerate(tables):
+            what = f"corpus {prefix} table {index}"
+            _, frame = _frame_for(shapes, _grid_rect(table), what)
+            problems.extend(_off_the_snapped_grid(frame, table, what))
+        assert not problems, "the corpus tables' grids do not lie on whole px:\n  " + (
+            "\n  ".join(problems)
         )
 
 

@@ -20,9 +20,10 @@
 // then every other group and row in document order, then the first footer
 // group. Columns run left to right on the slide, so a right-to-left table's
 // first column is its rightmost. Each grid line is where the browser put the
-// cell edges on it: under border-collapse: collapse adjacent cells' boxes
-// share their edges (each the centre line of the collapsed border between
-// them); under separate, the line is the middle of the gap between them.
+// cell edges on it, on the whole px nearest it, as Chrome paints a box edge
+// (snappedLines): under border-collapse: collapse adjacent cells' boxes share
+// their edges (each the centre line of the collapsed border between them);
+// under separate, the line is the middle of the gap between them.
 //
 // The fill of a cell is what its table's renderer paints in it: its column
 // group's, its column's, its row group's, its row's and its own backgrounds,
@@ -46,8 +47,9 @@
 // Margins. A cell's content starts where the browser started it: its
 // padding, plus half the collapsed border on that side (collapse) or its own
 // whole border (separate), plus the distance from its grid line to its box
-// (the half gap a separated table's spacing leaves), less the room its text
-// needs to keep the browser's lines (fitCellText).
+// (the half gap a separated table's spacing leaves, and the part of a px its
+// line moved to a whole one), less the room its text needs to keep the
+// browser's lines (fitCellText).
 //
 // A cell's content stays the cell's own wherever an a:tbl paragraph can hold
 // it. A cell holding block layout (a <div>, a <p>, a float) keeps the
@@ -90,6 +92,7 @@
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
+//  *              every grid line is on a whole px, so are x, y and each size;
 //  *   cells      one per cell, row by row, left to right, spans included, plus an
 //  *              empty one for each grid slot no cell covers (a short row).
 //  * TableCell = {row, col, rowspan, colspan, fill:{color,alpha}|null,
@@ -941,13 +944,28 @@ function createTableLayout(env) {
     return { left, top, right: left + Number(rect.width), bottom: top + Number(rect.height) };
   }
 
+  // Grid lines where Chrome paints them: each on the whole px nearest the
+  // browser's line, a half rounding up. Chrome snaps every box edge to a whole
+  // pixel, so two cell fills meet on a pixel boundary; meeting between two
+  // pixels, they anti-alias into a light seam in PowerPoint's PDF, under Quartz
+  // and MuPDF alike. Each line is snapped where it lies rather than each width
+  // rounded, so the widths add up to the snapped outer lines' distance however
+  // many there are, and a cell's margins, measured from its snapped lines,
+  // keep its text where the browser set it (layoutOf).
+  function snappedLines(lines) {
+    const snapped = [];
+    for (let index = 0; index < lines.length; index++) snapped.push(Math.round(lines[index]));
+    return snapped;
+  }
+
   // The TableLayout of a table whose grid and borders are read: each cell's
   // margins and the item it is drawn as. `parts` are the elements whose
-  // boxes it draws, `s` the table's computed style.
+  // boxes it draws, `s` the table's computed style. The grid is the browser's,
+  // on whole px (snappedLines).
   function layoutOf(model, grid, parts, s, frame) {
     const collapse = model.collapse;
-    const columnLines = grid.columnLines;
-    const rowLines = grid.rowLines;
+    const columnLines = snappedLines(grid.columnLines);
+    const rowLines = snappedLines(grid.rowLines);
     const colWidths = [];
     const rowHeights = [];
     for (let index = 0; index < model.columns; index++) colWidths.push(Math.max(0, columnLines[index + 1] - columnLines[index]));
