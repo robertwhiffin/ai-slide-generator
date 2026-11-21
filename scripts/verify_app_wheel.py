@@ -46,6 +46,7 @@ SIDECAR_SOURCES = (
     "coverage_font.mjs",
     "dom_access.mjs",
     "emit_deck.mjs",
+    "emit_dotted.cjs",
     "emit_model.cjs",
     "emit_table.cjs",
     "emit_text.cjs",

@@ -10,8 +10,10 @@
 // item's own data: src. Anything else is skipped and announced on stderr. Text
 // items are written by emit_text.cjs, which names each run's typeface from the
 // webfonts the page loaded (model.fonts, and model.italicFonts for an italic
-// run), and native tables by emit_table.cjs.
+// run), and native tables by emit_table.cjs. The deck for Google Slides writes
+// a dotted line or outline as emit_dotted.cjs draws it, Drive having no 1:1 dot.
 
+const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
 const { emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
 const { transparencyOf } = require('./emit_typography.cjs');
@@ -91,7 +93,36 @@ function pathPoints(item) {
   return points;
 }
 
-function emitShape(slide, pres, item) {
+// Whether the deck is written for Google Slides and the stroke is dotted, which
+// emit_dotted.cjs draws there.
+function dottedForGoogle(stroke, renderer) {
+  return Boolean(stroke) && stroke.dash === 'dot' && Boolean(renderer) && renderer.target === 'gslides';
+}
+
+// A dotted stroke for Google Slides: one unfilled custom shape over its frame,
+// turned by `rotate` (emit_dotted.cjs).
+function emitDottedStroke(slide, pres, stroke, outline, rotate) {
+  const options = {
+    x: inches(outline.frame.x),
+    y: inches(outline.frame.y),
+    w: inches(outline.frame.w),
+    h: inches(outline.frame.h),
+    points: strokePoints(outline.polylines, outline.closed, stroke.widthPx),
+    line: lineOptions(stroke),
+  };
+  if (rotate) options.rotate = rotate;
+  slide.addShape(pres.ShapeType.custGeom, options);
+}
+
+// `renderer` is emitSlide's. In the deck for Google Slides a dotted outline is
+// a stroke of its own over the shape (emitDottedStroke): a path that only
+// strokes is that stroke; any other shape is drawn without its outline first.
+function emitShape(slide, pres, item, renderer) {
+  if (dottedForGoogle(item.line, renderer)) {
+    if (item.fill || item.shadow) emitShape(slide, pres, { ...item, line: null }, renderer);
+    emitDottedStroke(slide, pres, item.line, dottedOutline(item), item.rotate);
+    return;
+  }
   const shapeType = item.geometry === 'path' ? pres.ShapeType.custGeom : pres.ShapeType[item.geometry];
   if (!shapeType) throw new Error(`[html2pptx] unknown shape geometry: ${item.geometry}`);
   const options = {
@@ -116,7 +147,12 @@ function emitShape(slide, pres, item) {
 }
 
 // A line runs left to right; one that rises is the same box flipped vertically.
-function emitLine(slide, pres, item) {
+// In the deck for Google Slides a dotted one is a stroke (emitDottedStroke).
+function emitLine(slide, pres, item, renderer) {
+  if (dottedForGoogle(item, renderer)) {
+    emitDottedStroke(slide, pres, item, dottedLine(item), null);
+    return;
+  }
   const leftToRight = item.x1 <= item.x2;
   const start = leftToRight ? { x: item.x1, y: item.y1 } : { x: item.x2, y: item.y2 };
   const end = leftToRight ? { x: item.x2, y: item.y2 } : { x: item.x1, y: item.y1 };
@@ -168,9 +204,9 @@ function emitSlide(pres, model, captures, renderer) {
       continue;
     }
     if (item.kind === 'shape') {
-      emitShape(slide, pres, item);
+      emitShape(slide, pres, item, renderer);
     } else if (item.kind === 'line') {
-      if (item.x1 !== item.x2 || item.y1 !== item.y2) emitLine(slide, pres, item);
+      if (item.x1 !== item.x2 || item.y1 !== item.y2) emitLine(slide, pres, item, renderer);
     } else if (item.kind === 'image') {
       const data = pictureData(item, captures);
       if (data) emitImage(slide, item, data);

@@ -100,9 +100,14 @@ And in any deck:
   Google has no family named for the italic static (D1);
 * U+2011 NON-BREAKING HYPHEN: kept for PowerPoint, which draws it as the
   face's hyphen; written as U+002D for Google Slides, which draws it from MS
-  PGothic (D8; U+2010 is U+002D in both decks).
+  PGothic (D8; U+2010 is U+002D in both decks);
+* a dotted border: for PowerPoint a line or outline dashed sysDot, which it
+  draws one width on and one off as CSS does; for Google Slides, whose every
+  dot dash is one width on and three off, one unfilled custom shape drawing
+  the centre line twice, the second pass two widths along (D6).
 
-So the two decks differ wherever text is tracked, kerned or italic.
+So the two decks differ wherever text is tracked, kerned or italic, or a
+border is dotted.
 """
 
 from __future__ import annotations

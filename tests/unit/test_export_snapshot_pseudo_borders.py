@@ -488,6 +488,24 @@ STACKED_FILL = "CDEDE1"
 STACKED_RINGS = (("FFFFFF", 2.0), ("1B5162", 5.0))
 
 
+# A box whose uniform border is dotted: its outline, round at the corners.
+DOTTED_BOX_BODY = (
+    '<div class="slide"><div id="dotted-box" style="position: absolute; left: 200px; top: 200px; '
+    "width: 300px; height: 100px; border: 2px dotted #7B2FBE; border-radius: 12px; "
+    'background: #CDEDE1;"></div></div>'
+)
+DOTTED_BOX = ("7B2FBE", 2.0)
+# Drive converts both prstDash sysDot and dot to its DOT dash, a dot one line
+# width long every four widths (measured: [1.5 4.5] pt at 1.5 pt, in its PDF and
+# its thumbnails), and every custDash to DASH_DOT, so none of them is the 1:1
+# dot CSS paints. The same centre line twice, the second pass starting two
+# widths further along, puts Drive's dots in each other's gaps: one width on,
+# one off (measured 1:1 at 1, 2 and 3 px).
+DOT_PITCH_WIDTHS = 2.0
+# Points of a dotted stroke's subpaths lie where the side's centre line does, within this.
+STROKE_POINT_TOLERANCE_PX = 0.05
+
+
 @dataclass(frozen=True)
 class Ring:
     """A box ringed by ``box-shadow: 0 0 0 <spread> <colour>``."""
@@ -705,8 +723,10 @@ def _assert_deck_rule(*names: str) -> None:
         )
 
 
-def _export(body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS) -> bytes:
-    pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch)
+def _export(
+    body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS, target: str | None = None
+) -> bytes:
+    pptx, failures = export_slides([body], css=css, monkeypatch=monkeypatch, target=target)
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
@@ -2135,6 +2155,184 @@ class TestOutlineShadows:
         assert unders[0] < boxes[0], (
             f"the outer ring (spTree {unders[0]}) paints over the box and its top ring ({boxes[0]})"
         )
+
+
+def _subpaths(
+    element: etree._Element, shape: Shape
+) -> list[tuple[list[tuple[float, float]], bool]]:
+    """A custGeom shape's subpaths, in order: (points in slide px, closed)."""
+    path = element.find("p:spPr/a:custGeom/a:pathLst/a:path", NAMESPACES)
+    assert path is not None, f"{shape.name!r} has no a:custGeom path"
+    subpaths: list[tuple[list[tuple[float, float]], bool]] = []
+    for step in path:
+        name = etree.QName(step).localname
+        if name == "close":
+            subpaths[-1] = (subpaths[-1][0], True)
+            continue
+        point = step.find("a:pt", NAMESPACES)
+        xy = (
+            shape.x + int(point.get("x")) / EMU_PER_PX,
+            shape.y + int(point.get("y")) / EMU_PER_PX,
+        )
+        if name == "moveTo":
+            subpaths.append(([xy], False))
+        else:
+            subpaths[-1][0].append(xy)
+    return subpaths
+
+
+def _along(points: list[tuple[float, float]], closed: bool, distance: float) -> tuple[float, float]:
+    """The point ``distance`` px along the polyline ``points`` from its first point."""
+    run = points + ([points[0]] if closed else [])
+    for start, end in zip(run, run[1:]):
+        length = ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5
+        if length >= distance:
+            share = distance / length
+            return (start[0] + (end[0] - start[0]) * share, start[1] + (end[1] - start[1]) * share)
+        distance -= length
+    raise AssertionError(f"the polyline is shorter than {distance} px more")
+
+
+def _near(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return (
+        abs(a[0] - b[0]) <= STROKE_POINT_TOLERANCE_PX
+        and abs(a[1] - b[1]) <= STROKE_POINT_TOLERANCE_PX
+    )
+
+
+def _dotted_strokes(shapes: list[Shape], colour: str) -> list[int]:
+    """spTree indices of the unfilled custom shapes stroked ``colour``."""
+    return [
+        position
+        for position, shape in enumerate(shapes)
+        if shape.kind == "shape"
+        and shape.geometry == "custGeom"
+        and shape.fill is None
+        and shape.line == colour
+    ]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestDottedStrokesForGoogleSlides:
+    @pytest.mark.parametrize("name", ["dotted", "sided"])
+    def test_a_dotted_side_is_drives_dot_twice_a_pitch_apart(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """A dotted side in the deck for Google Slides: one stroke, its centre line drawn twice.
+
+        ``#dotted``'s 3 px top and ``#sided``'s 8 px left side. Each is one
+        unfilled custom shape stroked in its colour and width, prstDash
+        sysDot (Drive's DOT), holding two open subpaths: the side's centre
+        line from its right or bottom end back to its start, which is where
+        Chrome lays a dotted side's dots from, and the same line from two
+        widths along it, so the second pass's dots fall in the first's gaps.
+        No line item draws it as well. The deck for PowerPoint keeps its one
+        sysDot line (test_a_single_side_border_is_one_line_in_its_style).
+        """
+        side = SINGLE_SIDES["dotted"] if name == "dotted" else SIDED_LINES[2]
+        rect = browser_rect(_document(BORDERS_BODY), f"#{name}")
+        pptx = _export(BORDERS_BODY, monkeypatch, target="gslides")
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+
+        assert _lines(shapes, side.colour) == [], (
+            f"#{name}: its dotted side is still a line in the deck for Google:\n{_describe(shapes)}"
+        )
+        strokes = _dotted_strokes(shapes, side.colour)
+        assert len(strokes) == 1, f"#{name}: expected one dotted stroke:\n{_describe(shapes)}"
+        stroke = shapes[strokes[0]]
+        _assert_line_style(stroke, side, f"#{name}'s dotted {side.side}")
+        box = _side_line_box(rect, side)
+        start = (box["x"], box["y"])
+        end = (box["x"] + box["w"], box["y"] + box["h"])
+        subpaths = _subpaths(elements[strokes[0]], stroke)
+        assert len(subpaths) == 2 and not subpaths[0][1] and not subpaths[1][1], (
+            f"#{name}: expected two open subpaths, got {subpaths}"
+        )
+        (first, _), (second, _) = subpaths
+        # The first pass is the side's centre line, run back from its right or bottom end.
+        assert len(first) == 2 and _near(first[0], end) and _near(first[1], start), (
+            f"#{name}: the first pass runs {first}; expected from {end} back to {start}"
+        )
+        later = _along(first, False, DOT_PITCH_WIDTHS * side.width_px)
+        assert len(second) == 2 and _near(second[0], later) and _near(second[1], first[1]), (
+            f"#{name}: the second pass runs {second}; expected from {later}, two widths along "
+            f"the first, to {first[1]}"
+        )
+
+    def test_a_dotted_outline_is_its_box_and_one_stroke_tracing_it_twice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A box with a uniform dotted border, in the deck for Google Slides.
+
+        The box is its CDEDE1 roundRect with no outline, where the PowerPoint
+        deck's outlined one is (its fill reaching the border's centre line);
+        its 2 px 7B2FBE border is one unfilled custom shape over it, prstDash
+        sysDot, 1.5 pt, holding the border's centre line twice as closed
+        subpaths: the second traces the first's polygon from two widths (4 px)
+        along it. In the deck for PowerPoint the box is one roundRect outlined
+        sysDot, as before.
+        """
+        colour, width_px = DOTTED_BOX
+        rect = browser_rect(_document(DOTTED_BOX_BODY), "#dotted-box")
+
+        powerpoint = slide_shapes(_export(DOTTED_BOX_BODY, monkeypatch))
+        boxes = [shape for shape in powerpoint if shape.fill == "CDEDE1"]
+        assert (
+            len(powerpoint) == 1
+            and len(boxes) == 1
+            and boxes[0].line == colour
+            and (boxes[0].line_dash == "sysDot" and boxes[0].geometry == "roundRect")
+        ), f"the PowerPoint deck's dotted box changed:\n{_describe(powerpoint)}"
+
+        pptx = _export(DOTTED_BOX_BODY, monkeypatch, target="gslides")
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        boxes = [shape for shape in shapes if shape.fill == "CDEDE1"]
+        assert len(boxes) == 1 and boxes[0].line is None and boxes[0].geometry == "roundRect", (
+            f"expected the box once, unoutlined:\n{_describe(shapes)}"
+        )
+        centre_line = _grown(rect, -width_px / 2)
+        _assert_box(boxes[0], centre_line, OUTLINE_TOLERANCE_PX, "the box, to the border's centre")
+        strokes = _dotted_strokes(shapes, colour)
+        assert len(strokes) == 1, f"expected one dotted stroke:\n{_describe(shapes)}"
+        stroke = shapes[strokes[0]]
+        assert (
+            stroke.line_dash == "sysDot"
+            and stroke.line_w_pt is not None
+            and (abs(stroke.line_w_pt - width_px * PT_PER_PX) <= LINE_WIDTH_TOLERANCE_PT)
+        ), f"the stroke is {stroke.line_dash} {stroke.line_w_pt} pt"
+        assert strokes[0] > shapes.index(boxes[0]), "the dotted border paints under the box"
+        _assert_box(stroke, centre_line, OUTLINE_TOLERANCE_PX, "the border's centre line")
+        subpaths = _subpaths(elements[strokes[0]], stroke)
+        assert len(subpaths) == 2 and subpaths[0][1] and subpaths[1][1], (
+            "expected two closed subpaths, got "
+            f"{[(len(points), closed) for points, closed in subpaths]}"
+        )
+        (first, _), (second, _) = subpaths
+        later = _along(first, True, DOT_PITCH_WIDTHS * width_px)
+        assert _near(second[0], later), (
+            f"the second pass starts at {second[0]}, not {later}, two widths along the first"
+        )
+        radius = 12 - width_px / 2
+        for point in first + second:
+            x = min(
+                max(point[0], centre_line["x"] + radius),
+                centre_line["x"] + centre_line["w"] - radius,
+            )
+            y = min(
+                max(point[1], centre_line["y"] + radius),
+                centre_line["y"] + centre_line["h"] - radius,
+            )
+            on_edge = (
+                abs(point[0] - centre_line["x"]) <= STROKE_POINT_TOLERANCE_PX
+                or abs(point[0] - centre_line["x"] - centre_line["w"]) <= STROKE_POINT_TOLERANCE_PX
+                or abs(point[1] - centre_line["y"]) <= STROKE_POINT_TOLERANCE_PX
+                or abs(point[1] - centre_line["y"] - centre_line["h"]) <= STROKE_POINT_TOLERANCE_PX
+            )
+            on_arc = abs(((point[0] - x) ** 2 + (point[1] - y) ** 2) ** 0.5 - radius) <= 0.1
+            assert on_edge or on_arc, f"{point} lies off the border's rounded centre line"
 
 
 # ---------------------------------------------------------------------------

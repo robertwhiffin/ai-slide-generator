@@ -14,9 +14,10 @@
 // the few constructs the two apps draw apart for it: around script runs,
 // their size, and for PowerPoint the lines they end or grow (emit_text.cjs);
 // each run's tracking, which for PowerPoint folds in its kerning; an italic
-// webfont run's typeface, for PowerPoint its italic static's name; and
-// U+2011, written as U+002D for Google Slides (emit_typography.cjs;
-// scripts/export_fidelity/CALIBRATION.md X1, D1 and D8).
+// webfont run's typeface, for PowerPoint its italic static's name; U+2011,
+// written as U+002D for Google Slides (emit_typography.cjs); and a dotted
+// line or outline, for Google Slides a stroke drawn twice (emit_dotted.cjs;
+// scripts/export_fidelity/CALIBRATION.md X1, D1, D8 and D6).
 //
 // argv:  emit_deck.mjs <out.pptx>
 //

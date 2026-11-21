@@ -39,7 +39,8 @@
 // target is the renderer the deck is written for, 'pptx' (the default) or
 // 'gslides': emit_model.cjs writes the few constructs the two draw apart
 // for it (emit_text.cjs writtenParagraphs; emit_typography.cjs fontSizePt,
-// the tracking, italic typefaces and hyphens of runOptions and runText).
+// the tracking, italic typefaces and hyphens of runOptions and runText;
+// emit_dotted.cjs, a dotted line or outline).
 // emit_deck.mjs attaches the speaker notes to the returned `slide`.
 
 const path = require('path');
