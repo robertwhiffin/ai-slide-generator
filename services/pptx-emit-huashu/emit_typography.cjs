@@ -26,7 +26,9 @@
 // the probe lines), where the face alone lies within 0.06 px and draws 10 to
 // 12% lighter than the browser's synthetic bold at 2x, against Google's own
 // plain runs (measured through Drive: scripts/export_fidelity/CALIBRATION.md,
-// D12).
+// D12). Measured on the 500 face of two Google-hosted families; a lighter face
+// (600 on 400) and a webfont Google does not host follow from the same bold
+// to 700 conversion, unmeasured.
 //
 // Italics, in the deck for PowerPoint (target 'pptx'). The static fonts name
 // each italic but Bold Italic a family of its own, with no italic bit ("DM Sans

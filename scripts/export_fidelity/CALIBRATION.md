@@ -911,6 +911,14 @@ keeps the face plus bold, which PowerPoint draws at the face's advances (Phase C
 PowerPoint 1182.35). Google Slides has no character spacing, so no tracking could take up the faux
 bold's advance.
 
+**What was measured, and what follows from it.** The measured cases are the browser's synthetic
+bold of the 500 face, in two families Google hosts: DM Mono, which has no 700, and DM Sans, which
+has one the page did not load. The rule reaches further by the same mechanism, unmeasured. Drive
+turns any bold flag into weight 700. So for a lighter face (600 on 400, 800 on 300) Google likewise
+draws a faux bold of a weight it has, or a real Bold, never the face the browser drew. And a loaded
+webfont Google does not host gets no face of its own there either way; its run is the face alone
+too.
+
 ## D13: a rounded table's corner pieces in Google Slides
 
 Measured 2026-11-22 (Task 14 B6). A rounded clip's corner cell is unfilled in the `a:tbl` and its
@@ -960,8 +968,8 @@ phases, along a column line and a row line (the worst seam, levels):
 At 0 px the PDF's figures are what two native cells meeting on a fractional line show there (on
 `slide-data-table` the piece's edges equal the native comparator's in the PDF), so 1 px clears
 the native cells' bar everywhere it was measured, and leaves a moved table's corner pieces 1 px
-over their cell. As built (`snapshot.mjs` pushTable, `CORNER_RUN_UNDER_PX`, the deck for Google
-alone): each side whose every slot across is an opaque native cell moves out by 1 px, or half that
+over their cell. As built (`snapshot.mjs` pushTable and `CORNER_RUN_UNDER_PX`, the deck for
+Google alone; `snapshot_table.mjs` runUnderPolygon, over the table's own slot grid): each side whose every slot across is an opaque native cell moves out by 1 px, or half that
 row's or column's size where that is less; the corner square between two such sides only where
 the slot across the corner is opaque too; never under another corner cell. On `slide-data-table`
 the seam at x = 356.5 is then 0 levels in the thumbnail (73 before), its other edges are as they
@@ -976,6 +984,20 @@ No shape is drawn as the cells are (the table above), so the only way to match t
 thumbnail is to move the piece's outer edges onto its pixel grid (ceil(edge × 1.25) / 1.25), and
 that splits them from the cells in the PDF: 50, 100 and 86 levels at 1×, 1.25× and 2×, where before
 they were 0. So they are left where the browser has them.
+
+**Ending the run-under short of the outer edges** (B6 fix round 1, a probe of `slide-data-table`:
+each coral piece's strips ending 1 px short of the table's top, left and right edges, against the
+pieces as built). Where a piece's strip meets the table's top edge, as built:
+- the thumbnail's light top row runs on to x = 356.8 (its pixel 446);
+- Google's PDF draws the edge's anti-aliased row a little darker there, where the strip's top
+  and its neighbour cell's overlap: 17–19 levels at 1× and 40–47 at 2×, over one or two pixels.
+
+Ended short, the light row stops one thumbnail pixel sooner and the darker pixels go. But the top
+pixel of the seam comes back:
+- in the thumbnail at (445, 259), 48–55 levels;
+- in the PDF, 28–33 levels at 1× and 4–8 at 2×.
+
+The PDF does not stay at 0, so the strips run to the table's edges, as built.
 
 ## H1: rasterising an app's PDF
 

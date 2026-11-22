@@ -1340,9 +1340,14 @@ and against Chrome at the same scale.
     draws DM Mono's Medium too, but DM Sans's real SemiBold, 3.7 px wide; Drive drops a run
     outline.
   - Placement outranks weight, so the face alone is the construct.
+  - **Measured, and extrapolated.** The measured cases are the browser's synthetic bold of the
+    500 face in two Google-hosted families: DM Mono, with no 700, and DM Sans, with a 700 the
+    page did not load. Lighter faces (600 on 400, 800 on 300), and loaded webfonts Google does
+    not host, follow from the same mechanism, unmeasured: Drive turns any bold flag into 700.
 - **Ruling (D13, measured through Drive).** In the deck for Google Slides a rounded table's corner
   piece runs 1 px under each opaque native cell beside it (`snapshot.mjs` pushTable,
-  `CORNER_RUN_UNDER_PX`).
+  `CORNER_RUN_UNDER_PX`; `snapshot_table.mjs` runUnderPolygon, over the table's own slot
+  grid).
   - **Why.** Drive's thumbnail draws a native cell without anti-aliasing, filling each pixel
     whose top left corner it holds, and any shape anti-aliased. So the piece and its neighbour
     left a part-covered pixel between them wherever the cell's edge moved away.
@@ -1370,6 +1375,42 @@ and against Chrome at the same scale.
 - **Residual (D13).** The light top row along the coral pieces in the thumbnail stays (B2's
   concern 5), the outer-edge ruling above. It now ends 1 px further right, because the piece's
   run under its neighbour lies on the table's own top edge.
+
+### B6 fix round 1
+
+Commits: `8b7896c8`, `21eb955f` and `4e17eaea`, then the docs.
+
+- **Every slot across a side** (the review's sabotage 10, checking only the first slot,
+  survived every case).
+  - **New cases** in the Google-deck corner test:
+    - `span-corner`: a corner cell spanning two columns, the second slot below it
+      translucent;
+    - `span-neighbour`: a corner cell spanning two rows beside a header cell spanning two
+      columns, the slot under that cell translucent.
+  - The test now reads every slot across a side and the diagonal slots beyond a span.
+  - **Sabotage 10** now turns 4 tests red; a spanning cell owning only its origin slot turns 2
+    red.
+- **Literal boxes.** A test pins the top left piece's box in px, worked out by hand from the grid
+  lines, not from the engine's rule.
+  - It runs on two tables laid out with `table-layout: fixed` and 50 px rows:
+    - `fixed` (88, 160, 389, 211);
+    - `fixed-span` (88, 160, 313, 261).
+  - A first form read the boxes off the auto-laid bodies. Their lines move with the live webfont
+    the tests' deck CSS loads, by up to 0.08 px between runs, and it failed in two of three
+    repeated runs. The formula test reads the deck's own grid, so it never did.
+- **D12's scope** is recorded: the 500 face of two Google-hosted families was measured, and the
+  rest follows from the same mechanism, unmeasured (Rulings from B6).
+- **The top-row residual, measured** (CALIBRATION.md D13). Ending the run-under 1 px short of the
+  table's outer edges stops the light row a thumbnail pixel sooner. But the seam's top pixel comes
+  back: 48–55 levels in the thumbnail, and 28–33 at 1× and 4–8 at 2× in the PDF. Not adopted.
+  As built, the PDF's anti-aliased top row is 17–19 levels darker at 1× (40–47 at 2×) over the
+  one or two pixels where the strip and its neighbour cell overlap.
+- **The slot logic in one place.** The corner-piece helpers moved to `snapshot_table.mjs`. They
+  read the visual slot grid `collectTable` builds from `slotsOf`, carried on the TableLayout, and
+  `slotOwners` is gone. Both corpora's decks, both targets, are identical to B6's final decks
+  (`structural_manifest`, 146 and 202 entries).
+- **Gate.** `uv run pytest tests/unit -q -p no:cacheprovider -k "export or huashu or google"`:
+  1359 passed, 0 failed, 12 skipped. **Full suite** (`-n 6`): 18021 passed, 0 failed, 27 skipped.
 
 ### Owner-facing notes
 
