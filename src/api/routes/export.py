@@ -1092,20 +1092,29 @@ def exports_busy(error: Exception, *, route: str) -> HTTPException:
     )
 
 
+# Where the sidecar's setup.sh logs its bootstrap (services/pptx-emit-huashu/setup.sh).
+HUASHU_SETUP_LOG = Path("/tmp/huashu-setup.log")
+# How many of the setup log's last lines the diagnostics carry.
+HUASHU_SETUP_LOG_TAIL_LINES = 40
+
+
 @router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_available() -> dict:
     """Tell the frontend whether the huashu pipeline is available.
 
-    Returns the boolean plus a slim set of per-check booleans. Full
-    diagnostics (paths, env, log tails, directory listings) are logged
-    server-side only (SDR-4437 MEDIUM-1).
+    Returns the boolean plus a slim set of per-check booleans, among them
+    ``font_bundle``: whether the sidecar's fontconfig (the font bundle,
+    ``fonts/fonts.conf``) is in place. Full diagnostics (paths, env, log tails,
+    directory listings, the font bundle's config path, its Liberation face count
+    and setup's font lines) are logged server-side only (SDR-4437 MEDIUM-1). The
+    bundle does not decide availability: without it the export lays text out in
+    the base image's faces.
     """
     import os
     import shutil
-    from pathlib import Path
 
     from src.services.pptx_from_html_huashu import (
-        SIDECAR_DIR, SIDECAR_SCRIPT, _has_chromium, is_available,
+        SIDECAR_DIR, SIDECAR_FONTCONFIG_FILE, SIDECAR_SCRIPT, _has_chromium, is_available,
     )
 
     home = Path.home()
@@ -1116,17 +1125,28 @@ async def export_pptx_huashu_available() -> dict:
         )
         if p.exists()
     ]
-    setup_log_path = Path("/tmp/huashu-setup.log")
+    setup_log_path = HUASHU_SETUP_LOG
     setup_log_tail = None
     setup_log_size = None
+    setup_log_font_lines: list[str] = []
     if setup_log_path.exists():
         try:
             setup_log_size = setup_log_path.stat().st_size
             with open(setup_log_path) as f:
                 lines = f.readlines()
-            setup_log_tail = "".join(lines[-40:])
+            setup_log_tail = "".join(lines[-HUASHU_SETUP_LOG_TAIL_LINES:])
+            # The font step's own lines: Chromium's download output fills the tail.
+            setup_log_font_lines = [
+                line.rstrip("\n")
+                for line in lines
+                if line.startswith("[setup]") and "fonts" in line
+            ]
         except Exception as e:  # noqa: BLE001
             setup_log_tail = f"(error reading log: {e})"
+    font_bundle = SIDECAR_FONTCONFIG_FILE.is_file()
+    liberation_faces = len(
+        list((SIDECAR_FONTCONFIG_FILE.parent / "liberation").glob("Liberation*.ttf"))
+    )
     checks_full = {
         "huashu_pipeline_enabled": os.environ.get("HUASHU_PIPELINE_ENABLED") == "1",
         "databricks_app_name": os.environ.get("DATABRICKS_APP_NAME") or None,
@@ -1140,8 +1160,12 @@ async def export_pptx_huashu_available() -> dict:
         "chromium_cache_paths": chromium_paths,
         "home": str(home),
         "playwright_browsers_path_env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+        "font_bundle": font_bundle,
+        "fontconfig_file": str(SIDECAR_FONTCONFIG_FILE),
+        "liberation_faces": liberation_faces,
         "setup_log_path_exists": setup_log_path.exists(),
         "setup_log_size": setup_log_size,
+        "setup_log_font_lines": setup_log_font_lines,
         "setup_log_tail": setup_log_tail,
     }
     logger.info("huashu availability diagnostics: %s", checks_full)
@@ -1154,6 +1178,7 @@ async def export_pptx_huashu_available() -> dict:
             "playwright_node_modules": (SIDECAR_DIR / "node_modules" / "playwright").exists(),
             "pptxgenjs_node_modules": (SIDECAR_DIR / "node_modules" / "pptxgenjs").exists(),
             "chromium_cache": _has_chromium(),
+            "font_bundle": font_bundle,
         },
     }
 

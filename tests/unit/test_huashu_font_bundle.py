@@ -15,7 +15,10 @@ and the fontconfig that makes Chromium use them:
 * ``sidecar_subprocess_env`` points ``FONTCONFIG_FILE`` at that file, the one
   variable the sidecar's env allowlist gained;
 * the wheel ships the tarball (``scripts/verify_app_wheel.py`` requires it) and
-  never the extracted ``fonts/``.
+  never the extracted ``fonts/``;
+* operators see it: ``GET /api/export/pptx/editable/huashu/available`` says whether
+  the config is in place (``font_bundle``), and its server-side diagnostics name the
+  config, count its Liberation faces and carry setup's font lines.
 
 The checksums below are the upstream release's own files, read independently of
 the build script.
@@ -31,6 +34,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -41,6 +45,7 @@ import xml.dom.minidom
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from scripts.sidecar_fonts import build_fonts_tarball
 from scripts.verify_app_wheel import BOOTSTRAP_FILES
@@ -448,10 +453,18 @@ print(json.dumps(out))
 
 
 def _resolved(config_file: Path, families: list[str]) -> dict[str, str]:
-    """The family of the face fontconfig matches for each of ``families`` through ``config_file``."""
+    """The family of the face fontconfig matches, through ``config_file``, for each of
+    ``families``."""
     assert _FONTCONFIG is not None
     result = subprocess.run(
-        [sys.executable, "-c", _RESOLVE_SCRIPT, str(config_file), json.dumps(families), _FONTCONFIG],
+        [
+            sys.executable,
+            "-c",
+            _RESOLVE_SCRIPT,
+            str(config_file),
+            json.dumps(families),
+            _FONTCONFIG,
+        ],
         capture_output=True,
         text=True,
         timeout=60,
@@ -511,7 +524,9 @@ def test_the_config_resolves_each_core_font_and_generic_to_its_liberation_face(
         "DejaVu Sans": "Liberation Sans",
     }
 
-    control = _resolved(_without_dejavu_rule(config_file, tmp_path / "control.conf"), ["DejaVu Sans"])
+    control_file = _without_dejavu_rule(config_file, tmp_path / "control.conf")
+
+    control = _resolved(control_file, ["DejaVu Sans"])
 
     assert control == {"DejaVu Sans": "DejaVu Sans"}, (
         f"fixture drift: without the rule DejaVu Sans matches {control}; no DejaVu Sans here"
@@ -579,6 +594,116 @@ class TestSidecarEnvironment:
         }
 
         assert set(pptx_from_html_huashu._SIDECAR_ENV_ALLOWLIST) == before | {"FONTCONFIG_FILE"}
+
+
+# ---------------------------------------------------------------------------
+# What operators see (GET /api/export/pptx/editable/huashu/available)
+# ---------------------------------------------------------------------------
+
+AVAILABLE_ROUTE = "/api/export/pptx/editable/huashu/available"
+# The font step's lines, as setup.sh writes them, among the rest of its log.
+SETUP_FONT_LINES = [
+    "[setup] extracting fonts-liberation.tar.gz",
+    "[setup] fonts ready",
+    "[setup] fonts/fonts.conf written for /app/sidecar/fonts",
+]
+
+
+@pytest.fixture
+def client() -> TestClient:
+    from src.api.main import app
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture
+def installed_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A sidecar's fonts/ with its config and three Liberation faces, where the wrapper looks."""
+    config = tmp_path / "fonts" / "fonts.conf"
+    (config.parent / "liberation").mkdir(parents=True)
+    config.write_text("<fontconfig/>")
+    faces = ("LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf", "LiberationMono-Regular.ttf")
+    for name in faces:
+        (config.parent / "liberation" / name).write_bytes(b"")
+    (config.parent / "liberation" / "README").write_text("not a face")
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_FONTCONFIG_FILE", config)
+    return config
+
+
+class TestOperatorsSeeTheBundle:
+    def test_the_response_says_whether_the_bundle_is_in_place(
+        self, client: TestClient, installed_bundle: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert client.get(AVAILABLE_ROUTE).json()["checks"]["font_bundle"] is True
+
+        installed_bundle.unlink()
+
+        assert client.get(AVAILABLE_ROUTE).json()["checks"]["font_bundle"] is False
+
+    def test_the_server_log_names_the_config_its_faces_and_setups_font_lines(
+        self,
+        client: TestClient,
+        installed_bundle: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The full diagnostics, logged server-side alone, carry the config's path, how many
+        Liberation faces are beside it, and the font step's lines of setup's log, which its
+        40-line tail loses to Chromium's download output."""
+        from src.api.routes import export
+
+        log = tmp_path / "huashu-setup.log"
+        log.write_text(
+            "\n".join(
+                [
+                    "=== huashu setup at 2026-11-22T00:00:00Z ===",
+                    "[setup] node_modules up-to-date with tarball, skipping extract",
+                    *SETUP_FONT_LINES,
+                    "[setup] running: node node_modules/playwright/cli.js install chromium",
+                    *(f"|■■■■■■■■      | {percent}% of 110 MiB" for percent in range(60)),
+                    "[setup] chromium step done",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(export, "HUASHU_SETUP_LOG", log)
+        caplog.set_level(logging.INFO, logger=export.logger.name)
+
+        assert client.get(AVAILABLE_ROUTE).status_code == 200
+
+        # logging keeps a lone mapping argument as the record's args itself.
+        (logged,) = [
+            record.args
+            for record in caplog.records
+            if record.getMessage().startswith("huashu availability diagnostics:")
+        ]
+        assert logged["font_bundle"] is True
+        assert logged["fontconfig_file"] == str(installed_bundle)
+        assert logged["liberation_faces"] == 3
+        assert logged["setup_log_font_lines"] == SETUP_FONT_LINES
+        assert not any("fonts" in line for line in logged["setup_log_tail"].splitlines()), (
+            "fixture drift: the tail holds the font lines"
+        )
+
+    def test_the_bundle_does_not_decide_availability(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the bundle the export still runs, laid out in the base image's faces."""
+        sidecar = tmp_path / "sidecar"
+        for module in ("playwright", "pptxgenjs"):
+            (sidecar / "node_modules" / module).mkdir(parents=True)
+        (sidecar / "emit_deck.mjs").write_text("")
+        monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_DIR", sidecar)
+        monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", sidecar / "emit_deck.mjs")
+        monkeypatch.setattr(pptx_from_html_huashu, "_has_chromium", lambda: True)
+        monkeypatch.setattr(pptx_from_html_huashu.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_FONTCONFIG_FILE", sidecar / "fonts" / "fonts.conf"
+        )
+
+        assert pptx_from_html_huashu.is_available() is True
 
 
 # ---------------------------------------------------------------------------
