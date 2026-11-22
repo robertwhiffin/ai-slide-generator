@@ -255,6 +255,8 @@ UI_DOCUMENTS_MISSING = (
     "the UI truth bundles frontend/src/services/slideDocument.ts with the frontend's esbuild, "
     "which is not installed: run `npm ci` in frontend/"
 )
+# The prefix of every line the harness itself prints on stderr, ui_document.mjs's included.
+HARNESS_LOG_PREFIX = "[export-fidelity] "
 
 
 class UiDocumentError(RuntimeError):
@@ -269,8 +271,11 @@ def ui_documents_missing() -> str | None:
 def build_ui_documents(deck: dict, slides: list[tuple[str, str]], out_dir: Path) -> list[Path]:
     """Each slide's document as the UI builds it (ui_document.mjs), in ``out_dir/ui-documents``.
 
-    Raises UiDocumentError naming what to install when the frontend's esbuild
-    is missing, and with the builder's own message when it fails.
+    Raises UiDocumentError, its message one line naming the remedy, when the
+    frontend's esbuild is missing, when it cannot build (ui_document.mjs's own
+    line: an install without its platform binary loads esbuild and fails only
+    when it builds), and with the first line of the builder's error when a
+    document fails. ui_document.mjs writes no document unless it builds them all.
     """
     missing = ui_documents_missing()
     if missing:
@@ -292,8 +297,14 @@ def build_ui_documents(deck: dict, slides: list[tuple[str, str]], out_dir: Path)
         check=False,
     )
     if completed.returncode != 0:
+        lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+        own = [line for line in lines if line.startswith(HARNESS_LOG_PREFIX)]
+        if own:
+            raise UiDocumentError(own[0].removeprefix(HARNESS_LOG_PREFIX))
+        cause = lines[0] if lines else f"ui_document.mjs exited {completed.returncode}"
         raise UiDocumentError(
-            completed.stderr.strip() or f"ui_document.mjs exited {completed.returncode}"
+            f"the UI truth could not build its slide documents ({cause}): if the frontend's "
+            "install is broken, run `npm ci` in frontend/"
         )
     return [ui_dir / f"{name}.html" for name, _ in slides]
 
@@ -1216,19 +1227,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # The truth needs the frontend's esbuild: said before anything is exported.
-    missing = ui_documents_missing()
-    if missing:
-        print(f"[export-fidelity] {missing}", file=sys.stderr)
-        return 2
     deck, slides = load_fixture_deck(args.fixture_dir, pin_fonts=args.pin_fonts)
     if args.only:
         slides = [s for s in slides if any(s[0].startswith(prefix) for prefix in args.only)]
+    # The truth is built first, by the frontend's esbuild: a missing or broken
+    # install stops the run on one line naming the remedy, with nothing written.
+    try:
+        ui_documents = build_ui_documents(deck, slides, args.out)
+    except UiDocumentError as error:
+        print(f"{HARNESS_LOG_PREFIX}{error}", file=sys.stderr)
+        return 2
     args.out.mkdir(parents=True, exist_ok=True)
     names = [name for name, _ in slides]
     write_harness_record(args.out, args.fixture_dir, len(names))
     documents = build_documents(deck, slides, args.out)
-    render_truth(build_ui_documents(deck, slides, args.out), args.out)
+    render_truth(ui_documents, args.out)
     pptx_path = export_pptx(deck, documents, args.out)
     # Each slide's hidden text, from its summary; none for a slide without one.
     hidden_text = [(summary or {}).get("hiddenText", "") for summary in recorded_summaries(args.out)]

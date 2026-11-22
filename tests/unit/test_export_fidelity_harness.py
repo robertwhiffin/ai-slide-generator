@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -46,6 +48,7 @@ from tests.fixtures.export_snapshot_support import (
     CORPUS_DIR,
     fidelity_harness,
     requires_huashu_sidecar,
+    requires_node,
     requires_ui_documents,
     ui_document,
 )
@@ -631,3 +634,138 @@ class TestUiDocumentsMissing:
         monkeypatch.setattr(harness, "FRONTEND_ESBUILD", tmp_path / "node_modules" / "esbuild")
         with pytest.raises(harness.UiDocumentError, match="npm ci"):
             harness.build_ui_documents({"css": ""}, [("01", "<div></div>")], tmp_path)
+
+
+# The review's broken install: esbuild's JavaScript loads, and building fails
+# because its platform binary is not installed (npm ci --omit=optional, or a
+# node_modules copied from another platform). Its first line, as esbuild writes it.
+BROKEN_ESBUILD_ERROR = (
+    'The package "@esbuild/darwin-arm64" could not be found, and is needed by esbuild.'
+)
+# The two slides ui_document.mjs is given, the second of which a frontend can fail on.
+UI_PAYLOAD = {
+    "css": "",
+    "externalScripts": [],
+    "slides": [
+        {"name": "01", "html": "<div></div>", "scripts": ""},
+        {"name": "02", "html": "<div>second</div>", "scripts": ""},
+    ],
+}
+
+
+def _fake_frontend(tmp_path: Path, build: str) -> tuple[Path, Path]:
+    """ui_document.mjs copied beside a frontend of its own, whose esbuild's ``build`` is the
+    JavaScript ``build`` (an async function body taking the build options). Returns the
+    copied script and the frontend's esbuild directory, as run.py names them."""
+    harness = fidelity_harness()
+    root = tmp_path / "repo"
+    script = root / "scripts" / "export_fidelity" / "ui_document.mjs"
+    script.parent.mkdir(parents=True)
+    shutil.copyfile(harness.UI_DOCUMENT_SCRIPT, script)
+    frontend = root / "frontend"
+    esbuild = frontend / "node_modules" / "esbuild"
+    (esbuild / "lib").mkdir(parents=True)
+    (frontend / "src" / "services").mkdir(parents=True)
+    (frontend / "src" / "services" / "slideDocument.ts").write_text("", encoding="utf-8")
+    (frontend / "package.json").write_text('{"name": "frontend", "private": true}', "utf-8")
+    (esbuild / "package.json").write_text('{"name": "esbuild", "main": "lib/main.js"}', "utf-8")
+    (esbuild / "lib" / "main.js").write_text(
+        f"exports.build = async (options) => {{ {build} }};", encoding="utf-8"
+    )
+    return script, esbuild
+
+
+def _broken_frontend(tmp_path: Path) -> tuple[Path, Path]:
+    """A frontend whose esbuild loads and cannot build: the review's broken install."""
+    message = json.dumps(BROKEN_ESBUILD_ERROR + "\n\nIf you are installing esbuild with npm, ...")
+    return _fake_frontend(tmp_path, f"throw new Error({message});")
+
+
+def _failing_second_slide_frontend(tmp_path: Path) -> tuple[Path, Path]:
+    """A frontend whose slideDocument builds the first slide's document and fails on the second."""
+    module = (
+        "export const SLIDE_PREVIEW_RESET_STYLE = '';"
+        "export function buildSlideDocument(html) {"
+        " if (html.includes('second')) throw new Error('buildSlideDocument failed');"
+        " return '<!DOCTYPE html>' + html; }"
+    )
+    return _fake_frontend(
+        tmp_path, f"return {{ outputFiles: [{{ text: {json.dumps(module)} }}] }};"
+    )
+
+
+@requires_node
+class TestUiDocumentsBroken:
+    """A frontend install that is there but broken (Task 15 B7 fix round 1): the harness stops
+    with one ``[export-fidelity]`` line naming the remedy, exit code 2, and has written nothing."""
+
+    def test_main_stops_with_one_line_and_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The review's case: esbuild loads, and building slideDocument.ts fails."""
+        harness = fidelity_harness()
+        script, esbuild = _broken_frontend(tmp_path)
+        monkeypatch.setattr(harness, "UI_DOCUMENT_SCRIPT", script)
+        monkeypatch.setattr(harness, "FRONTEND_ESBUILD", esbuild)
+        exported: list = []
+        _stub_export(harness, monkeypatch, exported)
+        out_dir = tmp_path / "out"
+        monkeypatch.setattr(
+            sys, "argv", ["run.py", str(_template_fixture(tmp_path)), "--out", str(out_dir)]
+        )
+        assert harness.main() == 2
+        lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+        assert len(lines) == 1 and lines[0].startswith("[export-fidelity] "), lines
+        assert lines[0].count("[export-fidelity]") == 1, lines[0]
+        assert "`npm ci` in frontend/" in lines[0] and BROKEN_ESBUILD_ERROR in lines[0], lines[0]
+        assert not exported and not out_dir.exists(), "main() wrote or exported before the truth"
+
+    def test_main_stops_with_one_line_when_a_document_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Any failure of the UI's documents is one line, naming its cause and the remedy."""
+        harness = fidelity_harness()
+        script, esbuild = _failing_second_slide_frontend(tmp_path)
+        monkeypatch.setattr(harness, "UI_DOCUMENT_SCRIPT", script)
+        monkeypatch.setattr(harness, "FRONTEND_ESBUILD", esbuild)
+        _stub_export(harness, monkeypatch, [])
+        fixture_dir = _template_fixture(tmp_path)
+        (fixture_dir / "slides" / "02-second.html").write_text("<div>second</div>", "utf-8")
+        out_dir = tmp_path / "out"
+        monkeypatch.setattr(sys, "argv", ["run.py", str(fixture_dir), "--out", str(out_dir)])
+        assert harness.main() == 2
+        lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+        assert len(lines) == 1 and lines[0].startswith("[export-fidelity] "), lines
+        assert "buildSlideDocument failed" in lines[0] and "`npm ci` in frontend/" in lines[0]
+        assert not out_dir.exists(), "main() wrote before the truth failed"
+
+    def test_ui_document_names_the_remedy_when_esbuild_cannot_build(self, tmp_path: Path) -> None:
+        """ui_document.mjs itself: exit 2 and one line naming `npm ci` and esbuild's cause."""
+        script, _ = _broken_frontend(tmp_path)
+        out_dir = tmp_path / "documents"
+        completed = subprocess.run(
+            ["node", str(script), str(out_dir)],
+            input=json.dumps(UI_PAYLOAD),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        lines = completed.stderr.strip().splitlines()
+        assert completed.returncode == 2, completed.stderr
+        assert len(lines) == 1 and lines[0].startswith("[export-fidelity] "), lines
+        assert "`npm ci` in frontend/" in lines[0] and BROKEN_ESBUILD_ERROR in lines[0], lines[0]
+        assert not out_dir.exists()
+
+    def test_ui_document_writes_no_document_unless_it_builds_them_all(self, tmp_path: Path) -> None:
+        """A slide whose document fails leaves no document of any slide: none is written first."""
+        script, _ = _failing_second_slide_frontend(tmp_path)
+        out_dir = tmp_path / "documents"
+        completed = subprocess.run(
+            ["node", str(script), str(out_dir)],
+            input=json.dumps(UI_PAYLOAD),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0 and "buildSlideDocument failed" in completed.stderr
+        assert not out_dir.exists(), sorted(path.name for path in out_dir.iterdir())

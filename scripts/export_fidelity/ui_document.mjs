@@ -13,8 +13,11 @@
 //
 // usage: node ui_document.mjs <out_dir> < payload.json
 //   payload: {"css": str, "externalScripts": [str], "slides": [{"name", "html", "scripts"}]}
-// writes <out_dir>/<name>.html for every slide, and prints each path.
-// Exits 2, naming what to install, when the frontend's esbuild is missing.
+// writes <out_dir>/<name>.html for every slide, and prints each path, once
+// every document is built: a failure writes none.
+// Exits 2 with one [export-fidelity] line, naming what to install, when the
+// frontend's esbuild is missing or cannot build (an install without its
+// platform binary loads esbuild and fails only when it builds).
 
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -26,32 +29,44 @@ const FRONTEND_DIR = path.join(REPO_ROOT, 'frontend');
 const SLIDE_DOCUMENT_SOURCE = path.join(FRONTEND_DIR, 'src', 'services', 'slideDocument.ts');
 const MISSING_EXIT_CODE = 2;
 
+// Stops on one [export-fidelity] line naming the remedy: the frontend's
+// esbuild `state` ("is not installed", "cannot build it"), and the first line
+// of `error`.
+function esbuildFailed(state, error) {
+  console.error(
+    '[export-fidelity] the UI truth bundles frontend/src/services/slideDocument.ts with the ' +
+    `frontend's esbuild, which ${state}: run \`npm ci\` in frontend/ ` +
+    `(${String(error && error.message).split('\n')[0]})`,
+  );
+  process.exit(MISSING_EXIT_CODE);
+}
+
 // The frontend's own esbuild, resolved as the frontend resolves it.
 function frontendEsbuild() {
   const require = createRequire(path.join(FRONTEND_DIR, 'package.json'));
   try {
     return require('esbuild');
   } catch (error) {
-    console.error(
-      '[export-fidelity] the UI truth bundles frontend/src/services/slideDocument.ts with the ' +
-      "frontend's esbuild, which is not installed: run `npm ci` in frontend/ " +
-      `(${error.message.split('\n')[0]})`,
-    );
-    process.exit(MISSING_EXIT_CODE);
+    return esbuildFailed('is not installed', error);
   }
 }
 
 // slideDocument.ts as an ES module, bundled unchanged and imported from memory.
 async function slideDocumentModule() {
   const esbuild = frontendEsbuild();
-  const bundled = await esbuild.build({
-    entryPoints: [SLIDE_DOCUMENT_SOURCE],
-    bundle: true,
-    format: 'esm',
-    platform: 'neutral',
-    write: false,
-    logLevel: 'silent',
-  });
+  let bundled;
+  try {
+    bundled = await esbuild.build({
+      entryPoints: [SLIDE_DOCUMENT_SOURCE],
+      bundle: true,
+      format: 'esm',
+      platform: 'neutral',
+      write: false,
+      logLevel: 'silent',
+    });
+  } catch (error) {
+    return esbuildFailed('cannot build it', error);
+  }
   const source = bundled.outputFiles[0].text;
   return import('data:text/javascript;base64,' + Buffer.from(source, 'utf-8').toString('base64'));
 }
@@ -64,17 +79,19 @@ async function main() {
   }
   const payload = JSON.parse(fs.readFileSync(0, 'utf-8'));
   const { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } = await slideDocumentModule();
-  fs.mkdirSync(outDir, { recursive: true });
-  for (const slide of payload.slides) {
-    const document = buildSlideDocument(slide.html, {
+  const documents = payload.slides.map((slide) => ({
+    outPath: path.join(outDir, `${slide.name}.html`),
+    html: buildSlideDocument(slide.html, {
       css: payload.css || '',
       externalScripts: payload.externalScripts || [],
       scripts: slide.scripts || '',
       extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE,
-    });
-    const outPath = path.join(outDir, `${slide.name}.html`);
-    fs.writeFileSync(outPath, document, 'utf-8');
-    console.log(outPath);
+    }),
+  }));
+  fs.mkdirSync(outDir, { recursive: true });
+  for (const document of documents) {
+    fs.writeFileSync(document.outPath, document.html, 'utf-8');
+    console.log(document.outPath);
   }
 }
 
