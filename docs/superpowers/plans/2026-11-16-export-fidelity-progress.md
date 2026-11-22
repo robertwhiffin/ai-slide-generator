@@ -1711,6 +1711,11 @@ test_export_snapshot_drawn_faces 20), each red first at the parent commit (or a 
 sabotages, every one red; three first survived (quoting a generic, the webfont flag, the coverage
 probe's family) and each got a case that then caught it. 3 typography tests were updated for the
 intended changes (the platform stack is Arial; ✓ in DM Sans is MS PGothic).
+- **Gate** (serial, the timeout test included): `uv run pytest tests/unit -q -p no:cacheprovider -k
+  "export or huashu or google"` gave 1453 passed, 0 failed, 13 skipped (B7: 1407 / 0 / 12; the new
+  skip is the fontconfig resolution test, which needs a fontconfig library, as on Linux CI).
+- **Full suite:** `uv run pytest tests/unit -q -p no:cacheprovider -n 6` gave 18115 passed, 0
+  failed, 28 skipped (B7: 18069 / 0 / 27).
 
 ### Rulings from B8
 
