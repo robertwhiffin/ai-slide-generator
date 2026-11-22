@@ -1689,12 +1689,13 @@ ROUNDED_SIDE_CASES = {
     ),
     # The box sits 2 px past its wrapper's left edge, which clips it.
     "clipped": ("border-radius: 10px; border-left: 4px solid #1F4FD8;", (SIDE_BLUE,), 1),
-    # Four sides painted alike, their widths differing: two regions, split at the
-    # top right and bottom left corners, none a ring.
+    # Four sides painted alike, their widths differing: one region, the whole
+    # border area, its edge cut open along the top left corner's dividing line
+    # (two regions meeting there drew an anti-aliased seam in Google Slides).
     "four-alike": (
         "border-radius: 12px; border: 3px solid #1F4FD8; border-bottom-width: 7px;",
         (SIDE_BLUE,),
-        2,
+        1,
     ),
     # Inner radii that overlap their side: the top left's 170 px less no border,
     # beside a right border wider than its own 30 px radius, so the padding

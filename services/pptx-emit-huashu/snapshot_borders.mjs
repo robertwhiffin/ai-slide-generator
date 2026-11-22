@@ -136,8 +136,13 @@ function createBorders(env) {
   //   outer and inner edges meet, tapering to nothing where the radius is the
   //   wider;
   // * neighbouring sides painted alike are one region together, so no seam
-  //   divides them; four alike (their widths differing) are two, split at the
-  //   top right and bottom left corners, so that no region is a ring.
+  //   divides them, and four alike (their widths differing) are one too: the
+  //   whole border area, its edge cut open along the top left corner's
+  //   dividing line, round the box from there and back, so it is one simple
+  //   polygon whose edge runs out along that line and back, no ring. Split in
+  //   two regions meeting along the dividing lines, Google Slides drew an
+  //   anti-aliased seam on each line, 19 to 64 levels lighter than the
+  //   border's colour (Task 15 B7, fix round 1).
   // Each region is one filled path, its arcs polygons within the snapshot's
   // arc tolerance (arcSteps), turned with the box and cut to the clip, its
   // rect and then any rounded padding box of it, as a side's triangle is.
@@ -235,7 +240,7 @@ function createBorders(env) {
 
   // The runs of solid painted sides one region each draws, in clockwise
   // order from the top: each {sides: [name], paint: {color, alpha}}.
-  // Neighbours painted alike share a run; four alike are split in two.
+  // Neighbours painted alike share a run, and four alike are one, from the top.
   function borderRuns(solid) {
     const same = (a, b) => Boolean(a && b && a.color === b.color && a.alpha === b.alpha);
     let start = -1;
@@ -245,7 +250,7 @@ function createBorders(env) {
     }
     if (start < 0) {
       if (!solid.Top) return [];
-      return [{ sides: ['Top', 'Right'], paint: solid.Top }, { sides: ['Bottom', 'Left'], paint: solid.Bottom }];
+      return [{ sides: ['Top', 'Right', 'Bottom', 'Left'], paint: solid.Top }];
     }
     const runs = [];
     let run = null;
@@ -269,7 +274,9 @@ function createBorders(env) {
   // The border region of a run of sides (borderRuns), as a polygon in slide
   // px before any turn: its outer edge clockwise from the dividing line at
   // its first side's start corner to the one at its last side's end corner,
-  // each corner within the run whole, then its inner edge back.
+  // each corner within the run whole, then its inner edge back. For all four
+  // sides both are the top left corner's: the edges run round the whole box,
+  // the top left corner in two pieces, one at each end.
   function runRegion(corners, sides) {
     const cornerBefore = (side) => corners[SIDE_INDEX[side]];
     const cornerAfter = (side) => corners[(SIDE_INDEX[side] + 1) % corners.length];
