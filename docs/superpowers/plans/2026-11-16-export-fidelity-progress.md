@@ -1822,6 +1822,108 @@ intended changes (the platform stack is Arial; ✓ in DM Sans is MS PGothic).
   zipped): such text is laid out at the replacement glyph's width and shows boxes in a picture, as
   before the bundle; the deck keeps every character.
 
+### B8 fix round 1 (at `a4974a15`)
+
+Commits: `ea15b8a5` and `a4974a15` (item 1), `01096995` (item 2), `024aaed7` (item 3), `4253ad7b`
+(item 4), `eb373bf8` (item 5), `4f014e0c` (item 6), `adecdaf9` (item 7), then this ledger.
+
+- **A deck's own loaded webfont named DejaVu is written as itself** (amends the N4 ruling's "never
+  DejaVu"). B8 skipped it and wrote the next face of the stack; the controller's caution was about
+  the container's fallback DejaVu alone. A loaded webfont is the page's own bytes, the same on the
+  laptop and on Apps, and the face the layout was measured in.
+  - **The rule.** `resolveWrittenFaces` returns early for every loaded webfont, and skips a
+    stack's DejaVu token only where it is no loaded webfont. The container's DejaVu stays
+    unwritten, guarded in the engine and by the sidecar's fontconfig (below).
+  - **The cases.** `"DejaVu Sans", Arial` and `"Missing Face", "DejaVu Sans", sans-serif`, with
+    the face loaded, are written "DejaVu Sans". A run of only characters it lacks keeps it too:
+    ½ is written in Arial and ◔ in MS PGothic, by D8. The same slide with the face renamed Twin
+    Sans is written alike.
+  - **Cleanup.** The metrics module no longer takes `baseImageFace`, which it stopped calling; the
+    output is byte-identical.
+- **setup.sh extracts the font bundle whole or not at all.** The check keyed on
+  `fonts/fonts.conf.in` and on `fonts/`'s mtime, which every boot's config write moves. So with
+  B8's script, a bundle cut off halfway left 7 of 12 faces, with a config naming them, on every
+  later boot. Now:
+  - the bundle is extracted into `fonts-staging/`, then moved into place only once `tar` has
+    succeeded (the old `fonts/` moved aside) and stamped (`fonts/.bundle-complete`);
+  - the up-to-date check keys on the stamp. So a failed extraction is tried again on the next
+    boot, and one that fails leaves the bundle in place as it was;
+  - `fonts.conf` is written only for a stamped bundle, and one beside a partial bundle is removed;
+  - every command of the font step runs in an `if` or `&&` list, so a failing `rm` or `touch`
+    cannot end the script before the Chromium step. Steps 1 and 2 are unchanged;
+  - `fonts-staging/` is kept out of git, deploy uploads and the wheel, as `fonts/` is.
+
+  The same cut-off bundle through the new script leaves no faces and no config, and the next
+  boot extracts all 12 faces (the release's bytes) and writes the config. The setup tests pass
+  under bash and under dash, the container's `sh`.
+- **The fontconfig's DejaVu rename is pinned by what it resolves.**
+  - **The test.** The resolution test gains `"DejaVu Sans": "Liberation Sans"`. It first checks
+    that the same config without its DejaVu rule matches DejaVu Sans itself, so the row proves the
+    rename wherever it runs.
+  - **Linux only; not run in this round.** The Mac has no fontconfig library and no DejaVu. The
+    session's permission check refused fetching a wheel that bundles them, and the round made no
+    deploys. Its control-config helper was checked on a config `setup.sh` wrote.
+- **Reproducibility is proved on the tar stream.** The rebuild test compares the decompressed
+  streams. The committed bundle, recompressed at another level, fails the old assertion and passes
+  the new one.
+- **Operators can see the bundle.**
+  - `/api/export/pptx/editable/huashu/available` answers `checks.font_bundle`, and every slim
+    check is now asserted to be a boolean.
+  - Its server-side diagnostics add `fontconfig_file`, `liberation_faces` and
+    `setup_log_font_lines`: setup's `[setup] … fonts` lines, read from the whole log, whose
+    40-line tail Chromium's download output fills.
+  - Availability is still not gated on the bundle; a test pins that.
+- **The in-repo corpus gains a slide with no webfont.** `18-ds-off-stack-kpis-table-legend` sets
+  the DS-off stack on KPI figures over their labels (finance-off 03's shape), a small table, and a
+  ◔◑◕ / ✓ legend. Its first scores, PowerPoint / Google, are **2.93 / 2.48**, the same in a run of
+  it alone; no text is lost, and there are 0 MODEL DROPS and 1 capture.
+  - Both decks write it in Arial, with MS PGothic for its 9 symbols. PowerPoint's PDF embeds only
+    Arial, Arial Bold and MS PGothic, and Google's conversion has only Arial and MS PGothic runs.
+  - No figure wraps or overlaps its label in either app.
+  - Both apps draw its Harvey quarters smaller than the UI does: they are MS PGothic's glyphs, by
+    B8's D8 rule.
+- **Wording.** The app.yaml template's bootstrap comment names the font bundle. export-features.md's
+  accuracy figures now agree with CALIBRATION.md N4: on a Mac, 3,135 runs agree and 13 differ in
+  name only.
+- **Harness.** Both corpora, `--pin-fonts --powerpoint --gslides`, at `4f014e0c`, against B7 fix
+  round 1's final runs.
+  - **Scores.** Every shared slide's score is unchanged, and none is worse. The means, PowerPoint /
+    Google, are 1.89 / 2.43 over the in-repo corpus's 17 shared slides and 1.62 / 1.52 for the
+    design-system corpus.
+  - **Decks.** The truth is pixel-identical on every shared slide. In both targets, slides 1 to 17
+    and all 27 design-system slides are byte-identical to the baseline's. The in-repo decks differ
+    only by slide 18 and the deck-level lists that name it.
+  - **Health.** No text is lost, and there are 0 MODEL DROPS and no capture failures.
+  - **Determinism.** Fresh pinned exports of both corpora at `a4974a15`, both targets, equal the
+    final runs part for part.
+- **Tests.** There are 11 new collected tests (test_export_snapshot_drawn_faces 2, one of them the
+  inverted `never-dejavu` case it replaces; test_huashu_font_bundle 9). 5 tests are strengthened:
+  the rebuild, the resolution, the two packaging tests and the slim-response leak test. The
+  `document.fonts` helper now reads a face declared with no weight (`normal`) as 400. Each new
+  test was red first at its parent, or is a guard.
+  - **Sabotages.** 29 were red, every file restored byte for byte, and item 2's under dash too.
+    Removing the early return for every webfont was green at first; the lacking-characters case
+    added for it then caught it.
+  - **Green, each explained.** Two leave what is under test unchanged: another deflate level, and
+    the PAX tar format, which writes the same bytes. Dropping the engine's own DejaVu check shows
+    only where DejaVu is installed, so on Linux.
+- **Gate** (serial): `-k "(export or huashu or google) and not timeout"`, with
+  `--ignore=tests/unit/test_pptx_from_html_huashu_timeout.py` so the file is not imported. Every
+  test in that file has "timeout" in its id, so the selection is the same. It gave 1435 passed, 0
+  failed, 13 skipped (B7 r1: 1425 / 0 / 13). The two other "timeout" tests: 2 passed.
+- **Full suite** (`-n 6`), without the timeout file: 18099 passed, 0 failed, 28 skipped (B7 r1:
+  18089 / 0 / 28).
+- **The timeout file was not run in this round.** Its watcher kills every Playwright browser on the
+  machine. Its pinned-corpus test now expects the 18 slides; the owner runs it.
+
+Google Slides decks kept for this round:
+- In-repo corpus: https://docs.google.com/presentation/d/1oDz9LnDlAqgAZRVFXznnKS26lmvvth-RabIBd-M6mWM/edit
+  ("Tellr export revamp — B8 r1, in-repo corpus (pinned fonts, 4f014e0c)")
+- Design-system corpus: https://docs.google.com/presentation/d/1EZvCSaWnhzxEOcALA0zxqqIWOHVC6lDBJFjPrFWPgR4/edit
+  ("Tellr export revamp — B8 r1, design-system corpus (pinned fonts, 4f014e0c)")
+
+The one probe presentation this round created was deleted by id and confirmed gone (404).
+
 ### Google Slides decks kept for the owner
 
 - In-repo corpus: https://docs.google.com/presentation/d/1mrsZcZayX1iMWjNjkU2G4Yt4vB4PS-iCf_KVcSvGz_w/edit
