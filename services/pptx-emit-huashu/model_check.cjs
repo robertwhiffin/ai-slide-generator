@@ -44,8 +44,6 @@ const GEOMETRIES = new Set(['rect', 'roundRect', 'roundCorners', 'ellipse', 'pat
 // A roundCorners shape's corners: top left, top right, bottom right, bottom left.
 const CORNER_COUNT = 4;
 const DASHES = new Set(['solid', 'dash', 'dot']);
-// What a shape may be besides itself (snapshot.mjs SlideModel): a shadow shape.
-const SHAPE_ROLES = new Set(['shadow']);
 const ALIGNMENTS = new Set(['left', 'center', 'right', 'justify']);
 const ANCHORS = new Set(['top', 'middle', 'bottom']);
 const BASELINES = new Set(['super', 'sub']);
@@ -139,7 +137,6 @@ function isCorner(corner) {
 
 function isShape(item) {
   if (!isBox(item) || !GEOMETRIES.has(item.geometry) || !isOptionalNumber(item.rotate)) return false;
-  if (item.role !== undefined && !SHAPE_ROLES.has(item.role)) return false;
   if (item.geometry === 'roundRect' ? !isNumber(item.radius) : !isOptionalNumber(item.radius)) return false;
   if (item.geometry === 'roundCorners' && !(isListOf(item.radii, isCorner) && item.radii.length === CORNER_COUNT)) return false;
   if (item.fill !== null && !isFill(item.fill)) return false;

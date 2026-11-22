@@ -3297,47 +3297,29 @@ class TestRoundedWrapper:
                 f"slot ({cell.row}, {cell.col}) reads {origin.text!r}, the browser {cell.text!r}"
             )
 
-    def test_the_unfilled_wrapper_casts_its_shadow_from_under_the_table(
+    def test_the_unfilled_wrapper_casts_no_shadow_and_draws_no_shape_for_one(
         self, inline_export: Callable[[str], bytes]
     ) -> None:
-        """The wrapper paints no background, so its two shadow layers are shapes of their own.
+        """The wrapper paints no background, so it casts no shadow, and no shape stands in for one.
 
-        Each is named "Shadow", at the wrapper's border box rounded 8 px,
-        filled F9F7F4 (the slide's ground, which is what lies beneath the
-        wrapper) and unoutlined, and both paint under the corner shapes and the
-        table: back to front the second layer, then the first.
+        Neither app casts a shadow from an unfilled shape, and the export
+        draws no shape for a shadow alone. So no shape on the slide is named
+        "Shadow", none carries a shadow, and nothing but the corner shapes lies
+        under the table.
         """
         document = _inline_document("rounded")
         shapes = slide_shapes(inline_export("rounded"))
         (table,) = browser_tables(document, "table")
-        wrapper = browser_rect(document, ROUNDED_WRAPPER)
         frame_position, _ = _frame_for(shapes, _grid_rect(table), "the rounded data table")
 
-        hidden = [
-            (position, shape) for position, shape in enumerate(shapes) if shape.name == "Shadow"
-        ]
-        corner_shapes = [
-            position for position, shape in enumerate(shapes) if shape.geometry == "custGeom"
-        ]
-        assert len(hidden) == 2, f"expected the wrapper's two shadow layers:\n{_describe(shapes)}"
-        for position, shape in hidden:
-            assert shape.fill == "F9F7F4" and shape.line is None and shape.shadow is not None, (
-                f"spTree {position}: a shadow shape filled {shape.fill}, outlined {shape.line}, "
-                f"casting {shape.shadow}"
-            )
-            assert _same_rect(_box(shape), wrapper, 0.1) and shape.geometry == "roundRect", (
-                f"spTree {position}: a {shape.geometry} at {_rect(shape)}, "
-                f"not the wrapper {wrapper}"
-            )
-            assert (
-                position < min(corner_shapes, default=frame_position) and position < frame_position
-            ), (
-                f"spTree {position}: a shadow layer paints over the corner shapes {corner_shapes} "
-                f"or the table ({frame_position})"
-            )
-        blurs = [shape.shadow.blur_px for _, shape in hidden]
-        assert blurs == sorted(blurs, reverse=True) and abs(blurs[0] - 3) <= 0.05, (
-            f"back to front the 3 px layer, then the 2 px one; emitted blurs {blurs}"
+        named = [shape for shape in shapes if shape.name == "Shadow"]
+        casting = [shape for shape in shapes if shape.shadow is not None]
+        assert named == [] and casting == [], (
+            f"a shape stands in for the wrapper's shadow:\n{_describe(shapes)}"
+        )
+        under = [shape for shape in shapes[:frame_position] if shape.geometry != "custGeom"]
+        assert under == [], (
+            f"something other than the corner shapes lies under the table:\n{_describe(under)}"
         )
 
     def test_cells_the_wrappers_corners_do_not_reach_keep_their_fills(

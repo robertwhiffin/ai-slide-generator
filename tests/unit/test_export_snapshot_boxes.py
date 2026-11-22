@@ -485,31 +485,42 @@ class TestSnapshotPaintOrder:
 # Shadow layers
 # ---------------------------------------------------------------------------
 
-# One shape carries one outer shadow, and neither app casts a shadow from a
-# shape it does not fill, or more than a faint one from a translucent fill
-# (measured: a fill at alpha 0.5 casts half the shadow, at 0.01 none to the
-# eye). So every shadow layer the box's own shape cannot carry is a shape of its
-# own under the box, filled so that nothing of it shows but its shadow, and named
-# for what it is.
+# One shape carries one outer shadow (a:outerShdw), in PowerPoint and in Google
+# Slides alike, and that is how a person gives a box a shadow in either app. So
+# a box's box-shadow layers are written as one shadow on the box's own shape:
+# its one layer as it is, and two or more (or a layer with a spread, which an
+# outer shadow has none of) as the one layer closest to them all together, the
+# fitted shadow (CALIBRATION.md, D4 and D5). No shape is drawn for a shadow
+# alone. Neither app casts a shadow from an unfilled shape (measured: B2), and
+# an unfilled shape's outline would cast only a thin frame of itself, so a box
+# that paints no fill casts none.
 SHADOW_SHAPE_NAME = "Shadow"
 # The design system's --shadow-md and --shadow-sm, each two layers (deck.css).
 SHADOW_MD = "0 2px 6px rgba(27,49,57,.08), 0 8px 20px rgba(27,49,57,.08)"
 SHADOW_SM = "0 1px 2px rgba(27,49,57,.06), 0 1px 3px rgba(27,49,57,.08)"
-# A solid ground for the boxes under test, so what lies beneath them is one colour.
+# Tailwind's shadow-lg: two layers with negative spreads.
+TAILWIND_SHADOW_LG = "0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1)"
+# The fitted layer of each design-system shadow, as CALIBRATION.md records it:
+# (offset down px, blur px, alpha), in 1B3139.
+FITTED_SHADOW_MD = (5.13, 14.34, 0.139)
+FITTED_SHADOW_SM = (1.0, 2.58, 0.137)
+# A solid ground for the boxes under test.
 PANEL_FILL = "CDEDE1"
 PANEL = (
     '<div id="panel" style="position: absolute; left: 80px; top: 80px; width: 1000px; '
     'height: 520px; background: #CDEDE1;">'
 )
-# The slide root's ground in the corpus deck (deck.css :root --paper, .slide).
-DECK_PAPER_RULE = "--paper: #F9F7F4;"
 SHADOW_ANGLE_TOLERANCE_DEG = 1
 SHADOW_LENGTH_TOLERANCE_PX = 0.05
+# A fitted length or alpha agrees with this test's own model within its grid's
+# last step (CALIBRATION.md: about 0.01 px) and EMU rounding.
+FIT_LENGTH_TOLERANCE_PX = 0.1
+FIT_ALPHA_TOLERANCE = 0.003
 
 
 @dataclass(frozen=True)
 class Layer:
-    """One painted box-shadow layer as an exported shadow: colour, alpha, blur, offset down."""
+    """One box-shadow layer as an exported shadow: colour, alpha, blur, offset down."""
 
     colour: str
     alpha: float
@@ -517,109 +528,255 @@ class Layer:
     down_px: float
 
 
-def _assert_shadow(shape: Shape, layer: Layer, what: str) -> None:
+@dataclass(frozen=True)
+class CssLayer:
+    """One CSS box-shadow layer: offset, blur, spread (px), colour and alpha."""
+
+    x: float
+    y: float
+    blur: float
+    spread: float
+    colour: str
+    alpha: float
+
+
+def _assert_shadow(
+    shape: Shape,
+    layer: Layer,
+    what: str,
+    tolerance_px: float = SHADOW_LENGTH_TOLERANCE_PX,
+    alpha_tolerance: float = ALPHA_TOLERANCE,
+) -> None:
     shadow = shape.shadow
     assert shadow is not None and shadow.kind == "outer", f"{what}: no outer shadow ({shadow})"
     assert shadow.color == layer.colour, f"{what}: shadow colour {shadow.color}, not {layer.colour}"
-    assert shadow.alpha is not None and abs(shadow.alpha - layer.alpha) <= ALPHA_TOLERANCE, (
+    assert shadow.alpha is not None and abs(shadow.alpha - layer.alpha) <= alpha_tolerance, (
         f"{what}: shadow alpha {shadow.alpha}, not {layer.alpha}"
     )
-    assert abs(shadow.blur_px - layer.blur_px) <= SHADOW_LENGTH_TOLERANCE_PX, (
+    assert abs(shadow.blur_px - layer.blur_px) <= tolerance_px, (
         f"{what}: shadow blur {shadow.blur_px} px, not {layer.blur_px}"
     )
-    assert abs(shadow.dist_px - layer.down_px) <= SHADOW_LENGTH_TOLERANCE_PX and (
+    assert abs(shadow.dist_px - layer.down_px) <= tolerance_px and (
         abs(shadow.angle - 90) <= SHADOW_ANGLE_TOLERANCE_DEG
     ), f"{what}: shadow {shadow.dist_px} px at {shadow.angle} degrees, not {layer.down_px} down"
 
 
-def _shadow_shapes(shapes: list[Shape]) -> list[tuple[int, Shape]]:
-    return [
-        (position, shape)
-        for position, shape in enumerate(shapes)
-        if shape.name == SHADOW_SHAPE_NAME
+def _assert_no_shadow_shape(shapes: list[Shape]) -> None:
+    """No shape is drawn for a shadow alone: none is named "Shadow", and every shape paints."""
+    named = [shape for shape in shapes if shape.name == SHADOW_SHAPE_NAME]
+    assert named == [], f"a shadow shape was drawn:\n{_describe(shapes)}"
+    blank = [
+        shape for shape in shapes if shape.kind == "shape" and not shape.fill and not shape.line
     ]
+    assert blank == [], f"a shape paints nothing of its own:\n{_describe(blank)}"
 
 
-def _assert_shadow_shape(
-    shape: Shape, fill: str, border_box: dict, radius_px: float, layer: Layer, what: str
-) -> None:
-    """A shadow shape: the box's border box and corner, filled ``fill``, no outline, ``layer``.
+# The fitted shadow's model, written here from CALIBRATION.md D4 and D5 for the
+# tests to hold the export against: a layer covers a point d px outside a long
+# edge of the box, n its outward normal, alpha * Q((d - offset.n - spread) /
+# sigma), sigma = blur / 2, Q the standard normal's upper tail; layers compose
+# as 1 - prod(1 - c); the error of a single layer is the summed squared
+# difference over the four edges at d = k R / 64, k = 0..64, R the layers'
+# reach. EDGES are the outward normals: bottom, top, right, left.
+FIT_SAMPLES = 64
+EDGES = ((0, 1), (0, -1), (1, 0), (-1, 0))
 
-    A box with no corner radius (``radius_px`` 0) is a rect.
-    """
-    assert shape.kind == "shape" and shape.fill == fill and shape.fill_alpha is None, (
-        f"{what}: a {shape.kind} filled {shape.fill} at alpha {shape.fill_alpha}, not {fill}"
+
+def _cover(d: float, along: float, blur: float, spread: float, alpha: float) -> float:
+    edge = d - along - spread
+    sigma = blur / 2
+    if sigma <= 0:
+        return alpha * (1.0 if edge < 0 else 0.5 if edge == 0 else 0.0)
+    return alpha * 0.5 * math.erfc(edge / sigma / math.sqrt(2))
+
+
+def _fit_points(layers: list[CssLayer]) -> list[float]:
+    reach = max(
+        abs(layer.x) + abs(layer.y) + max(layer.spread, 0) + 2 * layer.blur for layer in layers
     )
-    assert shape.line is None, f"{what}: outlined {shape.line}"
-    _assert_box(shape, border_box, INSET_TOLERANCE_PX, what)
-    if not radius_px:
-        assert shape.geometry == "rect", (
-            f"{what}: a square box's shadow shape is a {shape.geometry}"
-        )
-        _assert_shadow(shape, layer, what)
-        return
-    expected_adj = round(radius_px / min(border_box["w"], border_box["h"]) * 100000)
-    assert (
-        shape.geometry == "roundRect"
-        and shape.adj is not None
-        and (abs(shape.adj - expected_adj) <= 1000)
-    ), f"{what}: a {shape.geometry} with adj {shape.adj}, expected roundRect adj {expected_adj}"
-    _assert_shadow(shape, layer, what)
+    return [k * (reach + 1) / FIT_SAMPLES for k in range(FIT_SAMPLES + 1)]
+
+
+def _composite(layers: list[CssLayer], points: list[float]) -> list[float]:
+    profile = []
+    for nx, ny in EDGES:
+        for d in points:
+            keep = 1.0
+            for layer in layers:
+                keep *= 1 - _cover(
+                    d, layer.x * nx + layer.y * ny, layer.blur, layer.spread, layer.alpha
+                )
+            profile.append(1 - keep)
+    return profile
+
+
+def _fit_error(layers: list[CssLayer], x: float, y: float, blur: float, alpha: float) -> float:
+    points = _fit_points(layers)
+    target = _composite(layers, points)
+    single = [_cover(d, x * nx + y * ny, blur, 0, alpha) for nx, ny in EDGES for d in points]
+    return sum((a - b) ** 2 for a, b in zip(single, target))
+
+
+def _fitted_down(shape: Shape) -> tuple[float, float, float]:
+    """(offset down, blur, alpha) of a shape's shadow that falls straight down."""
+    shadow = shape.shadow
+    assert shadow is not None and abs(shadow.angle - 90) <= SHADOW_ANGLE_TOLERANCE_DEG, shadow
+    return shadow.dist_px, shadow.blur_px, shadow.alpha
+
+
+def _card(shadow: str, *, extra: str = "", fill: str = "#fff") -> str:
+    return (
+        '<div class="slide"><div id="card" style="position: absolute; left: 100px; top: 100px; '
+        f"width: 300px; height: 200px; border-radius: 14px; background: {fill}; {extra}"
+        f'box-shadow: {shadow};"></div></div>'
+    )
 
 
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestShadowLayers:
-    def test_each_further_layer_is_a_shadow_shape_under_the_box(
+    def test_a_multi_layer_card_is_one_shape_with_one_fitted_shadow(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The design system's ``--shadow-md`` card: two layers, the second its own shape.
+        """The design system's ``--shadow-md`` card: one shape, one shadow, nothing else.
 
         ``0 2px 6px rgba(27,49,57,.08), 0 8px 20px rgba(27,49,57,.08)`` on a
-        white 14 px-radius card. The card keeps the first layer (the one CSS
-        paints on top); the second, the long soft tail, is one shape directly
-        under the card, named "Shadow": the card's border box and corner, filled
-        in the card's own white, which the card hides, with no outline, casting
-        the second layer, 20 px of blur 8 px down. Nothing else is drawn.
+        white 14 px-radius card. The card is one roundRect at its border box,
+        carrying one outer shadow, the fitted layer CALIBRATION.md records for
+        ``--shadow-md``: 14.34 px of blur, 5.13 px down, 1B3139 at alpha
+        0.139. No other shape is drawn: none named "Shadow", none under the
+        card.
         """
-        body = (
-            '<div class="slide"><div id="card" style="position: absolute; left: 100px; top: 100px; '
-            "width: 300px; height: 200px; border-radius: 14px; background: #fff; "
-            f"box-shadow: {SHADOW_MD};"
-            '"></div></div>'
-        )
+        body = _card(SHADOW_MD)
         shapes = slide_shapes(_export_one(body, monkeypatch))
         border_box = browser_rect(_document(body), "#card")
 
-        hidden = _shadow_shapes(shapes)
-        cards = [
-            (position, shape)
-            for position, shape in enumerate(shapes)
-            if shape.fill == "FFFFFF" and shape.name != SHADOW_SHAPE_NAME
-        ]
-        assert len(shapes) == 2 and len(hidden) == 1 and len(cards) == 1, (
-            f"expected the card and one shadow shape:\n{_describe(shapes)}"
+        _assert_no_shadow_shape(shapes)
+        assert len(shapes) == 1 and shapes[0].fill == "FFFFFF", (
+            f"expected the card alone:\n{_describe(shapes)}"
         )
-        (card_position, card), (shadow_position, shadow_shape) = cards[0], hidden[0]
+        card = shapes[0]
+        assert card.geometry == "roundRect", f"the card is a {card.geometry}"
         _assert_box(card, border_box, INSET_TOLERANCE_PX, "the card")
-        _assert_shadow(card, Layer("1B3139", 0.08, 6, 2), "the card's own shadow")
-        _assert_shadow_shape(
-            shadow_shape, "FFFFFF", border_box, 14, Layer("1B3139", 0.08, 20, 8), "the second layer"
-        )
-        assert shadow_position == card_position - 1, (
-            f"the second layer (spTree {shadow_position}) is not directly under the card "
-            f"({card_position})"
+        down, blur, alpha = FITTED_SHADOW_MD
+        _assert_shadow(
+            card,
+            Layer("1B3139", alpha, blur, down),
+            "the card's fitted shadow",
+            FIT_LENGTH_TOLERANCE_PX,
+            FIT_ALPHA_TOLERANCE,
         )
 
-    def test_layers_and_rings_paint_in_css_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Three layers, a ring between two shadows: each paints where CSS lists it.
+    def test_a_shadow_sm_card_carries_its_pinned_fitted_shadow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The design system's KPI card: ``--shadow-sm`` on a bordered white card.
 
-        ``0 4px 10px rgba(0,0,0,.2), 0 0 0 3px #1B5162, 0 12px 30px
-        rgba(0,0,0,.1)`` on a white box: CSS paints the last listed lowest, so
-        back to front the third layer's shadow shape, the ring, then the box
-        with the first layer. The ring is no outline of the box, because the
-        first layer's shadow paints over it: it is an unfilled rect of its own,
-        3 px of 1B5162 outside the box.
+        One roundRect outlined 0.75 pt DCE0E2, carrying the fitted layer
+        CALIBRATION.md records for ``--shadow-sm``: 2.58 px of blur, 1 px
+        down, 1B3139 at alpha 0.137.
+        """
+        body = _card(SHADOW_SM, extra="border: 1px solid #DCE0E2; ")
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        _assert_no_shadow_shape(shapes)
+        assert len(shapes) == 1 and shapes[0].line == "DCE0E2", (
+            f"expected the card alone:\n{_describe(shapes)}"
+        )
+        down, blur, alpha = FITTED_SHADOW_SM
+        _assert_shadow(
+            shapes[0],
+            Layer("1B3139", alpha, blur, down),
+            "the card's fitted shadow",
+            FIT_LENGTH_TOLERANCE_PX,
+            FIT_ALPHA_TOLERANCE,
+        )
+
+    def test_the_fitted_shadow_is_the_least_squares_single_layer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tailwind's ``shadow-lg``, two layers with negative spreads, fitted by the model.
+
+        The card's one shadow is a least-squares minimum of this test's own
+        model of the layers (CALIBRATION.md): moving its offset or blur by
+        0.25 px, or its alpha by 0.003, makes the error no smaller; and it is
+        closer to the two layers together than either layer alone, each at
+        its own offset, blur and alpha.
+        """
+        layers = [
+            CssLayer(0, 10, 15, -3, "000000", 0.1),
+            CssLayer(0, 4, 6, -4, "000000", 0.1),
+        ]
+        shapes = slide_shapes(_export_one(_card(TAILWIND_SHADOW_LG), monkeypatch))
+
+        _assert_no_shadow_shape(shapes)
+        assert len(shapes) == 1, f"expected the card alone:\n{_describe(shapes)}"
+        assert shapes[0].shadow is not None and shapes[0].shadow.color == "000000"
+        down, blur, alpha = _fitted_down(shapes[0])
+        error = _fit_error(layers, 0, down, blur, alpha)
+        for d_down, d_blur, d_alpha in (
+            (0.25, 0, 0),
+            (-0.25, 0, 0),
+            (0, 0.25, 0),
+            (0, -0.25, 0),
+            (0, 0, 0.003),
+            (0, 0, -0.003),
+        ):
+            moved = _fit_error(layers, 0, down + d_down, max(0, blur + d_blur), alpha + d_alpha)
+            assert moved >= error - 1e-9, (
+                f"the fitted ({down:.2f}, {blur:.2f}, {alpha:.3f}) is no minimum: moving it by "
+                f"({d_down}, {d_blur}, {d_alpha}) lowers the error from {error:.3e} to {moved:.3e}"
+            )
+        for layer in layers:
+            alone = _fit_error(layers, layer.x, layer.y, layer.blur, layer.alpha)
+            assert error < alone, (
+                f"the fitted shadow's error {error:.3e} is no smaller than that of {layer} "
+                f"alone, {alone:.3e}"
+            )
+
+    def test_layers_of_two_colours_fit_their_weighted_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``0 2px 4px rgba(255,0,0,.3), 0 6px 12px rgba(0,0,255,.15)``: one shadow, both colours.
+
+        The fitted colour is the layers' colours weighted by how much each
+        covers alone, summed over the model's points (CALIBRATION.md), each
+        channel rounded.
+        """
+        layers = [CssLayer(0, 2, 4, 0, "FF0000", 0.3), CssLayer(0, 6, 12, 0, "0000FF", 0.15)]
+        body = _card("0 2px 4px rgba(255,0,0,.3), 0 6px 12px rgba(0,0,255,.15)")
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        points = _fit_points(layers)
+        weights = [
+            sum(
+                _cover(d, layer.x * nx + layer.y * ny, layer.blur, layer.spread, layer.alpha)
+                for nx, ny in EDGES
+                for d in points
+            )
+            for layer in layers
+        ]
+        channels = [
+            sum(weight * int(layer.colour[i : i + 2], 16) for weight, layer in zip(weights, layers))
+            / sum(weights)
+            for i in (0, 2, 4)
+        ]
+        expected = "".join(f"{round(channel):02X}" for channel in channels)
+        _assert_no_shadow_shape(shapes)
+        assert len(shapes) == 1 and shapes[0].shadow is not None, _describe(shapes)
+        assert shapes[0].shadow.color == expected, (
+            f"the fitted colour is {shapes[0].shadow.color}, the layers' weighted {expected}"
+        )
+
+    def test_a_ring_between_two_shadows_paints_under_the_box_and_its_shadow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``0 4px 10px rgba(0,0,0,.2), 0 0 0 3px #1B5162, 0 12px 30px rgba(0,0,0,.1)``.
+
+        The first shadow is listed before the ring, so it paints over it: the
+        ring is an unfilled rect of its own, 3 px of 1B5162 outside the box,
+        under the box, which carries the two shadows fitted to one. Two shapes,
+        no more.
         """
         body = (
             '<div class="slide"><div id="box" style="position: absolute; left: 200px; top: 150px; '
@@ -627,34 +784,22 @@ class TestShadowLayers:
             "0 4px 10px rgba(0,0,0,.2), 0 0 0 3px #1B5162, "
             '0 12px 30px rgba(0,0,0,.1);"></div></div>'
         )
+        layers = [CssLayer(0, 4, 10, 0, "000000", 0.2), CssLayer(0, 12, 30, 0, "000000", 0.1)]
         shapes = slide_shapes(_export_one(body, monkeypatch))
         border_box = browser_rect(_document(body), "#box")
 
-        hidden = _shadow_shapes(shapes)
-        rings = [
-            (position, shape)
-            for position, shape in enumerate(shapes)
-            if shape.fill is None and shape.line == "1B5162"
-        ]
-        boxes = [
-            (position, shape)
-            for position, shape in enumerate(shapes)
-            if shape.fill == "FFFFFF" and shape.name != SHADOW_SHAPE_NAME
-        ]
-        assert len(shapes) == 3 and len(hidden) == 1 and len(rings) == 1 and len(boxes) == 1, (
-            f"expected a shadow shape, a ring and the box:\n{_describe(shapes)}"
-        )
-        assert hidden[0][0] < rings[0][0] < boxes[0][0], (
-            f"back to front CSS paints the third layer, the ring, then the box with the first; "
-            f"emitted at {hidden[0][0]}, {rings[0][0]}, {boxes[0][0]}"
-        )
-        box = boxes[0][1]
-        assert box.line is None, f"the box is outlined {box.line}: the ring is under the shadow"
-        _assert_shadow(box, Layer("000000", 0.2, 10, 4), "the box's own shadow")
-        _assert_shadow_shape(
-            hidden[0][1], "FFFFFF", border_box, 10, Layer("000000", 0.1, 30, 12), "the third layer"
-        )
-        ring = rings[0][1]
+        _assert_no_shadow_shape(shapes)
+        rings = [position for position, shape in enumerate(shapes) if shape.line == "1B5162"]
+        boxes = [position for position, shape in enumerate(shapes) if shape.fill == "FFFFFF"]
+        assert len(shapes) == 2 and len(rings) == 1 and len(boxes) == 1, _describe(shapes)
+        assert rings[0] < boxes[0], f"the ring (spTree {rings[0]}) paints over the box"
+        ring, box = shapes[rings[0]], shapes[boxes[0]]
+        assert (
+            ring.fill is None
+            and ring.shadow is None
+            and ring.line_w_pt is not None
+            and (abs(ring.line_w_pt - 2.25) <= 0.01)
+        ), f"the ring is {ring.line_w_pt} pt, shadow {ring.shadow}"
         _assert_box(
             ring,
             {
@@ -666,362 +811,144 @@ class TestShadowLayers:
             INSET_TOLERANCE_PX,
             "the ring",
         )
-        assert (
-            ring.shadow is None
-            and ring.line_w_pt is not None
-            and abs(ring.line_w_pt - 2.25) <= 0.01
-        ), f"the ring is {ring.line_w_pt} pt with shadow {ring.shadow}"
-
-    def test_a_negative_spread_shrinks_its_shadow_shape(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Tailwind's ``shadow-md``: its second layer ``0 2px 4px -2px`` shrinks its shape by 2 px.
-
-        A negative spread draws the layer from the border box shrunk by the
-        spread, its radius with it (8 - 2 = 6 px), so the shadow shape is that
-        box, still under the card. The card's own first layer carries no spread
-        (an outer shadow has none).
-        """
-        body = (
-            '<div class="slide"><div id="card" style="position: absolute; left: 100px; top: 100px; '
-            "width: 240px; height: 120px; border-radius: 8px; background: #fff; box-shadow: "
-            '0 4px 6px -1px rgba(0,0,0,.1), 0 2px 4px -2px rgba(0,0,0,.1);"></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#card")
-
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 1, f"expected one shadow shape:\n{_describe(shapes)}"
-        shrunk = {
-            "x": border_box["x"] + 2,
-            "y": border_box["y"] + 2,
-            "w": border_box["w"] - 4,
-            "h": border_box["h"] - 4,
-        }
-        _assert_shadow_shape(
-            hidden[0][1], "FFFFFF", shrunk, 6, Layer("000000", 0.1, 4, 2), "the second layer"
-        )
-
-    def test_an_unfilled_box_casts_its_layers_from_shapes_in_the_colour_beneath(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unfilled rounded frame with ``--shadow-sm`` on a CDEDE1 panel: both layers drawn.
-
-        The frame paints no background (the data-table wrapper's pattern:
-        ``border-radius: 8px; overflow: hidden``, its child filling it). Each
-        layer is a shadow shape at the frame's border box and corner, filled
-        CDEDE1, the colour the panel paints beneath it, so that it shows
-        nothing but its shadow wherever the child does not cover it; back to
-        front the second layer, then the first, both over the panel and under
-        the child. No other shape carries a shadow.
-        """
-        body = (
-            f'<div class="slide">{PANEL}'
-            '<div id="frame" style="position: absolute; left: 40px; top: 40px; width: 300px; '
-            f'height: 160px; border-radius: 8px; overflow: hidden; box-shadow: {SHADOW_SM};">'
-            '<div style="height: 160px; background: #FF5F46;"></div></div></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#frame")
-
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 2, f"expected two shadow shapes:\n{_describe(shapes)}"
-        _assert_shadow_shape(
-            hidden[0][1], PANEL_FILL, border_box, 8, Layer("1B3139", 0.08, 3, 1), "the second layer"
-        )
-        _assert_shadow_shape(
-            hidden[1][1], PANEL_FILL, border_box, 8, Layer("1B3139", 0.06, 2, 1), "the first layer"
-        )
-        panels = [
-            position
-            for position, shape in enumerate(shapes)
-            if shape.fill == PANEL_FILL and shape.name != SHADOW_SHAPE_NAME
-        ]
-        assert len(panels) == 1, f"expected the panel once:\n{_describe(shapes)}"
-        panel = panels[0]
-        child, _ = _filled(shapes, "FF5F46")
-        assert panel < hidden[0][0] < hidden[1][0] < child, (
-            f"expected the panel, the two layers and the child back to front; emitted at {panel}, "
-            f"{hidden[0][0]}, {hidden[1][0]}, {child}"
-        )
-        others = [
-            shape
-            for shape in shapes
-            if shape.shadow is not None and shape.name != SHADOW_SHAPE_NAME
-        ]
-        assert others == [], f"another shape carries a shadow:\n{_describe(others)}"
-
-    def test_a_translucent_box_casts_its_shadow_from_beneath_it(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A 60 % white box on the panel: its shadow from a CDEDE1 shape under it, none on it.
-
-        Both apps draw a shadow under a translucent fill, so the box itself
-        would show its own shadow through it, where the browser shows the
-        panel. The box keeps its fill at alpha 0.6 and casts nothing; the shape
-        under it, filled CDEDE1 as the panel beneath it, casts the shadow.
-        """
-        body = (
-            f'<div class="slide">{PANEL}'
-            '<div id="glass" style="position: absolute; left: 60px; top: 60px; width: 280px; '
-            "height: 140px; border-radius: 12px; background: rgba(255, 255, 255, 0.6); "
-            'box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);"></div></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#glass")
-
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 1, f"expected one shadow shape:\n{_describe(shapes)}"
-        _assert_shadow_shape(
-            hidden[0][1], PANEL_FILL, border_box, 12, Layer("000000", 0.25, 12, 4), "the shadow"
-        )
-        glass_position, glass = _filled(shapes, "FFFFFF")
-        assert glass.fill_alpha is not None and abs(glass.fill_alpha - 0.6) <= ALPHA_TOLERANCE, (
-            f"the box's fill alpha is {glass.fill_alpha}, not 0.6"
-        )
-        assert glass.shadow is None, f"the translucent box casts its own shadow {glass.shadow}"
-        assert hidden[0][0] < glass_position, "the shadow shape paints over the box"
-
-    def test_an_unfilled_bordered_box_casts_no_shadow_from_its_outline(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unfilled box with a 1 px border: the outline casts nothing; a shape under it does.
-
-        The design system's ``.med-frame``. An unfilled outline's shadow is a
-        thin shadowed frame in both apps (measured), not the browser's soft
-        shadow outside the box. The outline keeps no shadow; one CDEDE1 shape
-        at the border box carries it.
-        """
-        body = (
-            f'<div class="slide">{PANEL}'
-            '<div id="outlined" style="position: absolute; left: 60px; top: 60px; width: 280px; '
-            "height: 140px; border: 1px solid #DCE0E2; border-radius: 12px; "
-            'box-shadow: 0 2px 8px rgba(27, 49, 57, 0.08);"></div></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#outlined")
-
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 1, f"expected one shadow shape:\n{_describe(shapes)}"
-        _assert_shadow_shape(
-            hidden[0][1], PANEL_FILL, border_box, 12, Layer("1B3139", 0.08, 8, 2), "the shadow"
-        )
-        outlines = [shape for shape in shapes if shape.line == "DCE0E2"]
-        assert len(outlines) == 1 and outlines[0].shadow is None and outlines[0].fill is None, (
-            f"expected the border once, unfilled and casting nothing:\n{_describe(shapes)}"
-        )
-
-    def test_over_a_translucent_panel_its_shapes_take_the_colour_it_shows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An unfilled frame on a 10 % 1B5162 panel over the slide's F9F7F4 paper.
-
-        What lies beneath the frame is the panel's tint over the paper, one
-        colour the browser shows: 1B5162 at alpha 0.1 composited over F9F7F4,
-        each channel rounded. The frame's shadow shape takes exactly that, so
-        it shows nothing but its shadow.
-        """
-        assert DECK_PAPER_RULE in DECK_CSS, "fixture drift: deck.css changed the slide's paper"
-        body = (
-            '<div class="slide"><div style="position: absolute; left: 80px; top: 80px; '
-            'width: 900px; height: 480px; background: rgba(27, 81, 98, 0.1);">'
-            '<div id="frame" style="position: absolute; left: 60px; top: 60px; width: 300px; '
-            'height: 160px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);">'
-            "</div></div></div>"
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#frame")
-
-        tint, paper = "1B5162", "F9F7F4"
-        channels = [
-            round(int(tint[index : index + 2], 16) * 0.1 + int(paper[index : index + 2], 16) * 0.9)
-            for index in (0, 2, 4)
-        ]
-        blended = "".join(f"{channel:02X}" for channel in channels)
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 1, f"expected one shadow shape:\n{_describe(shapes)}"
-        _assert_shadow_shape(
-            hidden[0][1], blended, border_box, 8, Layer("000000", 0.2, 8, 2), "the shadow"
-        )
-
-    @pytest.mark.parametrize("beneath", ["sibling", "picture-ground"])
-    def test_where_no_one_colour_lies_beneath_the_box_keeps_its_shadow(
-        self, monkeypatch: pytest.MonkeyPatch, beneath: str
-    ) -> None:
-        """No shadow shape where its fill could not be the slide beneath it: the box keeps its own.
-
-        An unfilled bordered box over the edge of an earlier FFC000 block (a
-        sibling under it), or on a slide whose ground is a picture (a gradient
-        ground, which the export rasterises to the slide's background picture):
-        a filled shape under the box would hide what shows through it. So the
-        box is exported as before: its outline with its first shadow layer,
-        and no shadow shape.
-        """
-        box = (
-            '<div id="outlined" style="position: absolute; left: 200px; top: 200px; width: 280px; '
-            "height: 140px; border: 1px solid #DCE0E2; "
-            'box-shadow: 0 2px 8px rgba(27, 49, 57, 0.08);"></div>'
-        )
-        if beneath == "sibling":
-            body = (
-                '<div class="slide"><div style="position: absolute; left: 120px; top: 160px; '
-                f'width: 200px; height: 120px; background: #FFC000;"></div>{box}</div>'
-            )
-        else:
-            body = (
-                '<div class="slide" style="background: linear-gradient(135deg, #CDEDE1, #1B5162);">'
-                f"{box}</div>"
-            )
-        pptx = _export_one(body, monkeypatch)
-        shapes = slide_shapes(pptx)
-        if beneath == "picture-ground":
-            assert slide_background(pptx) is None, (
-                f"fixture drift: the slide's ground is the colour {slide_background(pptx)}"
+        assert box.line is None, f"the box is outlined {box.line}"
+        down, blur, alpha = _fitted_down(box)
+        error = _fit_error(layers, 0, down, blur, alpha)
+        for layer in layers:
+            assert error < _fit_error(layers, layer.x, layer.y, layer.blur, layer.alpha), (
+                f"the box's shadow ({down:.2f}, {blur:.2f}, {alpha:.3f}) is no fit of both layers"
             )
 
-        assert _shadow_shapes(shapes) == [], f"a shadow shape was drawn:\n{_describe(shapes)}"
-        outlines = [shape for shape in shapes if shape.line == "DCE0E2"]
-        assert len(outlines) == 1, f"expected the border once:\n{_describe(shapes)}"
-        _assert_shadow(outlines[0], Layer("1B3139", 0.08, 8, 2), "the outline's shadow")
-
-    def test_a_ring_listed_before_the_first_shadow_paints_over_it(
+    def test_a_ring_listed_before_the_shadow_paints_over_the_box(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Tailwind's ring-then-shadow order: ``0 0 0 3px <translucent>, 0 8px 20px <shadow>``.
 
-        CSS paints the ring, listed first, over the shadow. A box's own shadow
-        paints with the box, over any shape under it, so the box carries none
-        here: back to front the shadow shape (the box's border box in its white,
-        casting the second layer), the ring (an unfilled rect 3 px wide at alpha
-        0.3), then the box.
+        CSS paints the ring, listed first, over the shadow. The box carries its
+        one shadow as it is, so the ring, an unfilled rect 3 px wide at alpha
+        0.3, is drawn over the box, where the box's shadow lies under it (it
+        lies outside the border box, so it covers nothing of the box). Two
+        shapes: the box, then the ring.
         """
-        body = (
-            '<div class="slide"><div id="box" style="position: absolute; left: 200px; top: 150px; '
-            "width: 320px; height: 180px; border-radius: 10px; background: #fff; box-shadow: "
-            '0 0 0 3px rgba(27, 81, 98, 0.3), 0 8px 20px rgba(0, 0, 0, 0.2);"></div></div>'
-        )
+        body = _card("0 0 0 3px rgba(27, 81, 98, 0.3), 0 8px 20px rgba(0, 0, 0, 0.2)")
         shapes = slide_shapes(_export_one(body, monkeypatch))
-        border_box = browser_rect(_document(body), "#box")
 
-        hidden = _shadow_shapes(shapes)
-        rings = [
-            (position, shape)
-            for position, shape in enumerate(shapes)
-            if shape.fill is None and shape.line == "1B5162"
-        ]
-        boxes = [
-            (position, shape)
-            for position, shape in enumerate(shapes)
-            if shape.fill == "FFFFFF" and shape.name != SHADOW_SHAPE_NAME
-        ]
-        assert len(shapes) == 3 and len(hidden) == 1 and len(rings) == 1 and len(boxes) == 1, (
-            f"expected a shadow shape, the ring and the box:\n{_describe(shapes)}"
+        _assert_no_shadow_shape(shapes)
+        rings = [position for position, shape in enumerate(shapes) if shape.line == "1B5162"]
+        boxes = [position for position, shape in enumerate(shapes) if shape.fill == "FFFFFF"]
+        assert len(shapes) == 2 and len(rings) == 1 and len(boxes) == 1, _describe(shapes)
+        assert boxes[0] < rings[0], (
+            f"the box (spTree {boxes[0]}) and its shadow paint over the ring ({rings[0]})"
         )
-        assert hidden[0][0] < rings[0][0] < boxes[0][0], (
-            "back to front CSS paints the shadow, the ring listed before it, then the box; "
-            f"emitted at {hidden[0][0]}, {rings[0][0]}, {boxes[0][0]}"
-        )
-        assert boxes[0][1].shadow is None, (
-            f"the box casts {boxes[0][1].shadow}, which would paint over the ring"
-        )
-        _assert_shadow_shape(
-            hidden[0][1], "FFFFFF", border_box, 10, Layer("000000", 0.2, 20, 8), "the shadow"
-        )
+        assert shapes[rings[0]].shadow is None, "the ring casts a shadow"
+        _assert_shadow(shapes[boxes[0]], Layer("000000", 0.2, 20, 8), "the box's own shadow")
 
-    def test_a_box_a_lower_shadow_reaches_keeps_its_own_shadow(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "place", ["panel", "under-a-neighbours-shadow", "rounded-corner", "turned"]
+    )
+    def test_a_translucent_box_carries_its_own_shadow(
+        self, monkeypatch: pytest.MonkeyPatch, place: str
     ) -> None:
-        """Two translucent boxes on the panel; the first box's long shadow reaches under the second.
+        """A translucent box keeps its one shadow on itself, wherever it lies; nothing is added.
 
-        ``#upper``'s shadow (24 px down, 48 px of blur) falls under ``#lower``, so
-        the browser shows it through ``#lower``: no one colour lies beneath
-        ``#lower``, and a filled shape there would hide that shadow. ``#upper``
-        has a shadow shape, filled CDEDE1; ``#lower`` has none and keeps its
-        own shadow, as before.
+        On a CDEDE1 panel; under a neighbour's long shadow; in the corner of a
+        panel rounded 60 px; turned 30 degrees. Each is one shape at alpha
+        0.4, carrying ``0 4px 12px rgba(0,0,0,.25)`` (turned with it, at 120
+        degrees, when it is turned). Both apps draw that shadow scaled by the
+        fill's alpha and through it (B2, measured): the box as it was exported
+        before the shadow shapes. No shape is drawn for a shadow alone.
         """
-        body = (
-            f'<div class="slide">{PANEL}'
-            '<div id="upper" style="position: absolute; left: 40px; top: 40px; width: 300px; '
-            "height: 200px; background: rgba(255, 255, 255, 0.4); "
-            'box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);"></div>'
-            '<div id="lower" style="position: absolute; left: 380px; top: 100px; width: 300px; '
-            "height: 200px; background: rgba(255, 255, 255, 0.4); "
-            'box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);"></div></div></div>'
+        glass = "background: rgba(255, 255, 255, 0.4); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);"
+        box = (
+            '<div id="glass" style="position: absolute; left: 380px; top: 100px; width: 280px; '
+            f'height: 140px; {glass}"></div>'
         )
-        document = _document(body)
+        if place == "panel":
+            body = f'<div class="slide">{PANEL}{box}</div></div>'
+        elif place == "under-a-neighbours-shadow":
+            neighbour = (
+                '<div style="position: absolute; left: 40px; top: 40px; width: 300px; '
+                "height: 200px; background: rgba(255, 255, 255, 0.4); "
+                'box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);"></div>'
+            )
+            body = f'<div class="slide">{PANEL}{neighbour}{box}</div></div>'
+        elif place == "rounded-corner":
+            body = (
+                '<div class="slide"><div style="position: absolute; left: 100px; top: 100px; '
+                'width: 600px; height: 400px; border-radius: 60px; background: #CDEDE1;">'
+                '<div style="position: absolute; left: 4px; top: 4px; width: 200px; '
+                f'height: 120px; {glass}"></div></div></div>'
+            )
+        else:
+            body = (
+                f'<div class="slide">{PANEL}<div style="position: absolute; left: 220px; '
+                f'top: 120px; width: 300px; height: 160px; transform: rotate(30deg); {glass}">'
+                "</div></div></div>"
+            )
         shapes = slide_shapes(_export_one(body, monkeypatch))
-        upper, lower = browser_rect(document, "#upper"), browser_rect(document, "#lower")
 
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 1, f"expected #upper's shadow shape alone:\n{_describe(shapes)}"
-        _assert_shadow_shape(
-            hidden[0][1], PANEL_FILL, upper, 0, Layer("000000", 0.35, 48, 24), "#upper's shadow"
-        )
-        boxes = [
+        _assert_no_shadow_shape(shapes)
+        glasses = [
             shape
             for shape in shapes
-            if shape.fill == "FFFFFF" and abs(shape.x - lower["x"]) <= INSET_TOLERANCE_PX
+            if shape.fill == "FFFFFF" and shape.shadow is not None and shape.shadow.blur_px < 20
         ]
-        assert len(boxes) == 1, f"expected #lower once:\n{_describe(shapes)}"
-        _assert_shadow(boxes[0], Layer("000000", 0.2, 8, 2), "#lower's own shadow")
-
-    def test_a_box_at_a_rounded_panels_corner_keeps_its_own_shadow(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A translucent box in the corner of a CDEDE1 panel rounded 60 px.
-
-        The box's own top left corner lies outside the panel's arc, where the
-        browser shows the slide's paper through it, not the panel: no one colour
-        lies beneath the box. So no shadow shape is drawn, and the box keeps its
-        own shadow.
-        """
-        body = (
-            '<div class="slide"><div style="position: absolute; left: 100px; top: 100px; '
-            'width: 600px; height: 400px; border-radius: 60px; background: #CDEDE1;">'
-            '<div id="cornered" style="position: absolute; left: 4px; top: 4px; width: 200px; '
-            "height: 120px; background: rgba(255, 255, 255, 0.5); "
-            'box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);"></div></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-
-        assert _shadow_shapes(shapes) == [], f"a shadow shape was drawn:\n{_describe(shapes)}"
-        _, box = _filled(shapes, "FFFFFF")
-        _assert_shadow(box, Layer("000000", 0.2, 8, 2), "the box's own shadow")
-
-    def test_a_turned_translucent_box_keeps_its_own_shadow(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A translucent box turned 30 degrees on the panel.
-
-        What lies beneath a turned box is not read (its footprint is no
-        unturned rect), so no shadow shape is drawn and the box keeps its own
-        shadow, 12 px of blur 4 px along its turned down direction (120
-        degrees on the slide).
-        """
-        body = (
-            f'<div class="slide">{PANEL}'
-            '<div id="turned" style="position: absolute; left: 220px; top: 120px; width: 300px; '
-            "height: 160px; transform: rotate(30deg); background: rgba(255, 255, 255, 0.4); "
-            'box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);"></div></div></div>'
-        )
-        shapes = slide_shapes(_export_one(body, monkeypatch))
-
-        assert _shadow_shapes(shapes) == [], f"a shadow shape was drawn:\n{_describe(shapes)}"
-        _, box = _filled(shapes, "FFFFFF")
-        assert abs(box.rotation - 30) <= SHADOW_ANGLE_TOLERANCE_DEG, (
-            f"fixture drift: the box is turned {box.rotation} degrees"
-        )
-        shadow = box.shadow
+        assert len(glasses) == 1, f"expected the box once, with its shadow:\n{_describe(shapes)}"
+        glass_shape = glasses[0]
         assert (
-            shadow is not None
-            and shadow.alpha is not None
-            and (
-                abs(shadow.alpha - 0.3) <= ALPHA_TOLERANCE
-                and abs(shadow.blur_px - 12) <= SHADOW_LENGTH_TOLERANCE_PX
-                and abs(shadow.dist_px - 4) <= SHADOW_LENGTH_TOLERANCE_PX
-                and abs(shadow.angle - 120) <= SHADOW_ANGLE_TOLERANCE_DEG
+            glass_shape.fill_alpha is not None
+            and abs(glass_shape.fill_alpha - 0.4) <= ALPHA_TOLERANCE
+        )
+        shadow = glass_shape.shadow
+        angle = 120 if place == "turned" else 90
+        assert (
+            abs(shadow.alpha - 0.25) <= ALPHA_TOLERANCE
+            and abs(shadow.blur_px - 12) <= SHADOW_LENGTH_TOLERANCE_PX
+            and abs(shadow.dist_px - 4) <= SHADOW_LENGTH_TOLERANCE_PX
+            and abs(shadow.angle - angle) <= SHADOW_ANGLE_TOLERANCE_DEG
+        ), f"the box's own shadow is {shadow}"
+
+    @pytest.mark.parametrize("box", ["frame", "bordered", "wrapper-on-the-slide"])
+    def test_an_unfilled_box_casts_no_shadow(
+        self, monkeypatch: pytest.MonkeyPatch, box: str
+    ) -> None:
+        """A box that paints no fill casts no shadow, and no shape is drawn for one.
+
+        An unfilled rounded frame with ``--shadow-sm`` holding a coral child
+        (the data-table wrapper's pattern) on the panel; an unfilled box with a
+        1 px border on the panel (the design system's ``.med-frame``); the
+        frame directly on the slide. Neither app casts a shadow from an
+        unfilled shape, and an outline's own shadow would be a thin frame of
+        itself, which the browser does not paint. So no shape carries a
+        shadow, and the slide holds only what the browser paints: the panel,
+        the child and the border.
+        """
+        frame = (
+            '<div style="position: absolute; left: 40px; top: 40px; width: 300px; height: 160px; '
+            f'border-radius: 8px; overflow: hidden; box-shadow: {SHADOW_SM};">'
+            '<div style="height: 160px; background: #FF5F46;"></div></div>'
+        )
+        if box == "frame":
+            body = f'<div class="slide">{PANEL}{frame}</div></div>'
+            painted = {"CDEDE1", "FF5F46"}
+        elif box == "bordered":
+            body = (
+                f'<div class="slide">{PANEL}<div style="position: absolute; left: 60px; top: 60px; '
+                "width: 280px; height: 140px; border: 1px solid #DCE0E2; border-radius: 12px; "
+                f'box-shadow: {SHADOW_SM};"></div></div></div>'
             )
-        ), f"the turned box's own shadow is {shadow}"
+            painted = {"CDEDE1", "DCE0E2"}
+        else:
+            body = f'<div class="slide">{frame}</div>'
+            painted = {"FF5F46"}
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        _assert_no_shadow_shape(shapes)
+        casting = [shape for shape in shapes if shape.shadow is not None]
+        assert casting == [], f"a shape casts a shadow:\n{_describe(casting)}"
+        assert {shape.fill or shape.line for shape in shapes} == painted and len(shapes) == len(
+            painted
+        ), f"expected exactly what the browser paints, {sorted(painted)}:\n{_describe(shapes)}"
 
 
 # ---------------------------------------------------------------------------
@@ -1472,17 +1399,15 @@ class TestMixedCornerRadii:
         [("left: 0; bottom: 0;", "0"), ("left: 0; top: 0;", "24px 24px 0 0")],
         ids=["square-frame-at-the-square-corner", "rounded-frame-at-the-rounded-corner"],
     )
-    def test_a_shadowed_frame_a_top_rounded_panel_covers_takes_the_panels_colour(
+    def test_an_unfilled_shadowed_frame_on_a_top_rounded_panel_casts_no_shadow(
         self, monkeypatch: pytest.MonkeyPatch, frame_place: str, frame_radius: str
     ) -> None:
-        """An unfilled shadowed frame the panel (``24px 24px 0 0``) covers: layers in its colour.
+        """An unfilled shadowed frame on a panel rounded ``24px 24px 0 0``: no shadow, no shape.
 
         A square frame in the panel's square bottom-left corner, and a frame
-        rounded as the panel is in its rounded top-left corner, each lie whole
-        on the panel, judged corner by corner: so the frame's two shadow layers
-        are shapes filled with the panel's colour. Rounding every corner by the
-        largest radius would leave a square corner uncovered, or a rounded
-        frame's corner point outside the panel's arc, and drop both layers.
+        rounded as the panel is in its rounded top-left corner. The frame
+        paints no fill, so it casts no shadow, and no shape is drawn for its
+        layers: the slide holds the panel and the frame's coral child alone.
         """
         body = (
             '<div class="slide"><div style="position: absolute; left: 80px; top: 80px; '
@@ -1492,10 +1417,9 @@ class TestMixedCornerRadii:
             '<div style="height: 100px; background: #FF5F46;"></div></div></div></div>'
         )
         shapes, _, _ = _mixed_export(body, monkeypatch)
-        hidden = _shadow_shapes(shapes)
-        assert len(hidden) == 2 and all(shape.fill == PANEL_FILL for _, shape in hidden), (
-            f"expected two shadow shapes filled {PANEL_FILL}:\n{_describe(shapes)}"
-        )
+        _assert_no_shadow_shape(shapes)
+        assert [shape for shape in shapes if shape.shadow is not None] == [], _describe(shapes)
+        assert sorted(shape.fill for shape in shapes) == ["CDEDE1", "FF5F46"], _describe(shapes)
 
     def test_the_google_deck_dots_a_top_rounded_border_along_its_own_corners(
         self, monkeypatch: pytest.MonkeyPatch

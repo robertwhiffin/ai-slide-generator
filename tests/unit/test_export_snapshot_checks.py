@@ -1955,7 +1955,7 @@ def _valid_model() -> dict:
                 ],
             },
             {
-                # A shadow layer the box over it cannot carry, on a shape of its own.
+                # A filled box casting its one shadow.
                 "kind": "shape",
                 "id": 9,
                 "order": [8],
@@ -1975,7 +1975,6 @@ def _valid_model() -> dict:
                     "angle": 90,
                 },
                 "rotate": None,
-                "role": "shadow",
             },
             {
                 # A box whose corners round by different radii: a card header's
@@ -2112,7 +2111,6 @@ MODEL_DEFECTS = {
     "shape-shadow-angle-not-a-number": (_set("items.0.shadow.angle", "90"), {0}, 0),
     "shape-path-point-nan": (_set("items.1.path.0.1.x", NAN), {1}, 0),
     "shape-path-closed-not-a-boolean": (_set("items.1.closed", "yes"), {1}, 0),
-    "shape-role-unknown": (_set("items.8.role", "script"), {9}, 0),
     # Each corner of a box whose corners differ is its radii {h, v}, top left first.
     "shape-corner-radii-missing": (_set("items.9.radii", None), {10}, 0),
     "shape-corner-radii-three": (_remove("items.9.radii", 3), {10}, 0),
@@ -2121,7 +2119,6 @@ MODEL_DEFECTS = {
     "shape-corner-radius-a-string": (_set("items.9.radii.2.h", "0"), {10}, 0),
     # A corner either radius of which is 0 is square: the snapshot writes it {0, 0}.
     "shape-corner-radius-half-square": (_set("items.9.radii.1", {"h": 16, "v": 0}), {10}, 0),
-    "shape-role-not-a-string": (_set("items.8.role", 1), {9}, 0),
     "line-x1-nan": (_set("items.2.x1", NAN), {2}, 0),
     "line-colour-short": (_set("items.2.color", "F00"), {2}, 0),
     "text-x-infinite": (_set("items.5.x", INFINITY), {5}, 0),
@@ -2357,6 +2354,31 @@ class TestModelCheck:
         )
         assert written["dropped"] == {"items": 1, "captures": 0, "fields": 0}, written
         assert written["tables"] == 0 and written["bytes"] > 0, written
+
+    def test_no_shape_is_written_for_a_shadow_alone(self) -> None:
+        """A shape is never named for a shadow, whatever the model says of it.
+
+        The export draws no shape for a shadow alone (one fitted shadow is the
+        box's own), so the emitter names no shape "Shadow", and a model field
+        claiming a shape is one (``role``) is no field it reads.
+        """
+        model = _valid_model()
+        model["items"][8]["role"] = "shadow"
+        written = node_json(
+            "const pptxgen = require('pptxgenjs');"
+            "const JSZip = require('jszip');"
+            f"const {{ checkModel }} = require({json.dumps(str(MODEL_CHECK_MODULE))});"
+            f"const {{ emitSlide }} = require({json.dumps(str(EMIT_MODEL_MODULE))});"
+            f"const {{ model }} = checkModel({json.dumps(model)});"
+            "const pres = new pptxgen(); pres.layout = 'LAYOUT_WIDE';"
+            "emitSlide(pres, model, new Map(), { target: 'pptx' });"
+            "pres.write({ outputType: 'nodebuffer' }).then((deck) => JSZip.loadAsync(deck))"
+            ".then((zip) => zip.file('ppt/slides/slide1.xml').async('string'))"
+            ".then((xml) => process.stdout.write(JSON.stringify({"
+            ' named: (xml.match(/name="Shadow"/g) || []).length,'
+            " shapes: (xml.match(/<p:sp>/g) || []).length })));"
+        )
+        assert written["named"] == 0 and written["shapes"] > 0, written
 
     @pytest.mark.parametrize("field", ["items", "captures"])
     def test_a_list_that_is_not_one_is_empty(self, field: str) -> None:

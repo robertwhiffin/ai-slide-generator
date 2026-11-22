@@ -45,15 +45,15 @@
 //  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'roundCorners'|'ellipse'|'path', radius,
 //  *   radii, fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
-//  *   path:[{x,y}[]], closed:boolean, role?:'shadow'}   (radius for geometry
+//  *   path:[{x,y}[]], closed:boolean}   (radius for geometry
 //  *   'roundRect', whose four corners are one circle; radii for 'roundCorners',
 //  *   a box whose corners differ: each corner's radii {h, v}, top left, top
 //  *   right, bottom right, bottom left, {0, 0} for a square one (cornerShape).
 //  *   path and closed for geometry
 //  *   'path' only: the polylines it draws, in px from its top left, each closed or
 //  *   each open; a shape a clip cuts that is not a plain rect, see pushClippedShape.
-//  *   role 'shadow': a shape under a box that casts one of the box's shadow
-//  *   layers and shows nothing else, snapshot_borders.mjs shadowShape)
+//  *   shadow is a box's one outer shadow, its box-shadow layers fitted to one,
+//  *   snapshot_borders.mjs shadowOf; no shape is drawn for a shadow alone)
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}   (one painted side of a
 //  *   border that differs between sides, along its centre line; see pushSideLines)
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
@@ -1106,7 +1106,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   // What a painted box draws beyond its fill (snapshot_borders.mjs): its
   // border as an outline or a line per side, its outline rings and its outer
   // shadow, each a shape or a line pushed here.
-  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, resolveShadowShapes, sliceOf } = createBorders({
+  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf } = createBorders({
     paintedColour,
     normalisedAngle,
     cornerShape,
@@ -2685,15 +2685,11 @@ async function snapshotPage(config, pseudoData, renderer) {
   const slideGround = groundCapture
     ? { color: groundColour(htmlStyle, bodyStyle), captureId: groundCapture.id }
     : background;
-  // A shadow shape under a box with no opaque fill is filled with what lies
-  // beneath it, or dropped where no one colour does (snapshot_borders.mjs).
-  const shadowed = resolveShadowShapes(items, slideGround);
-  stats.shapes -= shadowed.dropped;
   return {
     width: SLIDE_WIDTH,
     height: SLIDE_HEIGHT,
     background: slideGround,
-    items: shadowed.items,
+    items,
     captures,
     fonts,
     italicFonts,

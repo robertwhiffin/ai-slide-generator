@@ -43,10 +43,6 @@ const SMALLEST_ANGLE_DEG = 1 / 60000;
 
 const DASH_TYPES = { solid: 'solid', dash: 'dash', dot: 'sysDot' };
 
-// The name a shadow shape (snapshot.mjs SlideModel, role 'shadow') goes by in
-// the app's selection pane, so the shape under a box reads as what it is.
-const SHADOW_SHAPE_NAME = 'Shadow';
-
 function withinInchLimit(...values) {
   return values.every((value) => Math.abs(inches(value)) < PPTXGENJS_INCH_LIMIT);
 }
@@ -245,7 +241,6 @@ function emitShape(slide, pres, item, renderer) {
   if (geometry.options.angleRange) options.angleRange = geometry.options.angleRange;
   if (item.shadow) options.shadow = shadowOptions(item.shadow);
   if (item.rotate) options.rotate = item.rotate;
-  if (item.role === 'shadow') options.objectName = SHADOW_SHAPE_NAME;
   slide.addShape(geometry.shapeType, options);
 }
 

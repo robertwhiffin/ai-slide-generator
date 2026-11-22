@@ -4,18 +4,17 @@
 // walk calls for every box that paints.
 //
 // A border that is the same on all four sides is the box shape's outline; one
-// that differs between sides is a line per painted side (pushSideLines). Each
-// layer of a box-shadow is drawn in the order CSS paints the layers: a
-// spread-only layer is a ring, the box's outline when it is opaque and on top;
-// a blurred or offset layer is an outer shadow, the box's own when the box's
-// fill is opaque and the layer the first, and else a shadow shape of its own
-// under the box (shadowShape). paintsBox says whether a box paints anything of
-// that, and the walk and the text layout ask it.
+// that differs between sides is a line per painted side (pushSideLines). A
+// spread-only box-shadow layer is a ring: the box's outline when it is opaque
+// and on top, else an unfilled shape of its own. The blurred or offset layers
+// are the box's one outer shadow, on its own shape (shadowOf): one layer as it
+// is, more than one fitted to the one closest to them all. paintsBox says
+// whether a box paints anything of that, and the walk and the text layout ask
+// it.
 //
-// Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE and
-// GRADIENT_SOURCE and with emit_typography.cjs's blendOver:
-// COLLECTION_ITEM_LIMIT, splitTopLevelCommas and blendOver are its free names.
-// It is stringified, so it closes over nothing on the Node side;
+// Runs in the page, inside the snapshot IIFE, after GRADIENT_SOURCE:
+// splitTopLevelCommas is its free name. It is stringified, so it closes over
+// nothing on the Node side;
 // what it needs from the snapshot arrives in `env`, functions of snapshotPage
 // documented there:
 //   paintedColour     (css colour, opacity) -> {color, alpha} | null, as painted;
@@ -31,8 +30,8 @@
 //   roundsCut         (shape, clip) -> whether the clip's rounded padding boxes
 //                     (its rounds) cut what its rect shows of the shape;
 //   pushSideLines     (box, sides, order, clip) -> pushes a line per painted side.
-// It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox,
-// resolveShadowShapes and sliceOf.
+// It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox and
+// sliceOf.
 
 function createBorders(env) {
   const {
@@ -127,16 +126,14 @@ function createBorders(env) {
   }
 
   // The outer layers of a computed box-shadow that paint, in the order listed,
-  // which is top first, each {ring, shadow, spreadPx}:
+  // which is top first, each {ring, shadow}:
   //   ring     a layer with no blur and no offset paints a ring as wide as its
   //            spread around the border box: the outline it draws, {color,
   //            alpha, widthPx, dash: 'solid'}; such a layer with a spread of 0
   //            or less paints nothing outside the box and is no layer here;
-  //   shadow   a blurred or offset layer: the outer shadow it casts, {color,
-  //            alpha, blurPx, offsetPx, angle}. An outer shadow has no spread,
-  //            so spreadPx, the layer's own in slide px, is for the shape that
-  //            casts it (shadowShape). The direction is screen-fixed, because
-  //            the emitted shadow does not rotate with its shape.
+  //   shadow   a blurred or offset layer as CSS gives it, in the element's own
+  //            px: {color, alpha, x, y, blur, spread}. shadowOf writes a box's
+  //            shadow layers as its one outer shadow.
   function paintedLayers(value, opacity, box) {
     const painted = [];
     const layers = outerShadowLayers(value);
@@ -146,23 +143,197 @@ function createBorders(env) {
       if (!colour) continue;
       if (layer.blur === 0 && layer.offsetX === 0 && layer.offsetY === 0) {
         if (layer.spread > 0) {
-          painted.push({ ring: { color: colour.color, alpha: colour.alpha, widthPx: layer.spread * box.scale, dash: 'solid' }, shadow: null, spreadPx: 0 });
+          painted.push({ ring: { color: colour.color, alpha: colour.alpha, widthPx: layer.spread * box.scale, dash: 'solid' }, shadow: null });
         }
         continue;
       }
       painted.push({
         ring: null,
-        shadow: {
-          color: colour.color,
-          alpha: colour.alpha,
-          blurPx: layer.blur * box.scale,
-          offsetPx: Math.hypot(layer.offsetX, layer.offsetY) * box.scale,
-          angle: normalisedAngle(Math.atan2(layer.offsetY, layer.offsetX) * 180 / Math.PI + (box.rotate || 0)),
-        },
-        spreadPx: layer.spread * box.scale,
+        shadow: { color: colour.color, alpha: colour.alpha, x: layer.offsetX, y: layer.offsetY, blur: layer.blur, spread: layer.spread },
       });
     }
     return painted;
+  }
+
+  // The one outer shadow a box's shadow layers (paintedLayers) are written as,
+  // {color, alpha, blurPx, offsetPx, angle} in slide px, or null for none that
+  // shows. One shape carries one outer shadow (a:outerShdw), in either app. One
+  // layer with no spread is that layer; any other set, the one layer closest to
+  // them all (fittedLayer), since an outer shadow has no spread. The offset is
+  // the element's own, turned with it; the direction is screen-fixed, because
+  // the emitted shadow does not rotate with its shape.
+  function shadowOf(shadows, box) {
+    const layer = shadows.length === 1 && shadows[0].spread === 0 ? shadows[0] : fittedLayer(shadows);
+    if (!(layer.alpha >= FIT_ALPHA_STEP)) return null;
+    return {
+      color: layer.color,
+      alpha: layer.alpha,
+      blurPx: layer.blur * box.scale,
+      offsetPx: Math.hypot(layer.x, layer.y) * box.scale,
+      angle: normalisedAngle(Math.atan2(layer.y, layer.x) * 180 / Math.PI + (box.rotate || 0)),
+    };
+  }
+
+  // The fitted shadow (scripts/export_fidelity/CALIBRATION.md, D4 and D5): of
+  // the single layers with no spread, the one whose shadow is closest to the
+  // layers' own together. A layer (offset x, y; blur B, sigma = B / 2; spread
+  // s; alpha a) covers a point d px outside a long edge of the box, n its
+  // outward normal, a * Q((d - (x, y).n - s) / sigma), Q the standard normal's
+  // upper tail (a step where there is no blur), and layers compose as
+  // 1 - prod(1 - c) (CSS Backgrounds 3: the shadow is the box offset, spread
+  // and blurred by a Gaussian of half the blur radius). The fit is the layer
+  // whose coverage differs least from theirs, summed and squared, over the
+  // four edges at d = k R / FIT_SAMPLES, k = 0..FIT_SAMPLES, R the layers'
+  // reach (|x| + |y| + spread + 2B, the largest) plus 1 px. Its alpha is
+  // solved in closed form for each offset and blur, which are found on a grid
+  // of FIT_GRID points an axis, the grid narrowed FIT_ROUNDS times to the best
+  // point one step either side: offset within the layers' own, blur from 0 to
+  // their largest plus twice their largest spread. Its colour is theirs, each
+  // weighted by what it covers alone over the same points. Lengths are kept to
+  // FIT_LENGTH_STEP px and alpha to FIT_ALPHA_STEP. At most FIT_LAYER_LIMIT
+  // layers are fitted, the first listed, so a list no deck holds cannot stall
+  // the snapshot. The fit of one set of layers is made once.
+  const FIT_SAMPLES = 64;
+  const FIT_GRID = 9;
+  const FIT_ROUNDS = 4;
+  const FIT_LAYER_LIMIT = 16;
+  const FIT_LENGTH_STEP = 0.01;
+  const FIT_ALPHA_STEP = 0.001;
+  // The outward normals of the box's edges: bottom, top, right, left.
+  const FIT_EDGES = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+  const fittedLayers = new Map();
+
+  // The complementary error function, within 1.2e-7 of it (Numerical Recipes, erfcc).
+  function erfc(value) {
+    const z = Math.abs(value);
+    const t = 1 / (1 + 0.5 * z);
+    const tail = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
+      t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+    return value >= 0 ? tail : 2 - tail;
+  }
+
+  // What a layer at `along` px out along an edge's normal covers d px outside that edge.
+  function coverage(d, along, blur, spread, alpha) {
+    const edge = d - along - spread;
+    const sigma = blur / 2;
+    if (!(sigma > 0)) return edge < 0 ? alpha : edge === 0 ? alpha / 2 : 0;
+    return alpha * 0.5 * erfc(edge / (sigma * Math.SQRT2));
+  }
+
+  function fittedLayer(shadows) {
+    const layers = [];
+    let key = '';
+    for (let index = 0; index < shadows.length && index < FIT_LAYER_LIMIT; index++) {
+      const layer = shadows[index];
+      layers.push(layer);
+      key += layer.color + ' ' + layer.alpha + ' ' + layer.x + ' ' + layer.y + ' ' + layer.blur + ' ' + layer.spread + ',';
+    }
+    if (fittedLayers.has(key)) return fittedLayers.get(key);
+    let reach = 0;
+    let largestBlur = 0;
+    let largestSpread = 0;
+    const ranges = [[Infinity, -Infinity], [Infinity, -Infinity]];
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      reach = Math.max(reach, Math.abs(layer.x) + Math.abs(layer.y) + Math.max(layer.spread, 0) + 2 * layer.blur);
+      largestBlur = Math.max(largestBlur, layer.blur);
+      largestSpread = Math.max(largestSpread, Math.abs(layer.spread));
+      ranges[0] = [Math.min(ranges[0][0], layer.x), Math.max(ranges[0][1], layer.x)];
+      ranges[1] = [Math.min(ranges[1][0], layer.y), Math.max(ranges[1][1], layer.y)];
+    }
+    ranges.push([0, largestBlur + 2 * largestSpread]);
+    const points = [];
+    for (let step = 0; step <= FIT_SAMPLES; step++) points.push(step * (reach + 1) / FIT_SAMPLES);
+    // What the layers cover together at each edge's points, and what each covers alone in all.
+    const target = [];
+    const weights = [];
+    for (let index = 0; index < layers.length; index++) weights.push(0);
+    let targetSquared = 0;
+    for (let edge = 0; edge < FIT_EDGES.length; edge++) {
+      const normalX = FIT_EDGES[edge][0];
+      const normalY = FIT_EDGES[edge][1];
+      for (let point = 0; point < points.length; point++) {
+        let keep = 1;
+        for (let index = 0; index < layers.length; index++) {
+          const layer = layers[index];
+          const covered = coverage(points[point], layer.x * normalX + layer.y * normalY, layer.blur, layer.spread, layer.alpha);
+          weights[index] += covered;
+          keep *= 1 - covered;
+        }
+        target.push(1 - keep);
+        targetSquared += (1 - keep) * (1 - keep);
+      }
+    }
+    // The error of the best alpha for one offset and blur, and that alpha.
+    const solve = (x, y, blur) => {
+      let single = 0;
+      let crossed = 0;
+      let sample = 0;
+      for (let edge = 0; edge < FIT_EDGES.length; edge++) {
+        const along = x * FIT_EDGES[edge][0] + y * FIT_EDGES[edge][1];
+        for (let point = 0; point < points.length; point++) {
+          const covered = coverage(points[point], along, blur, 0, 1);
+          single += covered * covered;
+          crossed += covered * target[sample++];
+        }
+      }
+      const alpha = single > 0 ? Math.min(1, Math.max(0, crossed / single)) : 0;
+      return { error: alpha * alpha * single - 2 * alpha * crossed + targetSquared, alpha };
+    };
+    let best = null;
+    for (let round = 0; round < FIT_ROUNDS; round++) {
+      const axes = [];
+      for (let axis = 0; axis < ranges.length; axis++) {
+        const low = ranges[axis][0];
+        const high = ranges[axis][1];
+        const values = [];
+        if (high > low) {
+          for (let point = 0; point < FIT_GRID; point++) values.push(low + (high - low) * point / (FIT_GRID - 1));
+        } else {
+          values.push(low);
+        }
+        axes.push(values);
+      }
+      for (let ix = 0; ix < axes[0].length; ix++) {
+        for (let iy = 0; iy < axes[1].length; iy++) {
+          for (let ib = 0; ib < axes[2].length; ib++) {
+            const solved = solve(axes[0][ix], axes[1][iy], axes[2][ib]);
+            if (!best || solved.error < best.error) {
+              best = { error: solved.error, alpha: solved.alpha, values: [axes[0][ix], axes[1][iy], axes[2][ib]] };
+            }
+          }
+        }
+      }
+      for (let axis = 0; axis < ranges.length; axis++) {
+        const low = ranges[axis][0];
+        const high = ranges[axis][1];
+        if (!(high > low)) continue;
+        const step = (high - low) / (FIT_GRID - 1);
+        ranges[axis] = [Math.max(low, best.values[axis] - step), Math.min(high, best.values[axis] + step)];
+      }
+    }
+    let total = 0;
+    for (let index = 0; index < weights.length; index++) total += weights[index];
+    let color = '';
+    for (let channel = 0; channel < 6; channel += 2) {
+      let mixed = 0;
+      for (let index = 0; index < layers.length; index++) {
+        mixed += weights[index] * parseInt(layers[index].color.slice(channel, channel + 2), 16);
+      }
+      const value = total > 0 ? Math.round(mixed / total) : parseInt(layers[0].color.slice(channel, channel + 2), 16);
+      color += (value < 16 ? '0' : '') + value.toString(16).toUpperCase();
+    }
+    const kept = (value, step) => Math.round(value / step) * step;
+    const fitted = {
+      color,
+      alpha: Number(kept(best.alpha, FIT_ALPHA_STEP).toFixed(3)),
+      x: Number(kept(best.values[0], FIT_LENGTH_STEP).toFixed(2)),
+      y: Number(kept(best.values[1], FIT_LENGTH_STEP).toFixed(2)),
+      blur: Number(kept(best.values[2], FIT_LENGTH_STEP).toFixed(2)),
+      spread: 0,
+    };
+    fittedLayers.set(key, fitted);
+    return fitted;
   }
 
   // The corner radius of a ring's centre line, for a border box corner of
@@ -193,12 +364,6 @@ function createBorders(env) {
       sideBorders(s, opacity, UNIT_BOX.scale, null).painted.length);
   }
 
-  // What a shadow shape's role is, which emit_model.cjs names it by.
-  const SHADOW_ROLE = 'shadow';
-  // The shadow shapes of boxes that paint no opaque fill, to be filled once
-  // every item is known (resolveShadowShapes): {shapes, box, shadow, footprint}.
-  const pendingShadows = [];
-
   // A painted box becomes shapes and lines, cut to its clip, in the order CSS
   // paints a box (CSS 2.1 Appendix E: its shadows under its background, its
   // border over it):
@@ -209,20 +374,19 @@ function createBorders(env) {
   //     border. A translucent ring shows what lies under it, which is never
   //     the box's fill (a box-shadow paints outside the border box only), so
   //     its box keeps its fill at the border box;
-  //   - a shadow, a blurred or offset layer: the box's own when the box's fill
-  //     is opaque, this is the first such layer and no ring listed before it is
-  //     a shape of its own, since one shape carries one outer shadow, a shadow
-  //     under an opaque fill shows outside the box alone, and a box's shadow
-  //     paints with the box, over every shape under it; every other one a
-  //     shadow shape of its own (shadowShape). Under a
-  //     box with no fill, or a translucent one, every shadow is a shadow shape:
-  //     neither app casts a shadow from an unfilled shape, and both draw one
-  //     under a translucent fill, through it, where the browser shows what
-  //     lies beneath the box. Those shapes are filled once the slide is known
-  //     (resolveShadowShapes); until then the box carries its first shadow;
+  //   - the blurred or offset layers: the box's one outer shadow (shadowOf),
+  //     on its own shape, since one shape carries one. Only a box that paints
+  //     a fill casts it. Neither app casts a shadow from an unfilled shape, and
+  //     an outline would cast only a thin frame of itself, which the browser
+  //     does not paint: a box with no fill casts none. A translucent fill casts
+  //     it as both apps draw it, scaled by the fill's alpha and through it;
+  //   - the shadow paints where its first layer does: a ring listed before
+  //     that layer is drawn over the box (it lies outside the border box, so it
+  //     covers nothing of the box), and every other ring under the box;
   // * the box's own shape: its background colour and its shadow, outlined by
   //   its uniform border or else by its outline ring (ringedShape);
   // * a border that differs between sides, over the fill (pushSideLines).
+  // No shape is drawn for a shadow alone.
   // The slide root's ground is the slide background (the background transfer,
   // preprocess.mjs, put it on body, or for an image ground its picture,
   // snapshot.mjs groundCapture), so its fill, shadow and rings are never painted a second time here.
@@ -241,57 +405,30 @@ function createBorders(env) {
     if (line && !(box.w - line.widthPx > 0 && box.h - line.widthPx > 0)) line = null;
     const top = layers.length ? layers[0] : null;
     const outlineRing = !line && top && top.ring && top.ring.alpha >= 1 ? top.ring : null;
-    const opaque = Boolean(fill) && fill.alpha >= 1;
-    let firstShadow = null;
-    // A ring listed before the first shadow paints over it (Tailwind's ring,
-    // then shadow); drawn as a shape under the box, it would lie under the
-    // box's own shadow, so then every shadow is a shape, in order.
-    let ringOverShadow = false;
-    for (let index = 0; index < layers.length && !firstShadow; index++) {
-      if (layers[index].shadow) firstShadow = layers[index];
-      else if (layers[index].ring !== outlineRing) ringOverShadow = true;
+    const shadows = [];
+    let firstShadow = layers.length;
+    for (let index = 0; index < layers.length; index++) {
+      if (!layers[index].shadow) continue;
+      if (!shadows.length) firstShadow = index;
+      shadows.push(layers[index].shadow);
     }
-    const ownShadow = opaque && !ringOverShadow ? firstShadow : null;
-    // What the shadow shapes of a box with no opaque fill cover at most: its border box.
-    const footprint = { x: box.x, y: box.y, w: box.w, h: box.h, geometry: corners.geometry, radius: corners.radius, radii: corners.radii, rotate: box.rotate };
-    const pending = !opaque && firstShadow ? { shapes: [], box: [], shadow: firstShadow.shadow, footprint } : null;
+    const shadow = fill && shadows.length ? shadowOf(shadows, box) : null;
+    const ringAt = (index) => {
+      const ring = layers[index].ring;
+      if (ring && ring !== outlineRing) pushBoxShape(ringedShape(box, corners, null, ring, null, order), clip);
+    };
     for (let index = layers.length - 1; index >= 0; index--) {
-      const layer = layers[index];
-      if (layer.ring) {
-        if (layer.ring !== outlineRing) pushBoxShape(ringedShape(box, corners, null, layer.ring, null, order), clip);
-        continue;
-      }
-      if (layer === ownShadow) continue;
-      const shape = shadowShape(box, corners, layer, opaque ? { color: fill.color, alpha: 1 } : null, order);
-      if (!shape) continue;
-      const pushed = pushBoxShape(shape, clip);
-      for (let item = 0; item < pushed.length; item++) {
-        pushed[item].role = SHADOW_ROLE;
-        if (pending) pending.shapes.push(pushed[item]);
-      }
+      if (!(shadow && index < firstShadow)) ringAt(index);
     }
-    const shadow = ownShadow ? ownShadow.shadow : pending ? pending.shadow : null;
-    if (fill || line || shadow || outlineRing) {
-      const pushed = pushBoxShape(outlineRing
+    if (fill || line || outlineRing) {
+      pushBoxShape(outlineRing
         ? ringedShape(box, corners, fill, outlineRing, shadow, order)
         : borderedShape(box, corners, fill, line, shadow, order), clip);
-      if (pending) pending.box = pushed;
     }
-    if (pending && pending.shapes.length) pendingShadows.push(pending);
+    if (shadow) {
+      for (let index = firstShadow - 1; index >= 0; index--) ringAt(index);
+    }
     if (sides) pushSideLines(box, sides, order, clip);
-  }
-
-  // The shape that casts a shadow layer its box's own shape does not: the
-  // border box and its corners, moved in by a negative spread with its radii
-  // (CSS Backgrounds 3: the spread shadow's radii are the border radii plus the
-  // spread, floored at 0), filled `fill`, unoutlined. Drawn under its box, it
-  // shows nothing but its shadow. A positive spread is not drawn, as for the
-  // box's own shadow: grown past the box, the shape would show. Null for a
-  // spread that leaves no shape, which paints nothing.
-  function shadowShape(box, corners, layer, fill, order) {
-    const inset = layer.spreadPx < 0 ? -layer.spreadPx : 0;
-    if (!(box.w - 2 * inset > 0 && box.h - 2 * inset > 0)) return null;
-    return boxShape(box, corners, inset, (radius) => Math.max(0, radius - inset), { fill, line: null, shadow: layer.shadow, order, extent: box });
   }
 
   // The shape of a box outlined by `line` (or null), which CSS paints inside
@@ -382,219 +519,6 @@ function createBorders(env) {
     return pushClippedShape(shape, clip);
   }
 
-  // ─── the fill of shadow shapes ───────────────────────────────────────
-  // The shadow shapes of a box that paints no opaque fill must show nothing
-  // but their shadow, so each is filled with the one colour the slide shows
-  // beneath it: what the export itself paints there, read from the items under
-  // it in paint order (`items` sorted back to front) over the slide's ground
-  // colour (`background`). That colour is known only when the box is unturned
-  // and everything under its shapes that reaches into its border box is a
-  // plain shape that covers that box whole with a fill (or paints nothing
-  // inside it), down to an opaque one or to a ground of a colour. Then the
-  // shapes take it and the box casts nothing itself. Otherwise (text, a
-  // picture, a line, a table, a shape's edge or its translucent shadow there,
-  // or a picture ground: an image, or the slide root's image ground) a filled
-  // shape would hide what shows through the box, so the shapes are dropped
-  // and the box keeps its first shadow, as with no shapes at all. Returns the items left, in order, and how many it dropped.
-  // Comparing each box with what lies under it is bounded, in all, by
-  // COLLECTION_ITEM_LIMIT steps: past that, the rest keep their box's shadow.
-  // Bounds within this of each other only touch (layout rounding).
-  const TOUCH_EPSILON_PX = 0.01;
-  // A round corner of a footprint is tested at this many points along its arc.
-  const ARC_TEST_POINTS = 6;
-
-  function resolveShadowShapes(items, background) {
-    if (!pendingShadows.length) return { items, dropped: 0 };
-    const positions = new Map();
-    for (let index = 0; index < items.length && index < COLLECTION_ITEM_LIMIT; index++) positions.set(items[index], index);
-    const dropped = new Set();
-    let budget = COLLECTION_ITEM_LIMIT;
-    for (let group = 0; group < pendingShadows.length; group++) {
-      const pending = pendingShadows[group];
-      let lowest = Infinity;
-      for (let index = 0; index < pending.shapes.length; index++) {
-        const position = positions.get(pending.shapes[index]);
-        if (position !== undefined) lowest = Math.min(lowest, position);
-      }
-      const beneath = Number.isFinite(lowest) && !pending.footprint.rotate
-        ? colourBeneath(items, lowest, pending.footprint, background, budget)
-        : { color: null, budget };
-      budget = beneath.budget;
-      if (beneath.color) {
-        for (let index = 0; index < pending.shapes.length; index++) pending.shapes[index].fill = { color: beneath.color, alpha: 1 };
-        for (let index = 0; index < pending.box.length; index++) {
-          const item = pending.box[index];
-          item.shadow = null;
-          // A shape whose only paint was the shadow now paints nothing.
-          if (!item.fill && !item.line) dropped.add(item);
-        }
-      } else {
-        for (let index = 0; index < pending.shapes.length; index++) dropped.add(pending.shapes[index]);
-      }
-    }
-    if (!dropped.size) return { items, dropped: 0 };
-    const kept = [];
-    for (let index = 0; index < items.length && index < COLLECTION_ITEM_LIMIT; index++) {
-      if (!dropped.has(items[index])) kept.push(items[index]);
-    }
-    return { items: kept, dropped: dropped.size };
-  }
-
-  // {color, budget}: the one colour the items under items[position] paint over
-  // the unturned `footprint` ({x, y, w, h, geometry, radius}), on the slide's
-  // ground, or color null when they paint no one colour there
-  // (resolveShadowShapes); budget is what is left of `budget`.
-  function colourBeneath(items, position, footprint, background, budget) {
-    const bounds = { left: footprint.x, top: footprint.y, right: footprint.x + footprint.w, bottom: footprint.y + footprint.h };
-    const outline = outlinePoints(footprint);
-    const covers = [];
-    let base = null;
-    for (let index = position - 1; index >= 0; index--) {
-      if (--budget < 0) return { color: null, budget: 0 };
-      const item = items[index];
-      if (!reaches(item, bounds)) continue;
-      if (!coversWith(item, outline)) return { color: null, budget };
-      if (!item.fill) continue;
-      if (item.fill.alpha >= 1) {
-        base = item.fill.color;
-        break;
-      }
-      covers.push(item.fill);
-    }
-    if (base === null) {
-      if (!background || !background.color || background.image || background.captureId) return { color: null, budget };
-      base = background.color;
-    }
-    let colour = base;
-    for (let index = covers.length - 1; index >= 0; index--) colour = blendOver(covers[index].color, covers[index].alpha, colour);
-    return { color: colour, budget };
-  }
-
-  // Whether what an item paints reaches into `bounds` past their edges: its
-  // box, with a line's or an outline's half width and a shadow's blur and
-  // offset around it.
-  function reaches(item, bounds) {
-    let painted;
-    if (item.kind === 'line') {
-      const half = (Number(item.widthPx) || 0) / 2;
-      painted = {
-        left: Math.min(item.x1, item.x2) - half,
-        top: Math.min(item.y1, item.y2) - half,
-        right: Math.max(item.x1, item.x2) + half,
-        bottom: Math.max(item.y1, item.y2) + half,
-      };
-    } else if (item.kind === 'table') {
-      let width = 0;
-      let height = 0;
-      for (let index = 0; index < item.colWidths.length && index < COLLECTION_ITEM_LIMIT; index++) width += item.colWidths[index];
-      for (let index = 0; index < item.rowHeights.length && index < COLLECTION_ITEM_LIMIT; index++) height += item.rowHeights[index];
-      painted = { left: item.x, top: item.y, right: item.x + width, bottom: item.y + height };
-    } else {
-      painted = boundsOf(item);
-      if (item.kind === 'shape') {
-        const reach = (item.line ? item.line.widthPx / 2 : 0) + (item.shadow ? item.shadow.blurPx + item.shadow.offsetPx : 0);
-        painted = { left: painted.left - reach, top: painted.top - reach, right: painted.right + reach, bottom: painted.bottom + reach };
-      }
-    }
-    return painted.left < bounds.right - TOUCH_EPSILON_PX && painted.right > bounds.left + TOUCH_EPSILON_PX &&
-      painted.top < bounds.bottom - TOUCH_EPSILON_PX && painted.bottom > bounds.top + TOUCH_EPSILON_PX;
-  }
-
-  // Whether an item that reaches into a footprint paints it with its fill
-  // alone or not at all: an unturned rect, roundRect or ellipse whose fill
-  // holds every point of the footprint's `outline` (outlinePoints), inside its
-  // own outline's inner edge, with no shadow that shows through a translucent
-  // fill. Both are convex, so holding the outline is holding the footprint.
-  function coversWith(item, outline) {
-    if (item.kind !== 'shape' || item.rotate || item.geometry === 'path') return false;
-    if (item.shadow && !(item.fill && item.fill.alpha >= 1)) return false;
-    const inset = item.line ? item.line.widthPx / 2 : 0;
-    const inner = { x: item.x + inset, y: item.y + inset, w: item.w - 2 * inset, h: item.h - 2 * inset };
-    if (!(inner.w > 0 && inner.h > 0)) return false;
-    const corners = cornerRadii(item);
-    const radii = [];
-    for (let index = 0; index < corners.length; index++) {
-      radii.push({ h: Math.max(0, corners[index].h - inset), v: Math.max(0, corners[index].v - inset) });
-    }
-    for (let index = 0; index < outline.length; index++) {
-      if (!holds(item.geometry, inner, radii, outline[index])) return false;
-    }
-    return true;
-  }
-
-  // The radii {h, v} of each corner of a shape or footprint that is no
-  // ellipse, top left first: a roundRect's one radius (at most half its short
-  // side) on each, a roundCorners shape's own, a rect's none.
-  function cornerRadii(shape) {
-    if (shape.geometry === 'roundCorners') return shape.radii;
-    const radius = shape.geometry === 'roundRect' ? Math.min(shape.radius, shape.w / 2, shape.h / 2) : 0;
-    const corner = { h: radius, v: radius };
-    return [corner, corner, corner, corner];
-  }
-
-  // Points on the outline of a footprint ({x, y, w, h, geometry, radius,
-  // radii}): a rect's corners, each rounded corner's arc, an ellipse's arc.
-  function outlinePoints(footprint) {
-    const points = [];
-    const right = footprint.x + footprint.w;
-    const bottom = footprint.y + footprint.h;
-    if (footprint.geometry === 'ellipse') {
-      for (let step = 0; step < 4 * ARC_TEST_POINTS; step++) {
-        const angle = (2 * Math.PI * step) / (4 * ARC_TEST_POINTS);
-        points.push({
-          x: footprint.x + footprint.w / 2 * (1 + Math.cos(angle)),
-          y: footprint.y + footprint.h / 2 * (1 + Math.sin(angle)),
-        });
-      }
-      return points;
-    }
-    const radii = cornerRadii(footprint);
-    const centres = [
-      { x: footprint.x + radii[0].h, y: footprint.y + radii[0].v, start: Math.PI },
-      { x: right - radii[1].h, y: footprint.y + radii[1].v, start: 1.5 * Math.PI },
-      { x: right - radii[2].h, y: bottom - radii[2].v, start: 0 },
-      { x: footprint.x + radii[3].h, y: bottom - radii[3].v, start: 0.5 * Math.PI },
-    ];
-    for (let corner = 0; corner < centres.length; corner++) {
-      const centre = centres[corner];
-      const radius = radii[corner];
-      const steps = radius.h > 0 && radius.v > 0 ? ARC_TEST_POINTS : 0;
-      for (let step = 0; step <= steps; step++) {
-        const angle = centre.start + (Math.PI / 2) * (steps ? step / steps : 0.5);
-        points.push({ x: centre.x + radius.h * Math.cos(angle), y: centre.y + radius.v * Math.sin(angle) });
-      }
-    }
-    return points;
-  }
-
-  // Whether the point lies in the ellipse `box`, or in the rect `box` with
-  // each corner rounded by its `radii` ({h, v}, top left first): inside its
-  // bounds, and inside the arc of any rounded corner it lies beyond the
-  // centre of, on both axes.
-  function holds(geometry, box, radii, point) {
-    const right = box.x + box.w;
-    const bottom = box.y + box.h;
-    if (point.x < box.x - TOUCH_EPSILON_PX || point.x > right + TOUCH_EPSILON_PX ||
-        point.y < box.y - TOUCH_EPSILON_PX || point.y > bottom + TOUCH_EPSILON_PX) return false;
-    if (geometry === 'ellipse') {
-      const dx = (point.x - (box.x + box.w / 2)) / (box.w / 2);
-      const dy = (point.y - (box.y + box.h / 2)) / (box.h / 2);
-      return dx * dx + dy * dy <= 1 + TOUCH_EPSILON_PX;
-    }
-    for (let index = 0; index < radii.length; index++) {
-      const radius = radii[index];
-      if (!(radius.h > 0 && radius.v > 0)) continue;
-      const left = index === 0 || index === 3;
-      const top = index < 2;
-      const centreX = left ? box.x + radius.h : right - radius.h;
-      const centreY = top ? box.y + radius.v : bottom - radius.v;
-      if (!(left ? point.x < centreX : point.x > centreX) || !(top ? point.y < centreY : point.y > centreY)) continue;
-      const reach = Math.hypot((point.x - centreX) / radius.h, (point.y - centreY) / radius.v);
-      if (reach > 1 + TOUCH_EPSILON_PX / Math.min(radius.h, radius.v)) return false;
-    }
-    return true;
-  }
-
   // The sides box-decoration-break: slice takes off one fragment of an inline
   // box: its inline start on every fragment but the first, its inline end on
   // every fragment but the last. Null for a box in one fragment, or one that
@@ -609,7 +533,7 @@ function createBorders(env) {
     return s.direction === 'rtl' ? { Left: notLast, Right: notFirst } : { Left: notFirst, Right: notLast };
   }
 
-  return { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, resolveShadowShapes, sliceOf };
+  return { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf };
 }
 
 export const BORDERS_SOURCE = createBorders.toString();
