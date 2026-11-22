@@ -1746,13 +1746,14 @@ PX_PER_PT = 4 / 3
 
 
 def _rounded_side_slide() -> str:
-    """Every case and guard on one slide, four to a row, each box #<name>."""
+    """Every case and guard on one slide, five to a row above the sliced paragraph, each box
+    #<name>, all of them on the slide."""
     names = (*ROUNDED_SIDE_CASES, *ROUNDED_SIDE_GUARDS)
     width, height = ROUNDED_SIDE_BOX
     boxes = []
     for position, name in enumerate(names):
-        left = 60 + (position % 4) * 300
-        top = 60 + (position // 4) * 210
+        left = 50 + (position % 5) * 240
+        top = 60 + (position // 5) * 180
         style = (
             ROUNDED_SIDE_CASES[name][0] if name in ROUNDED_SIDE_CASES else ROUNDED_SIDE_GUARDS[name]
         )
