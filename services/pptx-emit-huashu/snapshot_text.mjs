@@ -1998,6 +1998,14 @@ function createTextLayout(env) {
       const decorations = decorationsOf(runs[index].nodes, walk.frame);
       if (walk.turned) {
         const lines = layoutTurnedRun(runs[index].nodes, s, walk.frame.scale, walk.turned);
+        // The run of a flex or grid container is an anonymous item, which the
+        // container aligns, not its text-align: its lines carry the item, so
+        // turnedBlocks places them by their own bounds, as unturned text's
+        // 'text' placement does.
+        if (itemsAreBlocks) {
+          const anonymousItem = { run: index };
+          for (let line = 0; line < lines.length; line++) lines[line].anonymousItem = anonymousItem;
+        }
         if (decorations.length || lines.length) {
           groups.push({ follows: runs[index].follows, decorations, blocks: [], lines, turned: walk.turned });
         }

@@ -91,6 +91,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_each_layout_box,
     browser_each_rect,
     browser_ellipsis,
+    browser_line_boxes,
     browser_lines,
     browser_probes,
     browser_style,
@@ -117,6 +118,7 @@ from tests.fixtures.export_snapshot_support import (
     slide_shapes,
     table_extent,
     table_frames,
+    text_bounds,
 )
 from tests.unit.test_export_collection_iteration_hostile_realm import (
     HOSTILE_EXPORT_TIMEOUT_SECONDS,
@@ -3175,3 +3177,140 @@ class TestRotatedTextInAHostileRealm:
             f"with a rotated label, {HOSTILE_FIXTURE} does not export as its benign twin "
             f"{BENIGN_TWIN}"
         )
+
+# ---------------------------------------------------------------------------
+# A flex-centred turned label (Task 15 N5)
+# ---------------------------------------------------------------------------
+
+# long-off 20's y-axis label, its CSS exactly (.dk-axis, .dk-axis--y), spanning
+# two rows of the 2x2 matrix grid it is the axis of. The rows are sized so the
+# axis is 502 px long, as in the deck. Its text is an anonymous flex item, which
+# the container centres along the axis: text-align (start) does not place it.
+# Each variant's unturned twin #w is the same flex box laid flat, 502 x 28,
+# with the same justify-content: a transform moves no layout, so the turned
+# label's text lies in its frame where the twin's lies in its own.
+FLEX_AXIS_CSS = """
+.dk-matrix { position: absolute; left: 88px; top: 140px; width: 1000px; display: grid;
+             grid-template-columns: 28px 1fr 1fr; grid-template-rows: 245px 245px 28px;
+             gap: 12px; }
+.dk-axis { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+           color: #5D6D71; display: flex; align-items: center; justify-content: center; }
+.dk-axis--y { writing-mode: vertical-rl; transform: rotate(180deg); grid-row: 1 / 3; }
+.dk-quad { background: #FFFFFF; border-radius: 10px; padding: 16px; }
+.dk-twin { position: absolute; left: 160px; top: 60px; width: 502px; height: 28px; }
+"""
+FLEX_AXIS_TEXT = "IMPACT"
+FLEX_AXIS_LENGTH_PX = 502.0
+FLEX_AXIS_THICKNESS_PX = 28.0
+# Each variant: the label's own extra style, its twin's, the label's angle (the
+# transform's turn plus its writing mode's, degrees clockwise), and the words
+# of its anonymous items. "start-centred" is a start-aligned item under
+# text-align: center, which aligns nothing outside the item; "two-items" holds
+# two anonymous items about a flex item of its own (the "/").
+FLEX_AXIS_VARIANTS = {
+    "centre": ("", "", 270.0, ("IMPACT",)),
+    "flex-start": (
+        "justify-content: flex-start;",
+        "justify-content: flex-start;",
+        270.0,
+        ("IMPACT",),
+    ),
+    "flex-end": ("justify-content: flex-end;", "justify-content: flex-end;", 270.0, ("IMPACT",)),
+    "no-rotation": ("transform: none;", "", 90.0, ("IMPACT",)),
+    "vertical-lr": ("writing-mode: vertical-lr;", "", 270.0, ("IMPACT",)),
+    "start-centred": (
+        "justify-content: flex-start; text-align: center;",
+        "justify-content: flex-start; text-align: center;",
+        270.0,
+        ("IMPACT",),
+    ),
+    "two-items": ("gap: 60px;", "gap: 60px;", 270.0, ("IMPACT", "VALUE")),
+}
+FLEX_AXIS_WRITING_MODES = {"vertical-lr": "vertical-lr"}
+# The label's content in HTML, per variant (its words before text-transform).
+FLEX_AXIS_CONTENT = {"two-items": "Impact<span>/</span>Value"}
+
+
+def _flex_axis_slide(label_style: str, twin_style: str, content: str) -> str:
+    return (
+        '<div class="slide">'
+        f'<div id="w" class="dk-axis dk-twin" style="{twin_style}">{content}</div>'
+        '<div class="dk-matrix">'
+        f'<div id="t" class="dk-axis dk-axis--y" style="{label_style}">{content}</div>'
+        '<div class="dk-quad">Quick wins</div><div class="dk-quad">Big bets</div>'
+        '<div class="dk-quad">Fill-ins</div><div class="dk-quad">Deprioritise</div>'
+        '<div class="dk-axis" style="grid-column: 2 / 4;">Effort</div>'
+        "</div></div>"
+    )
+
+
+FLEX_AXIS_SLIDES = {
+    name: _flex_axis_slide(label_style, twin_style, FLEX_AXIS_CONTENT.get(name, "Impact"))
+    for name, (label_style, twin_style, _, _) in FLEX_AXIS_VARIANTS.items()
+}
+
+
+def _flex_axis_document(name: str) -> str:
+    """The document ``flex_axis_pptx`` exported as slide ``name``."""
+    position = list(FLEX_AXIS_SLIDES).index(name) + 1
+    return slide_document(
+        FLEX_AXIS_SLIDES[name], css=DECK_CSS + FLEX_AXIS_CSS, slide_id=f"snapshot-{position}"
+    )
+
+
+@pytest.fixture(scope="module")
+def flex_axis_pptx() -> Iterator[bytes]:
+    """The flex-centred axis label's variants, exported once through the snapshot engine."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_slides(
+            list(FLEX_AXIS_SLIDES.values()), css=DECK_CSS + FLEX_AXIS_CSS, monkeypatch=monkeypatch
+        )
+    assert failures == [], f"the export rejected a slide: {failures}"
+    yield pptx
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestFlexCentredTurnedLabel:
+    @pytest.mark.parametrize("name", tuple(FLEX_AXIS_VARIANTS))
+    def test_a_flex_aligned_turned_label_is_written_where_the_browser_draws_it(
+        self, flex_axis_pptx: bytes, name: str
+    ) -> None:
+        """long-off 20's "IMPACT", and its variants, lie along the axis where the browser has them.
+
+        The label is a flex container turned by its writing mode (and the
+        180 degree rotation), its word an anonymous item the container aligns
+        along the axis: centred, at the start or at the end. The turned item
+        must start along its line where the browser's word starts, and sit in
+        the label's frame where its unturned twin's item sits in the twin's,
+        within 1 px, as long as the twin's. Written as a box the axis's length
+        from its start, the word lay at the axis's end (210 px off in both apps).
+        """
+        _, _, angle, words = FLEX_AXIS_VARIANTS[name]
+        document = _flex_axis_document(name)
+        layout = _layout(document, "#t")
+        writing_mode = FLEX_AXIS_WRITING_MODES.get(name, "vertical-rl")
+        assert layout["writing_mode"] == writing_mode and (
+            abs(layout["offset_h"] - FLEX_AXIS_LENGTH_PX) <= GEOMETRY_TOLERANCE_PX
+            and abs(layout["offset_w"] - FLEX_AXIS_THICKNESS_PX) <= GEOMETRY_TOLERANCE_PX
+        ), f"fixture drift: the {name} label lays out as {layout}"
+        shapes = slide_shapes(flex_axis_pptx, list(FLEX_AXIS_SLIDES).index(name))
+        for word in words:
+            turned = _items_reading(shapes, word, angle)
+            assert len(turned) == 1, (
+                f"the {name} label: expected one item reading {word!r} turned {angle:g} "
+                f"degrees:\n{_describe(shapes)}"
+            )
+            _assert_matches_twin(shapes, document, angle, word, f"the {name} label's {word}")
+        if len(words) == 1:
+            # Where the browser draws the word along its line, and where the item's
+            # written alignment puts a line that long in its box.
+            item = turned[0][1]
+            drawn = text_bounds(browser_line_boxes(document, "#t"))
+            start, end = _span_along(drawn, item.rotation)
+            inset = {
+                "left": 0.0,
+                "center": (item.w - (end - start)) / 2,
+                "right": item.w - (end - start),
+            }
+            _assert_starts_at(item, drawn, f"the {name} label's word", inset[item.paras[0].align])

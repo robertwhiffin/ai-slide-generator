@@ -336,12 +336,13 @@ function createTurnedText(env, layout) {
     };
   }
 
-  // The block of `lines` of a turn root a gap cuts, where they lie in its
-  // frame `place` (turnedLineExtent), placed as textBlock places unturned
-  // text (`placement` 'container' or 'segment'): by its lines' extent, across
-  // the content box for text aligned other than left, written from the line's
-  // start side for a segment, with the slack on the side its alignment grows.
-  // Null when none of its lines can be placed.
+  // The block of `lines` of a turn root a gap cuts, or of an anonymous flex
+  // or grid item of it, where they lie in its frame `place`
+  // (turnedLineExtent), placed as textBlock places unturned text
+  // (`placement` 'container', 'text' or 'segment'): by its lines' extent,
+  // across the content box for a container's text aligned other than left,
+  // written from the line's start side for a segment, with the slack on the
+  // side its alignment grows. Null when none of its lines can be placed.
   function turnedLocalBlock(lines, place, placement) {
     let left = Infinity;
     let right = -Infinity;
@@ -374,12 +375,18 @@ function createTurnedText(env, layout) {
   // order; [] when none of them paints. Its lines are taken in the order the
   // turned box stacks them (reversed for vertical-lr), less blank lines at
   // either end.
-  // * A root no gap cuts is one block on its layout box (turnedRootBlock).
-  // * A root a gap cuts is cut as blocksOf cuts unturned text: the lines
+  // * A root no gap cuts, whose text is its own, is one block on its layout
+  //   box (turnedRootBlock).
+  // * A root a gap cuts, or a flex or grid container's, whose text is its
+  //   anonymous items', is cut as blocksOf cuts unturned text: the lines
   //   between cut lines are one block together and each segment of a cut line
   //   one block, each where its text lies in the root's frame
   //   (turnedLocalBlock), so the text after a chip or a hidden word starts
-  //   where the browser has it.
+  //   where the browser has it. The lines of an anonymous item
+  //   (line.anonymousItem, collectTextBlocks) are a block of their own,
+  //   placed by their bounds: the container, not text-align, puts the item
+  //   where it is, as a flex-centred axis label centres its word along the
+  //   axis (Task 15 N5).
   function turnedBlocks(turned) {
     const lines = turned.reversed ? turned.lines.slice().reverse() : turned.lines.slice();
     let first = 0;
@@ -391,24 +398,31 @@ function createTurnedText(env, layout) {
     const place = turnedFrameOf(turned);
     let cut = false;
     for (let index = 0; index < kept.length; index++) {
-      if (kept[index].segments) cut = true;
+      if (kept[index].segments || kept[index].anonymousItem) cut = true;
     }
     if (!cut) return [turnedRootBlock(kept, place)];
     const blocks = [];
     let pending = [];
+    // The anonymous item the pending lines are, or null for the root's own text.
+    let pendingItem = null;
     const flush = () => {
       let from = 0;
       let to = pending.length - 1;
       while (from <= to && isBlank(pending[from])) from++;
       while (to >= from && isBlank(pending[to])) to--;
       if (from <= to) {
-        const block = turnedLocalBlock(pending.slice(from, to + 1), place, 'container');
+        const block = turnedLocalBlock(pending.slice(from, to + 1), place, pendingItem ? 'text' : 'container');
         if (block) blocks.push(block);
       }
       pending = [];
     };
     for (let index = 0; index < kept.length; index++) {
       const line = kept[index];
+      const item = line.anonymousItem || null;
+      if (item !== pendingItem) {
+        flush();
+        pendingItem = item;
+      }
       if (!line.segments) {
         pending.push(line);
         continue;

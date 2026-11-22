@@ -408,6 +408,9 @@ block (upstream issue #56). Each block becomes one text box.
 
 **Rotated text.** Text under a rotation, or set sideways by a vertical writing mode,
 emits the unrotated box (from `offsetWidth/Height`), the angle, and browser line breaks.
+A flex or grid container's text is its anonymous items', which the container aligns,
+so each item is a turned box over its own text, where the browser draws it, as
+unturned text is (as built, Task 15 B7: a flex-centred axis label lay at the axis's end).
 
 **Model validation** (as built). The model is built in the slide's own realm, whose
 script may have replaced the page's built-ins, so Node checks it before any use
