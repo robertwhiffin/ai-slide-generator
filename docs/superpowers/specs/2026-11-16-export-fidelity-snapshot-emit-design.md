@@ -580,10 +580,11 @@ Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Dr
 
 ## How we'll know it works
 
-- **Fixtures.** `tests/fixtures/export_fidelity/` holds 17 slides covering every root cause
+- **Fixtures.** `tests/fixtures/export_fidelity/` holds 18 slides covering every root cause
   and upstream's own regression cases: bare text beside an SVG, bare text after a block
   child, a hidden SVG before a visible one, mixed SVG and canvas, fractional opacity and
-  `text-transform`. The 27 design-system templates stay local: they are brand assets and
+  `text-transform`; and one slide with no webfont, in the stack a deck without a design
+  system names (Task 15 B8, N4). The 27 design-system templates stay local: they are brand assets and
   the repo is public.
 - **Tests.** One pytest file per concern, using real Chromium and gated like today's
   sidecar tests. They assert on the emitted slide XML:

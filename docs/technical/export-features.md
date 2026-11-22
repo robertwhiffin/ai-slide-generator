@@ -70,7 +70,7 @@ Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line wh
 
 ### The export summary line
 
-Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The 17-slide test corpus on a dev Mac (2026-11-21; no cgroup there, so both container keys are `null`):
+Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The test corpus, measured on a dev Mac when it had 17 slides (2026-11-21; no cgroup there, so both container keys are `null`):
 
 ```text
 [huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.834,"secondsPerSlide":1.343,"peakRssMb":837.6,"containerPeakMb":null,"containerWorkingSetMb":null,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}

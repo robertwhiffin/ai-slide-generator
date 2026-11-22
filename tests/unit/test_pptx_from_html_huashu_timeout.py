@@ -2625,7 +2625,7 @@ class TestTheSummaryOfARealExport:
     def test_a_pinned_corpus_export_is_identical_with_it(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The 17-slide corpus, its fonts pinned: the same deck with the summary and without it.
+        """The 18-slide corpus, its fonts pinned: the same deck with the summary and without it.
 
         Without it: no memory sampler and no line. The sampler reads the process
         table while the sidecar renders, so it must not change what is rendered.
@@ -2633,7 +2633,7 @@ class TestTheSummaryOfARealExport:
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
         css = pinned_font_css()
         paths = sorted((CORPUS_DIR / "slides").glob("*.html"))
-        assert len(paths) == 17, f"fixture drift: the corpus has {len(paths)} slides"
+        assert len(paths) == 18, f"fixture drift: the corpus has {len(paths)} slides"
         title = CORPUS_DECK.get("title", TEST_DECK_TITLE)
         slides = [
             {
