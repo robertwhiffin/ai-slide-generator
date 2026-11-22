@@ -1112,6 +1112,16 @@ def browser_faces(document_html: str, selector: str, index: int = 0) -> list[str
     return [face["postScriptName"] for face in faces]
 
 
+def browser_face_families(document_html: str, selector: str, index: int = 0) -> list[str]:
+    """The families of the faces the browser drew the match's own text in, most glyphs first.
+
+    As ``browser_faces``, by family name (``Helvetica``, ``.SF NS``, ``Liberation
+    Sans``): the face the browser drew, from the DevTools protocol, not the stack.
+    """
+    faces = json.loads(_run_measure(document_html, selector, str(index), "--mode=faces"))
+    return [face["familyName"] for face in faces]
+
+
 def browser_text(document_html: str, selector: str = "body", index: int = 0) -> str:
     """The ``innerText`` of the ``index``-th match of ``selector``, as the browser renders it.
 

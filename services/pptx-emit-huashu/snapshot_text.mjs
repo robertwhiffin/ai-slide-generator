@@ -164,11 +164,15 @@
 //  *          line-height: normal; null when unread;
 //  * ascentPx the largest run's ascent: its glyph top to its baseline; null when unread;
 //  * text     as painted: text-transform applied;
-//  * family   the first face in the stack that is not a generic or a system alias;
-//  *          a stack of generics alone is Arial, Times New Roman or Courier New.
-//  *          Characters a webfont the page loaded lacks are runs of their own in
-//  *          the face of its stack's generic family that every app has
-//  *          (snapshot_text_metrics.mjs splitFallbackRuns);
+//  * family   the face the run is written in: a webfont the page loaded, by its
+//  *          family; any other face, by the name of the face the browser drew it
+//  *          in that all three apps draw with its metrics (snapshot_text_metrics.mjs
+//  *          resolveWrittenFaces): Arial, Times New Roman or Courier New for
+//  *          their metric-compatible faces and for the generic and system faces,
+//  *          Times New Roman where nothing in the stack draws (the standard face),
+//  *          and a face installed on the machine as itself. Characters the
+//  *          written face lacks in the apps are runs of their own in a face every
+//  *          app has (snapshot_text_metrics.mjs splitFallbackRuns);
 //  * weight   100..900, the computed weight to the nearest hundred;
 //  * color    solid, pre-blended: what the browser paints the glyphs with, composited
 //  *          layer by layer over the backdrop (Drive drops text alpha);
@@ -245,9 +249,15 @@ function createTextLayout(env) {
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
   // A generic family keyword or a system alias names no face an importer can
-  // resolve, so a run takes the first face after them. A stack of nothing else
-  // takes, for its first one, a face every machine has. A plain table, read
-  // with hasOwnProperty: page script can replace Map and Set.
+  // resolve. Where one draws a run, the run is written in the face the export's
+  // container draws for it, by its metric-compatible name (Task 15 B8, measured
+  // on Databricks Apps with the sidecar's font bundle): sans-serif and system-ui
+  // are Liberation Sans there, Arial; serif Liberation Serif, Times New Roman;
+  // monospace Liberation Mono, Courier New. cursive, fantasy, emoji and math draw
+  // nothing there, so their text is set in the standard face, Liberation Serif:
+  // Times New Roman. The first of them in a stack also names the face a
+  // character a webfont lacks is written in (fallbackFaceOf). A plain table,
+  // read with hasOwnProperty: page script can replace Map and Set.
   const GENERIC_FACES = {
     'serif': 'Times New Roman',
     'ui-serif': 'Times New Roman',
@@ -260,12 +270,39 @@ function createTextLayout(env) {
     'system-ui': 'Arial',
     '-apple-system': 'Arial',
     'blinkmacsystemfont': 'Arial',
-    'cursive': 'Arial',
-    'fantasy': 'Arial',
-    'emoji': 'Arial',
-    'math': 'Arial',
+    'cursive': 'Times New Roman',
+    'fantasy': 'Times New Roman',
+    'emoji': 'Times New Roman',
+    'math': 'Times New Roman',
   };
   const DEFAULT_FACE = 'Arial';
+  // The faces PowerPoint (Windows and Mac) and Google Slides all draw, by the
+  // families metric-compatible with each: the name a run drawn in one of them is
+  // written by, so every app lays it out at the browser's widths. Lower-cased.
+  const METRIC_FAMILIES = {
+    'arial': 'Arial',
+    'helvetica': 'Arial',
+    'liberation sans': 'Arial',
+    'arimo': 'Arial',
+    'times new roman': 'Times New Roman',
+    'times': 'Times New Roman',
+    'liberation serif': 'Times New Roman',
+    'tinos': 'Times New Roman',
+    'courier new': 'Courier New',
+    'courier': 'Courier New',
+    'liberation mono': 'Courier New',
+    'cousine': 'Courier New',
+  };
+  // Text whose stack draws in nothing is set in the browser's standard face:
+  // Times on a Mac, Times New Roman on Linux (Liberation Serif in the export's
+  // container).
+  const STANDARD_FACE = 'Times New Roman';
+  // The container's base-image faces, which no desktop has: never a face a run
+  // is written in, whether the machine has them or the page loaded a face of
+  // that name. The sidecar's fontconfig keeps them for per-character fallback
+  // and lets no stack name them; a stack naming one is read as if it did not
+  // draw (baseImageFace). Lower-cased prefix.
+  const BASE_IMAGE_FACE_PREFIX = 'dejavu';
   const REGULAR_WEIGHT = 400;
   const BOLD_WEIGHT = 700;
   const LIGHTEST_WEIGHT = 100;
@@ -299,6 +336,9 @@ function createTextLayout(env) {
   //                includes the stretch), endsLine}
   const pendingParagraphs = [];
   const pendingRuns = [];
+  //   fonts       {font, face}: a table cell's own face (fontOf), whose family
+  //               is resolved as a run's is (resolveWrittenFaces)
+  const pendingFonts = [];
   // The slide's hidden text (hiddenText), in the order it is recorded: the
   // rendered text of each subtree that shows nothing (recordHiddenText) and
   // each word of laid-out text the slide does not show whole
@@ -316,8 +356,13 @@ function createTextLayout(env) {
     codePointLength,
     familyOf,
     probeFaceOf,
+    drawingTokensOf,
+    writtenFamilyOf,
+    undrawnFamilyOf,
+    baseImageFace,
     pendingParagraphs,
     pendingRuns,
+    pendingFonts,
     coverageFont: env.coverageFont,
   });
   const { joinMarkers, markerBlock, markerGlyphLine, readMarkerTokens } = createListMarkers(env, {
@@ -654,9 +699,13 @@ function createTextLayout(env) {
     return DEFAULT_FACE;
   }
 
-  // The run's family: the first face that is not a generic keyword or a system
-  // alias, else the face the first generic maps to. Quoted or not: Chrome
-  // serialises BlinkMacSystemFont as the quoted family "system-ui".
+  // The family a run starts with: the first face that is not a generic keyword
+  // or a system alias, else the face the first generic maps to. Quoted or not:
+  // Chrome serialises BlinkMacSystemFont as the quoted family "system-ui". Where
+  // it is a webfont the page loaded, it is the face the run is written in;
+  // where not, the walk keeps it (its probes set it first, then the stack, so
+  // they fall back as the text did) and the face the run is written in is
+  // resolved once the walk is done (snapshot_text_metrics.mjs resolveWrittenFaces).
   function familyOf(stack) {
     const names = familyNames(stack);
     let generic = null;
@@ -669,6 +718,56 @@ function createTextLayout(env) {
       return names[index];
     }
     return generic || DEFAULT_FACE;
+  }
+
+  // The stack's families in order as each is set alone in a probe's
+  // font-family, {name, css}: a generic keyword or system alias bare (so the
+  // browser reads it as one, as it read the stack), any other family quoted.
+  function drawingTokensOf(stack) {
+    const names = familyNames(stack);
+    const tokens = [];
+    for (let index = 0; index < names.length && index < WALK_STEP_LIMIT; index++) {
+      const name = names[index];
+      const generic = Object.prototype.hasOwnProperty.call(GENERIC_FACES, name.toLowerCase());
+      tokens.push({
+        name,
+        css: generic ? name.toLowerCase() : '"' + name.replace(/[\u0000-\u001F]/g, '').replace(/["\\]/g, '\\$&') + '"',
+        baseImage: baseImageFace(name),
+      });
+    }
+    return tokens;
+  }
+
+  // Whether `name` is a base-image face (BASE_IMAGE_FACE_PREFIX), which no run
+  // is written in.
+  function baseImageFace(name) {
+    return String(name).toLowerCase().indexOf(BASE_IMAGE_FACE_PREFIX) === 0;
+  }
+
+  // The face a run is written in, given the family of its stack that drew it
+  // (`name`) and whether that family is a webfont the page loaded: the webfont
+  // by its own name; a generic keyword or system alias as the face the
+  // container draws for it (GENERIC_FACES); a face metric-compatible with
+  // Arial, Times New Roman or Courier New by that name (METRIC_FAMILIES); any
+  // other face installed on the machine as itself.
+  function writtenFamilyOf(name, webfont) {
+    if (webfont) return name;
+    const key = String(name).toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(GENERIC_FACES, key)) return GENERIC_FACES[key];
+    if (Object.prototype.hasOwnProperty.call(METRIC_FAMILIES, key)) return METRIC_FAMILIES[key];
+    return name;
+  }
+
+  // The face a run is written in when nothing in its stack draws any of its
+  // characters: its first generic's (the browser falls back per character from
+  // there), else the standard face, which the browser sets such a stack in.
+  function undrawnFamilyOf(stack) {
+    const names = familyNames(stack);
+    for (let index = 0; index < names.length; index++) {
+      const key = names[index].toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(GENERIC_FACES, key)) return GENERIC_FACES[key];
+    }
+    return STANDARD_FACE;
   }
 
   // The computed weight to the nearest hundred: a variable font's 450 is 500.
@@ -769,8 +868,10 @@ function createTextLayout(env) {
   //   optical      its font-optical-sizing;
   //   scale        the block's transform scale: probes are set at the computed,
   //                unscaled size, and their widths and heights scale with it;
-  //   coverage     the run's face alone, style, weight, stretch and family, the
-  //                start of a coverage probe's font-family (splitFallbackRuns);
+  //   style        the run's style, weight and stretch, the start of a probe of
+  //                one family of its stack alone: the coverage probes of
+  //                splitFallbackRuns and resolveWrittenFaces;
+  //   stack        the element's font-family stack, as computed;
   //   fallback     the face a character the run's family lacks is written in
   //                (fallbackFaceOf).
   function probeFaceOf(ps, family, scale) {
@@ -785,8 +886,8 @@ function createTextLayout(env) {
       variation: String(ps.fontVariationSettings || 'normal'),
       optical: String(ps.fontOpticalSizing || 'auto'),
       scale,
-      coverage: 'font-style:' + ps.fontStyle + ';font-weight:' + ps.fontWeight + ';font-stretch:' + ps.fontStretch +
-        ';font-family:' + quoted + ',',
+      style: 'font-style:' + ps.fontStyle + ';font-weight:' + ps.fontWeight + ';font-stretch:' + ps.fontStretch + ';',
+      stack: String(ps.fontFamily || ''),
       fallback: fallbackFaceOf(ps.fontFamily),
     };
   }
@@ -2104,14 +2205,18 @@ function createTextLayout(env) {
   // fontOf(s, scale) -> {family, weight, italic, sizePx}: the face the element
   // whose computed style is `s` sets its own text in, as a Run carries it: in a
   // table cell, the face its renderer sizes an empty line, and each line's
-  // paragraph mark, by (the browser's line box holds a strut of it too).
+  // paragraph mark, by (the browser's line box holds a strut of it too). Its
+  // family is resolved after the walk, as a run's is (resolveWrittenFaces).
   function fontOf(s, scale) {
-    return {
-      family: familyOf(s.fontFamily),
+    const family = familyOf(s.fontFamily);
+    const font = {
+      family,
       weight: weightOf(s.fontWeight),
       italic: s.fontStyle !== 'normal',
       sizePx: (parseFloat(s.fontSize) || 0) * scale,
     };
+    pendingFonts.push({ font, face: probeFaceOf(s, family, scale) });
+    return font;
   }
 
   return {

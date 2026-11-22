@@ -196,7 +196,7 @@ FAMILY_CASES = (
         "platform-stack",
         "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
         "Platform stack text",
-        "Segoe UI",
+        "Arial",
     ),
 )
 FAMILIES_SLIDE = (
@@ -743,9 +743,11 @@ class TestSnapshotRunWeights:
     def test_non_webfont_family_at_600_is_bold_never_weight_named(
         self, typography_pptx: bytes, weights_fonts: dict[str, list[int]]
     ) -> None:
-        """``font-family: system-ui, Arial`` at weight 600.
+        """``font-family: system-ui, Arial`` at weight 600 (the global Review Focus 3).
 
-        ``system-ui`` is skipped, so the family is ``Arial``. Arial is not a
+        ``system-ui`` draws the run (SF on a Mac, Liberation Sans in the export's
+        container), so it is written as the face the container draws for it,
+        ``Arial`` (N4). Arial is not a
         webfont the page loaded, so the weight goes on the bold flag: every run
         is typeface ``Arial`` with ``b="1"``. Never "Arial SemiBold", a face no
         machine has, which PowerPoint replaces with its default font; never
@@ -771,19 +773,22 @@ class TestSnapshotRunWeights:
         ("element_id", "family", "text", "typeface"),
         [pytest.param(*case, id=case[0]) for case in FAMILY_CASES],
     )
-    def test_family_is_the_first_real_face_with_generics_mapped(
+    def test_generic_and_platform_stacks_are_written_as_the_face_drawn(
         self, typography_pptx: bytes, element_id: str, family: str, text: str, typeface: str
     ) -> None:
-        """The family is the first face in the stack that is not a generic keyword or a
-        system alias, and a stack of generics alone maps to a face every machine has.
+        """A generic or system face is written as the face the export's container draws
+        for it, by a name every app draws with its metrics (N4):
 
         * ``sans-serif`` is ``Arial``, ``serif`` is ``Times New Roman`` and
           ``monospace`` is ``Courier New``;
         * ``-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`` (the
-          common platform stack) is ``Segoe UI``.
+          common platform stack) is drawn in SF on a Mac (BlinkMacSystemFont)
+          and in Liberation Sans in the container (sans-serif): ``Arial``.
+          ``Segoe UI``, its first named face, is drawn on neither.
 
         A generic keyword or ``-apple-system`` written as a typeface name is
-        a face no importer resolves.
+        a face no importer resolves. test_export_snapshot_drawn_faces.py reads
+        the faces drawn from the browser.
         """
         box = _box(_shapes(typography_pptx, "families"), text)
 
@@ -1501,7 +1506,9 @@ FALLBACK_SANS_RUNS = [
     ("\u25bc", "Arial"),
     (" 3% ", "DM Sans"),
     ("\u2192", "Arial"),
-    (" next \u2193 down \u2713 done", "DM Sans"),
+    (" next \u2193 down ", "DM Sans"),
+    ("\u2713", "MS PGothic"),
+    (" done", "DM Sans"),
 ]
 
 
@@ -1562,8 +1569,10 @@ class TestSnapshotFallbackFaces:
         So in both decks each is a run of its own in Arial, which PowerPoint for
         Windows and Mac and Google Slides all have and whose WGL4 covers them,
         and the nearest of those faces to the browser's (CALIBRATION.md D8).
-        ↓ is DM Sans's own (guarded), and ✓ is no WGL4 character, so neither
-        is taken out. The text reads as before.
+        ↓ is DM Sans's own (guarded), so it is not taken out. ✓ is no WGL4
+        character but one of the symbols MS PGothic draws alike in every app
+        (Task 15 B8), which DM Sans lacks (test_export_snapshot_drawn_faces.py
+        guards it): a run of its own in MS PGothic. The text reads as before.
         """
         document = _fallback_document()
         lacking = {

@@ -3,10 +3,12 @@
 // TEXT_METRICS_SOURCE into TEXT_SOURCE, and createTextLayout makes it once
 // (createTextMetrics). Its header's "Metrics" says what is read and why;
 // here are the probes themselves (measureProbes) and what is made of them:
-// * after the walk, the characters each queued run's webfont lacks, each made
-//   a run of its own in a face every app has (splitFallbackRuns), then every
-//   queued paragraph's line height and ascent and every queued run's
-//   optical-size and unkerned tracking (applyMetrics);
+// * after the walk, the face each queued run with no loaded webfont is written
+//   in, the face the browser drew it in (resolveWrittenFaces); the characters
+//   each queued run's written face lacks in the apps, each made a run of its own
+//   in a face every app has (splitFallbackRuns); then every queued paragraph's
+//   line height and ascent and every queued run's optical-size and unkerned
+//   tracking (applyMetrics);
 // * before the walk, every list marker's advance (measureMarkers);
 // * while the walk reads, a face's content area, once per face
 //   (contentHeightOf, for turned text), and the probe CSS of a face as the
@@ -17,9 +19,16 @@
 // stringified, so it closes over nothing on the Node side; what it needs from
 // the text layout arrives in `layout`, documented in snapshot_text.mjs:
 //   codePointLength   (text, index) -> the length of the code point there;
-//   familyOf          a font-family stack -> the face a run names;
+//   familyOf          a font-family stack -> the face a run starts with;
 //   probeFaceOf       (style, family, scale) -> the face a probe is set in;
-//   pendingParagraphs, pendingRuns   what the walk queued for applyMetrics;
+//   drawingTokensOf   a stack -> its families, {name, css, baseImage}, each as a
+//                     probe sets it alone;
+//   writtenFamilyOf   (name, webfont) -> the face a run its stack's family `name`
+//                     drew is written in;
+//   undrawnFamilyOf   a stack -> the face a run nothing in it drew is written in;
+//   baseImageFace     a family name -> whether it is a base-image face, never written;
+//   pendingParagraphs, pendingRuns, pendingFonts   what the walk queued for
+//                     applyMetrics (a table cell's own face among the fonts);
 //   coverageFont      {family, advanceEm, bytes}, the coverage probe font
 //                     (coverage_font.mjs).
 // It gives back applyMetrics, browserCutCss, contentHeightOf, measureMarkers
@@ -30,8 +39,13 @@ function createTextMetrics(layout) {
     codePointLength,
     familyOf,
     probeFaceOf,
+    drawingTokensOf,
+    writtenFamilyOf,
+    undrawnFamilyOf,
+    baseImageFace,
     pendingParagraphs,
     pendingRuns,
+    pendingFonts,
     coverageFont,
   } = layout;
 
@@ -95,6 +109,58 @@ function createTextMetrics(layout) {
     [0x25d8, 0x25d9], [0x25e6, 0x25e6], [0x263a, 0x263c], [0x2640, 0x2640], [0x2642, 0x2642],
     [0x2660, 0x2660], [0x2663, 0x2663], [0x2665, 0x2666], [0x266a, 0x266b], [0xfb01, 0xfb02],
   ];
+  // Symbols outside WGL4 (Task 15 B8, CALIBRATION.md D8): the 982 that MS
+  // PGothic and MS Gothic both draw, glyph for glyph, in PowerPoint for Mac and
+  // in Google Slides (measured through both apps' PDFs: superscript digits,
+  // currency, letterlike symbols, number forms, arrows, mathematical operators,
+  // enclosed alphanumerics, box drawing, geometric shapes such as the Harvey
+  // balls ◔◑◕, miscellaneous symbols and dingbats such as ✓ and ★; of the block's
+  // characters these faces cover, ⅒ alone is left out, which Google draws as a
+  // box). Written in Arial or Times New Roman, PowerPoint for Mac draws them from
+  // Segoe UI Symbol, Cambria Math, MS Gothic or Apple Color Emoji at 0.72 to
+  // 1.12 em, and Google from MS PGothic; Courier New draws none of them in
+  // either app. So such a character the run's written face lacks is a run of
+  // its own in MS PGothic, or MS Gothic for a monospace run (SYMBOL_FACES),
+  // which every app draws alike. Inclusive ranges, in order.
+  const SYMBOL_COVERAGE = [
+    [0x2070, 0x2070], [0x2074, 0x207c], [0x2080, 0x208c], [0x20a0, 0x20a2], [0x20a5, 0x20a6], [0x20a8, 0x20ab],
+    [0x20ad, 0x20b1], [0x2100, 0x2101], [0x2103, 0x2104], [0x2106, 0x2106], [0x2108, 0x2109], [0x2114, 0x2114],
+    [0x2117, 0x2118], [0x211e, 0x2121], [0x2123, 0x2123], [0x2125, 0x2125], [0x2127, 0x2127], [0x2129, 0x2129],
+    [0x2153, 0x215a], [0x215f, 0x215f], [0x2196, 0x21a7], [0x21a9, 0x21ea], [0x2200, 0x2201], [0x2203, 0x2205],
+    [0x2207, 0x220e], [0x2210, 0x2210], [0x2213, 0x2214], [0x2216, 0x2218], [0x221b, 0x221d], [0x2220, 0x2228],
+    [0x222a, 0x222a], [0x222c, 0x2247], [0x2249, 0x225f], [0x2262, 0x2263], [0x2266, 0x22f1], [0x2305, 0x2306],
+    [0x2312, 0x2312], [0x2318, 0x2318], [0x23be, 0x23cc], [0x23ce, 0x23ce], [0x2423, 0x2423], [0x2460, 0x24fe],
+    [0x2501, 0x2501], [0x2503, 0x250b], [0x250d, 0x250f], [0x2511, 0x2513], [0x2515, 0x2517], [0x2519, 0x251b],
+    [0x251d, 0x2523], [0x2525, 0x252b], [0x252d, 0x2533], [0x2535, 0x253b], [0x253d, 0x254f], [0x256d, 0x257f],
+    [0x2581, 0x2583], [0x2585, 0x2587], [0x2589, 0x258b], [0x258d, 0x258f], [0x2594, 0x2595], [0x25a2, 0x25a9],
+    [0x25ad, 0x25b1], [0x25b3, 0x25b9], [0x25bb, 0x25bb], [0x25bd, 0x25c3], [0x25c5, 0x25c9], [0x25cc, 0x25ce],
+    [0x25d0, 0x25d7], [0x25da, 0x25e5], [0x25e7, 0x25ef], [0x2600, 0x2613], [0x2616, 0x2617], [0x261a, 0x2639],
+    [0x263d, 0x263f], [0x2641, 0x2641], [0x2643, 0x265f], [0x2661, 0x2662], [0x2664, 0x2664], [0x2667, 0x2669],
+    [0x266c, 0x266f], [0x2701, 0x2704], [0x2706, 0x2709], [0x270c, 0x2727], [0x2729, 0x274b], [0x274d, 0x274d],
+    [0x274f, 0x2752], [0x2756, 0x2756], [0x2758, 0x275e], [0x2761, 0x2767], [0x2776, 0x2794], [0x2798, 0x27af],
+    [0x27b1, 0x27be], [0x2934, 0x2935], [0x29bf, 0x29bf], [0x29fa, 0x29fb],
+  ];
+  // The symbols each face a non-webfont run is written in draws itself in both
+  // apps (measured as SYMBOL_COVERAGE was): such a character stays in its run,
+  // and a webfont run whose fallback face this is writes it in that face.
+  const TABLE_FACE_SYMBOLS = {
+    'Arial': [
+      0x20a0, 0x20a1, 0x20a2, 0x20a5, 0x20a6, 0x20a8, 0x20a9, 0x20aa, 0x20ab, 0x20ad, 0x20ae, 0x20af,
+      0x20b0, 0x20b1, 0x2117, 0x2153, 0x2154, 0x25cc, 0x266f,
+    ],
+    'Times New Roman': [
+      0x20a0, 0x20a1, 0x20a2, 0x20a5, 0x20a6, 0x20a8, 0x20a9, 0x20aa, 0x20ab, 0x20ad, 0x20ae, 0x20af,
+      0x20b0, 0x20b1, 0x2153, 0x2154, 0x25cc, 0x266f,
+    ],
+    'Courier New': [],
+  };
+  // The face a symbol is written in, by the face of the run's generic family:
+  // MS Gothic keeps a monospace run's cells even, MS PGothic is proportional.
+  // Both ship with Office for Mac and Google Slides draws both; on Windows they
+  // come with the Japanese fonts, and where a machine lacks them PowerPoint
+  // falls back per glyph, as it does for these characters in any other face.
+  const SYMBOL_FACES = { 'Courier New': 'MS Gothic' };
+  const DEFAULT_SYMBOL_FACE = 'MS PGothic';
   // What a coverage probe never asks about: white space, and the marks and
   // format characters that join or space the text around them.
   const COVERAGE_SKIP = /[\s\p{M}\p{Cf}]/u;
@@ -214,21 +280,99 @@ function createTextMetrics(layout) {
     return exportCutCss(face) + 'font-kerning:none;font-feature-settings:' + own + '"kern" 0;';
   }
 
-  // Whether the code point is one FALLBACK_COVERAGE holds.
-  function inFallbackCoverage(codePoint) {
-    for (let index = 0; index < FALLBACK_COVERAGE.length; index++) {
-      if (codePoint < FALLBACK_COVERAGE[index][0]) return false;
-      if (codePoint <= FALLBACK_COVERAGE[index][1]) return true;
+  // Whether `ranges` (inclusive, in order) holds the code point.
+  function inRanges(ranges, codePoint) {
+    for (let index = 0; index < ranges.length; index++) {
+      if (codePoint < ranges[index][0]) return false;
+      if (codePoint <= ranges[index][1]) return true;
     }
     return false;
   }
 
-  // One character set in `face` alone, the coverage probe font after it: its
-  // face's own advance where the face draws it, COVERAGE_ADVANCE_EM where not.
-  // Nothing the page sets on the root may widen it.
-  function coverageCss(face) {
-    return face.coverage + '"' + coverageFont.family + '";font-size:' + COVERAGE_PROBE_PX + 'px;' +
+  // Whether `family`, a face a run is written in, draws the symbol itself in
+  // every app (TABLE_FACE_SYMBOLS); false for any other face.
+  function drawsSymbol(family, codePoint) {
+    if (!Object.prototype.hasOwnProperty.call(TABLE_FACE_SYMBOLS, family)) return false;
+    return TABLE_FACE_SYMBOLS[family].indexOf(codePoint) >= 0;
+  }
+
+  // The face a symbol is written in, by the face of the run's generic family
+  // (SYMBOL_FACES).
+  function symbolFaceOf(family) {
+    return Object.prototype.hasOwnProperty.call(SYMBOL_FACES, family) ? SYMBOL_FACES[family] : DEFAULT_SYMBOL_FACE;
+  }
+
+  // `family` as one entry of a font-family list.
+  function quotedFamily(family) {
+    return '"' + String(family).replace(/[\u0000-\u001F]/g, '').replace(/["\\]/g, '\\$&') + '"';
+  }
+
+  // The end of every coverage probe's CSS: the coverage probe font after the
+  // face asked about, at the probe's size, with nothing the page sets on the
+  // root to widen it.
+  function coverageTail() {
+    return '"' + coverageFont.family + '";font-size:' + COVERAGE_PROBE_PX + 'px;' +
       'font-size-adjust:none;letter-spacing:0;word-spacing:0;font-feature-settings:normal;font-variant:normal;';
+  }
+
+  // One character set in `family` alone, in the run's style (`face`), the
+  // coverage probe font after it: the family's own advance where it draws the
+  // character, COVERAGE_ADVANCE_EM where not.
+  function coverageCss(face, family) {
+    return face.style + 'font-family:' + quotedFamily(family) + ',' + coverageTail();
+  }
+
+  // A run's characters set in one family of its stack alone (`token`, as
+  // drawingTokensOf sets it), in the run's style, the coverage probe font after
+  // it: narrower than COVERAGE_ADVANCE_EM a character wherever that family
+  // draws one of them, as the browser's own font matching takes it.
+  function drawnCss(face, token) {
+    return face.style + 'font-family:' + token + ',' + coverageTail();
+  }
+
+  // The characters a probe of a run's faces asks about: its distinct characters
+  // in order, white space, marks and format characters aside; "x" for a run of
+  // none, which the face of its Latin text sets.
+  function probeText(text) {
+    const value = String(text || '');
+    const seen = Object.create(null);
+    let distinct = '';
+    let at = 0;
+    for (let step = 0; at < value.length && step < COLLECTION_ITEM_LIMIT; step++) {
+      const length = codePointLength(value, at);
+      const character = value.slice(at, at + length);
+      at += length;
+      if (COVERAGE_SKIP.test(character) || seen[character]) continue;
+      seen[character] = true;
+      distinct += character;
+    }
+    return distinct || 'x';
+  }
+
+  // measureProbes over `probes` with the coverage probe font added to the
+  // document's fonts for the one pass (dom_access.mjs addFontFace, through the
+  // pristine realm) and deleted again; null, announced with `loss`, where the
+  // font could not be added or the probes read.
+  function measureWithCoverageFont(probes, loss) {
+    let face = null;
+    try {
+      face = dom.addFontFace(coverageFont.family, coverageFont.bytes);
+    } catch (e) {
+      face = null;
+    }
+    if (!face) {
+      console.warn('[html2pptx] the coverage probe font could not be added; ' + loss);
+      return null;
+    }
+    try {
+      return measureProbes(probes, loss);
+    } finally {
+      try {
+        dom.deleteFontFace(face);
+      } catch (e) {
+        console.warn('[html2pptx] the coverage probe font could not be deleted (' + (e && e.message) + ')');
+      }
+    }
   }
 
   // Whether `family` is a webfont the page loaded (`webfonts`, model.fonts);
@@ -242,52 +386,136 @@ function createTextMetrics(layout) {
     return false;
   }
 
-  // The pieces `text` is cut into, in order, {start, end, fallback}: a run of
-  // characters its face lacks (`lacking`, their offsets in order), or of the
-  // rest. A character that joins the one before it (a variation selector
-  // after ▲) stays with it.
+  // resolveWrittenFaces(webfonts): the face each queued run, and each queued
+  // table cell's own face, is written in where its family is no webfont the
+  // page loaded (`webfonts`, model.fonts), or is a base-image face (DejaVu,
+  // snapshot_text.mjs baseImageFace): the face the browser drew it in, by
+  // a name every app draws with its metrics (Task 15 B8, N4). Each family of
+  // its stack is probed alone on the run's characters, the coverage probe font
+  // after it (drawnCss): the first that draws any of them is the one the
+  // browser's own font matching took for the run, as the browser falls back
+  // family by family. It is written as snapshot_text.mjs writtenFamilyOf says:
+  // a webfont the page loaded later in the stack by its own name, a generic or
+  // system alias as the face the export's container draws for it, Helvetica
+  // and the rest as Arial, Times New Roman or Courier New, any other installed
+  // face as itself. A base-image face is never one, nor a page's own face of
+  // that name. Where none draws, the run is
+  // written in undrawnFamilyOf's face. One probe pass; where it cannot be read,
+  // each run keeps its stack's first family.
+  function resolveWrittenFaces(webfonts) {
+    const list = probeList();
+    const asked = [];
+    const ask = (target, face, text) => {
+      if (isWebfont(webfonts, target.family) && !baseImageFace(target.family)) return;
+      const characters = probeText(text);
+      const tokens = drawingTokensOf(face.stack);
+      const probes = [];
+      for (let index = 0; index < tokens.length; index++) {
+        if (tokens[index].baseImage) continue;
+        probes.push({ token: tokens[index], probe: list.probe(drawnCss(face, tokens[index].css), characters, false) });
+      }
+      asked.push({ target, face, count: codePointCount(characters), probes });
+    };
+    for (let index = 0; index < pendingRuns.length; index++) {
+      ask(pendingRuns[index].run, pendingRuns[index].face, pendingRuns[index].run.text);
+    }
+    for (let index = 0; index < pendingFonts.length; index++) {
+      ask(pendingFonts[index].font, pendingFonts[index].face, '');
+    }
+    if (!asked.length) return;
+    const sizes = list.probes.length
+      ? measureWithCoverageFont(list.probes, "this slide's text with no loaded webfont is written in each stack's first family")
+      : [];
+    if (!sizes) return;
+    const advance = coverageFont.advanceEm * COVERAGE_PROBE_PX;
+    const lackingAt = COVERAGE_SHARE * advance;
+    for (let index = 0; index < asked.length; index++) {
+      const { target, face, count, probes } = asked[index];
+      let family = null;
+      for (let token = 0; token < probes.length && family === null; token++) {
+        const size = sizes[probes[token].probe];
+        if (size && size.w < (count - 1) * advance + lackingAt) {
+          const name = probes[token].token.name;
+          family = writtenFamilyOf(name, isWebfont(webfonts, name));
+        }
+      }
+      target.family = family === null ? undrawnFamilyOf(face.stack) : family;
+    }
+  }
+
+  // How many code points `text` holds.
+  function codePointCount(text) {
+    let count = 0;
+    for (let at = 0; at < text.length; at += codePointLength(text, at)) count++;
+    return count;
+  }
+
+  // The pieces `text` is cut into, in order, {start, end, family}: a run of
+  // characters written in another face (`lacking`, {at, family} in the order of
+  // their offsets: that face), or of the rest (family null). A character that
+  // joins the one before it (a variation selector after ▲) stays with it.
   function piecesOf(text, lacking) {
     const pieces = [];
     let at = 0;
     let next = 0;
     while (at < text.length) {
-      const fallback = next < lacking.length && lacking[next] === at;
-      if (fallback) next += 1;
+      let family = null;
+      if (next < lacking.length && lacking[next].at === at) {
+        family = lacking[next].family;
+        next += 1;
+      }
       let end = at + codePointLength(text, at);
       while (end < text.length && JOINS_PREVIOUS.test(text.slice(end, end + codePointLength(text, end)))) {
         end += codePointLength(text, end);
       }
       const last = pieces.length ? pieces[pieces.length - 1] : null;
-      if (last && last.fallback === fallback) last.end = end;
-      else pieces.push({ start: at, end, fallback });
+      if (last && last.family === family) last.end = end;
+      else pieces.push({ start: at, end, family });
       at = end;
     }
     return pieces;
   }
 
+  // The characters of `text` that `test(codePoint, at)` takes, each as
+  // {at, codePoint, character}, white space, marks and format characters aside.
+  function characterOffsets(text, test) {
+    const found = [];
+    let at = 0;
+    while (at < text.length) {
+      const length = codePointLength(text, at);
+      const character = text.slice(at, at + length);
+      const codePoint = character.codePointAt(0);
+      if (!COVERAGE_SKIP.test(character) && test(codePoint)) found.push({ at, codePoint, character });
+      at += length;
+    }
+    return found;
+  }
+
   // The coverage probes of every queued run of a webfont, one per distinct face
-  // and character it might lack; what each run asks, {pending, asked: [{at,
-  // probe}]}, for the runs that ask anything.
+  // and character it might lack (one WGL4 or SYMBOL_COVERAGE holds); what each
+  // run asks, {index, pending, asked: [{at, codePoint, probe}]}, its place in the
+  // queue among them, for the runs that ask anything.
   function coverageQuestions(webfonts, list) {
     const questions = [];
     for (let index = 0; index < pendingRuns.length; index++) {
       const pending = pendingRuns[index];
       if (!isWebfont(webfonts, pending.run.family)) continue;
-      const text = pending.run.text;
-      const css = coverageCss(pending.face);
-      const asked = [];
-      let at = 0;
-      while (at < text.length) {
-        const length = codePointLength(text, at);
-        const character = text.slice(at, at + length);
-        if (!COVERAGE_SKIP.test(character) && inFallbackCoverage(character.codePointAt(0))) {
-          asked.push({ at, probe: list.probe(css, character, false) });
-        }
-        at += length;
-      }
-      if (asked.length) questions.push({ pending, asked });
+      const css = coverageCss(pending.face, pending.run.family);
+      const asked = characterOffsets(pending.run.text,
+        (codePoint) => inRanges(FALLBACK_COVERAGE, codePoint) || inRanges(SYMBOL_COVERAGE, codePoint))
+        .map((found) => ({ at: found.at, codePoint: found.codePoint, probe: list.probe(css, found.character, false) }));
+      if (asked.length) questions.push({ index, pending, asked });
     }
     return questions;
+  }
+
+  // The face a character a webfont run lacks is written in: its fallback face
+  // (the run's generic family's, snapshot_text.mjs fallbackFaceOf) for a WGL4
+  // character or a symbol that face draws itself, the symbol face for any other
+  // symbol (SYMBOL_FACES).
+  function lackingFaceOf(face, codePoint) {
+    if (inRanges(FALLBACK_COVERAGE, codePoint) || drawsSymbol(face.fallback, codePoint)) return face.fallback;
+    return symbolFaceOf(face.fallback);
   }
 
   // Puts `pieces` (runs) where `run` is in `runs`, a line's runs.
@@ -299,70 +527,76 @@ function createTextMetrics(layout) {
     }
   }
 
-  // splitFallbackRuns(webfonts): every queued run of a webfont the page loaded
-  // (`webfonts`, model.fonts) with characters its face lacks is cut into runs
-  // (piecesOf), in place in its line. A piece of such characters is the run's
-  // style in its fallback face (snapshot_text.mjs fallbackFaceOf), with no
-  // measured tracking, and leaves the queue: its width in the export is its
-  // fallback face's. Every other piece stays queued, its width now probed at
-  // the browser's own cut. Which characters a face lacks is read from the face
-  // itself, the same on every machine: one probe pass with the coverage probe
-  // font added to the document's fonts (dom_access.mjs addFontFace) and
-  // deleted again. A run of a family that is no webfont is a font on the
-  // viewer's machine, whose coverage is that machine's own, so it is left.
+  // splitFallbackRuns(webfonts): every queued run with characters its written
+  // face lacks in the apps is cut into runs (piecesOf), in place in its line:
+  // * a run of a webfont the page loaded (`webfonts`, model.fonts): the WGL4
+  //   characters and symbols (SYMBOL_COVERAGE) the face lacks. Which they are
+  //   is read from the face itself, the same on every machine: one probe pass
+  //   with the coverage probe font. A WGL4 character is written in the run's
+  //   fallback face (snapshot_text.mjs fallbackFaceOf), a symbol in the symbol
+  //   face (lackingFaceOf);
+  // * a run written in Arial, Times New Roman or Courier New (resolveWrittenFaces):
+  //   the symbols that face does not draw itself in the apps (TABLE_FACE_SYMBOLS),
+  //   in the symbol face. Every WGL4 character is the face's own in every app.
+  //   The face drawn may have them (the container's Liberation faces have ◔◑◕);
+  //   the face written does not, and the apps draw the written one.
+  // A piece of such characters is the run's style in that face, with no
+  // measured tracking, and leaves the queue: its width in the export is that
+  // face's. Every other piece stays queued, its width now probed at the
+  // browser's own cut. Any other face (one installed on the viewer's machine)
+  // has that machine's coverage, so its run is left.
   function splitFallbackRuns(webfonts) {
     const list = probeList();
     const questions = coverageQuestions(webfonts, list);
-    if (!questions.length) return;
-    const loss = 'this slide exports the characters its webfonts lack in its own fonts, as each app falls back';
-    let face = null;
-    let sizes = null;
-    try {
-      face = dom.addFontFace(coverageFont.family, coverageFont.bytes);
-    } catch (e) {
-      face = null;
-    }
-    if (!face) {
-      console.warn('[html2pptx] the coverage probe font could not be added; ' + loss);
-      return;
-    }
-    try {
-      sizes = measureProbes(list.probes, loss);
-    } finally {
-      try {
-        dom.deleteFontFace(face);
-      } catch (e) {
-        console.warn('[html2pptx] the coverage probe font could not be deleted (' + (e && e.message) + ')');
+    // The characters each queued run is cut at, by its place in the queue: a
+    // plain array, since page script can replace Map.
+    const lackingOf = [];
+    let splits = 0;
+    if (questions.length) {
+      const sizes = measureWithCoverageFont(list.probes,
+        'this slide exports the characters its webfonts lack in its own fonts, as each app falls back');
+      const lackingAt = COVERAGE_SHARE * coverageFont.advanceEm * COVERAGE_PROBE_PX;
+      for (let index = 0; sizes && index < questions.length; index++) {
+        const { pending, asked } = questions[index];
+        const lacking = [];
+        for (let question = 0; question < asked.length; question++) {
+          const size = sizes[asked[question].probe];
+          if (size && size.w >= lackingAt) {
+            lacking.push({ at: asked[question].at, family: lackingFaceOf(pending.face, asked[question].codePoint) });
+          }
+        }
+        if (lacking.length) {
+          lackingOf[questions[index].index] = lacking;
+          splits += 1;
+        }
       }
     }
-    if (!sizes) return;
-    const lackingAt = COVERAGE_SHARE * coverageFont.advanceEm * COVERAGE_PROBE_PX;
-    const split = [];
-    for (let index = 0; index < questions.length; index++) {
-      const lacking = [];
-      for (let ask = 0; ask < questions[index].asked.length; ask++) {
-        const size = sizes[questions[index].asked[ask].probe];
-        if (size && size.w >= lackingAt) lacking.push(questions[index].asked[ask].at);
+    for (let index = 0; index < pendingRuns.length; index++) {
+      const family = pendingRuns[index].run.family;
+      if (isWebfont(webfonts, family) || !Object.prototype.hasOwnProperty.call(TABLE_FACE_SYMBOLS, family)) continue;
+      const lacking = characterOffsets(pendingRuns[index].run.text,
+        (codePoint) => inRanges(SYMBOL_COVERAGE, codePoint) && !drawsSymbol(family, codePoint))
+        .map((found) => ({ at: found.at, family: symbolFaceOf(family) }));
+      if (lacking.length) {
+        lackingOf[index] = lacking;
+        splits += 1;
       }
-      if (lacking.length) split.push({ pending: questions[index].pending, lacking });
     }
-    if (!split.length) return;
+    if (!splits) return;
     const queued = [];
-    let next = 0;
     for (let index = 0; index < pendingRuns.length; index++) {
       const pending = pendingRuns[index];
-      if (next >= split.length || split[next].pending !== pending) {
+      if (!lackingOf[index]) {
         queued.push(pending);
         continue;
       }
       const run = pending.run;
-      const pieces = piecesOf(run.text, split[next].lacking);
-      next += 1;
+      const pieces = piecesOf(run.text, lackingOf[index]);
       const written = [];
       for (let piece = 0; piece < pieces.length; piece++) {
         const part = { ...run, text: run.text.slice(pieces[piece].start, pieces[piece].end) };
-        if (pieces[piece].fallback) {
-          part.family = pending.face.fallback;
+        if (pieces[piece].family !== null) {
+          part.family = pieces[piece].family;
           part.opticalTrackingPx = 0;
           part.unkernedTrackingPx = 0;
         } else {
@@ -464,6 +698,7 @@ function createTextMetrics(layout) {
   // webfont lacks are split off (splitFallbackRuns), so their runs are the ones
   // measured. `webfonts` is model.fonts.
   function applyMetrics(webfonts) {
+    resolveWrittenFaces(webfonts);
     splitFallbackRuns(webfonts);
     const list = probeList();
     const probes = list.probes;
