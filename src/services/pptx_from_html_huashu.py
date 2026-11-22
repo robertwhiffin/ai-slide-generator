@@ -159,6 +159,8 @@ def _resolve_sidecar_dir() -> Path:
 SIDECAR_DIR = _resolve_sidecar_dir()
 SIDECAR_SCRIPT = SIDECAR_DIR / "emit_deck.mjs"
 SIDECAR_SYS_LIBS_DIR = SIDECAR_DIR / "sys-libs"
+# The fontconfig setup.sh writes from the sidecar's font bundle (fonts-liberation.tar.gz).
+SIDECAR_FONTCONFIG_FILE = SIDECAR_DIR / "fonts" / "fonts.conf"
 SIDECAR_TIMEOUT_SECONDS = 180  # huashu opens chromium per-slide; slower than pptx-emit
 
 # How many sidecars one worker process runs at once. Each is a node and
@@ -339,7 +341,8 @@ def log_sidecar_bounds() -> None:
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
 # the converter jail's scrubbed env): Playwright finds Chromium under
 # ~/.cache/ms-playwright. Proxy and CA settings stay so the page can still
-# load Chart.js from its CDN.
+# load Chart.js from its CDN. FONTCONFIG_FILE is the sidecar's own fontconfig
+# wherever its font bundle is installed (sidecar_subprocess_env).
 _SIDECAR_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
@@ -348,6 +351,7 @@ _SIDECAR_ENV_ALLOWLIST = (
     "LC_CTYPE",
     "TMPDIR",
     "LD_LIBRARY_PATH",
+    "FONTCONFIG_FILE",
     "PLAYWRIGHT_BROWSERS_PATH",
     "XDG_CACHE_HOME",
     "HTTP_PROXY",
@@ -372,6 +376,12 @@ def sidecar_subprocess_env() -> dict[str, str]:
     next runtime libs aren't installed. Scoping it here (not as a global
     env in app.yaml) prevents the Python process from accidentally loading
     incompatible libs from the bundle.
+
+    Sets ``FONTCONFIG_FILE`` to the sidecar's own fontconfig
+    (``fonts/fonts.conf``, which ``setup.sh`` writes from the font bundle) where
+    it exists, so Chromium lays out a font stack with no loaded webfont in the
+    Liberation faces metric-compatible with Arial, Times New Roman and Courier
+    New, as a desktop does, instead of the base image's DejaVu.
     """
     env = {k: os.environ[k] for k in _SIDECAR_ENV_ALLOWLIST if k in os.environ}
     if SIDECAR_SYS_LIBS_DIR.exists():
@@ -379,6 +389,8 @@ def sidecar_subprocess_env() -> dict[str, str]:
         env["LD_LIBRARY_PATH"] = (
             f"{SIDECAR_SYS_LIBS_DIR}:{existing}" if existing else str(SIDECAR_SYS_LIBS_DIR)
         )
+    if SIDECAR_FONTCONFIG_FILE.is_file():
+        env["FONTCONFIG_FILE"] = str(SIDECAR_FONTCONFIG_FILE)
     return env
 
 

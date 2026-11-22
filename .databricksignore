@@ -7,6 +7,8 @@ services/html-to-pptx/tests/.out/
 # The snapshot engine's sidecar (the PPTX and Google Slides export) runs on Apps
 # too: at boot its setup.sh extracts node_modules/ from the shipped
 # node_modules.tar.gz and installs Chromium, so these local, uncompressed copies
-# stay out of an upload.
+# stay out of an upload. fonts/ is the font bundle's (fonts-liberation.tar.gz),
+# extracted the same way.
 services/pptx-emit-huashu/node_modules/
+services/pptx-emit-huashu/fonts/
 services/pptx-emit-huashu/playwright-browsers/

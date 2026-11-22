@@ -70,6 +70,7 @@ node_modules/
 # These are the on-disk extracted forms that should never be committed.
 services/pptx-emit-huashu/sys-libs/
 services/pptx-emit-huashu/sys-libs-bullseye/
+services/pptx-emit-huashu/fonts/
 frontend/.vite/
 frontend/dist/
 *.local

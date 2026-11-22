@@ -9,7 +9,8 @@ It refuses the build unless the one wheel in that directory is at least
 ``MIN_WHEEL_MB`` (below it the bootstrap tarballs are truncated) and holds,
 under ``databricks_tellr_app/_assets/sidecars/pptx-emit-huashu/``:
 
-* the bootstrap tarballs, and ``setup.sh``, which extracts them at boot;
+* the bootstrap tarballs (node_modules, the system libraries and the font
+  bundle), and ``setup.sh``, which extracts them at boot;
 * every sidecar source file the export loads. That is ``emit_deck.mjs``, which
   ``src/services/pptx_from_html_huashu.py`` runs, and each file it requires or
   imports, transitively, read from the wheel's own copies. The export loads them
@@ -34,7 +35,13 @@ from pathlib import Path
 SIDECAR_DIR_IN_WHEEL = "databricks_tellr_app/_assets/sidecars/pptx-emit-huashu"
 
 # What the deployed app's boot runs before any export: setup.sh, and the tarballs it extracts.
-BOOTSTRAP_FILES = ("node_modules.tar.gz", "sys-libs-bullseye.tar.gz", "setup.sh")
+# fonts-liberation.tar.gz is the font bundle the sidecar's Chromium lays text out in.
+BOOTSTRAP_FILES = (
+    "node_modules.tar.gz",
+    "sys-libs-bullseye.tar.gz",
+    "fonts-liberation.tar.gz",
+    "setup.sh",
+)
 
 # Where the export's module graph starts: the script the wrapper runs.
 GRAPH_ROOT = "emit_deck.mjs"

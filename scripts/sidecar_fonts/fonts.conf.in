@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<!--
+  The export sidecar's fontconfig (Databricks Apps): FONTCONFIG_FILE names the
+  copy setup.sh writes from this template, with @FONTS_DIR@ as the extracted
+  fonts directory (fontconfig 2.13, the base image's, takes absolute dirs only).
+
+  Chromium lays out a font stack with no loaded webfont in the faces fontconfig
+  gives it. The base image has DejaVu alone, 10 to 38 % wider than a desktop's
+  faces (Task 15 matrix, N3), so this config gives it the open faces
+  metric-compatible with the core fonts PowerPoint and Google Slides draw:
+
+    Liberation Sans    for Arial and Helvetica, and sans-serif and system-ui;
+    Liberation Serif   for Times New Roman and Times, and serif;
+    Liberation Mono    for Courier New and Courier, and monospace.
+
+  Each alias puts the Liberation face first in the request, so Chromium takes it
+  for the name it asked for. A name no face here has (Inter, Segoe UI, Roboto)
+  matches nothing, and the stack goes on to its next family, as on a desktop
+  without it; a stack with none left is set in the standard face, Times New
+  Roman, as Chrome on a Mac sets it in Times.
+
+  The base image's own fonts stay listed, for the characters Liberation lacks
+  (per-character fallback: check marks, stars, dingbats). They are not faces a
+  desktop has, so no stack may name them: a request naming DejaVu is renamed to
+  a family nothing has and matched to Liberation Sans, which Chromium refuses
+  for it, so the stack goes on as it does on a Mac or Windows machine.
+-->
+<fontconfig>
+  <dir>@FONTS_DIR@/liberation</dir>
+  <dir>/usr/share/fonts</dir>
+  <cachedir prefix="xdg">fontconfig</cachedir>
+
+  <!-- The core fonts a desktop has, as their metric-compatible Liberation faces. -->
+  <match target="pattern">
+    <test name="family"><string>Arial</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>Helvetica</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>Times New Roman</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Serif</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>Times</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Serif</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>Courier New</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Mono</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>Courier</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Mono</string></edit>
+  </match>
+
+  <!-- The generic families, as a desktop sets them. -->
+  <match target="pattern">
+    <test name="family"><string>sans-serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>sans</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>system-ui</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Serif</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>monospace</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Mono</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>mono</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Liberation Mono</string></edit>
+  </match>
+
+  <!-- DejaVu: per-character fallback only, never a family a stack names. -->
+  <match target="pattern">
+    <test name="family" compare="contains"><string>DejaVu</string></test>
+    <edit name="family" mode="assign" binding="strong"><string>tellr-unnamed-base-face</string></edit>
+    <edit name="family" mode="append_last" binding="strong"><string>Liberation Sans</string></edit>
+  </match>
+</fontconfig>
