@@ -1488,6 +1488,13 @@ failed. Determinism (Phase C's tool): two fresh pinned exports each of both corp
 (which holds the new N5 and N7 constructs), both targets, have the same `structural_manifest` as
 each other and as the final run's decks (146, 202 and 167 entries).
 
+**Tests.** 48 new, each red first for its defect at `7d77df77` (or a guard, shown red by
+sabotage), and 32 sabotages, every one red.
+- **Gate.** `uv run pytest tests/unit -q -p no:cacheprovider -k "export or huashu or google"`:
+  1407 passed, 0 failed, 12 skipped (B6: 1359 / 0 / 12).
+- **Full suite.** `uv run pytest tests/unit -q -p no:cacheprovider -n 6`: 18069 passed, 0 failed,
+  27 skipped (B6: 18021 / 0 / 27).
+
 ### What was measured on each defect (UI / before / after, at 1280 px)
 
 **N2, long-on 05's "So what" paragraph.** The UI's document draws it in `Times-Roman` (the DevTools
