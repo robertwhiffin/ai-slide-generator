@@ -212,6 +212,17 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # never needed the contract regardless: the sidecar reads
     # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
     # the right colour, so the .pptx was immune here BY CONSTRUCTION.
+    #
+    # NO FONT ON THE SHELL, DELIBERATELY: inherited text gets exactly what the
+    # UI's document gives it (Task 15 N2). This sheet used to set `html, body {
+    # font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif }`,
+    # which buildSlideDocument (frontend/src/services/slideDocument.ts) never
+    # set. Text that takes its font from `body` was then drawn in the browser's
+    # default face on screen (Times on the Mac) and in SF, or the container's
+    # fallback, in the export, and broke its lines elsewhere: a real deck's "So
+    # what" paragraph was 4 lines in the UI and 5 in the export. The shell
+    # declares no inherited property the UI's shell does not, which
+    # tests/unit/test_export_document_ui_parity.py pins against the TS source.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -229,7 +240,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       padding: 0;
       overflow: hidden;
       background: #ffffff;
-      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
   </style>
   <style>{deck_css}</style>

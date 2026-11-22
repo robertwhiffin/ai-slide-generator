@@ -50,12 +50,8 @@ from tests.fixtures.export_snapshot_support import (
     ui_document,
 )
 from tests.unit.test_export_csp import (
-    _FRONTEND_SLIDE_DOC as _FRONTEND_SLIDE_DOCUMENT,
-)
-from tests.unit.test_export_csp import (
-    _frontend_host_frame,
+    _frontend_preview_reset,
     _frontend_slide_csp,
-    _frontend_slide_root_reset,
 )
 
 # PowerPoint's PDF page for a 1280x720 slide: 960x540 pt.
@@ -544,18 +540,6 @@ def _stub_export(harness, monkeypatch: pytest.MonkeyPatch, exported: list) -> No
     monkeypatch.setattr(harness, "recorded_summaries", lambda out, target="pptx": [None])
     monkeypatch.setattr(harness, "check_text_loss", lambda *arguments, **keywords: {})
     monkeypatch.setattr(harness, "compare", lambda names, out: {})
-
-
-def _frontend_preview_reset() -> str:
-    """SLIDE_PREVIEW_RESET_STYLE as slideDocument.ts writes it, its two interpolations filled in
-    from the same source (the test oracle for the document the bundle builds)."""
-    source = _FRONTEND_SLIDE_DOCUMENT.read_text(encoding="utf-8")
-    anchor = "export const SLIDE_PREVIEW_RESET_STYLE = `"
-    start = source.index(anchor) + len(anchor)
-    literal = source[start : source.index("`;", start)]
-    return literal.replace("${SLIDE_ROOT_RESET_STYLE}", _frontend_slide_root_reset()).replace(
-        "${slideHostFrameStyle('body')}", _frontend_host_frame("body")
-    )
 
 
 @pytest.mark.slow

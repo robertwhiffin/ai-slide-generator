@@ -8,7 +8,7 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|faces|text|ellipsis]
 //        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables
 //        node measure.cjs <document.html> --mode=fonts|title
 //        node measure.cjs <document.html> <probes-json> --mode=probe
@@ -48,6 +48,9 @@
 //                character rects. See measureLines for how lines are found.
 //   --mode=style prints {"fontFamily":…, "fontWeight":…, …}, the element's computed
 //                typography (STYLE_PROPERTIES), as getComputedStyle serialises it.
+//   --mode=faces prints [{"familyName","postScriptName","isCustomFont","glyphCount"}, …],
+//                the faces the browser drew the element's own text in, most
+//                glyphs first, from the DevTools protocol. See measureFaces.
 //   --mode=text  prints {"text":…}, the element's innerText once every <svg> and
 //                <canvas> in the document is hidden. See measureText.
 //   --mode=fonts prints [{"family","weight","style","status"}, …], every face in
@@ -92,7 +95,7 @@
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
 // browser_each_rect, browser_client_rects, browser_padding_box,
-// browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
+// browser_each_padding_box, browser_line_boxes, browser_lines, browser_style, browser_faces,
 // browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
 // browser_pixel, browser_pixels, browser_tables, browser_each_pseudo,
 // browser_each_layout_box, browser_ellipsis, browser_title).
@@ -845,6 +848,29 @@ const PSEUDO_STYLE_PROPERTIES = [
   'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'boxShadow', 'zIndex', 'display', 'position',
 ];
 
+// The faces the browser drew the element's own text in, as the DevTools
+// protocol reports them (CSS.getPlatformFontsForNode): [{familyName,
+// postScriptName, isCustomFont, glyphCount}, ...], the face that drew the most
+// glyphs first. It names the face a font-family stack resolved to, which the
+// computed style cannot: `Times` is a family name, `Times-Roman` the face.
+async function measureFaces(page, selector, index) {
+  const count = await page.evaluate((selector) => document.querySelectorAll(selector).length, selector);
+  if (index >= count) {
+    return { error: `selector ${selector} matched ${count} element(s); index ${index} is out of range` };
+  }
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument', { depth: -1 });
+    const { nodeIds } = await session.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector });
+    const { fonts } = await session.send('CSS.getPlatformFontsForNode', { nodeId: nodeIds[index] });
+    return fonts.slice().sort((a, b) => b.glyphCount - a.glyphCount);
+  } finally {
+    await session.detach();
+  }
+}
+
 async function measureStyle(page, selector, index) {
   return page.evaluate(({ selector, index, properties }) => {
     const matches = document.querySelectorAll(selector);
@@ -1278,6 +1304,7 @@ const MODES = {
     return measured.error ? measured : measured.lines;
   },
   style: measureStyle,
+  faces: measureFaces,
   text: measureText,
   fonts: measureFonts,
   title: measureTitle,
@@ -1321,7 +1348,7 @@ async function main() {
   const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
-      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text|ellipsis]\n' +
+      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|faces|text|ellipsis]\n' +
       '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|each-layout-box|tables\n' +
       '       node measure.cjs <document.html> --mode=fonts|title\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +

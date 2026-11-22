@@ -57,7 +57,8 @@ what the browser itself laid out for the same document.
   where its pixels are on screen.
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
-  reads its computed typography, ``browser_text`` its rendered ``innerText``
+  reads its computed typography, ``browser_faces`` the faces its text was
+  drawn in (the DevTools protocol's), ``browser_text`` its rendered ``innerText``
   and ``browser_loaded_weights`` the webfont weights the page loaded
   (``browser_loaded_faces`` each loaded face with its style).
   ``browser_probes`` sets text offscreen in the page's own fonts and reads its
@@ -1097,6 +1098,18 @@ def browser_style(document_html: str, selector: str, index: int = 0) -> dict[str
     browser serialises it (``"600"``, ``"2.08px"``, ``"rgb(27, 49, 57)"``).
     """
     return json.loads(_run_measure(document_html, selector, str(index), "--mode=style"))
+
+
+def browser_faces(document_html: str, selector: str, index: int = 0) -> list[str]:
+    """The faces the browser drew the ``index``-th match's own text in, by PostScript name.
+
+    Read from the DevTools protocol (``CSS.getPlatformFontsForNode``), the face
+    that drew the most glyphs first: what a font-family stack resolved to, which
+    the computed style does not say (``Times`` is a family, ``Times-Roman`` the
+    face drawn).
+    """
+    faces = json.loads(_run_measure(document_html, selector, str(index), "--mode=faces"))
+    return [face["postScriptName"] for face in faces]
 
 
 def browser_text(document_html: str, selector: str = "body", index: int = 0) -> str:

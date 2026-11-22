@@ -116,6 +116,22 @@ def _frontend_host_frame(host_selector: str) -> str:
     )
 
 
+def _frontend_preview_reset() -> str:
+    """The TS `SLIDE_PREVIEW_RESET_STYLE` as it renders: its literal, with its two
+    interpolations (the root reset and the frame contract for `body`) filled in from
+    the same source, never from a Python copy."""
+    src = _FRONTEND_SLIDE_DOC.read_text()
+    anchor = "export const SLIDE_PREVIEW_RESET_STYLE = `"
+    start = src.index(anchor) + len(anchor)
+    literal = src[start : src.index("`;", start)]
+    assert "${SLIDE_ROOT_RESET_STYLE}" in literal and "${slideHostFrameStyle('body')}" in literal, (
+        "SLIDE_PREVIEW_RESET_STYLE no longer interpolates what this extractor fills in"
+    )
+    return literal.replace("${SLIDE_ROOT_RESET_STYLE}", _frontend_slide_root_reset()).replace(
+        "${slideHostFrameStyle('body')}", _frontend_host_frame("body")
+    )
+
+
 #: The four EXPORT builders. None of them may inject a slide-host frame contract.
 #:
 #: A contract framing `body` (or `section.slide-container`) and stretching its

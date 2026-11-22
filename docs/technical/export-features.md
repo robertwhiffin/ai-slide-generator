@@ -30,6 +30,8 @@ PDF export is client-side and is not a route.
 
 **No universal `* { box-sizing }` rule is applied** by either export builder, so slide content keeps the browser default. The resets that do exist are narrower than "scoped to `html, body`" — the Python builder's shell reset omits `box-sizing` entirely, and the preview host applies `box-sizing: border-box` to the host's direct child rather than to the document shell. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 
+**The export document gives inherited text what the UI's document gives it.** Neither shell sets a font, or any other inherited property, so a slide's text that takes its font from `<body>` is drawn in the browser's default face in both (Times on the Mac) and breaks its lines in the same places. The Python builder's shell used to set `font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif`, so such text was drawn in SF or the container's fallback in the export and broke differently: a real deck's "So what" paragraph was 4 lines in the UI and 5 in the export (Task 15, N2). `tests/unit/test_export_document_ui_parity.py` reads both shells and fails when either declares an inherited property the other does not. The face the deck then names for such text is the stack's first family, as for any text with no webfont.
+
 **Known export limitations.** The PowerPoint and Google Slides exports trade a few things away on purpose (*What the export trades away*, below). The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
 
 ## The snapshot engine (PowerPoint and Google Slides)
