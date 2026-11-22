@@ -15,6 +15,15 @@ WHAT IS PINNED.
   export's shell sheets read from the document ``build_slide_html`` writes, the
   UI's from the ``SLIDE_PREVIEW_RESET_STYLE`` literal of the TS source. Today
   neither declares one.
+* **The frontend's capture shells, from source** (Task 15 B7, fix round 1).
+  ``pdf_client.ts``, ``pptx_client.ts`` and ``screenshotCapture.ts`` each
+  build a slide document of their own around the deck's CSS (the PDF
+  download, the client-side PPTX's chart captures, the chat's screenshots).
+  Each one's sheet, read from its template literal with the deck's CSS taken
+  out, declares the inherited properties the UI's does: none today. Their
+  other ``<head>`` interpolation, ``trustedExportRuntimeMarkup()``, writes
+  scripts only; its opt-in font shim is a deliberate substitution, not a shell
+  default.
 * **Through the real engine.** A slide with no font of its own is drawn in the
   same face in the export document as in the UI's (the DevTools protocol's
   faces), and the exported text item holds the lines the UI's document breaks
@@ -27,6 +36,7 @@ writes for such text (the stack's first family) is a separate question.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -41,7 +51,7 @@ from tests.fixtures.export_snapshot_support import (
     slide_shapes,
     ui_document,
 )
-from tests.unit.test_export_csp import _frontend_preview_reset
+from tests.unit.test_export_csp import _frontend_preview_reset, _frontend_slide_root_reset
 
 # The properties CSS marks "Inherited: yes" (CSS 2.1, Fonts 4, Text 3 and 4,
 # Text Decoration 4, Writing Modes 4, Color 4, UI 4, Lists 3, Tables), plus
@@ -199,6 +209,84 @@ class TestShellParity:
             ("body", "color", "red"),
             ("body", "--brand", "x"),
         }
+
+
+_FRONTEND_SERVICES = Path(__file__).resolve().parents[2] / "frontend" / "src" / "services"
+# The frontend's capture shells: each file's builder, and how its template
+# names the deck's CSS, which is the deck's sheet and not the shell's.
+CAPTURE_SHELLS = {
+    "pdf_client.ts": ("buildSlideHTML", "${slideDeck.css}"),
+    "pptx_client.ts": ("buildSlideHTML", "${slideDeck.css}"),
+    "screenshotCapture.ts": ("buildSlideHtml", "${css}"),
+}
+_INTERPOLATION = re.compile(r"\$\{[^}]*\}")
+
+
+def _builder_source(file: str, function: str) -> str:
+    """The source of ``export function <function>(`` in ``file``, to its closing brace."""
+    source = (_FRONTEND_SERVICES / file).read_text(encoding="utf-8")
+    start = source.index(f"export function {function}(")
+    return source[start : source.index("\n}\n", start)]
+
+
+def _capture_shell(file: str) -> str:
+    """The sheet ``file``'s slide document wraps the deck's CSS in, read from the TS source.
+
+    The builder's one ``<style>`` template literal, the deck's CSS taken out,
+    the root reset filled in from slideDocument.ts and the slide size from the
+    file's own constants. An interpolation this does not fill in fails, so a
+    new one is read before the parity is trusted.
+    """
+    function, deck_css = CAPTURE_SHELLS[file]
+    builder = _builder_source(file, function)
+    sheets = re.findall(r"<style>(.*?)</style>", builder, re.DOTALL)
+    assert len(sheets) == 1, f"{file} {function} writes {len(sheets)} <style> sheets, not one"
+    source = (_FRONTEND_SERVICES / file).read_text(encoding="utf-8")
+    sizes = {
+        name: re.search(rf"^const {name} = (\d+);$", source, re.MULTILINE)
+        for name in ("SLIDE_WIDTH", "SLIDE_HEIGHT")
+    }
+    assert all(sizes.values()), f"{file} no longer declares the slide size it interpolates"
+    sheet = sheets[0].replace(deck_css, "")
+    sheet = sheet.replace("${SLIDE_ROOT_RESET_STYLE}", _frontend_slide_root_reset())
+    for name, found in sizes.items():
+        sheet = sheet.replace("${" + name + "}", found.group(1))
+    unread = _INTERPOLATION.findall(sheet)
+    assert not unread, f"{file} {function}'s sheet interpolates what this does not read: {unread}"
+    return sheet
+
+
+class TestCaptureShellParity:
+    @pytest.mark.parametrize("file", tuple(CAPTURE_SHELLS))
+    def test_a_capture_shell_gives_inherited_text_what_the_ui_shell_gives_it(
+        self, file: str
+    ) -> None:
+        """The PDF download's, the client PPTX's and the screenshots' documents give a slide's
+        inherited text what the UI's document gives it, on any selector."""
+        capture_inherited = _inherited(_capture_shell(file))
+        ui_inherited = _inherited(_frontend_preview_reset())
+        assert capture_inherited == ui_inherited, (
+            f"{file}'s shell gives inherited text other values than the UI's: its own "
+            f"{sorted(capture_inherited - ui_inherited)}, the UI's alone "
+            f"{sorted(ui_inherited - capture_inherited)}"
+        )
+
+    @pytest.mark.parametrize("file", tuple(CAPTURE_SHELLS))
+    def test_the_capture_shell_reader_reads_each_shell(self, file: str) -> None:
+        """Non-vacuity: each shell's known declarations are read, so an empty set means none."""
+        names = {name for _, name, _ in _declarations(_capture_shell(file))}
+        assert {"width", "height", "margin", "padding", "overflow", "box-sizing"} <= names, names
+
+    @pytest.mark.parametrize("file", tuple(CAPTURE_SHELLS))
+    def test_a_capture_shells_runtime_markup_writes_no_sheet(self, file: str) -> None:
+        """GUARD: the shell's one sheet is the one read. Its builder writes no other, and the
+        trusted runtime it writes into <head> (trustedExportRuntimeMarkup()) is scripts alone."""
+        function, _ = CAPTURE_SHELLS[file]
+        builder = _builder_source(file, function)
+        assert "${trustedExportRuntimeMarkup()}" in builder, f"{file} no longer writes the runtime"
+        assert builder.count("<style") == 1, f"{file} {function} writes another sheet"
+        markup = _builder_source("exportFrameRuntime.ts", "trustedExportRuntimeMarkup")
+        assert "<script>" in markup and "<style" not in markup, markup
 
 
 # A slide whose text has no font of its own anywhere: the deck has no CSS.
