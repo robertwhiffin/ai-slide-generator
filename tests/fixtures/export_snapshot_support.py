@@ -16,6 +16,10 @@ what the browser itself laid out for the same document.
   ``pinned_font_css`` is the corpus deck's CSS with its Google Fonts
   @import replaced by the same faces, embedded, for tests that compare
   exports of one page whole.
+* ``ui_document`` is the document the UI's slide viewer builds for a slide
+  body, by the frontend's own ``slideDocument.ts`` (the harness's truth
+  document), the twin of the export's ``slide_document``; tests that build
+  one carry ``requires_ui_documents`` (node and the frontend's esbuild).
 * ``slide_shapes`` parses one slide's ``spTree`` with lxml into ``Shape``
   records, in z-order, with geometry in CSS px (``EMU / 9525``);
   ``slide_xml`` is the slide part itself and ``slide_shape_elements`` each
@@ -226,6 +230,14 @@ requires_node: pytest.MarkDecorator = pytest.mark.skipif(
     shutil.which("node") is None, reason="requires node"
 )
 
+# The UI's own slide documents are built by the frontend's code with the
+# frontend's esbuild (scripts/export_fidelity/ui_document.mjs).
+FRONTEND_ESBUILD = REPO_ROOT / "frontend" / "node_modules" / "esbuild"
+requires_ui_documents: pytest.MarkDecorator = pytest.mark.skipif(
+    shutil.which("node") is None or not FRONTEND_ESBUILD.is_dir(),
+    reason="requires node and the frontend's esbuild (npm ci in frontend/)",
+)
+
 
 # ---------------------------------------------------------------------------
 # Building and exporting slide documents
@@ -256,6 +268,28 @@ def slide_document(
             "title": title,
         },
     )
+
+
+def ui_document(
+    body: str,
+    *,
+    css: str = DECK_CSS,
+    scripts: str = "",
+    external_scripts: tuple[str, ...] = (),
+    name: str = "snapshot-1",
+) -> str:
+    """The document the UI's slide viewer builds for one slide body, by the UI's own code.
+
+    ``frontend/src/services/slideDocument.ts`` bundled with the frontend's
+    esbuild, as the fidelity harness builds its truth
+    (``scripts/export_fidelity/run.py`` ``build_ui_documents``): the twin of
+    ``slide_document``, which is the export's. Needs ``requires_ui_documents``.
+    """
+    harness = fidelity_harness()
+    deck = {"css": css, "scripts": scripts, "external_scripts": list(external_scripts)}
+    with tempfile.TemporaryDirectory(prefix="tellr-ui-document-") as directory:
+        (path,) = harness.build_ui_documents(deck, [(name, body)], Path(directory))
+        return path.read_text(encoding="utf-8")
 
 
 # The line the snapshot engine logs when Node drops part of a slide's model

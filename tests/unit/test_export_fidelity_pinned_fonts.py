@@ -225,6 +225,8 @@ class TestMainOption:
         fixture_dir = _fixture_copy(tmp_path)
         out_dir = tmp_path / "out"
         pptx_path = out_dir / "export.pptx"
+        monkeypatch.setattr(harness, "ui_documents_missing", lambda: None)
+        monkeypatch.setattr(harness, "build_ui_documents", lambda deck, slides, out: [])
         monkeypatch.setattr(harness, "render_truth", lambda documents, out: None)
         monkeypatch.setattr(
             harness, "export_pptx", lambda deck, documents, out, target="pptx": pptx_path

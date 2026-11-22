@@ -5,7 +5,11 @@ For a fixture deck (``deck.css`` + ``deck.json`` + ``slides/*.html``) this:
 1. builds every slide's export document with the production
    ``build_slide_html`` (so the harness exercises exactly what the export
    routes feed the sidecar);
-2. renders the ground truth: a 1280x720 Chromium screenshot of that document;
+2. renders the ground truth: a 1280x720 Chromium screenshot of the slide as the
+   UI shows it, its document built by the UI's own code (``ui_document.mjs``
+   bundles ``frontend/src/services/slideDocument.ts`` with the frontend's
+   esbuild, so ``frontend/node_modules`` must be installed: ``npm ci`` in
+   ``frontend/``);
 3. runs the production export (``build_pptx_huashu``) to a .pptx,
    written for PowerPoint (``target="pptx"``), recording the snapshot
    engine's per-slide summary lines in ``summaries.json``, and reports the
@@ -226,6 +230,72 @@ def build_documents(deck: dict, slides: list[tuple[str, str]], out_dir: Path) ->
         path.write_text(document, encoding="utf-8")
         paths.append(path)
     return paths
+
+
+# The truth is the slide as the UI shows it, not as the export document lays it
+# out: the two documents differ where the export's shell does not mirror the
+# UI's (the slide-host frame contract, which gives a template's <section>
+# wrapper the frame's area, is the UI's alone: export.py build_slide_html), and
+# a truth rendered from the export document showed a template deck's dark
+# html, body ground where the UI and both apps show the slide's (Task 15 H1).
+# So each slide's truth document is built by the UI's own code, never a copy
+# that can drift from it: ui_document.mjs bundles slideDocument.ts unchanged
+# with the frontend's esbuild and builds each slide as the viewer's stage
+# does. The fixture format holds the deck's scripts only (deck.json
+# "scripts"), which the export runs on every slide; the UI runs each slide's
+# own, so every slide's UI document runs the deck's, a deck's scripts each
+# guarding on its own element as the app's do.
+UI_DOCUMENT_SCRIPT = Path(__file__).with_name("ui_document.mjs")
+FRONTEND_ESBUILD = REPO_ROOT / "frontend" / "node_modules" / "esbuild"
+TRUTH = (
+    "the UI's document: frontend/src/services/slideDocument.ts buildSlideDocument with "
+    "SLIDE_PREVIEW_RESET_STYLE, as SlideStage builds it"
+)
+UI_DOCUMENTS_MISSING = (
+    "the UI truth bundles frontend/src/services/slideDocument.ts with the frontend's esbuild, "
+    "which is not installed: run `npm ci` in frontend/"
+)
+
+
+class UiDocumentError(RuntimeError):
+    """The UI's slide documents could not be built."""
+
+
+def ui_documents_missing() -> str | None:
+    """What to install before the UI's documents can be built, or None when nothing is missing."""
+    return None if FRONTEND_ESBUILD.is_dir() else UI_DOCUMENTS_MISSING
+
+
+def build_ui_documents(deck: dict, slides: list[tuple[str, str]], out_dir: Path) -> list[Path]:
+    """Each slide's document as the UI builds it (ui_document.mjs), in ``out_dir/ui-documents``.
+
+    Raises UiDocumentError naming what to install when the frontend's esbuild
+    is missing, and with the builder's own message when it fails.
+    """
+    missing = ui_documents_missing()
+    if missing:
+        raise UiDocumentError(missing)
+    ui_dir = out_dir / "ui-documents"
+    payload = {
+        "css": deck.get("css", ""),
+        "externalScripts": deck.get("external_scripts", []),
+        "slides": [
+            {"name": name, "html": html, "scripts": deck.get("scripts", "")}
+            for name, html in slides
+        ],
+    }
+    completed = subprocess.run(
+        ["node", str(UI_DOCUMENT_SCRIPT), str(ui_dir)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise UiDocumentError(
+            completed.stderr.strip() or f"ui_document.mjs exited {completed.returncode}"
+        )
+    return [ui_dir / f"{name}.html" for name, _ in slides]
 
 
 def render_truth(documents: list[Path], out_dir: Path) -> None:
@@ -721,8 +791,14 @@ def compare(names: list[str], out_dir: Path) -> dict:
 
 
 def write_harness_record(out_dir: Path, fixture_dir: Path, slides: int) -> None:
-    """``out_dir/harness.json``: the fixture the run read, its slide count and its PDF raster."""
-    record = {"fixture": str(fixture_dir), "slides": slides, "pdfRaster": PDF_RASTER}
+    """``out_dir/harness.json``: the fixture the run read, its slide count, its PDF raster and
+    what its truth renders (TRUTH)."""
+    record = {
+        "fixture": str(fixture_dir),
+        "slides": slides,
+        "pdfRaster": PDF_RASTER,
+        "truth": TRUTH,
+    }
     (out_dir / HARNESS_RECORD).write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
@@ -781,6 +857,31 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def truth_changes(out_dir: Path, baseline_dir: Path, names: list[str]) -> tuple[list[str], int]:
+    """(the slides whose truth image, ``truth/<name>.png``, differs from the baseline run's pixel
+    for pixel; how many slides both runs drew a truth image of). A slide either run has no
+    truth image for is neither named nor counted."""
+    from PIL import Image, ImageChops
+
+    changed = []
+    drawn_by_both = 0
+    for name in names:
+        now = out_dir / "truth" / f"{name}.png"
+        before = baseline_dir / "truth" / f"{name}.png"
+        if not (now.is_file() and before.is_file()):
+            continue
+        drawn_by_both += 1
+        if now.read_bytes() == before.read_bytes():
+            continue
+        with Image.open(now) as drawn, Image.open(before) as baseline:
+            drawn_rgb, baseline_rgb = drawn.convert("RGB"), baseline.convert("RGB")
+        if drawn_rgb.size != baseline_rgb.size or ImageChops.difference(
+            drawn_rgb, baseline_rgb
+        ).getbbox():
+            changed.append(name)
+    return changed, drawn_by_both
+
+
 # A slide's summary in one deck (summaries.json), or None for a slide the export failed.
 def _model_drops(summary: dict | None) -> str:
     return "export failed" if summary is None else str(summary.get("modelDrops") or 0)
@@ -808,9 +909,12 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
     harness.json does not record this run's PDF raster (one from before it,
     which has none) rasterised its PDFs another way, so the apps scored from
     them (PDF_RENDERERS) are not compared with it: their rows and mean are this
-    run's alone, and no rise of theirs is listed; the summary says so. A file
-    the run did not write is taken as empty: a deck it did not export has no
-    column.
+    run's alone, and no rise of theirs is listed; the summary says so. Against a
+    baseline it also says whether the baseline's truth was rendered from
+    another document (harness.json's ``truth``), and names every slide whose
+    truth image differs from the baseline's (truth_changes), whose scores then
+    move with the truth too. A file the run did not write is taken as empty: a
+    deck it did not export has no column.
     """
     scores = _read_json(out_dir / "scores.json", {})
     record = _read_json(out_dir / HARNESS_RECORD, {})
@@ -863,6 +967,26 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
             f"({baseline_raster or 'before harness.json recorded it'}), and its LibreOffice "
             "ones with them, so neither app's scores are compared with these.",
         ]
+    if baseline_dir is not None:
+        notes = []
+        baseline_truth = baseline_record.get("truth") or (
+            "the export document (from before harness.json recorded the truth)"
+        )
+        if baseline_truth != record.get("truth"):
+            notes.append(
+                f"The baseline's truth is {baseline_truth}; this run's is "
+                f"{record.get('truth', 'unrecorded')}."
+            )
+        changed, drawn_by_both = truth_changes(out_dir, baseline_dir, names)
+        if changed:
+            notes.append(
+                f"The truth image differs from the baseline's on {', '.join(changed)}: those "
+                "slides' scores move with the truth as well as with the export."
+            )
+        elif drawn_by_both == len(names):
+            notes.append("The truth image is the baseline's, pixel for pixel, on every slide.")
+        if notes:
+            lines += ["", " ".join(notes)]
     lines += ["", "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     worse = []
     means: dict[str, tuple[list[float], list[float]]] = {kind: ([], []) for kind in renderers}
@@ -925,6 +1049,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # The truth needs the frontend's esbuild: said before anything is exported.
+    missing = ui_documents_missing()
+    if missing:
+        print(f"[export-fidelity] {missing}", file=sys.stderr)
+        return 2
     deck, slides = load_fixture_deck(args.fixture_dir, pin_fonts=args.pin_fonts)
     if args.only:
         slides = [s for s in slides if any(s[0].startswith(prefix) for prefix in args.only)]
@@ -932,7 +1061,7 @@ def main() -> int:
     names = [name for name, _ in slides]
     write_harness_record(args.out, args.fixture_dir, len(names))
     documents = build_documents(deck, slides, args.out)
-    render_truth(documents, args.out)
+    render_truth(build_ui_documents(deck, slides, args.out), args.out)
     pptx_path = export_pptx(deck, documents, args.out)
     # Each slide's hidden text, from its summary; none for a slide without one.
     hidden_text = [(summary or {}).get("hiddenText", "") for summary in recorded_summaries(args.out)]

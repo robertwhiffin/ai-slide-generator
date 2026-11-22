@@ -3,8 +3,10 @@
 //
 // Screenshots each complete slide document at 1280x720 with the SAME
 // Playwright build and browser channel the huashu sidecar uses, and with the
-// same settle sequence (networkidle, then a canvas readiness wait), so the
-// truth image and the exported slide come from one identical layout.
+// same settle sequence (networkidle, then a canvas readiness wait). The
+// harness hands it each slide's document as the UI builds it (run.py
+// build_ui_documents, ui_document.mjs), so the truth is the slide the user
+// sees; the calibration scripts hand it their own probe documents.
 //
 // usage: node render_truth.cjs [--scale=<n>] <out_dir> <slide.html>...
 // writes <out_dir>/<basename>.png and <out_dir>/<basename>.txt (rendered text) for every input.

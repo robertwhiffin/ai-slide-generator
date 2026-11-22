@@ -9,16 +9,30 @@
 The PowerPoint and Google Slides exports ([Export Features](export-features.md)) are judged by one question: does the exported slide look like the slide in the UI, in the app the user opens it in? The harness answers it per slide, for a fixture deck:
 
 1. it builds every slide's export document with the production `build_slide_html`, so it exercises exactly what the export routes hand the sidecar;
-2. it renders the **truth**: a 1280×720 Chromium screenshot of each document (`render_truth.cjs`), and the page's rendered text (`truth/<slide>.txt`);
+2. it renders the **truth**: a 1280×720 Chromium screenshot of the slide as the UI shows it (`render_truth.cjs`), and the page's rendered text (`truth/<slide>.txt`). Each slide's truth document is built by the UI's own code, not a copy of it ([The truth document](#the-truth-document));
 3. it runs the production export, `build_pptx_huashu`, to `export.pptx` (written for PowerPoint, `target="pptx"`), recording each slide's `[html2pptx] slide summary` line in `summaries.json`, and reports **text loss**: the words the browser renders that the `.pptx` lacks, leaving out each slide's hidden text (the words the page reads that the slide does not show, from the summary's `hiddenText`);
 4. it renders the deck in the apps asked for: PowerPoint (`--powerpoint`), Google Slides (`--gslides`: a second export written for Google Slides, `export-gslides.pptx`, converted through Drive as the Google Slides export does, whose text loss is checked too), and LibreOffice (`--lo`);
 5. it writes a side-by-side comparison per slide, a score per slide and app, and `summary.md`: one table row per slide with its scores (against a baseline run's, with `--baseline`), each deck's text loss, MODEL DROPS and captures.
 
 The default corpus is `tests/fixtures/export_fidelity/`: `deck.css` and `deck.json` (the deck's CSS, scripts and title) and 17 slides in `slides/`, each built around the constructs that once exported badly (gradients and SVG art, agenda grids, SVG and Chart.js charts, Harvey-ball and balance-sheet tables, pills, timelines, pseudo-element bullets, waterfalls, progress bars, code and gradient text, rotated labels, overlapping images, dense zebra tables, and hidden graphics).
 
+### The truth document
+
+The truth is the slide the user sees, which is not always the export document laid out: the UI's document frames the slide with the slide-host frame contract (`slideHostFrameStyle`), which the export's shell deliberately omits (`build_slide_html`), so a design-system template whose `<section>` wrapper has no height of its own shows its ground in the UI and the page's dark `html, body` ground in the export document. A truth rendered from the export document judged such slides against that dark ground (Task 15, H1).
+
+So `scripts/export_fidelity/ui_document.mjs` builds each slide's truth document with the frontend's own `frontend/src/services/slideDocument.ts`, bundled unchanged with the frontend's esbuild and imported from memory, with the options the slide viewer's stage passes (`SlideStage.tsx`): `buildSlideDocument(slide.html, {css, externalScripts, scripts, extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE})`. A change to `slideDocument.ts` reaches the truth at once. The fixture format holds the deck's scripts only (`deck.json` `scripts`), which the export runs on every slide; the UI runs each slide's own, so each slide's UI document runs the deck's, each of a deck's scripts guarding on its own element as the app's do. The documents are written to `ui-documents/`; `documents/` keeps the export's.
+
+**What it needs installed:** the frontend's dependencies, `npm ci` in `frontend/` (the harness uses `frontend/node_modules/esbuild`, which Vite brings). Without them the run stops before it exports anything, with exit code 2 and a `[export-fidelity]` line on stderr saying that the UI truth bundles `slideDocument.ts` with the frontend's esbuild, which is not installed, and to run `npm ci` in `frontend/`.
+
+**Against the earlier truth** (the export document, at engine `7d77df77` with `--pin-fonts`), the UI's truth is the same, pixel for pixel, on 42 of the 44 corpus slides. On the other two it is the UI's own drawing:
+- `11-chartjs-canvas` (10,949 px): the UI runs the slide's script inline at the end of `<body>`, so Chart.js draws the legend at once, before DM Sans has loaded, in the canvas's fallback face (Times), and lays the doughnut out around that legend; the export document runs its scripts after its chart wait, with DM Sans loaded. The UI's drawing is the same over four renders.
+- `slide-content` (5 px, one level of 255, on a faint diagonal SVG line): the export's shell paints `html` white (`background: #ffffff`), which the UI's leaves to the canvas. That one rule added to the UI document reproduces the export document's pixels exactly.
+
+`harness.json` records what the truth renders (`truth`), and against a baseline `summary.md` says when the baseline's truth was rendered another way (a run from before the record rendered the export document) and names every slide whose truth image differs from the baseline's, pixel for pixel: those slides' scores move with the truth as well as the export.
+
 ## 2. Running it
 
-From the repo root, with the sidecar's `node_modules` extracted (`services/pptx-emit-huashu/setup.sh`) and a Playwright Chromium installed:
+From the repo root, with the sidecar's `node_modules` extracted (`services/pptx-emit-huashu/setup.sh`), a Playwright Chromium installed, and the frontend's dependencies installed (`npm ci` in `frontend/`, for the truth's esbuild):
 
 ```bash
 uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py \
@@ -47,16 +61,17 @@ Everything lands in `--out`:
 | Path | What it is |
 |---|---|
 | `documents/<slide>.html` | The export document of each slide, as the routes build it. |
-| `truth/<slide>.png`, `truth/<slide>.txt` | The browser's rendering and rendered text: the reference. |
+| `ui-documents/<slide>.html` | The UI's document of each slide, as the slide viewer builds it ([The truth document](#the-truth-document)). |
+| `truth/<slide>.png`, `truth/<slide>.txt` | The browser's rendering of the UI's document, and its rendered text: the reference. |
 | `export.pptx`, `export-gslides.pptx` | The decks written for PowerPoint and for Google Slides. |
 | `summaries.json`, `summaries-gslides.json` | Each slide's summary line, in slide order (`null` for a slide the export failed): item counts by kind, pictures and captures, `hiddenText`, `target`, `modelDrops`. |
 | `failures.json`, `failures-gslides.json` | The slides the export rejected, as the routes report them. |
 | `text_loss.json`, `text_loss-gslides.json` | Per slide, the words the browser renders that are in no item of that deck and are not hidden text. The run also prints them ("Text missing from the export: none" when there are none). |
-| `harness.json` | The run's fixture, its slide count and how its PDFs were rasterised (`pdfRaster`), which `summary.md` checks a baseline against. |
+| `harness.json` | The run's fixture, its slide count, how its PDFs were rasterised (`pdfRaster`) and what its truth renders (`truth`), which `summary.md` checks a baseline against. |
 | `powerpoint/`, `gslides/`, `libreoffice/` | Each app's rendering of each slide. |
 | `compare/<slide>.png` | One sheet per slide: the truth, then each app's rendering, side by side and labelled. |
 | `scores.json` | Per slide and app, the mean per-pixel difference from the truth (0 is identical; lower is closer). |
-| `summary.md` | One row per slide: each app's score (`baseline → now` with `--baseline`), each deck's text loss (`pptx / gslides`), MODEL DROPS and captures taken / failed, or "export failed" for a slide a deck lacks; a mean row; and, with a baseline, every slide more than 0.05 worse. Paste it into a ledger as it is. |
+| `summary.md` | One row per slide: each app's score (`baseline → now` with `--baseline`), each deck's text loss (`pptx / gslides`), MODEL DROPS and captures taken / failed, or "export failed" for a slide a deck lacks; a mean row; and, with a baseline, every slide more than 0.05 worse, and whether the truth is the baseline's (its document, and the slides whose truth image changed). Paste it into a ledger as it is. |
 
 Read the scores as a guide to where to look, not as a grade: anti-aliasing, a sub-pixel text width or a picture's resampling all add a little, so compare a score with the same slide's score before a change, not with another slide's. The comparison sheets say what a score cannot: whether a line wrapped, a box moved or a colour changed.
 

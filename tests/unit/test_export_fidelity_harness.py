@@ -16,12 +16,19 @@ rendering of it:
   (``text_loss.json``, ``text_loss-gslides.json``); its MODEL DROPS and its
   captures taken and failed, per deck (``summaries*.json``). A baseline whose
   PDFs were rasterised another way is said to be so, because its PowerPoint
-  scores do not compare with these.
+  scores do not compare with these; a baseline whose truth was rendered from
+  another document, and each slide whose truth image changed, are named.
+* **The truth** (Task 15 H1) is the slide as the UI shows it: each slide's
+  document built by the UI's own ``slideDocument.ts``, bundled with the
+  frontend's esbuild (``build_ui_documents``). Without that esbuild the harness
+  stops before it exports, naming what to install.
 
-No browser, PowerPoint or Drive: MuPDF is stood in for by a fake ``fitz``
-module, and the later stages of ``main()`` are stubbed. One test draws a real
-page with MuPDF, and is skipped where pymupdf is not installed (the harness
-passes it with ``uv run --with pymupdf``).
+No PowerPoint or Drive: MuPDF is stood in for by a fake ``fitz`` module, and
+the later stages of ``main()`` are stubbed. One test draws a real page with
+MuPDF, and is skipped where pymupdf is not installed (the harness passes it
+with ``uv run --with pymupdf``). The truth tests render in the sidecar's
+browser and build the UI's documents, and are skipped without the sidecar or
+the frontend's esbuild.
 """
 
 from __future__ import annotations
@@ -35,7 +42,21 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
-from tests.fixtures.export_snapshot_support import CORPUS_DIR, fidelity_harness
+from tests.fixtures.export_snapshot_support import (
+    CORPUS_DIR,
+    fidelity_harness,
+    requires_huashu_sidecar,
+    requires_ui_documents,
+    ui_document,
+)
+from tests.unit.test_export_csp import (
+    _FRONTEND_SLIDE_DOC as _FRONTEND_SLIDE_DOCUMENT,
+)
+from tests.unit.test_export_csp import (
+    _frontend_host_frame,
+    _frontend_slide_csp,
+    _frontend_slide_root_reset,
+)
 
 # PowerPoint's PDF page for a 1280x720 slide: 960x540 pt.
 PAGE_WIDTH_PT = 960.0
@@ -340,6 +361,49 @@ class TestSummary:
             markdown
         ), markdown
 
+    def test_a_truth_rendered_another_way_or_changed_is_named(self, tmp_path: Path) -> None:
+        """The truth is held against the baseline's, so a score's change can be read.
+
+        A baseline from before harness.json recorded the truth rendered it from
+        the export document, which the summary says. Each slide whose truth
+        image differs from the baseline's pixel for pixel is named (02-table);
+        one whose image is the same (01-cover, 03-failed, the latter written
+        again byte for byte apart, the same pixels) is not.
+        """
+        harness = fidelity_harness()
+        out_dir = _current_run(tmp_path)
+        _write_json(
+            out_dir / "harness.json", {"pdfRaster": harness.PDF_RASTER, "truth": harness.TRUTH}
+        )
+        baseline = _run_dir(
+            tmp_path, "baseline", {"01-cover": {"gslides": 2.82}}, raster=harness.PDF_RASTER
+        )
+        for run, colours in (
+            (out_dir, ("white", "red", "blue")),
+            (baseline, ("white", "green", "blue")),
+        ):
+            (run / "truth").mkdir()
+            for name, colour in zip(NAMES, colours):
+                Image.new("RGB", (32, 18), colour).save(run / "truth" / f"{name}.png")
+        Image.new("RGBA", (32, 18), "blue").save(baseline / "truth" / "03-failed.png")
+        markdown = harness.write_summary(out_dir, NAMES, baseline).read_text(encoding="utf-8")
+        assert (
+            "The baseline's truth is the export document (from before harness.json recorded the "
+            f"truth); this run's is {harness.TRUTH}."
+        ) in markdown, markdown
+        assert "The truth image differs from the baseline's on 02-table:" in markdown, markdown
+
+        _write_json(
+            baseline / "harness.json",
+            {"pdfRaster": harness.PDF_RASTER, "truth": harness.TRUTH},
+        )
+        Image.new("RGB", (32, 18), "green").save(out_dir / "truth" / "02-table.png")
+        markdown = harness.write_summary(out_dir, NAMES, baseline).read_text(encoding="utf-8")
+        assert "The baseline's truth is" not in markdown, markdown
+        assert "The truth image is the baseline's, pixel for pixel, on every slide." in markdown, (
+            markdown
+        )
+
     def test_a_run_without_google_slides_reports_its_deck_alone(self, tmp_path: Path) -> None:
         out_dir = _current_run(tmp_path)
         (out_dir / "summaries-gslides.json").unlink()
@@ -396,6 +460,8 @@ class TestMainSummary:
             _write_json(out / "scores.json", scores)
             return scores
 
+        monkeypatch.setattr(harness, "ui_documents_missing", lambda: None)
+        monkeypatch.setattr(harness, "build_ui_documents", lambda deck, slides, out: [])
         monkeypatch.setattr(harness, "render_truth", lambda documents, out: None)
         monkeypatch.setattr(harness, "export_pptx", export_pptx)
         monkeypatch.setattr(harness, "check_text_loss", check_text_loss)
@@ -421,6 +487,163 @@ class TestMainSummary:
             "fixture": str(fixture_dir),
             "slides": 1,
             "pdfRaster": harness.PDF_RASTER,
+            "truth": harness.TRUTH,
         }, record
         rows = _rows((out_dir / "summary.md").read_text(encoding="utf-8"))
         assert rows["01-text"][1] == "2.00 → 1.50", rows["01-text"]
+
+
+# ---------------------------------------------------------------------------
+# The truth: the slide as the UI shows it (Task 15 H1)
+# ---------------------------------------------------------------------------
+
+# A design-system template deck, as the matrix's template decks are made: the
+# slide's ground is on a bare <section> wrapper, its .slide absolutely placed
+# inside it, so the wrapper has no height of its own and only the UI's frame
+# contract (slideHostFrameStyle) gives it the frame. The page's own ground,
+# html and body's, is dark, as the template's deck-stage page is.
+TEMPLATE_DECK_CSS = (
+    "html, body { background: #0E1A1F; }\n"
+    "section { background: #F9F7F4; color: #3A3838; font-family: sans-serif; }\n"
+    ".slide { position: absolute; inset: 0; padding: 72px 88px; }\n"
+)
+TEMPLATE_SLIDE = '<section><div class="slide"><h1>Acme quarterly review</h1></div></section>'
+TEMPLATE_HEADING = "Acme quarterly review"
+SECTION_GROUND = (0xF9, 0xF7, 0xF4)
+PAGE_GROUND = (0x0E, 0x1A, 0x1F)
+# A point of the slide's ground well clear of its text.
+GROUND_POINT = (640, 600)
+# A flat ground is the colour it paints, give or take colour management.
+GROUND_TOLERANCE = 3
+
+
+def _near(colour: tuple[int, ...], expected: tuple[int, int, int]) -> bool:
+    return all(abs(shown - wanted) <= GROUND_TOLERANCE for shown, wanted in zip(colour, expected))
+
+
+def _template_fixture(tmp_path: Path) -> Path:
+    fixture_dir = tmp_path / "template-fixture"
+    (fixture_dir / "slides").mkdir(parents=True)
+    (fixture_dir / "deck.css").write_text(TEMPLATE_DECK_CSS, encoding="utf-8")
+    (fixture_dir / "deck.json").write_text(
+        json.dumps({"title": "Template deck", "scripts": "", "external_scripts": []}),
+        encoding="utf-8",
+    )
+    (fixture_dir / "slides" / "01-template.html").write_text(TEMPLATE_SLIDE, encoding="utf-8")
+    return fixture_dir
+
+
+def _stub_export(harness, monkeypatch: pytest.MonkeyPatch, exported: list) -> None:
+    """main()'s stages after the truth, stubbed: what they were asked to export is recorded."""
+
+    def export_pptx(deck, documents, out, target="pptx"):
+        exported.append(target)
+        return out / "export.pptx"
+
+    monkeypatch.setattr(harness, "export_pptx", export_pptx)
+    monkeypatch.setattr(harness, "recorded_summaries", lambda out, target="pptx": [None])
+    monkeypatch.setattr(harness, "check_text_loss", lambda *arguments, **keywords: {})
+    monkeypatch.setattr(harness, "compare", lambda names, out: {})
+
+
+def _frontend_preview_reset() -> str:
+    """SLIDE_PREVIEW_RESET_STYLE as slideDocument.ts writes it, its two interpolations filled in
+    from the same source (the test oracle for the document the bundle builds)."""
+    source = _FRONTEND_SLIDE_DOCUMENT.read_text(encoding="utf-8")
+    anchor = "export const SLIDE_PREVIEW_RESET_STYLE = `"
+    start = source.index(anchor) + len(anchor)
+    literal = source[start : source.index("`;", start)]
+    return literal.replace("${SLIDE_ROOT_RESET_STYLE}", _frontend_slide_root_reset()).replace(
+        "${slideHostFrameStyle('body')}", _frontend_host_frame("body")
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+@requires_ui_documents
+class TestTruthIsTheUIDocument:
+    def test_a_template_decks_truth_shows_its_slide_ground_as_the_ui_does(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """main()'s truth of a template deck is the slide the UI shows.
+
+        The UI's frame contract gives the <section> wrapper the frame, so its
+        light ground fills the slide; the export document has no contract (a
+        choice export.py records), so there the wrapper has no height and the
+        page's dark ground shows. That the export document draws the dark
+        ground is checked first, so the fixture tells the two apart. The truth
+        image is the light ground, and its text reference holds the heading.
+        """
+        harness = fidelity_harness()
+        fixture_dir = _template_fixture(tmp_path)
+        deck, slides = harness.load_fixture_deck(fixture_dir)
+        export_dir = tmp_path / "export-document"
+        export_documents = harness.build_documents(deck, slides, export_dir)
+        harness.render_truth(export_documents, export_dir)
+        with Image.open(export_dir / "truth" / "01-template.png") as drawn:
+            export_ground = drawn.convert("RGB").getpixel(GROUND_POINT)
+        assert _near(export_ground, PAGE_GROUND), (
+            f"fixture drift: the export document draws {export_ground} at {GROUND_POINT}, not the "
+            f"page's dark ground {PAGE_GROUND}; the fixture no longer tells the documents apart"
+        )
+
+        out_dir = tmp_path / "out"
+        exported: list = []
+        _stub_export(harness, monkeypatch, exported)
+        monkeypatch.setattr(sys, "argv", ["run.py", str(fixture_dir), "--out", str(out_dir)])
+        assert harness.main() == 0
+        with Image.open(out_dir / "truth" / "01-template.png") as drawn:
+            truth_ground = drawn.convert("RGB").getpixel(GROUND_POINT)
+        assert _near(truth_ground, SECTION_GROUND), (
+            f"the truth draws {truth_ground} at {GROUND_POINT}: the UI shows the section's ground "
+            f"{SECTION_GROUND} there (the export document's dark ground is {PAGE_GROUND})"
+        )
+        reference = (out_dir / "truth" / "01-template.txt").read_text(encoding="utf-8")
+        assert TEMPLATE_HEADING in reference, f"the truth's text reference is {reference!r}"
+        assert exported == ["pptx"], f"main() exported {exported}"
+
+    def test_the_truth_document_is_the_one_slide_document_ts_builds(self) -> None:
+        """The UI document is buildSlideDocument's, read from the TS source itself.
+
+        Its CSP is the frontend's SLIDE_CSP, its one stylesheet is the deck's CSS
+        and then SLIDE_PREVIEW_RESET_STYLE (the root reset and the frame
+        contract), and its body is the slide, then the slide's script: what the
+        viewer's stage builds, and not the export's shell.
+        """
+        css = ".slide { color: #1B3139; }"
+        body = '<div class="slide"><p>Revenue grew</p></div>'
+        script = "document.title = 'charted';"
+        document = ui_document(body, css=css, scripts=script)
+
+        assert f'content="{_frontend_slide_csp()}"' in document, document[:400]
+        assert f"<style>{css}\n{_frontend_preview_reset()}</style>" in document, document
+        assert document.count("<style>") == 1, "the UI document has one stylesheet"
+        assert f"<body>\n  {body}\n  <script>{script}</script>" in document, document
+        assert "font-family" not in document, "the UI's shell sets no font"
+
+
+class TestUiDocumentsMissing:
+    def test_main_names_what_to_install_and_exports_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Without the frontend's esbuild, main() stops before it exports, naming `npm ci`."""
+        harness = fidelity_harness()
+        monkeypatch.setattr(harness, "FRONTEND_ESBUILD", tmp_path / "node_modules" / "esbuild")
+        exported: list = []
+        _stub_export(harness, monkeypatch, exported)
+        out_dir = tmp_path / "out"
+        monkeypatch.setattr(
+            sys, "argv", ["run.py", str(_template_fixture(tmp_path)), "--out", str(out_dir)]
+        )
+        assert harness.main() == 2
+        error = capsys.readouterr().err
+        assert "`npm ci` in frontend/" in error and "slideDocument.ts" in error, error
+        assert not exported and not out_dir.exists(), "main() went on without the truth"
+
+    def test_build_ui_documents_raises_naming_what_to_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = fidelity_harness()
+        monkeypatch.setattr(harness, "FRONTEND_ESBUILD", tmp_path / "node_modules" / "esbuild")
+        with pytest.raises(harness.UiDocumentError, match="npm ci"):
+            harness.build_ui_documents({"css": ""}, [("01", "<div></div>")], tmp_path)
