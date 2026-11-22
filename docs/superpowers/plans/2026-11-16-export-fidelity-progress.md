@@ -1010,3 +1010,233 @@ summed to the next element (UI / PowerPoint / Google, at 1280 px, the 4x raster)
 - Design-system corpus: https://docs.google.com/presentation/d/1BCj-l0KtY67g2oRZbLkg84Ey8ao2LM2P5xrJ0roSkKE/edit
 
 The baseline presentations were deleted by id and confirmed gone (`files.get` 404).
+
+## Phase C: final verification at engine `8a72f600`
+
+Phase C re-runs Phase A's verification on both corpora and both renderers, with pinned fonts, at
+the branch head after B1–B5. It changes no engine code: the defects it finds are recorded here,
+not fixed.
+
+### How it was measured
+
+- **Final runs.** `uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py
+  <corpus> --out <dir> --pin-fonts --powerpoint --gslides --baseline <legacy dir>` at
+  `8a72f600`, on the in-repo corpus (17 slides) and the design-system corpus (27).
+- **The legacy baseline on today's raster.** Phase A kept the legacy (`origin/main`) run's
+  PowerPoint PDFs. Each was rasterised again with the harness's own `rasterise_pdf` (MuPDF at 4×,
+  box-filtered to 1280 × 720) and scored with the harness's own `compare`, against Phase A's UI
+  truth.
+  - **One UI reference.** That truth is byte-identical to this run's, on all 44 slides.
+  - **Google.** The legacy Google thumbnails are scored as they were; the harness does not
+    rasterise Google.
+  - **The raster record.** Each baseline's `harness.json` records the current `pdfRaster`, so
+    `summary.md` compares both apps and flags no raster difference.
+  - **The figures reproduce.** The re-rasterised legacy means reproduce Phase A's own 4×
+    figures: PowerPoint 8.92 (in-repo) and 5.68 (design system). The Google means are unchanged
+    at 8.86 and 5.78.
+- **No run noise.** All four decks (two corpora, two targets) are byte-identical to B5's final
+  run's, and every score equals B5's to the hundredth in both apps.
+- **Beyond the scores.**
+  - Every slide's sheet (UI | PowerPoint | Google | difference map) was inspected by eye, with
+    zoomed crops and pixel profiles wherever something differed.
+  - The line-placement check matched every browser line against both apps' own PDFs: PowerPoint's,
+    and Google's Drive export.
+  - The deck XML and both PDFs' fonts were read for each fix and carry-over item.
+
+### Results
+
+In-repo corpus (tests/fixtures/export_fidelity, 17 slides): **DEFECT 3, TRADE-OFF 7, MATCHES 7.**
+
+| Slide | PowerPoint, legacy → final | Google, legacy → final | Tag | What differs, and the ruling or cause | Text loss (pptx / gslides) | MODEL DROPS (pptx / gslides) |
+|---|---|---|---|---|---|---|
+| 01-cover-gradient-svg-art | 11.01 → 3.23 | 10.72 → 2.82 | MATCHES | Gradient ground, SVG hexagon art, tracking and breaks as the UI | none / none | 0 / 0 |
+| 02-agenda-grid-rules | 3.50 → 1.15 | 3.40 → 1.78 | MATCHES | Grid, rules and mono numerals as the UI; the grey subtitles are written in the UI's own colour (5A6F77) and only rasterise lighter | none / none | 0 / 0 |
+| 03-svg-combo-chart-legend-callout | 16.32 → 2.06 | 17.08 → 2.67 | TRADE-OFF | Charts become pictures: the SVG combo chart, its data labels inside the picture; legend and callout native. Its gridlines are light now (H1) | none / none | 0 / 0 |
+| 04-harvey-table-caption | 8.46 → 2.08 | 8.27 → 2.97 | TRADE-OFF | The in-repo deck's synthetic italic against the true italic, in the caption (regular weight now: D1). Harvey balls, highlighted column and native table match | none / none | 0 / 0 |
+| 05-balance-sheet-two-tables | 13.65 → 2.14 | 13.52 → 1.80 | DEFECT | D12 (Google): the bold total rows' numbers and headers sit 1.9–2.7 px left of the plain rows in the same right-aligned columns. No PowerPoint seams (D7: 0 seam columns, MuPDF and Quartz) | none / none | 0 / 0 |
+| 06-delta-pills-table-callout | 29.57 → 1.75 | 29.35 → 2.72 | DEFECT | D12 (Google): the bold FY24 / FY23 headers 1.7–2.4 px left of their columns. Synthetic italic source line (trade-off). Pills, ▲▼, table and callout match | none / none | 0 / 0 |
+| 07-timeline-dots-mono-dates | 6.14 → 2.51 | 6.08 → 2.57 | MATCHES | Dots, rule and mono dates as the UI; the 22 px subtitle now ends where the UI's does (X1) | none / none | 0 / 0 |
+| 08-kpi-cards-grid | 7.32 → 2.26 | 6.85 → 3.26 | TRADE-OFF | Ruling D8 (B1): ▲▼ in Arial, whose triangle ink is smaller than the UI's Hiragino Sans (advance within 4 %); synthetic italic source line | none / none | 0 / 0 |
+| 09-pseudo-bullets-accent-quote | 7.92 → 2.14 | 8.34 → 3.55 | TRADE-OFF | Synthetic italic (the em phrase and the footnote); the SKU-7 chip sentence is several boxes; Google's superscript at 0.8 on a line that does not grow. Bullets, accent bar and quote border match | none / none | 0 / 0 |
+| 10-svg-waterfall | 5.70 → 1.41 | 6.02 → 2.13 | TRADE-OFF | Charts become pictures (the waterfall); synthetic italic source line. The card matches | none / none | 0 / 0 |
+| 11-chartjs-canvas | 2.86 → 1.06 | 2.75 → 1.63 | TRADE-OFF | Charts become pictures: the Chart.js doughnut with its canvas-drawn legend; cards and title native | none / none | 0 / 0 |
+| 12-progress-bars-icons | 7.19 → 1.29 | 6.77 → 1.96 | MATCHES | Progress fills and icons (pictures, spec call 3) and the off-slide circle as the UI | none / none | 0 / 0 |
+| 13-code-gradtext-rotated | 5.37 → 1.38 | 4.26 → 1.82 | TRADE-OFF | Gradient text becomes one solid colour; the code block and the turned GOVERNED DATA label match | none / none | 0 / 0 |
+| 14-two-col-text-image-overlap | 4.94 → 1.76 | 5.48 → 2.15 | MATCHES | Colours exact (C9D3D6); light-on-dark strokes look thinner in both apps, which is Chrome's macOS text rendering in the truth | none / none | 0 / 0 |
+| 15-dense-table-badges-zebra | 5.53 → 1.51 | 5.51 → 2.56 | DEFECT | D12 (Google): bold mono cells 2.1–2.5 px left of the plain rows, the margin column 4.7–5.6 px, its header 7.4 px. No PowerPoint seams (D7). Zebra rows and pills match | none / none | 0 / 0 |
+| 16-closing-cta | 5.47 → 1.74 | 5.41 → 1.59 | MATCHES | As the UI | none / none | 0 / 0 |
+| 17-mixed-content-hidden-graphics | 10.75 → 1.54 | 10.84 → 2.79 | MATCHES | Icons beside bare text, hidden graphics hidden, faded copy faded, the script-drawn canvas present | none / none | 0 / 0 |
+| **mean** | **8.92 → 1.82** | **8.86 → 2.40** | | | | |
+
+Design-system corpus (local `$TMP/ds_fixture`, 27 slides): **DEFECT 1, TRADE-OFF 8, MATCHES 18.**
+
+| Slide | PowerPoint, legacy → final | Google, legacy → final | Tag | What differs, and the ruling or cause | Text loss (pptx / gslides) | MODEL DROPS (pptx / gslides) |
+|---|---|---|---|---|---|---|
+| slide-2x2-matrix | 5.74 → 1.97 | 5.12 → 1.73 | MATCHES | The plotted dot is 14 px with its 4 px pale ring in both apps (D2); matrix, turned axis label and bullets as the UI | none / none | 0 / 0 |
+| slide-action-title | 5.56 → 1.48 | 6.53 → 2.27 | TRADE-OFF | Google's superscripts at 0.8 on lines that do not grow (2). Bars and callout native and matching; the italic footnote is regular weight (D1) | none / none | 0 / 0 |
+| slide-agenda | 3.75 → 0.87 | 4.18 → 0.96 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-azure-flow-example | 4.36 → 1.55 | 4.02 → 1.25 | TRADE-OFF | Ruling D8: the caption's → in Arial, 10–13 % wider than the UI's, the words after it −0.4 to +3.4 px. Google's dots 1:1 at the UI's 4 px period (D6); PowerPoint's ~1 px out of phase (B2, not changed, not visible) | none / none | 0 / 0 |
+| slide-bold-title | 5.43 → 1.58 | 5.45 → 1.43 | MATCHES | As the UI. PowerPoint's faint logo mark is MuPDF's raster of the masked picture (22 levels; Quartz 4, UI 0, Google 1) | none / none | 0 / 0 |
+| slide-charts | 4.13 → 0.79 | 4.46 → 0.83 | TRADE-OFF | Charts become pictures (both charts); titles and legends native | none / none | 0 / 0 |
+| slide-closing | 4.41 → 0.81 | 4.18 → 0.71 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-comparison | 5.12 → 1.22 | 5.39 → 1.44 | MATCHES | Harvey balls cut to their circles (D3); the italic legend regular weight (D1) | none / none | 0 / 0 |
+| slide-content | 6.58 → 2.20 | 6.86 → 1.75 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-cover | 7.32 → 2.31 | 7.04 → 1.83 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-data-table | 6.20 → 1.69 | 6.54 → 1.20 | DEFECT | D12 (Google): the Cost (list) header 4.8 px left. D13 (Google): a light 1 px seam in the coral header where its rounded left corner piece meets the next cell. Unfilled wrapper casts no shadow (B5 trade-off). PowerPoint: rounded header, no seams | none / none | 0 / 0 |
+| slide-event-cover | 6.17 → 2.07 | 6.38 → 1.27 | MATCHES | The tracked 64 px title ends within 1.1 px in both apps; in PowerPoint its glyphs after kerned pairs drift up to 3.7 px mid-line (X1, listed once below) | none / none | 0 / 0 |
+| slide-executive-summary | 7.68 → 4.04 | 5.30 → 2.59 | TRADE-OFF | Ruling D8: the → in Arial, longer and thinner than the UI's, the text after it +3.1 px (PowerPoint) / +1.8 px (Google) | none / none | 0 / 0 |
+| slide-industry-title | 9.43 → 2.34 | 9.14 → 2.93 | MATCHES | As the UI, the photo capture included | none / none | 0 / 0 |
+| slide-journey | 3.08 → 1.30 | 3.42 → 0.75 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-kpi-dashboard | 8.83 → 2.06 | 9.37 → 1.91 | TRADE-OFF | A fitted shadow's tail is a little short (4 → 2 / 3 px); ruling D8: the bold ▲ in Arial, 29–36 % wider, the delta text +3.0–3.2 px | none / none | 0 / 0 |
+| slide-lakehouse-blueprint | 11.40 → 2.40 | 11.32 → 2.04 | MATCHES | As the UI (65 lines of dense diagram; chip markers are pictures) | none / none | 0 / 0 |
+| slide-medallion | 5.30 → 2.01 | 5.69 → 1.96 | TRADE-OFF | Unfilled boxes carry no shadow (the frame); ruling D8: the CSS → in Arial Bold, thinner than the UI's. Corner tiles cut to the arcs (D3) | none / none | 0 / 0 |
+| slide-milestones | 3.25 → 1.03 | 3.34 → 0.86 | MATCHES | As the UI, the current milestone's halo included | none / none | 0 / 0 |
+| slide-reference-architecture | 5.88 → 1.77 | 5.75 → 1.96 | TRADE-OFF | Ruling D8: the → links (CSS content) in Arial, thinner than the UI's | none / none | 0 / 0 |
+| slide-section | 3.88 → 0.74 | 4.32 → 1.38 | MATCHES | end-to-end at full width in Google (D8 hyphens) | none / none | 0 / 0 |
+| slide-statement | 7.73 → 1.67 | 9.40 → 2.39 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-stats | 5.06 → 1.05 | 5.41 → 1.09 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-three-cards | 3.79 → 1.08 | 3.82 → 1.02 | TRADE-OFF | A fitted shadow's tail is a little short: 26 px in the UI, 15 / 13 px (one shadow per card) | none / none | 0 / 0 |
+| slide-timeline | 3.77 → 0.62 | 4.06 → 0.82 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-two-column | 5.76 → 1.82 | 5.95 → 1.44 | MATCHES | As the UI | none / none | 0 / 0 |
+| slide-waterfall | 3.78 → 1.24 | 3.61 → 1.15 | MATCHES | Native bars, connectors and true-italic caption as the UI | none / none | 0 / 0 |
+| **mean** | **5.68 → 1.62** | **5.78 → 1.52** | | | | |
+
+**Means** (legacy → final, the same 4× raster): in-repo PowerPoint **8.92 → 1.82** and Google
+**8.86 → 2.40**; design system PowerPoint **5.68 → 1.62** and Google **5.78 → 1.52**.
+
+**Health.** Captures: 42 / 0 failed (in-repo) and 51 / 0 (design system) in each deck. No export
+failures. `summary.md`, both corpora: "Worse than the baseline by more than 0.05: none."
+
+**How a slide is tagged.**
+- **MATCHES:** no difference from the UI beyond the rasterisers' anti-aliasing.
+- **TRADE-OFF:** every difference is one an accepted ruling covers, and that ruling is named.
+- **DEFECT:** the slide shows a difference no ruling covers. Its cause and owning module are
+  below.
+- **The UI's line breaks are kept on every slide**, so that trade-off is not repeated per slide.
+
+### The brief's end conditions
+
+1. **No slide shows an RC defect: NOT MET.** Four slides carry D12 in the Google deck (in-repo
+   05, 06, 15; `slide-data-table`), RC7's family (a weight's construct). One also carries D13
+   (`slide-data-table`), RC8's family (a table's radius).
+   - Every other RC check holds in both apps: RC1 through RC13, each confirmed in the sheets and
+     line checks, as listed below.
+   - PowerPoint shows no defect on any slide.
+2. **No slide scores worse than its legacy baseline, in either renderer: MET.** Every slide is
+   better in both apps, by any margin, not only by 0.05. The smallest gains:
+   - corpus 11 in both apps (PowerPoint 2.86 → 1.06, Google 2.75 → 1.63);
+   - `slide-journey` in PowerPoint (3.08 → 1.30);
+   - `slide-waterfall` in Google (3.61 → 1.15).
+3. **Text loss is empty everywhere: MET.** Both decks of both corpora (`text_loss.json`,
+   `text_loss-gslides.json`) are empty, with no MODEL DROPS.
+
+**RC1–RC13 as seen.**
+- **RC1:** the side-by-side tables (05) and captions sit in place.
+- **RC2:** flex and grid items are separate boxes (agenda numerals, legends, KPI labels).
+- **RC3:** no stray SVG text; chart text travels inside the picture.
+- **RC4:** class-styled SVG colours are kept (03, 10, the design-system art).
+- **RC5:** no line re-wraps. Every unmatched segment is a matcher artefact: SVG text, monospace
+  and letter-spaced gaps, list markers, text-transform, or fallback-glyph splits.
+- **RC6:** every matched line's baseline is within 2.3 px of the UI's in both apps.
+- **RC7:** weights, tracking, mono, scripts and faded text hold, apart from D12.
+- **RC8:** pseudo-element bullets, dots, rings, Harvey balls, the progress fills, table radius
+  and shadow hold, apart from D13.
+- **RC9:** bold headers, italics and alignment in native tables.
+- **RC10:** hidden graphics stay hidden (17).
+- **RC11:** pills sit under the callouts.
+- **RC12:** the turned labels (13, 2x2-matrix) are on one line.
+- **RC13:** the SKU-7 chip stays in its sentence (09).
+
+### Defects found in Phase C (not fixed: Phase C changes no engine code)
+
+| Id | Renderer | What differs from the UI | Cause (measured) | Proposed fix, owning module |
+|---|---|---|---|---|
+| D12 | Google | A bold run in a webfont whose heaviest loaded weight is lighter than 600 (DM Mono loads 400 and 500) is placed short. In a right-aligned cell it ends 1.7–7.4 px left of where the UI and PowerPoint end it; plain runs in the same columns are within 0.3 px. Seen on in-repo 05, 06, 15 and `slide-data-table` (30 runs, all DM Mono) | The deck writes the browser's synthetic bold as the lighter face plus bold (`DM Mono Medium`, `b="1"`; `emit_typography.cjs`, Task 3). Drive converts that to DM Mono at weight 700, which the family lacks. Google then draws DMMono-Regular with a 0.58 pt faux-bold stroke, but lays the run out about 0.44 px per glyph wider than it draws it. Its PDF puts the glyphs at DM Mono's own 8.4 px advance, with the line's right edge 5.2 px short over 13 glyphs | For the `gslides` target, probe what Google draws for `DM Mono Medium` without bold, and for the family plus bold. Pick the construct whose weight is closest and that Google lays out at the drawn width; if none, compensate the faux-bold advance in the run's tracking as A1 does. Pin it with a Google measurement. `emit_typography.cjs` (the gslides synthetic-bold construct) |
+| D13 | Google | A light 1 px seam in `slide-data-table`'s coral header at x = 356.5, where the wrapper's rounded left corner piece meets the next header cell. Drive's 1600 px thumbnail shows ff9e8f in a ff5f46 bar, 73 levels; Google's own PDF at 2× shows 8. Every other cell boundary of the table shows 0 | The corner piece (B2's D5 construct: the corner cell unfilled, its fill a custom shape cut to the arc under the table) ends at the browser's fractional grid line. The Google deck keeps that grid unsnapped (B3's D7 ruling, PowerPoint only), so the piece's anti-aliased edge and the neighbour cell's meet with a gap of coverage. B2's concern 5 (a faint row along the piece's top edge) was this construct's other edge | In the Google deck, run the corner piece one px under its opaque neighbour cell (the cell paints over it), or snap that one inner edge. Measure in Google's thumbnail and PDF. `snapshot_table.mjs` / `emit_table.cjs` (the corner pieces) |
+
+**D12, the weight (measured; a residual, not the defect).** Chrome's synthetic bold of DM Mono
+500 adds 19 % ink at 4× (a probe at weights 400, 500 and 700 on the deck's own faces). In the same
+probe at 1×, the harness's truth scale, it adds none measurable: 700 draws with 500's ink. At 2×,
+the sidecar's and a Retina display's scale, both apps' faux bold is heavier than Chrome's, against
+the same slides' plain DM Mono runs:
+- **PowerPoint**, 14–22 %: DMMono-Medium with a 1.42 pt stroke;
+- **Google**, 9–17 %: DMMono-Regular with a 0.58 pt stroke.
+
+In the 1× sheets, PowerPoint's bold mono rows therefore look clearly heavier than the UI's,
++22–37 % ink.
+
+### Differences recorded under rulings outside the brief's trade-off list
+
+- **D8's fallback faces (B1 ruling).** ▲▼→ are written in Arial (Courier New after a mono run),
+  a face all three apps have, not the browser machine's own fallback (Hiragino Sans, Lucida
+  Grande).
+  - **In-repo:** the advances match within 4 %; Arial's triangle ink is smaller, visible on 08's
+    deltas (B1's concern 4).
+  - **Design system:** the → glyphs are 10–13 % wider than the UI's and look longer and thinner,
+    and the bold ▲ is 29–36 % wider. The text after them moves −0.4 to +3.4 px.
+  - **Correction (B1):** B1's note that Arial's → is the UI's 1.00 em held in its 100 px probe,
+    not in these decks.
+  - **Slides:** 08, azure-flow, executive-summary, kpi-dashboard, medallion and
+    reference-architecture are tagged under this ruling.
+- **X1's uniform tracking (B1 ruling).** PowerPoint for Mac kerns no DM Sans, so each run's
+  kerning is folded into one `spc`. Each line keeps its width:
+  - median +0.16 px;
+  - largest 2.73 px (in-repo) and 3.34 px (design system), B1's figures exactly.
+
+  But glyphs after a kerned pair sit a little off mid-line, at most 3.7 px on
+  `slide-event-cover`'s 64 px tracked title. This is on every PowerPoint slide, so it is listed
+  here once and not per slide.
+- **PowerPoint's dotted lines (B2, not changed).** They run from their start, about 1 px out of
+  phase with Chrome's dots, at the UI's 4 px period (`slide-azure-flow-example`); not visible.
+
+### Checks beyond the sheets
+
+- **Line placement** (every browser line against each app's PDF; the 95th percentile of
+  |Δy| is 0.9–1.2 px throughout):
+
+  | Corpus | App | Lines | Worst \|Δy\| | Median line width error | Worst width error |
+  |---|---|---|---|---|---|
+  | in-repo | PowerPoint | 311 | 2.0 px | +0.16 px | 2.73 px |
+  | in-repo | Google | 298 | 1.57 px | 0.00 px | 4.50 px |
+  | design system | PowerPoint | 399 | 2.3 px | +0.15 px | 3.34 px |
+  | design system | Google | 394 | 1.87 px | 0.00 px | 3.42 px |
+- **Fonts in the apps' PDFs.** Only the deck's faces plus Arial and Courier New (D8) are used.
+  - DMSans-Italic is drawn for every DM Sans italic run; the three italic → are Arial Italic (D8).
+  - No DMSans-BoldItalic (D1), Times New Roman, Cambria Math or MS PGothic appears.
+  - Google's PDF embeds Calibri but draws no text with it.
+- **Shadow tails** (B5's tool; UI / PowerPoint / Google), the same as B5's:
+  - `slide-three-cards`: 26 / 15 / 13 px;
+  - `slide-kpi-dashboard`: 4 / 2 / 3 px;
+  - the unfilled medallion frame and table wrapper: 3–4 px / none / none.
+- **Seams (D7)**, B3's tool on PowerPoint's PDF, MuPDF and Quartz: 0 seam columns on 44
+  interior lines of corpus 05, corpus 15 and `slide-data-table`.
+- **Determinism.** Two fresh pinned exports of each corpus, for both targets, have the same
+  `structural_manifest` as each other and as the final run's decks: 146 entries (in-repo) and
+  202 (design system).
+- **Gate.** `uv run pytest tests/unit -q -p no:cacheprovider -k "export or huashu or google"`:
+  1336 passed, 0 failed, 10 skipped.
+
+### Carry-over items, re-checked at `8a72f600`
+
+| Item | Verdict |
+|---|---|
+| Task 1: unbordered shapes write `<a:ln></a:ln>` | **No default outline.** 222 (in-repo) and 437 (design system) such shapes per deck. In Google's Slides API the rendered outlines equal the shapes with a real outline on every slide (16 / 16, 100 / 100); no PowerPoint render shows one |
+| Task 2: justified text plus slack may stretch in PowerPoint | **No stretch.** Neither corpus has justified text (`algn="just"`: 0); a probe paragraph exports `algn="l"` with the browser's four breaks |
+| Task 2: `<a:pPr>` after every `<a:br/>` | **No repair prompt.** All 7 and 15 `<a:br>` are followed by `<a:pPr>`; PowerPoint opened and saved both decks unattended |
+| Task 4: DM Sans italic heavier in PowerPoint | **Fixed (D1).** PowerPoint draws DMSans-Italic for every italic run (`DM Sans Italic`, italic off); Google keeps `DM Sans` plus italic |
+| Task 5: `a<br> <br>b` may drop the blank line | **Kept.** `alpha`, a blank paragraph, `bravo`, as `a<br><br>b` |
+| Task 7: dark PowerPoint gridlines in the harness PNG | **Fixed (H1).** Gridlines are light (03, `slide-charts`); the one residual is `slide-bold-title`'s same-colour logo mark, 22 levels in MuPDF against Quartz's 4 |
+| PowerPoint seams between filled cells | **Fixed (D7)** in PowerPoint's PDF under MuPDF and Quartz. PowerPoint's own window still cannot be captured (no Screen Recording permission); the owner can confirm on screen |
+| Mixed-size paragraph-spacing residuals | **Not visible.** The worst matched baseline is 2.3 px off (PowerPoint, `slide-cover`'s display title); a two-line 11 px caption in `slide-lakehouse-blueprint` pitches 1.2 px tight in PowerPoint |
+| Form-control text | **None in either corpus** |
+| Cases neither corpus holds | D9 (a root image ground), D10 (dotted cell borders), D11 (mixed corner radii) and B4's Minor 1: measured on B3's and B4's probe corpora, not re-measured here |
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/123h1a4PxUpbQJ5veI_OoVMhfBPEUK5mNAeI1p7yraeE/edit
+  ("Tellr export revamp — final, in-repo corpus (Phase C, pinned fonts, 8a72f600)")
+- Design-system corpus: https://docs.google.com/presentation/d/1jpnwkWtbiq6b7Avc4549S0sq7S5k_ptkWvwVlXfaw5Y/edit
+  ("Tellr export revamp — final, design-system corpus (Phase C, pinned fonts, 8a72f600)")
+
+Phase C created no other presentation; a Drive query for presentations created during the run
+returns these two. The decks earlier phases kept are untouched.
