@@ -1106,7 +1106,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   // What a painted box draws beyond its fill (snapshot_borders.mjs): its
   // border as an outline or a line per side, its outline rings and its outer
   // shadow, each a shape or a line pushed here.
-  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf } = createBorders({
+  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, reportShadowFits, sliceOf } = createBorders({
     paintedColour,
     normalisedAngle,
     cornerShape,
@@ -2677,6 +2677,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   // rect (snapshot_text.mjs applyMetrics).
   textLayout.applyMetrics(fonts);
   if (textLayout.truncated()) stats.truncated = true;
+  reportShadowFits();
   nameCaptureTargets();
 
   items.sort(compareItems);

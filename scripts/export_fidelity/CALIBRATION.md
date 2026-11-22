@@ -666,16 +666,23 @@ fittedLayer):
    outward normal, `a · Q((d − (x, y)·n − s) / σ)`, where Q is the standard normal's upper tail
    (a step where B is 0). Layers compose as `1 − ∏(1 − c)`.
 2. **The points.** The four edges (bottom, top, right, left) at d = k·R/64, k = 0..64, R the
-   layers' reach (the largest |x| + |y| + spread + 2B) plus 1 px.
+   layers' reach (the largest |x| + |y| + max(spread, 0) + 2B) plus 1 px.
 3. **The error** of a single layer (x, y, B, a) with no spread: its coverage less theirs,
    squared, summed over those points.
 4. **The search.** For each offset and blur the best alpha is solved in closed form (least
    squares, clamped to 0..1). Offset and blur are found on a grid of 9 points an axis, narrowed
-   4 times to the best point one step either side: the offset within the layers' own, the blur
-   from 0 to their largest plus twice their largest spread.
+   4 times to the best point one step either side: the offset within the layers' own, widened
+   either way by their largest spread (a spread moves an edge as an offset does), the blur from
+   0 to their largest plus twice their largest spread.
 5. **The colour** is the layers' colours, each weighted by what it covers alone over the same
    points.
-6. Lengths are kept to 0.01 px and alpha to 0.001; at most 16 layers are fitted, the first listed.
+6. Lengths are kept to 0.01 px and alpha to 0.001; at most 16 layers are fitted, the first
+   listed. A fit with no alpha to keep (under 0.001) writes no shadow; a layer written as it is
+   keeps its own alpha, however faint.
+7. **The budget.** One set of layers is fitted once, and a slide makes at most 64 fits (each
+   costs 6–10 ms): past them, a box carries its first layer as it is, as before the fit, and one
+   `[html2pptx] box-shadow fits: N box(es) past the 64 fits a slide makes carry their first
+   shadow layer` line counts them.
 
 The fits this gives (the engine's, read back from the deck; the tests pin the first two):
 
@@ -684,9 +691,11 @@ The fits this gives (the engine's, read back from the deck; the tests pin the fi
 | `--shadow-md`: `0 2px 6px`, `0 8px 20px`, 1B3139 at 0.08 each | `0 5.13px 14.34px`, 1B3139 at 0.139 |
 | `--shadow-sm`: `0 1px 2px` at 0.06, `0 1px 3px` at 0.08 | `0 1px 2.58px`, 1B3139 at 0.137 |
 | `--shadow-lg`: `0 8px 24px`, `0 24px 48px`, 1B3139 at 0.10 each | `0 16px 38.63px`, 1B3139 at 0.184 |
-| Tailwind `shadow-md`: `0 4px 6px -1px`, `0 2px 4px -2px`, black at 0.1 | `0 3.17px 4.12px`, black at 0.117 |
-| Tailwind `shadow-lg`: `0 10px 15px -3px`, `0 4px 6px -4px`, black at 0.1 | `0 7.81px 9.70px`, black at 0.103 |
-| one layer, `0 2px 8px` 1B3139 at 0.08 | itself |
+| Tailwind `shadow-md`: `0 4px 6px -1px`, `0 2px 4px -2px`, black at 0.1 | `0 3.18px 4.12px`, black at 0.117 |
+| Tailwind `shadow-lg`: `0 10px 15px -3px`, `0 4px 6px -4px`, black at 0.1 | `0 7.82px 9.70px`, black at 0.103 |
+| Tailwind `shadow-2xl`, one layer: `0 25px 50px -12px`, black at 0.25 | `0 24.06px 36.71px`, black at 0.174 |
+| a glow, one layer: `0 0 12px 4px`, FF5F46 at 0.3 | `0 0 15.94px`, FF5F46 at 0.47 |
+| one layer with no spread, `0 2px 8px` 1B3139 at 0.08 | itself |
 
 B2's coarser fit of `--shadow-md` (0.5 px and 1 px steps) was `0 5px 15px` at 0.14.
 
@@ -899,7 +908,8 @@ through Drive, whose presentation was deleted by id once read, and on the two co
 (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1). D4, D5 and D6 (B2) were
 measured the same way, on probe decks of shapes and lines and on Chrome screenshots at device
 scale 4. The fitted shadow (B5, 2026-11-22) is computed, not measured; its result was measured on
-the design-system corpus (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B5). D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
+the design-system corpus (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B5).
+D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
 PowerPoint PDFs. D11 (B4) was measured on a probe deck of
 boxes and on a probe corpus through the harness, H1 (B4) on the two corpora's PowerPoint PDFs.
 

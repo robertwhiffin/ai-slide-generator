@@ -30,8 +30,8 @@
 //   roundsCut         (shape, clip) -> whether the clip's rounded padding boxes
 //                     (its rounds) cut what its rect shows of the shape;
 //   pushSideLines     (box, sides, order, clip) -> pushes a line per painted side.
-// It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox and
-// sliceOf.
+// It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox,
+// reportShadowFits and sliceOf.
 
 function createBorders(env) {
   const {
@@ -163,8 +163,10 @@ function createBorders(env) {
   // the element's own, turned with it; the direction is screen-fixed, because
   // the emitted shadow does not rotate with its shape.
   function shadowOf(shadows, box) {
-    const layer = shadows.length === 1 && shadows[0].spread === 0 ? shadows[0] : fittedLayer(shadows);
-    if (!(layer.alpha >= FIT_ALPHA_STEP)) return null;
+    const exact = shadows.length === 1 && shadows[0].spread === 0;
+    const layer = exact ? shadows[0] : fittedLayer(shadows);
+    // A fit may find no alpha to keep (pptxgenjs would write a falsy one at 0.75).
+    if (!exact && !(layer.alpha >= FIT_ALPHA_STEP)) return null;
     return {
       color: layer.color,
       alpha: layer.alpha,
@@ -184,24 +186,37 @@ function createBorders(env) {
   // and blurred by a Gaussian of half the blur radius). The fit is the layer
   // whose coverage differs least from theirs, summed and squared, over the
   // four edges at d = k R / FIT_SAMPLES, k = 0..FIT_SAMPLES, R the layers'
-  // reach (|x| + |y| + spread + 2B, the largest) plus 1 px. Its alpha is
+  // reach (the largest |x| + |y| + max(spread, 0) + 2B) plus 1 px. Its alpha is
   // solved in closed form for each offset and blur, which are found on a grid
   // of FIT_GRID points an axis, the grid narrowed FIT_ROUNDS times to the best
-  // point one step either side: offset within the layers' own, blur from 0 to
-  // their largest plus twice their largest spread. Its colour is theirs, each
-  // weighted by what it covers alone over the same points. Lengths are kept to
-  // FIT_LENGTH_STEP px and alpha to FIT_ALPHA_STEP. At most FIT_LAYER_LIMIT
-  // layers are fitted, the first listed, so a list no deck holds cannot stall
-  // the snapshot. The fit of one set of layers is made once.
+  // point one step either side: offset within the layers' own, widened either
+  // way by their largest spread (which moves an edge as an offset does), blur
+  // from 0 to their largest plus twice their largest spread. Its colour is
+  // theirs, each weighted by what it covers alone over the same points.
+  // Lengths are kept to FIT_LENGTH_STEP px and alpha to FIT_ALPHA_STEP. At most
+  // FIT_LAYER_LIMIT layers are fitted, the first listed. The fit of one set of
+  // layers is made once, and a slide makes at most FIT_BUDGET fits (each costs
+  // milliseconds): past them a box carries its first layer as it is, as before
+  // the fit, and reportShadowFits counts it.
   const FIT_SAMPLES = 64;
   const FIT_GRID = 9;
   const FIT_ROUNDS = 4;
   const FIT_LAYER_LIMIT = 16;
   const FIT_LENGTH_STEP = 0.01;
   const FIT_ALPHA_STEP = 0.001;
+  const FIT_BUDGET = 64;
   // The outward normals of the box's edges: bottom, top, right, left.
   const FIT_EDGES = [[0, 1], [0, -1], [1, 0], [-1, 0]];
   const fittedLayers = new Map();
+  // The boxes past the fit budget, which carry their first layer.
+  let pastFitBudget = 0;
+
+  // One [html2pptx] line counting the boxes past the fit budget, when any are.
+  function reportShadowFits() {
+    if (!pastFitBudget) return;
+    console.warn('[html2pptx] box-shadow fits: ' + pastFitBudget + ' box(es) past the ' + FIT_BUDGET +
+      ' fits a slide makes carry their first shadow layer');
+  }
 
   // The complementary error function, within 1.2e-7 of it (Numerical Recipes, erfcc).
   function erfc(value) {
@@ -229,6 +244,10 @@ function createBorders(env) {
       key += layer.color + ' ' + layer.alpha + ' ' + layer.x + ' ' + layer.y + ' ' + layer.blur + ' ' + layer.spread + ',';
     }
     if (fittedLayers.has(key)) return fittedLayers.get(key);
+    if (fittedLayers.size >= FIT_BUDGET) {
+      pastFitBudget++;
+      return shadows[0];
+    }
     let reach = 0;
     let largestBlur = 0;
     let largestSpread = 0;
@@ -241,6 +260,7 @@ function createBorders(env) {
       ranges[0] = [Math.min(ranges[0][0], layer.x), Math.max(ranges[0][1], layer.x)];
       ranges[1] = [Math.min(ranges[1][0], layer.y), Math.max(ranges[1][1], layer.y)];
     }
+    for (let axis = 0; axis < ranges.length; axis++) ranges[axis] = [ranges[axis][0] - largestSpread, ranges[axis][1] + largestSpread];
     ranges.push([0, largestBlur + 2 * largestSpread]);
     const points = [];
     for (let step = 0; step <= FIT_SAMPLES; step++) points.push(step * (reach + 1) / FIT_SAMPLES);
@@ -533,7 +553,7 @@ function createBorders(env) {
     return s.direction === 'rtl' ? { Left: notLast, Right: notFirst } : { Left: notFirst, Right: notLast };
   }
 
-  return { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, sliceOf };
+  return { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, reportShadowFits, sliceOf };
 }
 
 export const BORDERS_SOURCE = createBorders.toString();

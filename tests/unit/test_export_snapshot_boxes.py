@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +53,7 @@ from tests.fixtures.export_snapshot_support import (
     NAMESPACES,
     Shape,
     browser_rect,
+    export_logged,
     export_slides,
     node_json,
     requires_huashu_sidecar,
@@ -500,6 +502,17 @@ SHADOW_MD = "0 2px 6px rgba(27,49,57,.08), 0 8px 20px rgba(27,49,57,.08)"
 SHADOW_SM = "0 1px 2px rgba(27,49,57,.06), 0 1px 3px rgba(27,49,57,.08)"
 # Tailwind's shadow-lg: two layers with negative spreads.
 TAILWIND_SHADOW_LG = "0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1)"
+# Tailwind's shadow-2xl, one layer with a negative spread, and a coral glow, one
+# layer with a positive one: an outer shadow has no spread, so each is fitted.
+TAILWIND_SHADOW_2XL = "0 25px 50px -12px rgba(0,0,0,.25)"
+GLOW = "0 0 12px 4px rgba(255,95,70,.3)"
+# How many distinct sets of layers one slide fits; past it, a box carries its
+# first layer as it is (snapshot_borders.mjs FIT_BUDGET).
+FIT_BUDGET = 64
+FIT_BUDGET_LINE = re.compile(
+    r"\[html2pptx\] box-shadow fits: (\d+) box\(es\) past the 64 fits a slide makes carry "
+    r"their first shadow layer"
+)
 # The fitted layer of each design-system shadow, as CALIBRATION.md records it:
 # (offset down px, blur px, alpha), in 1B3139.
 FITTED_SHADOW_MD = (5.13, 14.34, 0.139)
@@ -734,6 +747,108 @@ class TestShadowLayers:
                 f"alone, {alone:.3e}"
             )
 
+    @pytest.mark.parametrize("case", ["shadow-2xl", "glow"])
+    def test_a_single_layer_with_a_spread_is_fitted(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """One layer with a spread, which no outer shadow has, is fitted like several layers.
+
+        Tailwind's ``shadow-2xl`` (``0 25px 50px -12px`` black at 0.25) and a
+        coral glow (``0 0 12px 4px`` at 0.3): the card's one shadow is a
+        least-squares minimum of this test's own model of the layer (moving
+        its offset or blur by 0.25 px, or its alpha by 0.003, makes the error no
+        smaller), and it is closer to the layer than the layer's own offset,
+        blur and alpha written with its spread dropped, which is what the box
+        carried before the fit.
+        """
+        if case == "shadow-2xl":
+            layer = CssLayer(0, 25, 50, -12, "000000", 0.25)
+            value = TAILWIND_SHADOW_2XL
+        else:
+            layer = CssLayer(0, 0, 12, 4, "FF5F46", 0.3)
+            value = GLOW
+        shapes = slide_shapes(_export_one(_card(value), monkeypatch))
+
+        _assert_no_shadow_shape(shapes)
+        assert len(shapes) == 1 and shapes[0].shadow is not None, _describe(shapes)
+        shadow = shapes[0].shadow
+        assert shadow.color == layer.colour, f"the fitted colour is {shadow.color}"
+        down = shadow.dist_px if abs(shadow.angle - 90) <= SHADOW_ANGLE_TOLERANCE_DEG else 0.0
+        assert layer.y or shadow.dist_px <= SHADOW_LENGTH_TOLERANCE_PX, (
+            f"a glow with no offset is fitted {shadow.dist_px} px off"
+        )
+        blur, alpha = shadow.blur_px, shadow.alpha
+        error = _fit_error([layer], 0, down, blur, alpha)
+        moves = [(0, 0.25, 0), (0, -0.25, 0), (0, 0, 0.003), (0, 0, -0.003)]
+        if layer.y:
+            moves += [(0.25, 0, 0), (-0.25, 0, 0)]
+        for d_down, d_blur, d_alpha in moves:
+            moved = _fit_error([layer], 0, down + d_down, max(0, blur + d_blur), alpha + d_alpha)
+            assert moved >= error - 1e-9, (
+                f"the fitted ({down:.2f}, {blur:.2f}, {alpha:.3f}) is no minimum: moving it by "
+                f"({d_down}, {d_blur}, {d_alpha}) lowers the error from {error:.3e} to {moved:.3e}"
+            )
+        raw = _fit_error([layer], layer.x, layer.y, layer.blur, layer.alpha)
+        assert error < raw and (
+            abs(blur - layer.blur) > FIT_LENGTH_TOLERANCE_PX
+            or abs(alpha - layer.alpha) > FIT_ALPHA_TOLERANCE
+        ), (
+            f"the card's shadow ({down:.2f}, {blur:.2f}, {alpha:.3f}) is the raw layer's, its "
+            f"spread dropped (error {raw:.3e})"
+        )
+
+    def test_a_faint_single_layer_is_written_as_it_is(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``0 2px 8px rgba(0,0,0,.004)`` on a card at ``opacity: 0.2``: the layer, as it is.
+
+        One layer with no spread is the box's shadow as it is, however faint:
+        it paints at 0.004 x 0.2 = 0.0008, below the fit's alpha step (0.001),
+        and is still written, not dropped. (Chrome keeps no colour alpha
+        below 1/255 itself, so only an opacity takes a layer below the step.)
+        """
+        body = _card("0 2px 8px rgba(0, 0, 0, 0.004)", extra="opacity: 0.2; ")
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        assert len(shapes) == 1, _describe(shapes)
+        _assert_shadow(
+            shapes[0], Layer("000000", 0.0008, 8, 2), "the faint shadow", alpha_tolerance=5e-5
+        )
+
+    def test_a_slide_fits_at_most_its_budget_the_rest_carry_their_first_layer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slide of 65 boxes, each with its own two-layer shadow: 64 fits, then the first layer.
+
+        Each fit costs milliseconds, so a slide fits at most FIT_BUDGET distinct
+        sets of layers. The 65th box, past it, carries its first layer as it is
+        (``0 1px 2px`` black at 0.1), as before the fit, and one
+        ``[html2pptx]`` line counts it. The export succeeds, and every box
+        before it carries its fitted shadow.
+        """
+        boxes = "".join(
+            f'<div style="position: absolute; left: {20 + (index % 13) * 96}px; '
+            f"top: {20 + (index // 13) * 130}px; width: 80px; height: 80px; background: #fff; "
+            f'box-shadow: 0 1px 2px rgba(0,0,0,.1), 0 {index + 2}px 6px rgba(0,0,0,.1);"></div>'
+            for index in range(FIT_BUDGET + 1)
+        )
+        logged = export_logged(
+            [slide_document(f'<div class="slide">{boxes}</div>', css=DECK_CSS)],
+            monkeypatch=monkeypatch,
+        )
+        assert logged.failures == [] and logged.pptx, logged.failures
+        shapes = slide_shapes(logged.pptx)
+
+        counts = [int(match.group(1)) for match in FIT_BUDGET_LINE.finditer(logged.stderr)]
+        assert counts == [1], f"expected one budget line counting 1 box, got {counts}"
+        assert len(shapes) == FIT_BUDGET + 1, _describe(shapes)
+        past = shapes[-1]
+        _assert_shadow(past, Layer("000000", 0.1, 2, 1), "the box past the budget")
+        fitted = [shape for shape in shapes[:-1] if abs(shape.shadow.blur_px - 2) > 0.5]
+        assert len(fitted) == FIT_BUDGET, (
+            f"{len(fitted)} of the first {FIT_BUDGET} boxes carry a fitted shadow"
+        )
+
     def test_layers_of_two_colours_fit_their_weighted_colour(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -930,14 +1045,14 @@ class TestShadowLayers:
         )
         if box == "frame":
             body = f'<div class="slide">{PANEL}{frame}</div></div>'
-            painted = {"CDEDE1", "FF5F46"}
+            painted = {PANEL_FILL, "FF5F46"}
         elif box == "bordered":
             body = (
                 f'<div class="slide">{PANEL}<div style="position: absolute; left: 60px; top: 60px; '
                 "width: 280px; height: 140px; border: 1px solid #DCE0E2; border-radius: 12px; "
                 f'box-shadow: {SHADOW_SM};"></div></div></div>'
             )
-            painted = {"CDEDE1", "DCE0E2"}
+            painted = {PANEL_FILL, "DCE0E2"}
         else:
             body = f'<div class="slide">{frame}</div>'
             painted = {"FF5F46"}

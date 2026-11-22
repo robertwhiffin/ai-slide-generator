@@ -985,6 +985,14 @@ summed to the next element (UI / PowerPoint / Google, at 1280 px, the 4x raster)
 - **Removed:** the colour-beneath pass (`resolveShadowShapes`), the model's `role` field and its
   check, and the emitter's "Shadow" name. Tests guard that no shape is named "Shadow", that every
   shape paints a fill or an outline, and that a forged `role` names nothing.
+- **Ruling (B5 fix round 1):** a single layer with a spread is fitted like several layers (an
+  outer shadow has none), and the fit's offset may move by the layers' largest spread either way,
+  as a spread moves an edge: Tailwind's `shadow-2xl` (`0 25px 50px -12px` at 0.25) is
+  `0 24.06px 36.71px` at 0.174, a coral glow (`0 0 12px 4px` at 0.3) blur 15.94 at 0.47; layers
+  with no spread fit exactly as before. A slide makes at most 64 fits (each 6–10 ms); past them a
+  box carries its first layer as it is, counted in one `[html2pptx] box-shadow fits` line. A
+  layer written as it is keeps its alpha however faint (0.004 under `opacity: 0.2`, 0.0008); only
+  a fit with no alpha to keep writes no shadow.
 
 ### Owner-facing notes
 
