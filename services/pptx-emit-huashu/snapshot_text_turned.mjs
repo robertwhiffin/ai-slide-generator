@@ -3,7 +3,7 @@
 // TURNED_TEXT_SOURCE into TEXT_SOURCE, and createTextLayout makes it once
 // (createTurnedText). Its header's "Turned text" says what a turn root
 // becomes: one text item on its layout box, turned by its text's angle, or
-// one per piece where a gap cuts it.
+// one per piece where a gap cuts it or an anonymous flex or grid item holds it.
 //
 // Runs in the page, inside the snapshot IIFE. It is stringified, so it closes
 // over nothing on the Node side. It reads the text layout's `env` (boxEdges,

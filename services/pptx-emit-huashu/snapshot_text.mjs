@@ -94,7 +94,10 @@
 // A line a gap cuts (an atomic inline, a word that paints nothing, an inline
 // element's edges) is cut as unturned text is, and so is the root: each
 // segment, and the lines between cut lines, is a turned item of its own
-// where its text lies along and across the line (turnedLocalBlock). A list
+// where its text lies along and across the line (turnedLocalBlock). So is
+// each anonymous item of a flex or grid turn root, which the container, not
+// text-align, places: a turned item over its own text, where the browser
+// draws it, as an unturned anonymous item is (its 'text' placement). A list
 // marker under a turn is a turned item of its own at its box
 // (turnedMarkerBlock). Turned text is snapshot_text_turned.mjs.
 //
