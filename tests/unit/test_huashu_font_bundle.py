@@ -412,24 +412,16 @@ class TestSetupScript:
 
 
 # ---------------------------------------------------------------------------
-# What the written config resolves (where a fontconfig library is loadable)
+# What the written config resolves (Linux only: the base image's library and faces)
 # ---------------------------------------------------------------------------
 
 _FONTCONFIG = ctypes.util.find_library("fontconfig")
-
-
-@pytest.mark.skipif(_FONTCONFIG is None, reason="requires the fontconfig library (Linux)")
-@pytest.mark.skipif(shutil.which("sh") is None, reason="requires sh")
-def test_the_config_resolves_each_core_font_and_generic_to_its_liberation_face(
-    tmp_path: Path,
-) -> None:
-    """Through the library Chromium itself uses: each core name and generic is a Liberation face."""
-    sidecar = _sidecar_copy(tmp_path / "sidecar")
-    assert _run_setup(sidecar).returncode == 0
-    script = f"""
+# Each family's match through FONTCONFIG_FILE (argv[1]), as Chromium's own fontconfig
+# calls make it: {family: the matched face's family} for the families in argv[2].
+_RESOLVE_SCRIPT = """
 import ctypes, json, os, sys
-os.environ["FONTCONFIG_FILE"] = {str(sidecar / "fonts" / "fonts.conf")!r}
-lib = ctypes.CDLL({_FONTCONFIG!r})
+os.environ["FONTCONFIG_FILE"] = sys.argv[1]
+lib = ctypes.CDLL(sys.argv[3])
 lib.FcInitLoadConfigAndFonts.restype = ctypes.c_void_p
 lib.FcNameParse.restype = ctypes.c_void_p
 lib.FcNameParse.argtypes = [ctypes.c_char_p]
@@ -440,16 +432,69 @@ lib.FcFontMatch.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(cty
 lib.FcPatternFormat.restype = ctypes.c_char_p
 lib.FcPatternFormat.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 config = lib.FcInitLoadConfigAndFonts()
-out = {{}}
-for family in json.loads(sys.argv[1]):
+out = {}
+for family in json.loads(sys.argv[2]):
     pattern = lib.FcNameParse(family.encode())
     lib.FcConfigSubstitute(config, pattern, 0)
     lib.FcDefaultSubstitute(pattern)
     result = ctypes.c_int(0)
     match = lib.FcFontMatch(config, pattern, ctypes.byref(result))
-    out[family] = lib.FcPatternFormat(match, b"%{{family[0]}}").decode()
+    out[family] = lib.FcPatternFormat(match, b"%{family[0]}").decode()
 print(json.dumps(out))
 """
+
+
+def _resolved(config_file: Path, families: list[str]) -> dict[str, str]:
+    """The family of the face fontconfig matches for each of ``families`` through ``config_file``."""
+    assert _FONTCONFIG is not None
+    result = subprocess.run(
+        [sys.executable, "-c", _RESOLVE_SCRIPT, str(config_file), json.dumps(families), _FONTCONFIG],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _without_dejavu_rule(config_file: Path, out: Path) -> Path:
+    """``config_file`` less its one rule that tests a family for DejaVu, written to ``out``."""
+    config = xml.dom.minidom.parseString(config_file.read_bytes())
+    rules = [
+        match
+        for match in config.getElementsByTagName("match")
+        if any(
+            "DejaVu" in string.firstChild.data
+            for test in match.getElementsByTagName("test")
+            for string in test.getElementsByTagName("string")
+        )
+    ]
+    assert len(rules) == 1, f"fixture drift: {len(rules)} DejaVu rules in {config_file}"
+    rules[0].parentNode.removeChild(rules[0])
+    out.write_bytes(config.toxml(encoding="utf-8"))
+    return out
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or _FONTCONFIG is None,
+    reason="Linux only: the fontconfig library and the base image's DejaVu",
+)
+@pytest.mark.skipif(shutil.which("sh") is None, reason="requires sh")
+def test_the_config_resolves_each_core_font_and_generic_to_its_liberation_face(
+    tmp_path: Path,
+) -> None:
+    """Through the library Chromium itself uses: each core name and generic is a Liberation face,
+    and so is a request naming DejaVu, the base image's own face, which the config keeps for
+    per-character fallback alone (Chromium then refuses Liberation Sans for the name, so a stack
+    naming DejaVu goes on to its next family, as on a desktop).
+
+    This runs on Linux only (CI, the export's container), where the fontconfig library and
+    the base image's DejaVu are installed; a Mac has neither. The DejaVu row proves the rename
+    only where DejaVu Sans is installed, so the same config without its DejaVu rule must match
+    DejaVu Sans itself first."""
+    sidecar = _sidecar_copy(tmp_path / "sidecar")
+    assert _run_setup(sidecar).returncode == 0
+    config_file = sidecar / "fonts" / "fonts.conf"
     families = {
         "Arial": "Liberation Sans",
         "Helvetica": "Liberation Sans",
@@ -460,15 +505,15 @@ print(json.dumps(out))
         "Courier New": "Liberation Mono",
         "Courier": "Liberation Mono",
         "monospace": "Liberation Mono",
+        "DejaVu Sans": "Liberation Sans",
     }
-    result = subprocess.run(
-        [sys.executable, "-c", script, json.dumps(list(families))],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
+
+    control = _resolved(_without_dejavu_rule(config_file, tmp_path / "control.conf"), ["DejaVu Sans"])
+
+    assert control == {"DejaVu Sans": "DejaVu Sans"}, (
+        f"fixture drift: without the rule DejaVu Sans matches {control}; no DejaVu Sans here"
     )
-    assert json.loads(result.stdout) == families
+    assert _resolved(config_file, list(families)) == families
 
 
 # ---------------------------------------------------------------------------
