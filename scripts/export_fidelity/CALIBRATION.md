@@ -379,7 +379,8 @@ probes `plain-*`, a 16 px paragraph; offsets of each line after the first):
 | line-height 26 px, a 20 px run on line 2 | −0.14, −1.58, −1.58 | −0.14, +0.42, +0.42 |
 
 So a line with no script run takes its growth alike in both decks (the decks still differ in
-tracking, italics and U+2011, and in dotted borders: X1, D1, D8 and D6 below). A 28 px line opening a paragraph whose
+tracking, italics, the browser's synthetic bold and U+2011, in dotted borders and in native
+tables: X1, D1, D12, D8, D6, D7 and D13 below). A 28 px line opening a paragraph whose
 spacing is tighter than single (66.7%) still sits 2.6 px high, in PowerPoint 3.6 px: that is
 the two apps' spacing between paragraphs of different sizes, which no growth changes.
 
@@ -871,6 +872,111 @@ PowerPoint and 2287 → 472 in Google. What is left is not the corners' shape (c
 dotted border's dot phase, Google's softer stroke edges (the same before and after), and text
 inside a large corner's square.
 
+## D12: the browser's synthetic bold in Google Slides
+
+Measured 2026-11-22 (Task 14 B6) on a probe page whose DM Mono and DM Sans each load 400 and 500
+alone, so a bold request (600 or 700) is the browser's synthetic bold of the 500 face, which
+Chrome draws at that face's own advances (the 700 and 500 lines measure alike, 159.44 px). One
+slide per construct, each written by the engine's own emitter for Google Slides and converted
+through Drive. Placement is read from Google's PDF (each run's first and last glyph box, MuPDF)
+and from the LARGE thumbnail (the run's ink edges against Chrome's render at 1.25×), minus the
+browser's Range rect; ink is the run's summed ink in Google's PDF at 2× over Chrome's at 2×
+(render_truth `--scale=2`).
+
+| written (typeface, bold) | the Slides API reads | Google draws | right-aligned run's edges, PDF | thumbnail | the run after a left-aligned one starts | ink at 2× |
+|---|---|---|---|---|---|---|
+| `DM Mono Medium` + bold (the construct before B6) | DM Mono, 700 | DMMono-Regular, faux bold | −5.6 to −10.0 px, both edges | left edge −5.6 to −9.6 | +4.7 px | 0.97–1.03 |
+| `DM Mono` + bold | DM Mono, 700 | the same | the same | the same | the same | the same |
+| `DM Mono Bold` | DM Mono, 700 | the same | the same | the same | the same | the same |
+| `DM Mono SemiBold` | DM Mono, 500 | DMMono-Medium | 0.00 | 0.00 | 0.00 | 0.78–0.80 |
+| **`DM Mono Medium`** | DM Mono, 500 | DMMono-Medium | **0.00** | **0.00** | **0.00** | **0.78–0.80** |
+| `DM Mono Medium` with a 0.4 pt run outline | DM Mono, 500 (the outline dropped) | DMMono-Medium | 0.00 | 0.00 | 0.00 | 0.78–0.80 |
+| `DM Sans Medium` + bold (before B6) | DM Sans, 700 | DMSans-Bold, a Bold the page did not load | left edge −6.5, right +0.04 | left −7.2 | +3.3 | 0.98–1.00 |
+| `DM Sans SemiBold` | DM Sans, 600 | DMSans-SemiBold | left edge −3.7 | left −4.0 | +1.9 | 0.90–0.92 |
+| **`DM Sans Medium`** | DM Sans, 500 | DMSans-Medium | **within 0.06** | **0.00** | **0.00** | **0.78–0.79** |
+
+The controls, the page's own 500 and 400 runs, draw 0.89 and 0.87 of Chrome's ink at 2× in Google's
+PDF: Google draws plain text about 11 % lighter than Chrome at that scale. Against them the face
+alone is 10–12 % lighter than Chrome's synthetic bold. At 1×, the harness's truth scale, Chrome's
+synthetic bold adds no ink measurable (Phase C), so there the face alone matches the UI's weight.
+
+Two facts decide it. Drive converts a bold flag to weight 700, whatever face is named; and Google
+lays out a faux bold wider than it draws it (about 0.4 px a glyph at 15 px; in the thumbnail the
+glyphs are drawn at that wider pitch, in the PDF at the font's own and the run shifted), and a
+real Bold it has, but the page did not load, at that Bold's own advances. Only the face alone puts
+the run's edges within 0.5 px of the browser's, in both alignments and both families (the ruling:
+placement first). So the deck for Google Slides writes the browser's synthetic bold as the lighter
+face with bold off (`emit_typography.cjs` typefaceFor, from `model.fonts`); the deck for PowerPoint
+keeps the face plus bold, which PowerPoint draws at the face's advances (Phase C: UI 1181.75,
+PowerPoint 1182.35). Google Slides has no character spacing, so no tracking could take up the faux
+bold's advance.
+
+## D13: a rounded table's corner pieces in Google Slides
+
+Measured 2026-11-22 (Task 14 B6). A rounded clip's corner cell is unfilled in the `a:tbl` and its
+fill drawn as a custom shape under the table, the cell cut to the arc (D5). In the deck for Google
+Slides, which keeps the browser's grid (D7), that shape meets its neighbours between pixels.
+
+**How Google draws them** (a probe slide: coral fills at ten fractional offsets, f = 0.0 to 0.9 of a
+thumbnail pixel, on both axes; the cover of the edge's pixel row in the LARGE thumbnail):
+
+| drawn as | f = 0 | f = 0.1 | 0.3 | 0.5 | 0.7 | 0.9 |
+|---|---|---|---|---|---|---|
+| a native table cell | 1.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| a preset rect | 1.0 | 0.88 | 0.75 | 0.50 | 0.25 | 0.12 |
+| a custom path | 1.0 | 0.88 | 0.75 | 0.50 | 0.25 | 0.12 |
+
+The thumbnail draws a native cell without anti-aliasing, filling each pixel whose top left corner
+it holds, and a shape anti-aliased at its exact place. Google's PDF draws both as vectors at the
+same coordinates (the cells to within 0.0012 px of the pieces).
+
+**`slide-data-table`, every straight edge of its four pieces** (the profile 3 px either side of each
+edge, the median along its straight part; the largest channel difference against the same deck
+with the corner cells filled natively, whose cell edges lie on the same lines, and against Chrome
+at the same scale):
+
+| edge | thumbnail, against native / UI (native's own) | Google's PDF at 1× / 2×, against native |
+|---|---|---|
+| top-left piece, right (inner, x = 356.484, coral beside coral) | 73 / 73 (0) | 0 / 0 |
+| top-left and top-right, bottom (inner, y = 252.781, white below) | 0 / 12 (12) | 0 / 0 |
+| top-right piece, left (inner, x = 989.484) | 0 / 35 (35, Chrome's own seam at 1.25×) | 0 / 1 |
+| top-left and top-right, top (outer, y = 206.781) | 92 / 43 (49) | 0 / 0 |
+| top-left, left (outer, x = 88); top-right, right (x = 1192) | 0 / 11 (11) | 0, 10 (the native cell 0.003 px short) |
+| the white pieces, every edge | 0 | 0–3 |
+
+The seam at x = 356.5 is where the native cell's edge moves away from the piece's (445.605 to 446
+in the thumbnail, the pixel between them 0.605 coral over white: ff9e8f); at 989.484 it moves over
+the piece (1236.855 to 1237) and hides it. Which edges seam is a matter of phase, so the fix is
+general: **an inner edge runs under its opaque native neighbour**, which paints over the overlap.
+A probe of two-cell tables (a piece under the unfilled cell, its native coral neighbour) at 16
+phases, along a column line and a row line (the worst seam, levels):
+
+| run under by | LARGE thumbnail (1.25×) | MEDIUM (0.625×) | PDF 0.625× | PDF 1× | PDF 2× |
+|---|---|---|---|---|---|
+| 0 px (before B6) | 162 | 116 | 46 | 46 | 45 |
+| **1 px** | **0** | **0** | 7 | **0** | **0** |
+| 2 px | 0 | 0 | 0 | 0 | 0 |
+
+At 0 px the PDF's figures are what two native cells meeting on a fractional line show there (on
+`slide-data-table` the piece's edges equal the native comparator's in the PDF), so 1 px clears
+the native cells' bar everywhere it was measured, and leaves a moved table's corner pieces 1 px
+over their cell. As built (`snapshot.mjs` pushTable, `CORNER_RUN_UNDER_PX`, the deck for Google
+alone): each side whose every slot across is an opaque native cell moves out by 1 px, or half that
+row's or column's size where that is less; the corner square between two such sides only where
+the slot across the corner is opaque too; never under another corner cell. On `slide-data-table`
+the seam at x = 356.5 is then 0 levels in the thumbnail (73 before), its other edges are as they
+were there, and in Google's PDF its inner edges match the UI (0) where native cell boundaries
+still show MuPDF's 9 to 45 levels.
+
+**The outer edges stay on the browser's lines.** At the top edge the thumbnail drops the native
+cells' partial row (258.477: they start at 259) where the piece paints it at half cover, so the
+piece's top row differs from its neighbours' by 92 levels. Against Chrome at 1.25× the piece is the
+nearer (43 levels, the native cells 49), and in Google's PDF the piece and the cells are identical.
+No shape is drawn as the cells are (the table above), so the only way to match them in the
+thumbnail is to move the piece's outer edges onto its pixel grid (ceil(edge × 1.25) / 1.25), and
+that splits them from the cells in the PDF: 50, 100 and 86 levels at 1×, 1.25× and 2×, where before
+they were 0. So they are left where the browser has them.
+
 ## H1: rasterising an app's PDF
 
 Measured 2026-11-21 (Task 14 B4) on the PDFs PowerPoint saved of both corpora at `09ceb289`.
@@ -911,7 +1017,12 @@ scale 4. The fitted shadow (B5, 2026-11-22) is computed, not measured; its resul
 the design-system corpus (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B5).
 D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
 PowerPoint PDFs. D11 (B4) was measured on a probe deck of
-boxes and on a probe corpus through the harness, H1 (B4) on the two corpora's PowerPoint PDFs.
+boxes and on a probe corpus through the harness, H1 (B4) on the two corpora's PowerPoint PDFs. D12
+and D13 (B6, 2026-11-22) were measured on probe decks the engine's own emitter wrote for Google
+Slides (a page of synthetic-bold runs in the deck's faces, the data table's model with its
+corner pieces varied, and fills at fractional offsets), converted through Drive, their PDFs and
+LARGE and MEDIUM thumbnails read and the presentations deleted by id, and on the two corpora's
+Google decks.
 
 To re-run (PowerPoint will briefly open a window):
 

@@ -98,16 +98,25 @@ And in any deck:
   static's own name with italic off, since PowerPoint draws the family plus
   italic as Bold Italic; for Google Slides the family plus italic, since
   Google has no family named for the italic static (D1);
+* the browser's synthetic bold, a bold request only a lighter loaded face
+  meets: for PowerPoint that face plus bold, which it draws at the face's
+  advances; for Google Slides the face alone, since Drive converts a bold
+  flag to weight 700 and Google draws a family without one as a faux bold
+  laid out wider than it draws it (D12);
 * U+2011 NON-BREAKING HYPHEN: kept for PowerPoint, which draws it as the
   face's hyphen; written as U+002D for Google Slides, which draws it from MS
   PGothic (D8; U+2010 is U+002D in both decks);
 * a dotted border: for PowerPoint a line or outline dashed sysDot, which it
   draws one width on and one off as CSS does; for Google Slides, whose every
   dot dash is one width on and three off, one unfilled custom shape drawing
-  the centre line twice, the second pass two widths along (D6).
+  the centre line twice, the second pass two widths along (D6);
+* a native table: for PowerPoint its grid on whole px, where Chrome paints
+  it (D7); for Google Slides the browser's own grid, on which a rounded
+  table's corner fills run 1 px under their opaque neighbour cells, since
+  Google draws a native cell on whole pixels and a shape anti-aliased (D13).
 
-So the two decks differ wherever text is tracked, kerned or italic, or a
-border is dotted.
+So the two decks differ wherever text is tracked, kerned, italic or
+synthetic bold, a border is dotted, or a table is native.
 """
 
 from __future__ import annotations

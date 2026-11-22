@@ -1151,8 +1151,8 @@ failures. `summary.md`, both corpora: "Worse than the baseline by more than 0.05
 
 | Id | Renderer | What differs from the UI | Cause (measured) | Proposed fix, owning module |
 |---|---|---|---|---|
-| D12 | Google | A bold run in a webfont whose heaviest loaded weight is lighter than 600 (DM Mono loads 400 and 500) is placed short. In a right-aligned cell it ends 1.7–7.4 px left of where the UI and PowerPoint end it; plain runs in the same columns are within 0.3 px. Seen on in-repo 05, 06, 15 and `slide-data-table` (30 runs, all DM Mono) | The deck writes the browser's synthetic bold as the lighter face plus bold (`DM Mono Medium`, `b="1"`; `emit_typography.cjs`, Task 3). Drive converts that to DM Mono at weight 700, which the family lacks. Google then draws DMMono-Regular with a 0.58 pt faux-bold stroke, but lays the run out about 0.44 px per glyph wider than it draws it. Its PDF puts the glyphs at DM Mono's own 8.4 px advance, with the line's right edge 5.2 px short over 13 glyphs | For the `gslides` target, probe what Google draws for `DM Mono Medium` without bold, and for the family plus bold. Pick the construct whose weight is closest and that Google lays out at the drawn width; if none, compensate the faux-bold advance in the run's tracking as A1 does. Pin it with a Google measurement. `emit_typography.cjs` (the gslides synthetic-bold construct) |
-| D13 | Google | A light 1 px seam in `slide-data-table`'s coral header at x = 356.5, where the wrapper's rounded left corner piece meets the next header cell. Drive's 1600 px thumbnail shows ff9e8f in a ff5f46 bar, 73 levels; Google's own PDF at 2× shows 8. Every other cell boundary of the table shows 0 | The corner piece (B2's D5 construct: the corner cell unfilled, its fill a custom shape cut to the arc under the table) ends at the browser's fractional grid line. The Google deck keeps that grid unsnapped (B3's D7 ruling, PowerPoint only), so the piece's anti-aliased edge and the neighbour cell's meet with a gap of coverage. B2's concern 5 (a faint row along the piece's top edge) was this construct's other edge | In the Google deck, run the corner piece one px under its opaque neighbour cell (the cell paints over it), or snap that one inner edge. Measure in Google's thumbnail and PDF. `snapshot_table.mjs` / `emit_table.cjs` (the corner pieces) |
+| D12 | Google | A bold run in a webfont whose heaviest loaded weight is lighter than 600 (DM Mono loads 400 and 500) is placed short. In a right-aligned cell it ends 1.7–7.4 px left of where the UI and PowerPoint end it; plain runs in the same columns are within 0.3 px. Seen on in-repo 05, 06, 15 and `slide-data-table` (30 runs, all DM Mono) | The deck writes the browser's synthetic bold as the lighter face plus bold (`DM Mono Medium`, `b="1"`; `emit_typography.cjs`, Task 3). Drive converts that to DM Mono at weight 700, which the family lacks. Google then draws DMMono-Regular with a 0.58 pt faux-bold stroke, but lays the run out about 0.44 px per glyph wider than it draws it. Its PDF puts the glyphs at DM Mono's own 8.4 px advance, with the line's right edge 5.2 px short over 13 glyphs | For the `gslides` target, probe what Google draws for `DM Mono Medium` without bold, and for the family plus bold. Pick the construct whose weight is closest and that Google lays out at the drawn width; if none, compensate the faux-bold advance in the run's tracking as A1 does. Pin it with a Google measurement. `emit_typography.cjs` (the gslides synthetic-bold construct). **Fixed in B6 (`2e23228d`):** the deck for Google writes the face alone; the runs' edges lie within 0.04 px of the UI on all four slides (B6 below) |
+| D13 | Google | A light 1 px seam in `slide-data-table`'s coral header at x = 356.5, where the wrapper's rounded left corner piece meets the next header cell. Drive's 1600 px thumbnail shows ff9e8f in a ff5f46 bar, 73 levels; Google's own PDF at 2× shows 8. Every other cell boundary of the table shows 0 | The corner piece (B2's D5 construct: the corner cell unfilled, its fill a custom shape cut to the arc under the table) ends at the browser's fractional grid line. The Google deck keeps that grid unsnapped (B3's D7 ruling, PowerPoint only), so the piece's anti-aliased edge and the neighbour cell's meet with a gap of coverage. B2's concern 5 (a faint row along the piece's top edge) was this construct's other edge | In the Google deck, run the corner piece one px under its opaque neighbour cell (the cell paints over it), or snap that one inner edge. Measure in Google's thumbnail and PDF. `snapshot_table.mjs` / `emit_table.cjs` (the corner pieces). **Fixed in B6 (`2ccfb12d`):** in the Google deck each corner piece runs 1 px under its opaque neighbours; the seam is 0 levels in the thumbnail. The light top row is the pieces' outer edge, a measured residual (B6 below) |
 
 **D12, the weight (measured; a residual, not the defect).** Chrome's synthetic bold of DM Mono
 500 adds 19 % ink at 4× (a probe at weights 400, 500 and 700 on the deck's own faces). In the same
@@ -1240,3 +1240,151 @@ In the 1× sheets, PowerPoint's bold mono rows therefore look clearly heavier th
 
 Phase C created no other presentation; a Drive query for presentations created during the run
 returns these two. The decks earlier phases kept are untouched.
+
+
+## Phase B, batch B6: the two Google defects Phase C found (D12, D13), engine `2ccfb12d`
+
+Commits: `2e23228d` (D12) and `2ccfb12d` (D13). Only the deck for Google Slides changes; the deck
+for PowerPoint is the same. The probes went through Drive, as the export does (the engine's own
+emitter writing probe decks for Google Slides, Drive's PDF and LARGE and MEDIUM thumbnails read
+back, the presentations deleted by id). They are recorded in
+`scripts/export_fidelity/CALIBRATION.md` (D12, D13). Both corpora were re-run with `run.py
+--pin-fonts --powerpoint --gslides --baseline`, against Phase C's final runs (`8a72f600`).
+
+### Scores, Phase C (`8a72f600`) → B6 (`2ccfb12d`)
+
+- **The PowerPoint decks** of both corpora are byte-identical to Phase C's, apart from the
+  timestamps in `docProps/core.xml`, so every PowerPoint score is the same: in-repo 1.82, design
+  system 1.62.
+- **The Google decks** change on exactly the four slides below. On every other slide the slide
+  XML is byte-identical and the Google score is the same to the hundredth.
+- **What changes.** The synthetic-bold runs lose their bold flag (30 in all), and
+  `slide-data-table`'s four corner pieces run 1 px under their neighbours. Nothing else changes.
+
+| Slide | Defect | What changes in the Google deck | Google, Phase C → B6 |
+|---|---|---|---|
+| 05-balance-sheet-two-tables | D12 | 12 `DM Mono Medium` runs written without bold | 1.80 → **1.61** |
+| 06-delta-pills-table-callout | D12 | 2 runs | 2.72 → **2.70** |
+| 15-dense-table-badges-zebra | D12 | 15 runs | 2.56 → **2.29** |
+| slide-data-table | D12, D13 | 1 run; the four corner pieces | 1.20 → **1.16** |
+| **mean, in-repo (17)** | | | **2.398 → 2.370** |
+| **mean, design system (27)** | | | **1.517 → 1.516** |
+
+The control set (in-repo 02 and 12; `slide-agenda`, `slide-lakehouse-blueprint`, `slide-stats`)
+is unchanged in both apps. `summary.md`, both corpora: "Worse than the baseline by more than
+0.05: none."
+
+**Health.**
+- Text loss is none in both decks of both corpora, and MODEL DROPS 0.
+- Captures: 42 / 0 failed and 51 / 0, as in Phase C.
+- No export failures.
+- **Determinism** (Phase C's tool): two fresh pinned exports of each corpus, for both targets,
+  have the same `structural_manifest` as each other and as the final run's decks (146 and 202
+  entries).
+- **Gate.** `uv run pytest tests/unit -q -p no:cacheprovider -k "export or huashu or google"`:
+  1353 passed, 0 failed, 12 skipped (Phase C: 1336 / 0 / 10). The two new skips are the opt-in
+  Drive tests, which were run red and then green with `TELLR_GOOGLE_TESTS=1`.
+- **Full suite.** `uv run pytest tests/unit -q -p no:cacheprovider -n 6`: 18015 passed, 0
+  failed, 27 skipped.
+
+### What was measured (UI / Phase C / B6, at 1280 px unless named)
+
+**D12: where the synthetic-bold runs lie.** The line check matched every browser line against
+Google's PDF; the figures are each slide's worst left-edge offset, and the bold segments' edges.
+
+| Slide | Worst \|dx\|, Google | Bold segments' left and right edges against the UI |
+|---|---|---|
+| 05 (12 segments) | 2.19 → **0.03** px | −2.19 to −1.74 → **0.00 to +0.01** |
+| 06 (2) | 1.88 → **0.03** | −1.88 → **0.00** |
+| 15 (10) | 5.24 → **0.01** | −5.25 to −1.74 → **0.00 to +0.01** |
+| `slide-data-table` ("Cost (list)", two segments) | 4.71 → **0.04** | −4.81 to −4.65 → **−0.12 to +0.04** |
+
+Google now draws these runs as DMMono-Medium, where Phase C's PDF drew DMMono-Regular with a
+faux-bold stroke. Against PowerPoint's PDF, every run's right edge is within −0.47 to +0.42 px;
+in Phase C it was −7.35 to −0.52.
+
+**D12: the weight.** Each figure is the synthetic-bold runs' ink in Google's PDF over the UI's
+(the median); in brackets, against Google's own plain DM Mono runs on the slide.
+
+| Slide | At 2× (Chrome at 2×), Phase C → B6 | At 1× (the harness's truth), Phase C → B6 |
+|---|---|---|
+| 05 | 0.95 (+9 %) → 0.76 (−13 %) | 1.01 (+15 %) → 0.83 (−6 %) |
+| 06 | 1.01 (+17 %) → 0.80 (−7 %) | 1.13 (+31 %) → 0.90 (+5 %) |
+| 15 | 1.00 (+15 %) → 0.79 (−9 %) | 1.14 (+28 %) → 0.92 (+3 %) |
+| `slide-data-table` (one white-on-coral header) | 0.88 (+1 %) → 0.69 (−21 %) | 0.88 (−2 %) → 0.69 (−23 %) |
+
+**D13: every straight edge of the four corner pieces.** Each is measured in Drive's thumbnail and
+Google's PDF, against the same deck with its corner cells filled natively (the native comparator)
+and against Chrome at the same scale.
+
+| Edge | Thumbnail, against native / UI (native's own) | Google's PDF, 1× / 2×, against the UI (native's own) |
+|---|---|---|
+| top-left piece, right (inner, x = 356.484) | 73 / 73 → **0 / 0** (0) | 45 / 9 → **0 / 0** (45 / 9) |
+| top-right piece, left (inner, x = 989.484) | 0 / 35 → 0 / 35 (35: Chrome's own seam at 1.25×) | 45 / 10 → **0 / 0** (45 / 9) |
+| top pieces, bottom (inner, y = 252.781) | 0 / 12 → 0 / 12 (12) | 85 / 131 → **49 / 85** (85 / 131) |
+| top pieces, top (outer, y = 206.781) | 92 / 43, unchanged (49) | 47 / 82, unchanged (47 / 82) |
+| the outer left and right edges (x = 88, 1192) | 0 / 11, unchanged (11) | 11 / 13, unchanged |
+| the white pieces, every edge | 0 / 0 to 19, unchanged (the same) | 0 to 22, unchanged (the same) |
+
+### Rulings from B6
+
+- **Ruling (D12, measured through Drive).** The deck for Google Slides writes the browser's
+  synthetic bold as the lighter face alone (`emit_typography.cjs` typefaceFor, from
+  `model.fonts`). The deck for PowerPoint keeps the face plus bold.
+  - Drive converts a bold flag to weight 700 whatever face is named.
+  - Google lays out a faux bold (DM Mono) wider than it draws it, and draws a Bold the page did
+    not load (DM Sans at 400 and 500) at that Bold's advances.
+  - Of the constructs probed (the face plus bold, the family plus bold, a "Bold"-named face, a
+    "SemiBold"-named face, the face with a run outline, the face alone), only the face alone
+    puts both alignments within 0.5 px of the browser in both families. A "SemiBold" name
+    draws DM Mono's Medium too, but DM Sans's real SemiBold, 3.7 px wide; Drive drops a run
+    outline.
+  - Placement outranks weight, so the face alone is the construct.
+- **Ruling (D13, measured through Drive).** In the deck for Google Slides a rounded table's corner
+  piece runs 1 px under each opaque native cell beside it (`snapshot.mjs` pushTable,
+  `CORNER_RUN_UNDER_PX`).
+  - **Why.** Drive's thumbnail draws a native cell without anti-aliasing, filling each pixel
+    whose top left corner it holds, and any shape anti-aliased. So the piece and its neighbour
+    left a part-covered pixel between them wherever the cell's edge moved away.
+  - **Why 1 px.** It leaves no seam at any of 16 phases in the 1600 and 800 px thumbnails or
+    the PDF at 1× and 2×.
+  - **The limits.** Half a thinner row or column at most. The corner square only under an
+    opaque diagonal neighbour, a notch otherwise. Never under another corner cell.
+  - The table stays native, and its grid is still the browser's. The PowerPoint deck is
+    unchanged.
+- **Ruling (D13, the outer edges, measured).** A piece's outer edges stay on the browser's lines.
+  - In Google's PDF they equal the native cells' (0 levels).
+  - In the thumbnail the native cells drop their part-covered outer row, which the piece draws
+    at its cover. The piece is the nearer the UI (43 levels against the cells' 49).
+  - No shape is drawn on whole pixels as cells are: a preset rect and a path both draw at
+    1 − f.
+  - Moving the outer edges onto the thumbnail's grid would match the cells there, and split them
+    from the cells by 50 to 100 levels in the PDF.
+  - Snapping the whole Google table is ruled out (B3).
+- **Residual (D12, the weight).**
+  - At 2×, Google's Medium draws 7–13 % lighter than Chrome's synthetic bold, against its own
+    plain runs.
+  - At 1×, the harness's truth scale, it is −6 % to +5 %, where Phase C's faux bold was +15 % to
+    +31 %.
+  - The one white-on-coral header (`slide-data-table`'s "Cost (list)") is 21–23 % lighter.
+- **Residual (D13).** The light top row along the coral pieces in the thumbnail stays (B2's
+  concern 5), the outer-edge ruling above. It now ends 1 px further right, because the piece's
+  run under its neighbour lies on the table's own top edge.
+
+### Owner-facing notes
+
+- In the Google deck a synthetic-bold run is its lighter face, not bold: the font menu shows
+  "DM Mono Medium" with bold off. Turning bold on there gives Google's faux bold, laid out wide.
+- A moved data table still leaves its corner pieces behind, while its unfilled corner cells move
+  with it (B3). In the Google deck each piece is 1 px larger than its cell on the sides it shares
+  with other cells.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1UONRIfb_fq9htA2SYCI-V9Vhd8yt-J_IGJdGRyQilHU/edit
+  ("Tellr export revamp — B6, in-repo corpus (pinned fonts, 2ccfb12d)")
+- Design-system corpus: https://docs.google.com/presentation/d/1JxHFUA4hF3Sl2IGQh7-2huWGkFTc3xhHX2y8RNKrU9U/edit
+  ("Tellr export revamp — B6, design-system corpus (pinned fonts, 2ccfb12d)")
+
+The probe and test presentations B6 created were deleted by id and confirmed gone (404). The decks
+earlier phases kept are untouched.

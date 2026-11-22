@@ -14,10 +14,13 @@
 // the few constructs the two apps draw apart for it: around script runs,
 // their size, and for PowerPoint the lines they end or grow (emit_text.cjs);
 // each run's tracking, which for PowerPoint folds in its kerning; an italic
-// webfont run's typeface, for PowerPoint its italic static's name; U+2011,
-// written as U+002D for Google Slides (emit_typography.cjs); and a dotted
-// line or outline, for Google Slides a stroke drawn twice (emit_dotted.cjs;
-// scripts/export_fidelity/CALIBRATION.md X1, D1, D8 and D6).
+// webfont run's typeface, for PowerPoint its italic static's name; the
+// browser's synthetic bold, for Google Slides the lighter face alone; U+2011,
+// written as U+002D for Google Slides (emit_typography.cjs); a dotted line or
+// outline, for Google Slides a stroke drawn twice (emit_dotted.cjs); and a
+// native table's grid, for PowerPoint on whole px, and its rounded corner
+// fills, for Google Slides run under their opaque neighbours (snapshot.mjs;
+// scripts/export_fidelity/CALIBRATION.md X1, D1, D12, D8, D6, D7 and D13).
 //
 // pptxgenjs writes the deck; its dotted table-cell borders are then written
 // sysDot, a dash pptxgenjs cannot write a table border in (emit_table.cjs

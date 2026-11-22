@@ -422,7 +422,11 @@ word joiner after a script run that ends its line (PowerPoint only), and a later
 growth as space before. In any text: each run's tracking (PowerPoint for Mac kerns no DM
 Sans, so its deck folds each run's kerning in, with no optical-size band; Google's keeps
 A1), an italic webfont run's typeface (for PowerPoint its italic static's own name with
-italic off; for Google the family plus italic), and U+2011 (written as U+002D for Google).
+italic off; for Google the family plus italic), the browser's synthetic bold, a bold request
+only a lighter loaded face meets (for PowerPoint that face plus bold; for Google the face alone,
+as built, B6: Drive converts a bold flag to weight 700, and Google draws a family without one as
+a faux bold laid out wider than it draws it, and one with a Bold the page did not load in that
+Bold, so a right-aligned run ended short), and U+2011 (written as U+002D for Google).
 In any box: a dotted border (for PowerPoint dashed `sysDot`, one width on and one off; for
 Google, whose every dot dash is one on and three off, one unfilled custom shape drawing the
 centre line twice, the second pass two widths along; a table cell's dotted border is one
@@ -432,7 +436,10 @@ meeting between pixels into a seam, each grid line lies where Chrome paints it, 
 first edge on the whole px nearest the browser's (a line with no border on that px, a 1 px
 rule half a px past it), the margins keeping each cell's text where the browser set it;
 for Google, which draws no seam and shows no CSS px as a whole pixel, the browser's own
-grid. The snapshot is told the target for this one construct.
+grid, on which a rounded table's corner fills (Tables) run 1 px under each opaque native cell
+beside them (B6): Google's thumbnails draw a native cell on whole pixels and a shape
+anti-aliased, so the two met with a light seam between. The snapshot is told the target for
+these table constructs.
 `build_pptx_huashu(..., target=...)` names the app the deck is for: `"pptx"` (the download)
 or `"gslides"` (the Google Slides route). Only those constructs branch. In the Google deck a
 script glyph on a line the browser did not grow is drawn at 0.8 of its size, an accepted
@@ -458,8 +465,9 @@ PowerPoint pictures have no radius.
 - table radius and shadow, as a shape under the table;
 - where a rounded clip (a wrapper's `border-radius` with `overflow: hidden`) cuts a filled
   cell, the cell is unfilled in the table, and its fill is a custom shape under the table,
-  the cell cut to the rounded padding box (as built, B2: an `a:tc` cannot be clipped); the
-  table's own background is cut to that box too (B3);
+  the cell cut to the rounded padding box (as built, B2: an `a:tc` cannot be clipped); in the
+  deck for Google Slides that shape runs 1 px under each opaque native cell beside it, which
+  paints over it (B6); the table's own background is cut to that box too (B3);
 - a dotted border is written `sysDot` (B3): pptxgenjs writes table borders only solid or
   dashed, so the deck's XML is rewritten for it once written.
 
@@ -488,7 +496,9 @@ capture logs and skips that target; it never drops the slide.
 
 Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Drive keep:
 - **Weights:** 400 is `Family`, 700 is `Family` plus bold, and every other weight is
-  `Family <Weight name>` (`Light`, `Medium`, `SemiBold`, `ExtraBold` and so on).
+  `Family <Weight name>` (`Light`, `Medium`, `SemiBold`, `ExtraBold` and so on). A bold request
+  only a lighter loaded face meets, the browser's synthetic bold, is that face plus bold for
+  PowerPoint and that face alone for Google Slides (as built, B6).
 - **Font names:** the deck's CSS family is written, not the browser's fallback.
 - **Text:** `charSpacing` in points; percentage line spacing; zero insets; browser line
   breaks; `valign: top`.
