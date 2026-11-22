@@ -6,19 +6,20 @@ the app log and in the export fidelity harness (spec §6):
 * ``services/pptx-emit-huashu/text_check.cjs`` holds the comparison.
   ``missingWords(reference, emitted, hidden)`` returns the reference words,
   as the reference spells them and in its order, whose normalised form (white
-  space and default-ignorable code points removed, lower-cased) is no
-  substring of the normalised emitted text, leaving out the slide's hidden
-  words and the words written across items' edges: an atomic inline (an
-  inline-block numeral, a chip) is an item of its own, so innerText's
-  "1Financials" or "Iceberg," is written in two items, each piece at an item's
-  edge (Task 15 H2); a word longer than ``ACROSS_LIMIT`` is not looked for so,
-  page script being free to write one of any length, and the harness's twin
-  shares the limit. ``textLossLine(reference, items, hidden)`` collects the
-  emitted text of a slide model's items (text items, which hold every list marker, outside
-  ones as items of their own and inside ones as tokens of their line, and
-  native table cells) and returns ``[html2pptx] text missing: <json array>``,
-  or null when nothing is missing. Both are pure, so they are tested here in
-  Node over hand-built item arrays, with no browser.
+  space and default-ignorable code points removed, lower-cased) is in no
+  emitted text, each compared alone, leaving out the slide's hidden words.
+  ``textLossLine(reference, items, hidden)`` collects the text of each of a
+  slide model's items (text items, which hold every list marker, outside ones
+  as items of their own and inside ones as tokens of their line, and native
+  table cells) and returns ``[html2pptx] text missing: <json array>`` naming
+  the words in none of them that are not written across neighbours either,
+  or null when nothing is missing. An atomic inline (an inline-block numeral,
+  a chip) is an item of its own, so innerText's "1Financials" or "Iceberg," is
+  written in two items, which are neighbours on the slide; a lost chip's two
+  sides are not, so its letters at their ends are no excuse (Task 15 H2, fix
+  round 1; *Words across neighbours* below). Both are pure, so they are
+  tested here in Node over hand-built item arrays, with no browser, on the
+  one table of cases the harness's twin reads as hand-built decks.
 * ``render_slide.cjs`` reads the reference after the captures (the body's
   ``innerText`` with every ``<svg>`` and ``<canvas>`` hidden, through the
   pristine-realm accessors), logs the ``text missing`` line when a word is
@@ -93,6 +94,7 @@ from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     CORPUS_DIR,
     DECK_CSS,
+    EMU_PER_PX,
     LoggedExport,
     browser_ellipsis,
     browser_lines,
@@ -353,6 +355,431 @@ ATOMIC_BODY = (
 )
 ATOMIC_DOCUMENT = _case_document(ATOMIC_BODY)
 
+# ---------------------------------------------------------------------------
+# Words across neighbours (Task 15 H2, fix round 1)
+# ---------------------------------------------------------------------------
+# A word no item holds whole is still written when it lies across the joins of
+# a chain of neighbouring text items, each item's text run on into the next's.
+# Two items are neighbours when both are unturned and of one line, run the same
+# way, share a line (overlap by more than half the shorter's height, as
+# snapshot_text.mjs groups tokens into lines) and the head's text starts from
+# NEIGHBOUR_OVERLAP_EM before the tail's text ends to NEIGHBOUR_GAP_EM after
+# it, in ems of the larger of the two items' sizes: the room an atomic
+# inline's edge (its padding, border and margin, and the room its content box
+# leaves its text) makes. A lost chip leaves both its edges and its own text
+# between the boxes either side of it. A text's ends are its box's less the
+# slack snapshot_text.mjs gives the box on the side its alignment grows.
+#
+# Each case is one slide of boxes that both checks read: the sidecar's as text
+# items of a slide model (_model_item), the harness's as a deck's text boxes
+# (_deck_of_boxes). The real cases' boxes are the export's own, measured on
+# the Task 15 matrix decks (long-off 02, dense-tpl18 03) and on a slide laying
+# out the review's probe (its seven boxes; the "AI", "ML" and "KPI" chips
+# between the boxes whose ends spell them), each read from the slide model the
+# sidecar wrote for it.
+
+
+# The slide model's units: pt = px * 0.75 (units.cjs).
+PT_PER_PX = 0.75
+
+
+@dataclass(frozen=True)
+class Box:
+    """One text box of a hand-built slide, in CSS px, as snapshot_text.mjs lays it out.
+
+    ``x, y, w, h`` is the box, its slack included, and ``size`` its runs'
+    font size. A ``text`` holding a newline is a box of more than one line
+    (wrapped). ``script`` is a superscript run ending it, ``(text, size)`` at
+    the browser's size, which the deck writes larger (emit_typography.cjs
+    SUPERSCRIPT_SIZE_FACTOR).
+    """
+
+    text: str
+    x: float
+    y: float
+    w: float
+    h: float
+    size: float
+    align: str = "left"
+    rtl: bool = False
+    rotate: float = 0
+    script: tuple[str, float] | None = None
+
+
+def _snapshot_text_constant(name: str) -> float:
+    """The value of ``const NAME = <number>;`` in snapshot_text.mjs's text layout."""
+    source = (Path(pptx_from_html_huashu.SIDECAR_DIR) / "snapshot_text.mjs").read_text()
+    found = re.findall(rf"^\s*const {re.escape(name)} = (-?[\d.]+);", source, re.MULTILINE)
+    assert len(found) == 1, (
+        f"snapshot_text.mjs defines `const {name} = <number>;` {len(found)} times"
+    )
+    return float(found[0])
+
+
+def _box_around(
+    text: str,
+    start: float,
+    end: float,
+    *,
+    y: float = 100,
+    h: float = 21,
+    size: float = 18,
+    align: str = "left",
+    rtl: bool = False,
+    rotate: float = 0,
+    script: tuple[str, float] | None = None,
+) -> Box:
+    """The box snapshot_text.mjs textBlock lays out for text (or the content box of a
+    centred or right-aligned block) from ``start`` to ``end`` px: widened by its slack
+    on the side its alignment grows."""
+    extra = (end - start) * _snapshot_text_constant("SLACK_FRACTION") + _snapshot_text_constant(
+        "SLACK_PX"
+    )
+    shift = extra / 2 if align == "center" else extra if align == "right" else 0
+    return Box(text, start - shift, y, end - start + extra, h, size, align, rtl, rotate, script)
+
+
+# long-off 02's first two rows: each item's inline-block numeral (min-width
+# 28px at 18px, its text 10 px wide) is a text item of its own, after its row's.
+NUMERAL_ROWS = (
+    Box(
+        "Financials — Revenue up 9% to $1.80B with a 14.0% EBITDA margin",
+        138,
+        156,
+        601.11125,
+        21,
+        18,
+    ),
+    Box("1", 110, 156, 14.6165625, 21, 18),
+    Box(
+        "Operations — On-time delivery, fleet and warehouse performance",
+        138,
+        217,
+        566.7771875,
+        21,
+        18,
+    ),
+    Box("2", 110, 217, 14.6165625, 21, 18),
+)
+NUMERAL_REFERENCE = (
+    "1Financials — Revenue up 9% to $1.80B with a 14.0% EBITDA margin "
+    "2Operations — On-time delivery, fleet and warehouse performance"
+)
+# dense-tpl18 03's two cut lines: the four chips (16 px, padding 8 px, border
+# 1 px) are text items of their own, after their lines' segments.
+CHIP_LINES = (
+    Box(
+        "Vendor A leads on speed, cost and time to value. Open table formats such as",
+        88,
+        366.59375,
+        777.700625,
+        26,
+        20,
+    ),
+    Box("and", 925.265625, 366.59375, 40.9178125, 26, 20),
+    Box(",", 1102.8125, 366.59375, 7.77625, 26, 20),
+    Box("together with", 88, 398.59375, 134.0984375, 26, 20),
+    Box("and", 292.90625, 398.59375, 40.9178125, 26, 20),
+    Box(
+        ", shorten the path to a first model. Pipeline reliability is the one trade-off",
+        452.78125,
+        398.59375,
+        709.330625,
+        26,
+        20,
+    ),
+    Box("Delta Lake", 832.21875, 370.59375, 87.475, 21, 16),
+    Box("Apache Iceberg", 974.390625, 370.59375, 130.5871875, 21, 16),
+    Box("MLflow", 225.03125, 402.59375, 60.7928125, 21, 16),
+    Box("Unity Catalog", 342.03125, 402.59375, 111.855, 21, 16),
+)
+CHIP_REFERENCE = (
+    "Vendor A leads on speed, cost and time to value. Open table formats such as Delta Lake "
+    "and Apache Iceberg, together with MLflow and Unity Catalog, shorten the path to a first "
+    "model. Pipeline reliability is the one trade-off"
+)
+# The review's probe: its seven boxes, laid out on a slide with each lost chip
+# between the two boxes whose ends spell it ("Customer Data" [AI] "Insights for
+# every team", "Platform" [ML] "Lakehouse governance", "Risk" [KPI] "Pipeline
+# health"), in the order the slide paints them; each chip comes after its line.
+PROBE_BOXES = {
+    "Revenue grew 12%": Box("Revenue grew 12%", 88, 72, 353.9159375, 52, 40),
+    "Customer Data": Box("Customer Data", 88, 156, 152.0853125, 26, 20),
+    "Insights for every team": Box("Insights for every team", 270.65625, 156, 227.6765625, 26, 20),
+    "AI": Box("AI", 242, 160, 19.2209375, 21, 16),
+    "Platform": Box("Platform", 88, 202, 86.415, 26, 20),
+    "Lakehouse governance": Box("Lakehouse governance", 216.265625, 202, 227.4778125, 26, 20),
+    "ML": Box("ML", 180.0625, 206, 27.220625, 21, 16),
+    "Risk": Box("Risk", 88, 248, 42.9715625, 26, 20),
+    "Pipeline health": Box("Pipeline health", 175.71875, 248, 147.16625, 26, 20),
+    "KPI": Box("KPI", 139.0625, 252, 27.7009375, 21, 16),
+}
+PROBE_CHIPS = ("AI", "ML", "KPI")
+# The review's own reference and its boxes' order.
+PROBE_REFERENCE = (
+    "Customer Data AI Revenue grew 12% Insights for every team Platform ML Lakehouse "
+    "governance Risk KPI Pipeline health"
+)
+PROBE_REVIEW_ORDER = (
+    "Platform",
+    "Customer Data",
+    "Risk",
+    "Revenue grew 12%",
+    "Lakehouse governance",
+    "Insights for every team",
+    "Pipeline health",
+)
+
+
+def _probe(names: tuple[str, ...]) -> tuple[Box, ...]:
+    return tuple(PROBE_BOXES[name] for name in names)
+
+
+PROBE_PAINT_ORDER = tuple(PROBE_BOXES)
+PROBE_LOST_IN_PAINT_ORDER = tuple(name for name in PROBE_PAINT_ORDER if name not in PROBE_CHIPS)
+# The slide the probe's boxes were measured on, for the real export.
+PROBE_CHIP = (
+    'style="display: inline-block; padding: 0 8px; border-radius: 999px; '
+    'background: #EEECE6; border: 1px solid #DCE0E2; font-size: 16px;"'
+)
+PROBE_PARAGRAPH = 'style="font-size: 20px; margin: 0 0 20px;"'
+PROBE_BODY = (
+    '<div class="slide"><h1 style="font-size: 40px; margin: 0 0 32px;">Revenue grew 12%</h1>'
+    f"<p {PROBE_PARAGRAPH}>Customer Data <span {PROBE_CHIP}>AI</span> Insights for every team</p>"
+    f"<p {PROBE_PARAGRAPH}>Platform <span {PROBE_CHIP}>ML</span> Lakehouse governance</p>"
+    f"<p {PROBE_PARAGRAPH}>Risk <span {PROBE_CHIP}>KPI</span> Pipeline health</p></div>"
+)
+
+# A synthetic line at 18 px, the numeral's text from 110 to 120 px: an edge of
+# NEIGHBOUR_GAP_EM (1.5) is 27 px, the overlap NEIGHBOUR_OVERLAP_EM (0.25) 4.5 px.
+NUMERAL = _box_around("1", 110, 120)
+NUMERAL_END = 120
+
+
+def _financials(start: float, **layout: object) -> Box:
+    """The word after the numeral, its text starting at ``start`` px."""
+    return _box_around("Financials", start, start + 90, **layout)
+
+
+# Name -> (the slide's boxes, in the order it paints them; its reference; the
+# words both checks report missing).
+ACROSS_CASES: dict[str, tuple[tuple[Box, ...], str, list[str]]] = {
+    # The two patterns of the Task 15 matrix, on the export's own boxes.
+    "an inline-block numeral and its word (long-off 02)": (NUMERAL_ROWS, NUMERAL_REFERENCE, []),
+    "chips and the commas after them (dense-tpl18 03)": (CHIP_LINES, CHIP_REFERENCE, []),
+    "the review's probe, its chips written": (_probe(PROBE_PAINT_ORDER), PROBE_REFERENCE, []),
+    # REAL LOSS: the review's probe with its chips lost. Each chip's letters
+    # end and start the boxes either side of where it was, which are no
+    # neighbours: the chip's room lies between them.
+    "the review's probe, its chips lost, in the review's order": (
+        _probe(PROBE_REVIEW_ORDER),
+        PROBE_REFERENCE,
+        ["AI", "ML", "KPI"],
+    ),
+    "the review's probe, its chips lost, in the order the slide paints": (
+        _probe(PROBE_LOST_IN_PAINT_ORDER),
+        PROBE_REFERENCE,
+        ["AI", "ML", "KPI"],
+    ),
+    # A chip between two pieces of one word: a chain of three neighbours.
+    "a chip inside a word": (
+        (
+            _box_around("(", 100, 106, size=20, h=26),
+            _box_around(")", 143, 149, size=20, h=26),
+            _box_around("AI", 115, 134, size=16),
+        ),
+        "(AI)",
+        [],
+    ),
+    "a chip inside a word, lost": (
+        (_box_around("(", 100, 106, size=20, h=26), _box_around(")", 143, 149, size=20, h=26)),
+        "(AI)",
+        ["(AI)"],
+    ),
+    # Every piece must be written, and as its own item's end.
+    "the word after the numeral lost": (
+        (
+            Box("— Revenue up 9% to $1.80B with a 14.0% EBITDA margin", 138, 156, 520.3, 21, 18),
+            Box("1", 110, 156, 14.6165625, 21, 18),
+        ),
+        "1Financials",
+        ["1Financials"],
+    ),
+    "the numeral lost": (NUMERAL_ROWS[:1], "1Financials", ["1Financials"]),
+    "the comma after the chip lost": (
+        tuple(box for box in CHIP_LINES if box.text != ","),
+        CHIP_REFERENCE,
+        ["Iceberg,"],
+    ),
+    "the pieces inside other text": (
+        (
+            _box_around("a total of 1 shown", 110, 260),
+            _box_around("the Financials team", 269, 420),
+        ),
+        "1Financials",
+        ["1Financials"],
+    ),
+    # The edge: from NEIGHBOUR_OVERLAP_EM before the tail's text ends to
+    # NEIGHBOUR_GAP_EM after, each a px inside or outside it.
+    "an atomic edge apart": ((_financials(NUMERAL_END + 27 - 1), NUMERAL), "1Financials", []),
+    "past an atomic edge": (
+        (_financials(NUMERAL_END + 27 + 1), NUMERAL),
+        "1Financials",
+        ["1Financials"],
+    ),
+    "overlapping within the tolerance": (
+        (_financials(NUMERAL_END - 4.5 + 1), NUMERAL),
+        "1Financials",
+        [],
+    ),
+    "overlapping past the tolerance": (
+        (_financials(NUMERAL_END - 4.5 - 1), NUMERAL),
+        "1Financials",
+        ["1Financials"],
+    ),
+    # The em is the larger of the two items' sizes: a 16 px chip before 20 px text.
+    "an edge of the larger size": (
+        (_box_around("1", 110, 119, size=16), _box_around("Financials", 147, 237, size=20)),
+        "1Financials",
+        [],
+    ),
+    "past an edge of the larger size": (
+        (_box_around("1", 110, 119, size=16), _box_around("Financials", 150, 240, size=20)),
+        "1Financials",
+        ["1Financials"],
+    ),
+    # A superscript run is no size of its item's: the deck writes it larger
+    # than the browser draws it. The tail's text is 10 px; its superscript is
+    # 14 px in the browser, so its em is 10 px and the head 16 px on is past it.
+    "a superscript run's size is not its item's": (
+        (
+            _box_around("Revenue", 110, 160, size=10, h=12, script=("1", 14)),
+            _box_around("Financials", 176, 226, size=10, h=12),
+        ),
+        "Revenue1Financials",
+        ["Revenue1Financials"],
+    ),
+    # One line: overlapping by more than half the shorter's height (21 px).
+    "sharing more than half a line": (
+        (_financials(138, y=100 + 10.5 - 1), NUMERAL),
+        "1Financials",
+        [],
+    ),
+    "sharing less than half a line": (
+        (_financials(138, y=100 + 10.5 + 1), NUMERAL),
+        "1Financials",
+        ["1Financials"],
+    ),
+    "on the next line": ((_financials(138, y=161), NUMERAL), "1Financials", ["1Financials"]),
+    "the head before the tail": ((_financials(10), NUMERAL), "1Financials", ["1Financials"]),
+    # Only unturned one-line items: a turned item's box is not where its text
+    # runs, and a wrapped one's ends are not its box's.
+    "a wrapped tail": (
+        (_financials(138), Box("0\n1", 110, 100, 14.6165625, 42, 18)),
+        "1Financials",
+        ["1Financials"],
+    ),
+    "a turned tail": (
+        (_financials(138), _box_around("1", 110, 120, rotate=90)),
+        "1Financials",
+        ["1Financials"],
+    ),
+    "a turned head": (
+        (_financials(138, rotate=270), NUMERAL),
+        "1Financials",
+        ["1Financials"],
+    ),
+    # Right to left, the tail's text ends at its left and the head's starts at its right.
+    "right to left": (
+        (
+            _box_around("שלום", 1060, 1140, align="right", rtl=True),
+            _box_around("1", 1150, 1160, align="right", rtl=True),
+        ),
+        "1שלום",
+        [],
+    ),
+    "right to left, read as left to right": (
+        (
+            _box_around("שלום", 1060, 1140, align="right"),
+            _box_around("1", 1150, 1160, align="right"),
+        ),
+        "1שלום",
+        ["1שלום"],
+    ),
+    # Two directions are two lines, whatever their places: a right-to-left
+    # tail at the slide's left edge, where its mirrored ends meet a
+    # left-to-right head's, 4 px on.
+    "of two directions": (
+        (_financials(14), _box_around("1", 0, 10, rtl=True)),
+        "1Financials",
+        ["1Financials"],
+    ),
+    # Each tail runs on into its nearest head, and each head follows its
+    # nearest tail: a tall box shares a line with three boxes, one above the
+    # other, no two of which share one. The nearest is painted between the others.
+    "one tail, three heads: the nearest": (
+        (
+            _box_around("1", 110, 120, h=63),
+            _financials(135),
+            _box_around("Operations", 125, 215, y=121),
+            _box_around("Customers", 130, 210, y=142),
+        ),
+        "1Operations",
+        [],
+    ),
+    "three tails, one head: the nearest": (
+        (
+            _financials(130, h=63),
+            _box_around("2", 100, 110),
+            _box_around("1", 115, 125, y=121),
+            _box_around("3", 105, 115, y=142),
+        ),
+        "1Financials",
+        [],
+    ),
+    # Two boxes in one place, each within the overlap of the other: one chain
+    # of the two, the nearer join first, never a loop (which no chain starts).
+    "two narrow boxes in one place": (
+        (_box_around("a", 100, 102), _box_around("b", 100, 102)),
+        "ab",
+        [],
+    ),
+    # A long line's slack is no edge: the tail's box runs 52 px past its text,
+    # over the 60 px a lost chip left.
+    "a long line's slack over a lost chip": (
+        (
+            _box_around("The platform joins every source of Customer Data", 88, 888, size=20, h=26),
+            _box_around("Insights for every team", 948, 1180, size=20, h=26),
+        ),
+        "Customer Data AI Insights for every team",
+        ["AI"],
+    ),
+}
+# A centred or right-aligned block's box spans its content box, widened by its
+# slack on both sides or on the left: the text's end is the content box's.
+for _align in ("center", "right"):
+    _tail = _box_around("1", 110, 140, align=_align)
+    ACROSS_CASES[f"a {_align} tail an atomic edge apart"] = (
+        (_financials(140 + 27 - 1), _tail),
+        "1Financials",
+        [],
+    )
+    ACROSS_CASES[f"a {_align} tail past an atomic edge"] = (
+        (_financials(140 + 27 + 1), _tail),
+        "1Financials",
+        ["1Financials"],
+    )
+    ACROSS_CASES[f"a {_align} head an atomic edge apart"] = (
+        (_financials(NUMERAL_END + 27 - 1, align=_align), NUMERAL),
+        "1Financials",
+        [],
+    )
+    ACROSS_CASES[f"a {_align} head past an atomic edge"] = (
+        (_financials(NUMERAL_END + 27 + 1, align=_align), NUMERAL),
+        "1Financials",
+        ["1Financials"],
+    )
+
 # A slide realm that lies about the text a reader of it sees: innerText
 # returns a decoy, and both querySelectorAll copies find nothing, so a reference
 # read through the page's own accessors would hold the decoy and the SVG's
@@ -495,11 +922,170 @@ def _table_item(*cells: list[dict] | None) -> dict:
     return {"kind": "table", "cells": [{"paragraphs": cell} for cell in cells]}
 
 
-def _across_limit() -> int:
-    """text_check.cjs's ACROSS_LIMIT, read from its source."""
-    match = re.search(r"^const ACROSS_LIMIT = (\d+);$", TEXT_CHECK_MODULE.read_text(), re.M)
-    assert match, "text_check.cjs no longer declares ACROSS_LIMIT"
-    return int(match.group(1))
+def _model_item(box: Box) -> dict:
+    """``box`` as the sidecar's slide model holds it: a text item (snapshot_text.mjs TextBlock)."""
+    lines = [
+        {"runs": [{"text": line, "sizePx": box.size, "baseline": None}]}
+        for line in box.text.split("\n")
+    ]
+    if box.script:
+        text, size = box.script
+        lines[-1]["runs"].append({"text": text, "sizePx": size, "baseline": "super"})
+    return {
+        "kind": "text",
+        "x": box.x,
+        "y": box.y,
+        "w": box.w,
+        "h": box.h,
+        "rotate": box.rotate or None,
+        "wrap": len(lines) > 1,
+        "align": box.align,
+        "rtl": box.rtl,
+        "paragraphs": [{"sizePx": box.size, "lines": lines}],
+    }
+
+
+def _sidecar_missing(boxes: tuple[Box, ...], reference: str) -> list[str]:
+    """The words the sidecar's check (textLossLine) reports missing from a slide of ``boxes``."""
+    line = _text_loss_line(reference, [_model_item(box) for box in boxes], "")
+    return [] if line is None else _missing_from_line(line)
+
+
+def _deck_of_boxes(slides: list[tuple[Box, ...]]) -> bytes:
+    """A .pptx of these slides' boxes, each a text box as the export writes it (python-pptx).
+
+    A one-line box does not wrap (``wrap="none"``), a box of more lines does;
+    each line is a paragraph aligned and run as its box is; a superscript run
+    is written as emit_typography.cjs writes it, larger than the browser draws
+    it, at baseline 30000.
+    """
+    from pptx import Presentation
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Emu, Pt
+
+    alignments = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}
+    superscript_factor = _emit_typography_constant("SUPERSCRIPT_SIZE_FACTOR")
+    presentation = Presentation()
+    presentation.slide_width = Emu(1280 * EMU_PER_PX)
+    presentation.slide_height = Emu(720 * EMU_PER_PX)
+    blank = presentation.slide_layouts[6]
+    for boxes in slides:
+        slide = presentation.slides.add_slide(blank)
+        for box in boxes:
+            geometry = (Emu(round(value * EMU_PER_PX)) for value in (box.x, box.y, box.w, box.h))
+            shape = slide.shapes.add_textbox(*geometry)
+            shape.rotation = box.rotate
+            frame = shape.text_frame
+            lines = box.text.split("\n")
+            frame.word_wrap = len(lines) > 1
+            for index, line in enumerate(lines):
+                paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+                paragraph.alignment = alignments[box.align]
+                if box.rtl:
+                    paragraph._p.get_or_add_pPr().set("rtl", "1")
+                run = paragraph.add_run()
+                run.text = line
+                run.font.size = Pt(box.size * PT_PER_PX)
+            if box.script:
+                text, size = box.script
+                run = paragraph.add_run()
+                run.text = text
+                run.font.size = Pt(size / superscript_factor * PT_PER_PX)
+                run.font._rPr.set("baseline", "30000")
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def _harness_missing(boxes: tuple[Box, ...], reference: str) -> list[str]:
+    """The words the harness's check (check_text_loss) reports missing from a slide of ``boxes``."""
+    return reference_text_loss(_deck_of_boxes([boxes]), [reference])[0]
+
+
+def _boxes_of_slide(pptx: bytes) -> tuple[Box, ...]:
+    """The text boxes of a written deck's first slide, as Boxes, in the order it paints them.
+
+    Each box's size is its largest run that is no superscript or subscript;
+    a justified box is aligned as the export writes one, from its start.
+    """
+    boxes = []
+    for shape in slide_shapes(pptx):
+        if shape.kind != "text" or not shape.text:
+            continue
+        sizes = [
+            run.size_pt / PT_PER_PX
+            for para in shape.paras
+            for run in para.runs
+            if run.size_pt is not None and run.baseline is None
+        ]
+        first = shape.paras[0]
+        align = first.align if first.align in ("center", "right") else "left"
+        boxes.append(
+            Box(
+                shape.text,
+                shape.x,
+                shape.y,
+                shape.w,
+                shape.h,
+                max(sizes, default=0),
+                align,
+                first.rtl,
+                shape.rotation,
+            )
+        )
+    return tuple(boxes)
+
+
+def _without_text_boxes(pptx: bytes, texts: tuple[str, ...]) -> bytes:
+    """The deck with its first slide's text boxes that hold one of ``texts`` taken out."""
+    from pptx import Presentation
+
+    presentation = Presentation(io.BytesIO(pptx))
+    slide = presentation.slides[0]
+    taken = [
+        shape
+        for shape in slide.shapes
+        if shape.has_text_frame and shape.text_frame.text.strip() in texts
+    ]
+    assert sorted(shape.text_frame.text.strip() for shape in taken) == sorted(texts), (
+        f"fixture drift: the deck's text boxes for {texts} are {[s.text_frame.text for s in taken]}"
+    )
+    for shape in taken:
+        shape._element.getparent().remove(shape._element)
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return buffer.getvalue()
+
+
+def _emit_typography_constant(name: str) -> float:
+    """The value of ``const NAME = <number>;`` in the sidecar's ``emit_typography.cjs``."""
+    source = (Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_typography.cjs").read_text()
+    found = re.findall(rf"^const {re.escape(name)} = (-?[\d.]+);", source, re.MULTILINE)
+    assert len(found) == 1, (
+        f"emit_typography.cjs defines `const {name} = <number>;` {len(found)} times"
+    )
+    return float(found[0])
+
+
+# The neighbour rule's constants, by their names in text_check.cjs and run.py.
+NEIGHBOUR_CONSTANTS = (
+    "SLACK_FRACTION",
+    "SLACK_PX",
+    "SAME_LINE_OVERLAP",
+    "NEIGHBOUR_GAP_EM",
+    "NEIGHBOUR_OVERLAP_EM",
+    "ACROSS_ITEM_LIMIT",
+)
+
+
+def _text_check_constants() -> dict[str, float]:
+    """The neighbour rule's constants as text_check.cjs exports them."""
+    script = (
+        f"const textCheck = require({json.dumps(str(TEXT_CHECK_MODULE))});"
+        f"process.stdout.write(JSON.stringify(Object.fromEntries("
+        f"{json.dumps(list(NEIGHBOUR_CONSTANTS))}.map((name) => [name, textCheck[name]]))));"
+    )
+    return node_json(script)
 
 
 def _missing_from_line(line: object) -> list[str]:
@@ -677,74 +1263,75 @@ class TestTextLossLine:
         assert _text_loss_line("Liquidity", items, "") is None
         assert _missing_from_line(_text_loss_line("Liquidity Solvency", items, "")) == ["Solvency"]
 
-    def test_a_numeral_an_inline_block_joins_to_its_word_is_written(self) -> None:
-        """ "1Financials": the numeral is an item of its own, after its line in paint order.
+    def test_items_without_a_box_are_no_neighbours(self) -> None:
+        """GUARD: a text item with no box (x, y, w, h) has no place on the slide to be beside."""
+        items = [_text_item(("Financials — Revenue up 9%",)), _text_item(("1",))]
+        assert _missing_from_line(_text_loss_line("1Financials", items, "")) == ["1Financials"]
 
-        innerText runs the inline-block numeral into the word after it, and the
-        model writes them in two items, which it does not hold side by side
-        (long-off 02, 03 and 27). Every character is written, at the items'
-        edges, so no word is missing.
+
+@requires_node
+class TestWordsAcrossNeighbours:
+    """``textLossLine`` finds a word written across neighbours, and only there (Task 15 H2).
+
+    Each case of ACROSS_CASES is a slide of boxes, given as a slide model's
+    text items; TestHarnessWordsAcrossNeighbours reads the same cases as decks.
+    """
+
+    @pytest.mark.parametrize("case", tuple(ACROSS_CASES))
+    def test_a_word_is_written_across_neighbours_only(self, case: str) -> None:
+        boxes, reference, missing = ACROSS_CASES[case]
+        assert _sidecar_missing(boxes, reference) == missing
+
+    def test_the_slack_and_the_line_are_the_snapshots(self) -> None:
+        """A box's slack and what one line is are snapshot_text.mjs's own, which lays them out."""
+        constants = _text_check_constants()
+        for name in ("SLACK_FRACTION", "SLACK_PX", "SAME_LINE_OVERLAP"):
+            assert constants[name] == _snapshot_text_constant(name), name
+
+    def test_the_neighbour_search_reads_at_most_its_limit_of_items(self) -> None:
+        """BOUND: every item the rule reads is compared with every other, so it reads a bounded
+        number, ACROSS_ITEM_LIMIT, the first the slide paints: no slide the matrix or the
+        corpora hold paints more than 51 text items.
+
+        Below the numeral and its word, fillers each a line of their own, none a
+        neighbour of anything: with the pair the last two items read, the word
+        is written; one filler more, and the word's head is past the limit.
         """
-        items = [
-            _text_item(("Financials — Revenue up 9%",)),
-            _text_item(("1",)),
-            _text_item(("Operations — On-time delivery",)),
-            _text_item(("2",)),
-        ]
-        reference = "1Financials — Revenue up 9% 2Operations — On-time delivery"
-        assert _text_loss_line(reference, items, "") is None
+        limit = int(_text_check_constants()["ACROSS_ITEM_LIMIT"])
 
-    def test_a_chip_and_the_comma_after_it_are_written(self) -> None:
-        """ "Iceberg,": the chip is an item of its own, the comma starts the text after it.
+        def slide(fillers: int) -> list[dict]:
+            spacing = 600 / fillers
+            filled = [
+                _model_item(_box_around("f", 10, 15, y=110 + index * spacing, h=spacing / 2))
+                for index in range(fillers)
+            ]
+            return [*filled, _model_item(NUMERAL), _model_item(_financials(130))]
 
-        The line is cut at the chips, and the chips paint after the line's text
-        (dense-tpl18 03).
-        """
-        items = [
-            _text_item(("Open table formats such as",)),
-            _text_item(("and",)),
-            _text_item((",",)),
-            _text_item(("together with",)),
-            _text_item(("Delta Lake",)),
-            _text_item(("Apache Iceberg",)),
-        ]
-        reference = "Open table formats such as Delta Lake and Apache Iceberg, together with"
-        assert _text_loss_line(reference, items, "") is None
-
-    def test_a_word_split_across_items_is_missing_when_a_piece_is(self) -> None:
-        """CONTROL: the pieces must each be written, and at the items' edges.
-
-        * the word after the numeral lost: "1Financials" is missing;
-        * the numeral lost: "1Financials" is missing;
-        * the comma after the chip lost: "Iceberg," is missing;
-        * a "1" and a "Financials" written inside other text are no edges.
-        """
-        lost_word = [_text_item(("— Revenue up 9%",)), _text_item(("1",))]
-        assert _missing_from_line(_text_loss_line("1Financials", lost_word, "")) == ["1Financials"]
-        lost_numeral = [_text_item(("Financials — Revenue up 9%",))]
-        assert _missing_from_line(_text_loss_line("1Financials", lost_numeral, "")) == [
+        assert _text_loss_line("1Financials", slide(limit - 2), "") is None
+        assert _missing_from_line(_text_loss_line("1Financials", slide(limit - 1), "")) == [
             "1Financials"
         ]
-        lost_comma = [_text_item(("together with",)), _text_item(("Apache Iceberg",))]
-        assert _missing_from_line(_text_loss_line("Iceberg, together", lost_comma, "")) == [
-            "Iceberg,"
-        ]
-        inside = [_text_item(("a total of 1 shown",)), _text_item(("the Financials team",))]
-        assert _missing_from_line(_text_loss_line("1Financials", inside, "")) == ["1Financials"]
 
-    def test_a_page_long_word_is_not_looked_for_across_items(self) -> None:
-        """BOUND: the page writes the reference, so a word of any length can reach the check.
+    def test_a_slide_of_stacked_neighbours_is_checked_in_time(self) -> None:
+        """BOUND: ACROSS_ITEM_LIMIT items in one place, each a neighbour of every other, and a
+        reference of 2,000 words none of them holds, are checked inside the Node call's timeout."""
+        limit = int(_text_check_constants()["ACROSS_ITEM_LIMIT"])
+        items = [_model_item(_box_around("xy", 100, 110, size=100, h=100)) for _ in range(limit)]
+        words = [f"w{index}" for index in range(2000)]
+        assert _missing_from_line(_text_loss_line(" ".join(words), items, "")) == words
 
-        The items hold every run of 1 to ACROSS_LIMIT x's, which makes a word of
-        x's fit their edges at every point: read across items without the
-        limit, a 20,000-character word costs a cubic number of character
-        copies, far past the Node call's timeout. Longer than the limit, it is
-        not looked for, and is missing.
+    def test_a_page_long_word_written_across_neighbours_is_found(self) -> None:
+        """A word of any length is looked for: the chains' text is no longer than the slide's.
+
+        20,000 x's, written as two neighbours of 10,000 each that the slide does
+        not paint one after the other.
         """
-        limit = _across_limit()
-        items = [_text_item(("x" * length,)) for length in range(1, limit + 1)]
-        word = "x" * 20000
-        assert _missing_from_line(_text_loss_line(word, items, "")) == [word]
+        items = [
+            _model_item(_box_around("x" * 10000, 100, 600)),
+            _model_item(_box_around("filler", 100, 160, y=300)),
+            _model_item(_box_around("x" * 10000, 609, 1100)),
+        ]
+        assert _text_loss_line("x" * 20000, items, "") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1217,57 +1804,43 @@ class TestHarnessOracle:
         dashed = _deck_of_texts([["end-to-end"]])
         assert reference_text_loss(dashed, ["end\u2013to\u2013end"]) == [["end\u2013to\u2013end"]]
 
-    def test_a_numeral_an_inline_block_joins_to_its_word_is_no_loss(self) -> None:
-        """ "1Financials": the numeral is a text box of its own, after its line's (long-off 02).
+    def test_boxes_the_slide_paints_one_after_the_other_are_no_neighbours(self) -> None:
+        """GUARD: a word is in one box's text or across neighbours, never across boxes merely
+        written one after the other (python-pptx stacks _deck_of_texts' boxes a line apart)."""
+        pptx = _deck_of_texts([["Customer Data", "Insights for every team"]])
+        assert reference_text_loss(pptx, ["Customer Data AI Insights"]) == [["AI"]]
 
-        Every character is written, at the boxes' edges, so no word is lost.
-        """
-        pptx = _deck_of_texts(
-            [["Financials — Revenue up 9%", "1", "Operations — On-time delivery", "2"]]
+
+class TestHarnessWordsAcrossNeighbours:
+    """``check_text_loss`` reads ACROSS_CASES as ``textLossLine`` does, each slide a deck."""
+
+    @pytest.mark.parametrize("case", tuple(ACROSS_CASES))
+    def test_a_word_is_written_across_neighbours_only(self, case: str) -> None:
+        boxes, reference, missing = ACROSS_CASES[case]
+        assert _harness_missing(boxes, reference) == missing
+
+    @requires_node
+    def test_the_harness_reads_neighbours_as_the_sidecar_does(self) -> None:
+        """The two checks report the same words: one rule, with the sidecar's constants."""
+        harness = fidelity_harness()
+        assert {name: getattr(harness, name) for name in NEIGHBOUR_CONSTANTS} == (
+            _text_check_constants()
         )
-        reference = "1Financials — Revenue up 9% 2Operations — On-time delivery"
-        assert reference_text_loss(pptx, [reference]) == [[]]
 
-    def test_a_chip_and_the_comma_after_it_are_no_loss(self) -> None:
-        """ "Iceberg,": the chip is a text box of its own; the comma starts the box after it
-        (dense-tpl18 03)."""
-        pptx = _deck_of_texts(
-            [
-                [
-                    "Open table formats such as",
-                    "and",
-                    ",",
-                    "together with",
-                    "Delta Lake",
-                    "Apache Iceberg",
-                ]
+    def test_the_neighbour_search_reads_at_most_its_limit_of_boxes(self) -> None:
+        """BOUND: as the sidecar's, the first ACROSS_ITEM_LIMIT boxes the rule can read."""
+        limit = fidelity_harness().ACROSS_ITEM_LIMIT
+
+        def deck(fillers: int) -> bytes:
+            spacing = 600 / fillers
+            filled = [
+                _box_around("f", 10, 15, y=110 + index * spacing, h=spacing / 2)
+                for index in range(fillers)
             ]
-        )
-        reference = "Open table formats such as Delta Lake and Apache Iceberg, together with"
-        assert reference_text_loss(pptx, [reference]) == [[]]
+            return _deck_of_boxes([(*filled, NUMERAL, _financials(130))])
 
-    def test_the_harness_reads_words_across_boxes_as_the_sidecar_does(self) -> None:
-        """The two checks report the same words: one limit to the words read across items."""
-        assert fidelity_harness().ACROSS_LIMIT == _across_limit()
-
-    def test_a_word_split_across_boxes_is_lost_when_a_piece_is(self) -> None:
-        """CONTROL: each piece must be written, and at the boxes' edges.
-
-        The word after the numeral, the numeral, or the comma after the chip
-        lost; and a "1" and a "Financials" written only inside other text.
-        """
-        cases = {
-            "lost word": (["— Revenue up 9%", "1"], "1Financials", ["1Financials"]),
-            "lost numeral": (["Financials — Revenue up 9%"], "1Financials", ["1Financials"]),
-            "lost comma": (["together with", "Apache Iceberg"], "Iceberg, together", ["Iceberg,"]),
-            "inside": (
-                ["a total of 1 shown", "the Financials team"],
-                "1Financials",
-                ["1Financials"],
-            ),
-        }
-        for name, (texts, reference, lost) in cases.items():
-            assert reference_text_loss(_deck_of_texts([texts]), [reference]) == [lost], name
+        assert reference_text_loss(deck(limit - 2), ["1Financials"]) == [[]]
+        assert reference_text_loss(deck(limit - 1), ["1Financials"]) == [["1Financials"]]
 
 
 @pytest.mark.slow
@@ -1312,6 +1885,32 @@ class TestWordsAcrossAtomicInlines:
         assert logged.failures == [], logged.failures
         assert text_missing_reports(logged.stderr) == [], f"stderr:\n{logged.stderr[-3000:]}"
         assert text_loss(logged.pptx, [ATOMIC_DOCUMENT]) == [[]]
+
+    def test_chips_lost_from_a_real_export_are_reported_by_both_checks(self) -> None:
+        """REAL LOSS: the review's probe, exported, then its chips taken out of the deck.
+
+        Exported whole, neither check reports a word. With the chips' text boxes
+        taken out, each chip's letters still end and start the boxes either
+        side of where it was ("Customer Dat[a] | [I]nsights"), and both checks
+        report the three chips: the harness's over the deck, the sidecar's over
+        the deck's own boxes read as a slide model's items, so both read the
+        geometry the real engine wrote.
+        """
+        document = _pinned_case_document(PROBE_BODY)
+        reference = browser_text(document)
+        assert all(chip in reference.split() for chip in PROBE_CHIPS), (
+            f"fixture drift: innerText no longer reads the chips as words: {reference!r}"
+        )
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([document], monkeypatch=monkeypatch)
+        assert logged.failures == [], logged.failures
+        assert text_missing_reports(logged.stderr) == [], f"stderr:\n{logged.stderr[-3000:]}"
+        assert text_loss(logged.pptx, [document]) == [[]]
+        assert _sidecar_missing(_boxes_of_slide(logged.pptx), reference) == []
+
+        lost = _without_text_boxes(logged.pptx, PROBE_CHIPS)
+        assert text_loss(lost, [document]) == [list(PROBE_CHIPS)]
+        assert _sidecar_missing(_boxes_of_slide(lost), reference) == list(PROBE_CHIPS)
 
 
 # ---------------------------------------------------------------------------
