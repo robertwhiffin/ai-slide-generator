@@ -802,12 +802,63 @@ PAIR_BODY = (
     "<tbody><tr><td>UC 1</td><td>$184</td></tr><tr><td>UC 2</td><td>$142</td></tr>"
     "</tbody></table></div></div>"
 )
+# The rounded data table under a header whose first cell spans two columns: the corner
+# cell's bottom side lies along two slots, the second translucent (the first body row's
+# middle cell, its row painting nothing), so that side runs under neither.
+SPAN_CORNER_BODY = (
+    '<div class="slide"><div id="span-corner-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th colspan="2">Use case and measurement</th>'
+    '<th>Cost</th></tr></thead><tbody><tr style="background: none;">'
+    '<td style="background: #FFFFFF;">UC 1</td><td style="background: rgba(27, 49, 57, 0.1);">'
+    'Batch load</td><td style="background: #FFFFFF;">$184</td></tr>'
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# A two-row header: the first corner cell spans both rows; across its right side, the
+# top slot is a header cell spanning two columns, opaque, and the slot below it a
+# translucent cell, so that side runs under neither; the other top corner runs under
+# the spanning cell, its neighbour by its second slot.
+SPAN_NEIGHBOUR_BODY = (
+    '<div class="slide"><div id="span-neighbour-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th rowspan="2">Use case</th>'
+    '<th colspan="2">Measurement</th><th>Cost</th></tr>'
+    '<tr><th style="background: rgba(255, 95, 70, 0.5);">Run</th><th>Load</th><th>List</th></tr>'
+    "</thead><tbody><tr><td>UC 1</td><td>Batch</td><td>4 TB</td><td>$184</td></tr>"
+    "<tr><td>UC 2</td><td>DLT</td><td>1 TB</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# The slots each body paints translucent.
+TRANSLUCENT_SLOTS_OF = {
+    "translucent": TRANSLUCENT_SLOTS,
+    "span-corner": ((1, 1),),
+    "span-neighbour": ((1, 1),),
+}
 # Each Google-deck corner body's corner slots and the fill its piece paints.
 CORNER_PIECE_FILLS = {
     "rounded": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
     "translucent": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
     "thin": {(0, 0): "FF5F46", (0, 2): "FF5F46", (3, 0): "F3F3F3", (3, 2): "F3F3F3"},
     "pair": {(0, 0): "FF5F46", (0, 1): "FF5F46", (2, 0): "F3F3F3", (2, 1): "F3F3F3"},
+    "span-corner": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
+    "span-neighbour": {(0, 0): "FF5F46", (0, 3): "FF5F46", (3, 0): "F3F3F3", (3, 3): "F3F3F3"},
+}
+# The box (left, top, right, bottom, CSS px) of each body's top left corner piece in the
+# deck for Google Slides, from the browser's grid lines (GOOGLE_CORNER_GRID): each side
+# beside an opaque native cell 1 px past its line, beside the 1 px rule row half that,
+# and every other side on its line.
+GOOGLE_CORNER_BOXES = {
+    "rounded": (88.0, 160.0, 383.75, 208.0),
+    "thin": (88.0, 160.0, 383.75, 207.5),
+    "span-corner": (88.0, 160.0, 787.1094, 207.0),
+    "span-neighbour": (88.0, 160.0, 375.9531, 255.0),
+}
+# The browser's grid lines those boxes are measured from: the corner cell's right
+# column line and bottom row line.
+GOOGLE_CORNER_GRID = {
+    "rounded": (382.75, 207.0),
+    "thin": (382.75, 207.0),
+    "span-corner": (787.1094, 207.0),
+    "span-neighbour": (375.9531, 254.0),
 }
 # How far, in the deck for Google Slides, a corner cell's shape runs under each opaque
 # native neighbour (snapshot.mjs CORNER_RUN_UNDER_PX; CALIBRATION.md D13).
@@ -910,6 +961,8 @@ INLINE_BODIES = {
     "translucent": TRANSLUCENT_BODY,
     "thin": THIN_BODY,
     "pair": PAIR_BODY,
+    "span-corner": SPAN_CORNER_BODY,
+    "span-neighbour": SPAN_NEIGHBOUR_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
     "dots": DOTS_BODY,
@@ -3584,7 +3637,9 @@ class TestRoundedWrapper:
             f"{outside[:4]}; on its arcs: {arcs}"
         )
 
-    @pytest.mark.parametrize("name", ["rounded", "translucent", "thin", "pair"])
+    @pytest.mark.parametrize(
+        "name", ["rounded", "translucent", "thin", "pair", "span-corner", "span-neighbour"]
+    )
     def test_in_the_deck_for_google_a_corner_piece_runs_under_its_opaque_neighbours(
         self, google_inline_export: Callable[[str], bytes], name: str
     ) -> None:
@@ -3609,6 +3664,12 @@ class TestRoundedWrapper:
           (``translucent``: the first body row's middle cell);
         * no corner cell's shape runs under another corner cell, which the
           table leaves unfilled too (``pair``: a two-column table);
+        * a side runs under only where every slot across it is opaque: a corner
+          cell spanning two columns, the second slot below it translucent
+          (``span-corner``), and one spanning two rows beside a header cell
+          spanning two columns over a translucent slot (``span-neighbour``),
+          runs under neither; the spanning neighbour is opaque by both its
+          slots, so the other corner runs under it;
         * the outer corner is still cut to the wrapper's 8 px arc, and the
           corner cell's own a:tc is unfilled.
         """
@@ -3620,9 +3681,10 @@ class TestRoundedWrapper:
         frame_position, frame = _frame_for(shapes, _grid_rect(table), f"the {name} data table")
         assert frame.table is not None
         heights, widths = frame.table.row_heights, frame.table.col_widths
-        if name == "translucent":
+        if name in TRANSLUCENT_SLOTS_OF:
             alphas = {
-                slot: frame.table.rows[slot[0]][slot[1]].fill_alpha for slot in TRANSLUCENT_SLOTS
+                slot: frame.table.rows[slot[0]][slot[1]].fill_alpha
+                for slot in TRANSLUCENT_SLOTS_OF[name]
             }
             assert all(alpha is not None and alpha < 1 for alpha in alphas.values()), (
                 f"fixture drift: the translucent slots' fill alphas are {alphas}"
@@ -3643,19 +3705,30 @@ class TestRoundedWrapper:
             left, top = rect["x"], rect["y"]
             right, bottom = left + rect["w"], top + rect["h"]
 
+            last_row, last_col = row + cell.row_span, col + cell.grid_span
+
             def reach(opaque: bool, size: float) -> float:
                 return min(CORNER_RUN_UNDER_PX, size / 2) if opaque else 0.0
 
+            def across(rows: range, cols: range) -> bool:
+                return all(_opaque_slot(frame, r, c) for r in rows for c in cols)
+
             reaches = {
-                "top": reach(_opaque_slot(frame, row - 1, col), heights[row - 1] if row else 0),
-                "bottom": reach(
-                    _opaque_slot(frame, row + 1, col),
-                    heights[row + 1] if row + 1 < len(heights) else 0,
+                "top": reach(
+                    across(range(row - 1, row), range(col, last_col)),
+                    heights[row - 1] if row else 0,
                 ),
-                "left": reach(_opaque_slot(frame, row, col - 1), widths[col - 1] if col else 0),
+                "bottom": reach(
+                    across(range(last_row, last_row + 1), range(col, last_col)),
+                    heights[last_row] if last_row < len(heights) else 0,
+                ),
+                "left": reach(
+                    across(range(row, last_row), range(col - 1, col)),
+                    widths[col - 1] if col else 0,
+                ),
                 "right": reach(
-                    _opaque_slot(frame, row, col + 1),
-                    widths[col + 1] if col + 1 < len(widths) else 0,
+                    across(range(row, last_row), range(last_col, last_col + 1)),
+                    widths[last_col] if last_col < len(widths) else 0,
                 ),
             }
             # Inside the run-under, half way; or, where a side does not run under, 0.5 px past it.
@@ -3680,12 +3753,12 @@ class TestRoundedWrapper:
                 if reaches[vertical] and reaches[horizontal]:
                     x = left - depth["left"] if horizontal == "left" else right + depth["right"]
                     y = top - depth["top"] if vertical == "top" else bottom + depth["bottom"]
-                    across = _opaque_slot(
+                    diagonal = _opaque_slot(
                         frame,
-                        row + (-1 if vertical == "top" else 1),
-                        col + (-1 if horizontal == "left" else 1),
+                        row - 1 if vertical == "top" else last_row,
+                        col - 1 if horizontal == "left" else last_col,
                     )
-                    probes[f"the {vertical}-{horizontal} corner square"] = ((x, y), across)
+                    probes[f"the {vertical}-{horizontal} corner square"] = ((x, y), diagonal)
             corner_x, corner_y = _corner_of(rect, corner)
             inward = (0.5 if "left" in corner else -0.5, 0.5 if "top" in corner else -0.5)
             probes["the square corner the arc cuts"] = (
@@ -3714,6 +3787,51 @@ class TestRoundedWrapper:
                 )
         assert not wrong, f"the {name} table's corner pieces in the Google deck:\n" + "\n".join(
             [*wrong, _describe(shapes)]
+        )
+
+    @pytest.mark.parametrize("name", sorted(GOOGLE_CORNER_BOXES))
+    def test_in_the_deck_for_google_the_top_left_corner_piece_has_its_measured_box(
+        self, google_inline_export: Callable[[str], bytes], name: str
+    ) -> None:
+        """D13 in literal px: the top left corner piece's box in the deck for Google Slides.
+
+        Each box is the browser's grid read off once (GOOGLE_CORNER_GRID) and
+        moved by hand: ``rounded``'s piece 1 px past its right line (382.75)
+        and its bottom line (207); ``thin``'s 1 px right and 0.5 px down, into
+        its 1 px rule row; ``span-corner``'s nowhere, its bottom slots one
+        translucent and its right neighbour another corner cell;
+        ``span-neighbour``'s 1 px down only. Each side within 0.01 px.
+        """
+        document = _inline_document(name)
+        (table,) = browser_tables(document, "table")
+        columns, rows = _browser_grid_lines(table)
+        right_line, bottom_line = GOOGLE_CORNER_GRID[name]
+        origin = next(cell for cell in table.cells if cell.row == 0 and cell.col == 0)
+        measured = (columns[origin.col + origin.col_span], rows[origin.row + origin.row_span])
+        assert abs(measured[0] - right_line) < 0.01 and abs(measured[1] - bottom_line) < 0.01, (
+            f"fixture drift: the {name} corner cell's right and bottom lines are {measured}, "
+            f"the boxes were measured from {GOOGLE_CORNER_GRID[name]}"
+        )
+        pptx = google_inline_export(name)
+        shapes = slide_shapes(pptx)
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), f"the {name} data table")
+        points = _corner_piece(
+            shapes,
+            slide_shape_elements(pptx),
+            frame_position,
+            CORNER_PIECE_FILLS[name][(0, 0)],
+            table_cell_rect(frame, 0, 0),
+        )
+        box = (
+            min(point[0] for point in points),
+            min(point[1] for point in points),
+            max(point[0] for point in points),
+            max(point[1] for point in points),
+        )
+        expected = GOOGLE_CORNER_BOXES[name]
+        assert all(abs(a - b) <= 0.01 for a, b in zip(box, expected)), (
+            f"the {name} table's top left corner piece spans {tuple(round(v, 4) for v in box)}; "
+            f"expected {expected} (left, top, right, bottom)"
         )
 
 
