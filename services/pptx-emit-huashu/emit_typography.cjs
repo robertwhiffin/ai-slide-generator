@@ -15,7 +15,18 @@
 // The weight named is the face the browser painted with. That is CSS font
 // matching over the weights the page loaded, so 600 with only 400 and 700
 // loaded is 700. A bold request that only a lighter face could meet is the
-// browser's synthetic bold, so it is written as that face plus bold.
+// browser's synthetic bold, drawn at that face's own advances. The deck for
+// PowerPoint writes it as that face plus bold, which PowerPoint draws at the
+// face's advances. The deck for Google Slides writes the face alone: Drive
+// converts a bold flag to weight 700, and Google draws a family without a 700
+// (DM Mono) as Regular in a faux bold laid out about 0.4 px a glyph wider than
+// it is drawn, and a family with a Bold the page did not load (DM Sans loaded
+// at 400 and 500) in that Bold, whose advances are wider. Either way a
+// right-aligned run ends short of where the browser ends it (5.6 to 10 px on
+// the probe lines), where the face alone lies within 0.06 px and draws 10 to
+// 12% lighter than the browser's synthetic bold at 2x, against Google's own
+// plain runs (measured through Drive: scripts/export_fidelity/CALIBRATION.md,
+// D12).
 //
 // Italics, in the deck for PowerPoint (target 'pptx'). The static fonts name
 // each italic but Bold Italic a family of its own, with no italic bit ("DM Sans
@@ -143,12 +154,15 @@ function loadedHundreds(loadedWeights) {
   return loaded;
 }
 
-// typefaceFor(family, weight, loadedWeights) -> {fontFace, bold}
+// typefaceFor(family, weight, loadedWeights, target) -> {fontFace, bold}
 //   family         the run's CSS family;
 //   weight         its CSS weight;
 //   loadedWeights  the weights of that family's webfont faces the page loaded
-//                  (model.fonts), empty for a family that is not a loaded webfont.
-function typefaceFor(family, weight, loadedWeights) {
+//                  (model.fonts), empty for a family that is not a loaded webfont;
+//   target         the renderer the deck is written for, 'pptx' (also when
+//                  none is named) or 'gslides', which writes the browser's
+//                  synthetic bold as the lighter face alone (see Weights).
+function typefaceFor(family, weight, loadedWeights, target) {
   const name = String(family || '');
   const requested = cssWeight(weight);
   const loaded = loadedHundreds(loadedWeights);
@@ -159,9 +173,10 @@ function typefaceFor(family, weight, loadedWeights) {
   const face = matchedWeight(requested, loaded);
   if (face === BOLD_WEIGHT) return { fontFace: name, bold: true };
   const weightName = WEIGHT_NAMES[face];
+  const syntheticBold = requested >= BOLD_FROM_WEIGHT && face < BOLD_FROM_WEIGHT;
   return {
     fontFace: weightName ? `${name} ${weightName}` : name,
-    bold: requested >= BOLD_FROM_WEIGHT && face < BOLD_FROM_WEIGHT,
+    bold: syntheticBold && target !== 'gslides',
   };
 }
 
@@ -246,10 +261,11 @@ function targetOf(sizing) {
 function runOptions(run, faces, sizing) {
   const known = faces && typeof faces === 'object' ? faces : {};
   const weights = loadedWeightsOf(known.weights, run.family);
-  const face = run.italic && targetOf(sizing) === 'pptx'
+  const target = targetOf(sizing);
+  const face = run.italic && target === 'pptx'
     ? italicTypefaceFor(run.family, run.weight, weights, loadedWeightsOf(known.italicWeights, run.family))
-    : { ...typefaceFor(run.family, run.weight, weights), italic: Boolean(run.italic) };
-  const measuredPx = targetOf(sizing) === 'pptx' ? run.unkernedTrackingPx : run.opticalTrackingPx;
+    : { ...typefaceFor(run.family, run.weight, weights, target), italic: Boolean(run.italic) };
+  const measuredPx = target === 'pptx' ? run.unkernedTrackingPx : run.opticalTrackingPx;
   const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(measuredPx) || 0);
   return {
     fontFace: xmlAttribute(face.fontFace),

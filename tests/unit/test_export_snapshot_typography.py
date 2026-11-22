@@ -64,6 +64,7 @@ from lxml import etree
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
+    DRIVE_FILES_URL,
     LATIN_UNICODE_RANGE,
     PINNED_FONT_DIR,
     Run,
@@ -77,11 +78,15 @@ from tests.fixtures.export_snapshot_support import (
     browser_text,
     corpus_document,
     cut_widths,
+    delete_drive_file,
     export_corpus,
     export_slides,
+    fidelity_harness,
+    google_slides_presentation,
     google_tracking_px,
     node_json,
     powerpoint_tracking_px,
+    requires_google_slides,
     requires_huashu_sidecar,
     requires_node,
     slide_document,
@@ -147,6 +152,38 @@ WEIGHTS_SLIDE = (
     f'<p id="bold" style="font-size: 24px; font-weight: 700;">{BOLD_TEXT}</p>'
     '<p id="system-arial" style="font-family: system-ui, Arial; font-size: 24px; '
     f'font-weight: 600;">{SYSTEM_ARIAL_TEXT}</p>'
+    "</div>"
+)
+
+# D12, the browser's synthetic bold. deck.css loads DM Mono at 400 and 500 alone,
+# so DM Mono asked for at 600 or 700 is the 500 face, which the browser paints in
+# synthetic bold at that face's own advances. A right-aligned line, a left-aligned
+# one followed by a plain run, and a right-aligned table cell, as the corpus's
+# bold figures and headers are; and two controls: DM Mono at 500, the Medium face
+# itself, and DM Sans at 700, a weight the page loaded.
+SYNTHETIC_BOLD_RIGHT = "434.0 148.8 $1,060"
+SYNTHETIC_BOLD_LEFT = "Margin FY24 vs FY23"
+SYNTHETIC_BOLD_TAIL = "|tail"
+SYNTHETIC_BOLD_CELL = "Total 1,240.0"
+SYNTHETIC_BOLD_MEDIUM = "Medium mono control"
+SYNTHETIC_BOLD_SANS = "Loaded bold sans"
+SYNTHETIC_BOLD_MONO_STYLE = "font-family: var(--mono); font-size: 20px; margin: 0;"
+SYNTHETIC_BOLD_SLIDE = (
+    '<div class="slide">'
+    '<p id="mono-right" style="position: absolute; left: 600px; top: 100px; width: 600px; '
+    f'{SYNTHETIC_BOLD_MONO_STYLE} font-weight: 700; text-align: right;">{SYNTHETIC_BOLD_RIGHT}</p>'
+    '<p id="mono-left" style="position: absolute; left: 88px; top: 100px; '
+    f'{SYNTHETIC_BOLD_MONO_STYLE}">'
+    f'<span id="mono-left-bold" style="font-weight: 600;">{SYNTHETIC_BOLD_LEFT}</span>'
+    f'<span id="mono-tail">{SYNTHETIC_BOLD_TAIL}</span></p>'
+    '<table style="position: absolute; left: 600px; top: 200px; width: 600px; '
+    'border-collapse: collapse;"><tbody><tr><td id="mono-cell" style="padding: 8px; '
+    f'{SYNTHETIC_BOLD_MONO_STYLE} font-weight: 700; text-align: right;">{SYNTHETIC_BOLD_CELL}</td>'
+    "</tr></tbody></table>"
+    '<p id="mono-medium" style="position: absolute; left: 88px; top: 300px; '
+    f'{SYNTHETIC_BOLD_MONO_STYLE} font-weight: 500;">{SYNTHETIC_BOLD_MEDIUM}</p>'
+    '<p id="sans-bold" style="position: absolute; left: 88px; top: 400px; margin: 0; '
+    f'font-size: 20px; font-weight: 700;">{SYNTHETIC_BOLD_SANS}</p>'
     "</div>"
 )
 
@@ -425,6 +462,44 @@ def corpus_gslides_pptx() -> Iterator[bytes]:
         )
     assert failures == [], f"the export rejected a corpus slide: {failures}"
     yield pptx
+
+
+@pytest.fixture(scope="module")
+def synthetic_bold_decks() -> Iterator[dict[str, bytes]]:
+    """The synthetic-bold slide (D12) exported once for each target, ``pptx`` and ``gslides``."""
+    decks = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            pptx, failures = export_slides(
+                [SYNTHETIC_BOLD_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [], f"the {target} export rejected the slide: {failures}"
+            decks[target] = pptx
+    yield decks
+
+
+def _synthetic_bold_document() -> str:
+    """The document ``synthetic_bold_decks`` exported, with its slide id."""
+    return slide_document(SYNTHETIC_BOLD_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+
+
+def _guard_synthetic_bold(document: str) -> None:
+    """The fixture's premise: DM Mono loaded at 500 and nothing heavier, its bold runs at 600 and
+    700, the controls at 500 and (DM Sans, loaded at 700) 700."""
+    loaded = browser_loaded_weights(document)
+    assert 500 in loaded.get("DM Mono", []) and max(loaded.get("DM Mono", [0])) < 600, (
+        f"fixture drift: the page must load DM Mono 500 and nothing from 600 up, it loads {loaded}"
+    )
+    _guard_loaded(loaded, "DM Sans", 700)
+    for selector, weight in (
+        ("#mono-right", "700"),
+        ("#mono-left-bold", "600"),
+        ("#mono-tail", "400"),
+        ("#mono-cell", "700"),
+        ("#mono-medium", "500"),
+        ("#sans-bold", "700"),
+    ):
+        _guard_style(document, selector, fontWeight=weight)
 
 
 def _slide_index(name: str) -> int:
@@ -717,6 +792,63 @@ class TestSnapshotRunWeights:
             f"font-family: {family}: every run must be typeface {typeface!r}; these are not:\n  "
             + "\n  ".join(wrong)
         )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotSyntheticBold:
+    @pytest.mark.parametrize(("target", "bold"), [("pptx", True), ("gslides", False)])
+    def test_synthetic_bold_is_the_lighter_face_plus_bold_for_powerpoint_alone(
+        self, synthetic_bold_decks: dict[str, bytes], target: str, bold: bool
+    ) -> None:
+        """D12: DM Mono at 600 and 700 with only 400 and 500 loaded, the browser's synthetic bold.
+
+        Its face is the 500 face, so every such run is ``DM Mono Medium``: a
+        right-aligned line, a left-aligned run followed by a plain one, and a
+        right-aligned table cell's run. In the deck for PowerPoint it is bold,
+        which PowerPoint draws at Medium's own advances, where the browser
+        ends it. In the deck for Google Slides it is not bold: Drive converts
+        the bold flag to weight 700, which DM Mono lacks, and Google draws
+        Regular in a faux bold laid out about 0.4 px a glyph wider than it is
+        drawn, so a right-aligned figure ends short (5.6 to 10 px on the probe
+        lines; scripts/export_fidelity/CALIBRATION.md D12). The face alone is
+        drawn and laid out at Medium's advances, within 0.06 px of the browser.
+
+        The controls are the same in both decks: the plain run after the bold
+        one is ``DM Mono``, the 500 run ``DM Mono Medium`` never bold, and DM
+        Sans at 700, a weight the page loaded, the family plus bold.
+        """
+        _guard_synthetic_bold(_synthetic_bold_document())
+        shapes = slide_shapes(synthetic_bold_decks[target])
+        frames = [shape for shape in shapes if shape.kind == "table"]
+        assert len(frames) == 1, f"expected one native table:\n{_describe(shapes)}"
+        (cell,) = [cell for row in frames[0].table.rows for cell in row]
+        cell_runs = [run for para in cell.paras for run in para.runs if run.text.strip()]
+        found = {
+            SYNTHETIC_BOLD_RIGHT: _run(_box(shapes, SYNTHETIC_BOLD_RIGHT), SYNTHETIC_BOLD_RIGHT),
+            SYNTHETIC_BOLD_LEFT: _run(_box(shapes, SYNTHETIC_BOLD_LEFT), SYNTHETIC_BOLD_LEFT),
+            SYNTHETIC_BOLD_TAIL: _run(_box(shapes, SYNTHETIC_BOLD_LEFT), SYNTHETIC_BOLD_TAIL),
+            SYNTHETIC_BOLD_MEDIUM: _run(_box(shapes, SYNTHETIC_BOLD_MEDIUM), SYNTHETIC_BOLD_MEDIUM),
+            SYNTHETIC_BOLD_SANS: _run(_box(shapes, SYNTHETIC_BOLD_SANS), SYNTHETIC_BOLD_SANS),
+        }
+        assert [run.text.strip() for run in cell_runs] == [SYNTHETIC_BOLD_CELL], (
+            f"the table cell's runs are {[_describe_run(run) for run in cell_runs]}"
+        )
+        found[SYNTHETIC_BOLD_CELL] = cell_runs[0]
+        expected = {
+            SYNTHETIC_BOLD_RIGHT: ("DM Mono Medium", bold),
+            SYNTHETIC_BOLD_LEFT: ("DM Mono Medium", bold),
+            SYNTHETIC_BOLD_CELL: ("DM Mono Medium", bold),
+            SYNTHETIC_BOLD_TAIL: ("DM Mono", False),
+            SYNTHETIC_BOLD_MEDIUM: ("DM Mono Medium", False),
+            SYNTHETIC_BOLD_SANS: ("DM Sans", True),
+        }
+        wrong = [
+            f"{text!r}: {_describe_run(run)}, expected typeface and bold {expected[text]}"
+            for text, run in found.items()
+            if (run.typeface, run.bold) != expected[text]
+        ]
+        assert not wrong, f"the deck for {target}:\n  " + "\n  ".join(wrong)
 
 
 # ---------------------------------------------------------------------------
@@ -2256,6 +2388,75 @@ class TestTypographyModule:
         )
 
     @pytest.mark.parametrize(
+        ("family", "weight", "italic", "loaded", "face"),
+        [
+            pytest.param("DM Mono", 700, False, [400, 500], "DM Mono Medium", id="700-on-500"),
+            pytest.param("DM Mono", 600, False, [400, 500], "DM Mono Medium", id="600-on-500"),
+            pytest.param("DM Sans", 700, False, [400, 500], "DM Sans Medium", id="700-on-500-sans"),
+            pytest.param("DM Sans", 800, False, [300], "DM Sans Light", id="800-on-300"),
+            pytest.param("DM Sans", 600, False, [400], "DM Sans", id="600-on-400"),
+            pytest.param(
+                "DM Mono", 700, True, [400, 500], "DM Mono Medium", id="italic-700-on-500"
+            ),
+        ],
+    )
+    def test_synthetic_bold_is_the_lighter_face_without_bold_for_google(
+        self, family: str, weight: int, italic: bool, loaded: list[int], face: str
+    ) -> None:
+        """D12: a bold request only a lighter loaded face meets, the browser's synthetic bold.
+
+        The browser paints the lighter face (CSS matching over the weights the
+        page loaded, ``model.fonts``) in synthetic bold, at that face's own
+        advances. For Google Slides the run is that face with bold off, any
+        family: Drive converts a bold flag to weight 700, and Google draws a
+        family without a 700 as Regular in a faux bold laid out wider than it
+        is drawn, and one with a real Bold the page did not load in that Bold,
+        whose advances differ from the face's (CALIBRATION.md D12). An italic
+        run keeps its italic flag, as Google's deck writes every italic. For
+        PowerPoint the upright run is still the face plus bold.
+        """
+        faces = {"weights": {family: loaded}, "italicWeights": {}}
+        google = _run_options(
+            _plain_run(family=family, weight=weight, italic=italic), faces, "gslides"
+        )
+        assert (google.get("fontFace"), google.get("bold"), google.get("italic")) == (
+            face,
+            False,
+            italic,
+        ), f"{family} {weight} on {loaded} for Google is {google}, expected {face!r} without bold"
+        if not italic:
+            for target in (None, "pptx"):
+                powerpoint = _run_options(_plain_run(family=family, weight=weight), faces, target)
+                assert (powerpoint.get("fontFace"), powerpoint.get("bold")) == (face, True), (
+                    f"{family} {weight} on {loaded} for target {target!r} is {powerpoint}, "
+                    f"expected {face!r} plus bold"
+                )
+
+    @pytest.mark.parametrize(
+        ("family", "weight", "loaded", "expected"),
+        [
+            pytest.param("DM Sans", 700, [400, 700], ("DM Sans", True), id="a-loaded-700"),
+            pytest.param("DM Sans", 600, [400, 700], ("DM Sans", True), id="600-paints-700"),
+            pytest.param("DM Sans", 600, [400, 600], ("DM Sans SemiBold", False), id="loaded-600"),
+            pytest.param("Arial", 600, [], ("Arial", True), id="arial-not-loaded"),
+            pytest.param("Impact", 700, [], ("Impact", False), id="impact-single-weight"),
+        ],
+    )
+    def test_a_bold_no_lighter_face_stands_in_for_is_kept_for_google(
+        self, family: str, weight: int, loaded: list[int], expected: tuple[str, bool]
+    ) -> None:
+        """D12's rule reaches only the synthetic bold: every other weight is written alike in both
+        decks. A 700 face the page loaded is the family plus bold; 600 is its SemiBold where loaded;
+        a family the page did not load keeps its own name, bold from 600, and a single-weight
+        family is never bold."""
+        faces = {"weights": {family: loaded} if loaded else {}, "italicWeights": {}}
+        for target in ("pptx", "gslides"):
+            result = _run_options(_plain_run(family=family, weight=weight), faces, target)
+            assert (result.get("fontFace"), result.get("bold")) == expected, (
+                f"{family} {weight} on {loaded} for {target} is {result}, expected {expected}"
+            )
+
+    @pytest.mark.parametrize(
         ("weight", "faces", "expected"),
         [
             pytest.param(
@@ -2553,4 +2754,111 @@ class TestTypographyModule:
 
         assert isinstance(result, str) and result.upper() == expected, (
             f"blendOver({color!r}, {alpha}, {backdrop!r}) is {result!r}, expected {expected}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# D12 through Drive (opt-in)
+# ---------------------------------------------------------------------------
+
+# D12's ruling: a run's edges lie within 0.5 px of where the browser sets them.
+GOOGLE_PLACEMENT_TOLERANCE_PX = 0.5
+SLIDE_WIDTH_PX = 1280
+
+
+def _slides_api_weights(presentation: dict) -> dict[str, tuple[str | None, int | None]]:
+    """Each text run's text (stripped) on the first slide -> the Slides API's weighted family:
+    its ``fontFamily`` and ``weight``, from text boxes and table cells alike."""
+    found: dict[str, tuple[str | None, int | None]] = {}
+    texts = []
+    for element in presentation["slides"][0].get("pageElements", []):
+        if "text" in element.get("shape", {}):
+            texts.append(element["shape"]["text"])
+        for row in element.get("table", {}).get("tableRows", []):
+            texts.extend(cell["text"] for cell in row.get("tableCells", []) if "text" in cell)
+    for text in texts:
+        for part in text.get("textElements", []):
+            run = part.get("textRun")
+            if run and run["content"].strip():
+                family = run.get("style", {}).get("weightedFontFamily", {})
+                found[run["content"].strip()] = (family.get("fontFamily"), family.get("weight"))
+    return found
+
+
+def _pdf_glyphs(page, line: dict) -> list[tuple[str, float, float]]:
+    """(character, left, right) of every glyph Drive's PDF draws on the browser's ``line``, left
+    to right, in slide px: each glyph's advance box, as MuPDF reads it."""
+    scale = SLIDE_WIDTH_PX / page.rect.width
+    glyphs = [
+        (char["c"], char["bbox"][0] * scale, char["bbox"][2] * scale)
+        for block in page.get_text("rawdict")["blocks"]
+        for each in block.get("lines", [])
+        for span in each["spans"]
+        for char in span["chars"]
+        if line["y"] - 2 <= char["origin"][1] * scale <= line["y"] + line["h"] + 4
+        and char["c"].strip()
+    ]
+    return sorted(glyphs, key=lambda glyph: glyph[1])
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+@requires_google_slides
+class TestSyntheticBoldInGoogleSlides:
+    def test_a_synthetic_bold_run_is_drawn_where_the_browser_sets_it(
+        self, synthetic_bold_decks: dict[str, bytes]
+    ) -> None:
+        """Opt-in (``TELLR_GOOGLE_TESTS=1``, run with ``uv run --with pymupdf``).
+
+        The synthetic-bold slide's deck for Google Slides, converted through Drive:
+        * the Slides API reads every synthetic-bold run (the right-aligned line,
+          the left-aligned 600 run and the table cell's) as DM Mono at 500, the
+          Medium face, never at 700;
+        * in Drive's PDF of the presentation the right-aligned line's last glyph
+          ends where the browser ends it, and the plain run after the
+          left-aligned bold one starts where the browser starts it, each within
+          0.5 px.
+        Written as the face plus bold, Drive reads 700, and Google ends the
+        right-aligned line 10 px short and starts the plain run 4.7 px late
+        (CALIBRATION.md D12). The presentation is deleted afterwards.
+        """
+        fitz = pytest.importorskip("fitz", reason="reads Drive's PDF: run with --with pymupdf")
+        document = _synthetic_bold_document()
+        _guard_synthetic_bold(document)
+        (right,) = browser_line_boxes(document, "#mono-right")
+        (tail,) = browser_line_boxes(document, "#mono-tail")
+        conversion = google_slides_presentation(synthetic_bold_decks["gslides"], ["synthetic-bold"])
+        try:
+            weights = _slides_api_weights(conversion.presentation)
+            harness = fidelity_harness()
+            pdf_bytes = harness._google_request(
+                f"{DRIVE_FILES_URL}/{conversion.presentation_id}/export?mimeType=application/pdf",
+                harness._google_token(),
+            )
+        finally:
+            delete_drive_file(conversion.presentation_id)
+        read = {
+            text: weights.get(text)
+            for text in (SYNTHETIC_BOLD_RIGHT, SYNTHETIC_BOLD_LEFT, SYNTHETIC_BOLD_CELL)
+        }
+        assert all(found == ("DM Mono", 500) for found in read.values()), (
+            f"the Slides API reads the synthetic-bold runs as {read}; expected DM Mono at 500 each"
+        )
+        page = fitz.open(stream=pdf_bytes, filetype="pdf")[0]
+        line = _pdf_glyphs(page, right)
+        drawn = "".join(glyph[0] for glyph in line)
+        assert drawn.endswith(SYNTHETIC_BOLD_RIGHT.replace(" ", "")), (
+            f"Drive's PDF draws {drawn!r} on the right-aligned line"
+        )
+        browser_end = right["x"] + right["w"]
+        assert abs(line[-1][2] - browser_end) <= GOOGLE_PLACEMENT_TOLERANCE_PX, (
+            f"Google ends the right-aligned bold line at {line[-1][2]:.2f} px, the browser at "
+            f"{browser_end:.2f} ({line[-1][2] - browser_end:+.2f} px)"
+        )
+        starts = [
+            glyph[1] for glyph in _pdf_glyphs(page, tail) if glyph[0] == SYNTHETIC_BOLD_TAIL[0]
+        ]
+        assert len(starts) == 1 and abs(starts[0] - tail["x"]) <= GOOGLE_PLACEMENT_TOLERANCE_PX, (
+            f"Google starts the plain run after the bold one at {starts}, the browser at "
+            f"{tail['x']:.2f}"
         )
