@@ -95,6 +95,7 @@ jobs:
           required = [
               f"{base}/node_modules.tar.gz",
               f"{base}/sys-libs-bullseye.tar.gz",
+              f"{base}/fonts-liberation.tar.gz",
           ]
 
           with zipfile.ZipFile(wheel) as zf:

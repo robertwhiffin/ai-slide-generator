@@ -387,7 +387,12 @@ block (upstream issue #56). Each block becomes one text box.
   offset is calibrated against PowerPoint and Google Slides renders of a probe deck and
   pinned by a test.
 - **Runs** carry:
-  - font: family (the first face in the stack the document loaded), weight, italic, size;
+  - font: family, weight, italic, size. The family is the webfont the document loaded that
+    draws the run, or else the face the browser drew it in, by a name every app draws with its
+    metrics: Arial, Times New Roman or Courier New for their metric-compatible faces and for the
+    generic and system faces, Times New Roman where nothing in the stack draws, a face installed
+    on the machine as itself (Task 15 B8, N4; `scripts/export_fidelity/CALIBRATION.md` N4). A
+    symbol outside WGL4 the written face lacks is a run of its own in MS PGothic (D8);
   - colour, pre-blended against the resolved backdrop for any alpha or opacity;
   - letter spacing, `text-transform`, underline and strike-through;
   - superscript and subscript, and preserved `white-space`.

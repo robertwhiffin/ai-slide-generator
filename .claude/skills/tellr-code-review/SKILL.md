@@ -80,10 +80,13 @@ called!" bug) or shipped uncompressed (size limits), so the pipeline depends on
 a fragile, easy-to-break bundling chain:
 
 1. **Pre-built tarballs committed to git**:
-   `services/pptx-emit-huashu/node_modules.tar.gz` (~12 MB) and
-   `sys-libs-bullseye.tar.gz` (~18 MB). These are committed on purpose, *not*
-   built in CI. Regen instructions live in the header comment of
-   `services/pptx-emit-huashu/build-artifacts.sh`.
+   `services/pptx-emit-huashu/node_modules.tar.gz` (~12 MB),
+   `sys-libs-bullseye.tar.gz` (~18 MB) and `fonts-liberation.tar.gz` (~2.4 MB,
+   the Liberation faces and the fontconfig the sidecar's Chromium lays text out
+   in). These are committed on purpose, *not* built in CI. Regen instructions
+   live in the header comment of `services/pptx-emit-huashu/build-artifacts.sh`;
+   the font bundle is rebuilt byte-identically from a pinned release by
+   `scripts/sidecar_fonts/build_fonts_tarball.py`.
 2. **Verify step** (`build-artifacts.sh`) runs in `publish.yml` /
    `publish-dev.yml` before `python -m build`: checks the tarballs exist, are
    >1 MB (not truncated/dir-only), and contain `playwright*/cli.js`.
@@ -101,8 +104,8 @@ a fragile, easy-to-break bundling chain:
    `tests/unit/test_verify_app_wheel_huashu.py` keeps that list equal to the
    graph of the source tree.
 5. **`.databricksignore`** excludes the bulky uncompressed
-   `services/pptx-emit-huashu/node_modules/` and `playwright-browsers/` from
-   `deploy_local` uploads.
+   `services/pptx-emit-huashu/node_modules/`, `fonts/` and `playwright-browsers/`
+   from `deploy_local` uploads.
 
 **What to flag in review.** Raise a concern when a diff touches any link in
 this chain in a way that could break it silently:

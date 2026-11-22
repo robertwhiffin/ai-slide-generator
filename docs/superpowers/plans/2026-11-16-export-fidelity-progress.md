@@ -1607,3 +1607,155 @@ logs none.
 
 The matrix-deck and probe presentations B7 created (12) were deleted by id and confirmed gone (404).
 The decks earlier phases kept, and the T15 decks, are untouched.
+
+## Task 15, batch B8: text on Apps laid out and named as the user's machine draws it (N3, N4), engine `a2ce66e6`
+
+Commits: `1d81452c` (N3: the font bundle, `setup.sh`, `FONTCONFIG_FILE`, the wheel), `ae4c6cfe`
+(N3: unhinted glyph layout on Linux), `a2ce66e6` (N4: the face written; D8's symbols), then this
+ledger. The defects come from the real-deck matrix
+(`.superpowers/sdd/2026-11-16-export-fidelity-snapshot-emit/task-15-matrix-report.md` §4 N3 and
+N4, §12). Dev build `0.5.9.dev3` (`a2ce66e6`) carries them; the wheel is 34.2 MB (32.0 MB at
+`0.5.9.dev2`, +2.4 MB).
+
+### How it was measured
+
+- **On Apps.** A throwaway app on the dev workspace (`tellr-fonts-probe`) ran the published
+  sidecar's own `setup.sh`, tarballs and Playwright Chromium 147, with the B7-head engine and the B8
+  engine side by side: the container's faces and fontconfig, widths and faces through the DevTools
+  protocol, and every matrix deck exported by each engine. Then the real route: `0.5.9.dev3` on a
+  throwaway devloop instance (`fonts-probe`), a session of probe slides and matrix slides exported
+  through `/api/export/pptx/editable/huashu/from-html`. Both apps were deleted afterwards.
+- **Against the laptop.** The same export documents, built by the production `build_slide_html`,
+  exported on the Mac by the same engine; single-line box widths and every box's lines compared
+  (width = the box less the engine's slack, `(w - 4) / 1.06`).
+- **Corpora:** both, `run.py --pin-fonts --powerpoint --gslides`, against B7's final runs.
+
+### Scores
+
+**Apps against the laptop, the 19 matrix decks** (single-line width ratio, median / p90 of the
+deviation; text boxes whose lines differ):
+
+| Deck | Before (B7 engine, base image) | breaks differ | After (B8, the bundle) | breaks differ |
+|---|---|---|---|---|
+| architecture-off | 1.123 / 18.0 % | 7 of 61 | **1.000 / 0.0 %** | **0** of 61 |
+| architecture-on | 1.126 / 17.2 % | 6 of 38 | **0.980 / 6.6 %** | **2** of 38 |
+| architecture-tpl17 | 1.000 / 3.7 % | 3 of 60 | **1.000 / 0.0 %** | **0** of 60 |
+| dataviz-off | 1.135 / 20.0 % | 4 of 28 | **1.000 / 0.0 %** | **0** of 28 |
+| dataviz-on | 1.263 / 32.6 % | 4 of 23 | **1.000 / 0.0 %** | **0** of 23 |
+| dataviz-tpl18 | 1.002 / 2.8 % | 2 of 26 | **1.000 / 0.0 %** | **0** of 26 |
+| dense-off | 1.145 / 18.7 % | 1 of 77 | **1.000 / 0.0 %** | **0** of 80 |
+| dense-on | 1.260 / 31.6 % | 4 of 84 | **1.000 / 0.0 %** | **0** of 88 |
+| dense-tpl18 | 0.995 / 4.2 % | 0 of 83 | **1.000 / 0.0 %** | **0** of 83 |
+| edited-off | 1.154 / 21.4 % | 6 of 45 | **1.000 / 0.0 %** | **0** of 46 |
+| edited-on | 1.293 / 35.2 % | 13 of 44 | **1.000 / 0.0 %** | **0** of 44 |
+| finance-off | 1.169 / 22.4 % | 2 of 33 | **1.000 / 0.0 %** | **0** of 33 |
+| finance-on | 1.240 / 34.7 % | 3 of 32 | **1.000 / 0.0 %** | **0** of 32 |
+| finance-tpl18 | 0.999 / 2.5 % | 0 of 41 | **1.000 / 5.3 %** | **0** of 41 |
+| long-off | 1.152 / 23.6 % | 24 of 309 | **1.000 / 0.0 %** | **0** of 311 |
+| long-on | 1.250 / 32.3 % | 34 of 334 | **1.000 / 0.4 %** | **0** of 335 |
+| strategy-off | 1.169 / 21.9 % | 10 of 68 | **1.000 / 0.0 %** | **0** of 69 |
+| strategy-on | 1.262 / 32.7 % | 10 of 67 | **1.000 / 0.0 %** | **0** of 67 |
+| strategy-tpl15 | 0.996 / 4.3 % | 0 of 74 | **1.000 / 0.0 %** | **0** of 74 |
+
+All 19 decks are within the brief's ±1 % median. Two miss the p90 bound of 2.5 %, each explained:
+- **architecture-on** names DM Sans without loading it, and the owner's Mac has it installed: the
+  laptop draws DM Sans, Apps Liberation Sans (written Arial). Its 2 boxes with other breaks are
+  these.
+- **finance-tpl18** (5.3 %): its six delta pills' ▲ falls through DM Sans to `system-ui`, which is
+  SF on the Mac, narrower, and Liberation Sans on Apps, whose ▲ is Arial's. D8 writes the ▲ in
+  Arial, so on Apps the box now holds exactly what the apps draw; the laptop's is the Mac's
+  system-face residual (Rulings, below).
+
+The real route agreed: the devloop instance's export of 11 slides (two probe slides, finance-off,
+strategy-off and long-off 16) has the same `structural_manifest` as the probe app's export of the
+same documents with the B8 engine and the bundle, and against the laptop a median of 1.000, p90 0.05 %
+and 0 of 137 boxes with other breaks.
+
+**The laptop's export through Google and PowerPoint** (the brief's acceptance 2). finance-off and
+strategy-off, written in Arial throughout, have none of N4's overlaps: "$2.48B" and "35.0%" are one
+line each and clear of their labels, the subtitles clear the headings and the table, "Q2 2026" is one
+line. PowerPoint's PDF embeds only Arial and Arial Bold (Calibri before). Scores against the UI,
+PowerPoint / Google: finance-off 8.76 / 8.59, 7.82 / 7.66, 2.81 / 2.34; strategy-off 1.38 / 1.05,
+1.80 / 1.74, 1.84 / 1.69, 1.26 / 1.24.
+
+**Corpora, B7 (`bc23aa55`) → B8 (`a2ce66e6`).** All four decks are identical to B7's
+(`structural_manifest`): every corpus run is a loaded webfont, so no typeface changes. Every score is
+unchanged; means, PowerPoint / Google: in-repo 1.89 / 2.43, design system 1.62 / 1.52. `summary.md`,
+both: "Worse than the baseline by more than 0.05: none."
+
+**The face written, against the protocol.** Every run of the 19 matrix decks and both corpora (162
+documents): on Apps 3,147 agree, 0 disagree, 49 ambiguous (text in nodes drawn in different faces),
+118 unmatched (generated text); on the Mac 3,135 agree and 13 differ only in name (architecture-on's
+installed "DM Sans Medium" static, written "DM Sans" by the rule for a family the page did not load).
+
+**Characters that reach DejaVu on Apps.** None in any of the 162 documents: no text node is drawn,
+even in part, in a face other than Liberation or a loaded webfont (a control slide of ✓★◆ shows
+DejaVu, so the read can see it). ◔◑◕ on long-on 12 are Liberation Serif's own, written in MS
+PGothic; ▲ is Liberation's, written in Arial. On the probe slide through the real route, ▲▼→ in an
+Arial run are written Arial and ✓★◆ (DejaVu's on Apps) MS PGothic.
+
+**Time.** On Apps, the 28-slide decks, three runs each with the engines alternating: long-off 25.26 →
+25.63 s (median, +1.5 %), long-on 25.72 → 25.93 s (+0.8 %), 7 to 13 ms a slide. The 19 decks once
+each: 118 slides 126.6 → 127.5 s (+0.7 %).
+
+**Health.** Text loss is none in every deck of every run. Under the strict pre-H2 rule (`7d77df77`'s
+`check_text_loss`, from a read-only extract), the final runs flag nothing, and the matrix decks,
+laptop and Apps alike, flag only B7's two known patterns: inline-block numerals joined to the next
+word (long-off 02, 03 and 27: "1Financials", "1$45M", "3210" and 9 more) and chip commas
+(dense-tpl18 03: "Iceberg,", "Catalog,"); no other word. MODEL DROPS 0 and no capture failure
+anywhere. Determinism: two fresh pinned exports of each corpus, both targets, match each other and
+the final run (146 and 202 entries); two exports of long-off match, on the laptop and on Apps (167).
+
+**Tests.** 46 new (test_huashu_font_bundle 23, test_export_snapshot_launch 3,
+test_export_snapshot_drawn_faces 20), each red first at the parent commit (or a guard), and 36
+sabotages, every one red; three first survived (quoting a generic, the webfont flag, the coverage
+probe's family) and each got a case that then caught it. 3 typography tests were updated for the
+intended changes (the platform stack is Arial; ✓ in DM Sans is MS PGothic).
+
+### Rulings from B8
+
+- **Ruling (N3, the faces).** The sidecar ships Liberation Sans, Serif and Mono 2.1.5, their four
+  styles, metric-compatible with Arial, Times New Roman and Courier New, in
+  `fonts-liberation.tar.gz` (2.4 MB), built reproducibly from the pinned release and its SHA-256 by
+  `scripts/sidecar_fonts/build_fonts_tarball.py`. `setup.sh` extracts it as the other tarballs are
+  and writes `fonts/fonts.conf` with absolute paths; `sidecar_subprocess_env` sets
+  `FONTCONFIG_FILE`, the one variable the env allowlist gains. The extracted `fonts/` is never
+  committed, uploaded or shipped.
+- **Ruling (N3, the config).** The core fonts a desktop has and the generics `sans-serif`,
+  `system-ui`, `serif` and `monospace` are their Liberation faces; any other name draws nothing,
+  so a stack goes on as on a desktop, and fontless text is the standard face, Liberation Serif. The
+  base image's DejaVu stays for the characters Liberation lacks and no stack can name it.
+- **Ruling (N3, hinting).** On Linux Chromium lays glyphs out unhinted
+  (`--font-render-hinting=none`); the Mac's launch is unchanged.
+- **Ruling (N4).** A run whose family is no loaded webfont is written in the face the browser drew,
+  found by probing each family of its stack alone on its characters (an in-page test of the
+  browser's own matching; the protocol's per-node faces cannot attribute characters), by a name
+  every app draws with its metrics: the table faces for their twins and for the generic and system
+  faces (as the container draws them), Times New Roman where nothing draws, a later loaded webfont
+  by its own name, any other installed face as itself, and never DejaVu. Review Focus 3 holds.
+- **Ruling (D8, symbols).** A symbol outside WGL4 that MS PGothic and MS Gothic both draw alike in
+  PowerPoint and Google (982, `SYMBOL_COVERAGE`) is a run of its own in MS PGothic (MS Gothic in a
+  monospace run) wherever the written face lacks it in the apps: for Arial, Times New Roman and
+  Courier New, all but the few each draws itself; for a webfont, by the coverage probe.
+  `coverage_font.mjs` needed no change: its probe font covers every code point.
+- **Residual (the Mac's system face).** Text a Mac draws in SF or another face no app has is
+  written as the container's face: the deck on Apps is laid out at that face's widths, a laptop
+  export at the Mac's (finance-tpl18's ▲, `system-ui` up to 9 % at SF's extremes).
+- **Residual (symbol advances).** MS PGothic's Harvey quarters are 0.5 em where Apps lays them out
+  at 0.6 em; centred in their cells, they sit where the browser's do.
+- **Limit (Windows).** MS PGothic and MS Gothic are unprobed on Windows; on non-Japanese Windows
+  they come with the optional Japanese Supplemental Fonts, and without them PowerPoint falls back
+  per glyph, today's behaviour.
+- **Limit (CJK and emoji).** The container has no CJK or emoji face (Noto Sans CJK alone is 95 MB
+  zipped): such text is laid out at the replacement glyph's width and shows boxes in a picture, as
+  before the bundle; the deck keeps every character.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1mrsZcZayX1iMWjNjkU2G4Yt4vB4PS-iCf_KVcSvGz_w/edit
+  ("Tellr export revamp — B8, in-repo corpus (pinned fonts, a2ce66e6)")
+- Design-system corpus: https://docs.google.com/presentation/d/1mn3hEPZ17MDrqn_4TALlk1RIBGNNNrH3jJSPTP61dXw/edit
+  ("Tellr export revamp — B8, design-system corpus (pinned fonts, a2ce66e6)")
+
+The probe and matrix presentations B8 created (5) were deleted by id and confirmed gone (404). The
+decks earlier phases kept, and the T15 decks, are untouched.

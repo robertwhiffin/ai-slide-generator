@@ -613,6 +613,113 @@ Cambria Math), U+2011 as U+002D in the deck for Google Slides alone (PowerPoint 
 the face's hyphen, and it keeps its no-break meaning there). U+2010 in place of U+2011 would not
 do: Google draws it from MS PGothic too.
 
+### D8, extended: symbols outside WGL4 (Task 15 B8, 2026-11-22)
+
+A run written in Arial, Times New Roman or Courier New (N4, below) has the apps' copies of those
+faces, whose coverage is WGL4 and little more: the face the container drew may cover more (Liberation
+2.1.5 has ◔◑◕), but the apps draw the face written. Probe decks of the 983 symbols outside WGL4
+(categories Sm, So, Sk, Sc and No, U+2000 to U+2BFF) that Office for Mac's MS PGothic and MS Gothic
+both hold, each written in five faces, rendered in PowerPoint for Mac and converted through Drive,
+every glyph's face and advance read from the two PDFs:
+
+| written | PowerPoint for Mac | Google Slides |
+|---|---|---|
+| MS PGothic | MS PGothic, all 983 | MS PGothic, all 983 (⅒ U+2152 drawn as a box, 1.0 em against 0.918) |
+| MS Gothic | MS Gothic, all 983 | MS Gothic, all 983 (⅒ as a box) |
+| Arial | Cambria Math 401, Segoe UI Symbol 337, MS Gothic 157, Apple Color Emoji 60, Arial 26 | MS PGothic 951, Arial 20, Noto Color Emoji 12 |
+| Times New Roman | Cambria Math 370, Segoe UI Symbol 329, MS Mincho 157, Times New Roman 67, Apple Color Emoji 60 | MS PMincho 952, Times New Roman 19, Noto Color Emoji 12 |
+| Courier New | Cambria Math 409, Segoe UI Symbol 337, MS Mincho 157, Apple Color Emoji 60, Courier New 18 | MS Gothic 970, Noto Color Emoji 12, Courier New 1 |
+
+Of the other 982, MS PGothic's advance agrees between the apps within 0.005 em on every one, and the
+glyphs match on the contact sheets. Arial draws 19 of them itself in both apps (currency signs
+U+20A0–U+20B1, ℗, ⅓, ⅔, ◌, ♯), Times New Roman the same less ℗, Courier New none. On the Harvey
+quarters (`probe-symbols`): written in Arial or Times New Roman, PowerPoint draws ◔◑◕ from Segoe UI
+Symbol at 0.861 em beside ○● at 0.604 em, Google from MS PGothic or MS PMincho at 0.50 em; in MS
+PGothic both apps draw all of them alike (○● 1.0 em, the quarters 0.5 em, its own design). The UI
+itself draws them from two faces on a Mac (○● in Times New Roman, ◔◑◕ in Menlo), and Apps'
+Chromium in Liberation, all at about 0.60 em.
+
+**The choice.** MS PGothic (MS Gothic in a monospace run) is the one face PowerPoint and Google
+both draw these characters in, glyph for glyph, so each is a run of its own in it wherever the run's
+written face lacks it: for Arial, Times New Roman and Courier New, every one but the few that face
+draws itself (`TABLE_FACE_SYMBOLS`); for a webfont, the ones the coverage probe says it lacks, a
+symbol its fallback face draws itself going to that face. The set is `SYMBOL_COVERAGE` in
+`snapshot_text_metrics.mjs` (982 code points, 94 ranges). Windows was not probed: on non-Japanese
+Windows MS Gothic and MS PGothic come with the optional Japanese Supplemental Fonts, and without
+them PowerPoint falls back per glyph, as it does for these characters in any other face. A
+character outside both sets (a letter of a script Liberation lacks, CJK, emoji) stays in its run.
+
+## N3: the faces of the export's container (Task 15 B8, 2026-11-22)
+
+Measured on a throwaway app on the dev workspace running the sidecar's own `setup.sh`, tarballs and
+Playwright Chromium 147 (headless shell), against Chrome 158 on the Mac, each element's text width
+from its Range and its faces from `CSS.getPlatformFontsForNode`.
+
+**The base image** has DejaVu Sans, Sans Mono and Serif (regular and bold, no italics) and Debian's
+fontconfig. Every stack with no webfont drew DejaVu: Helvetica, Arial and the DS-off stack at 1.14
+to 1.20 of the Mac's width, Times New Roman and fontless text at 1.24 to 1.34 (drawn in DejaVu
+Sans, the last resort, because Chromium refuses DejaVu Serif for "Times New Roman"), Courier New
+0.90 to 1.01.
+
+**The bundle** (Liberation 2.1.5 and `scripts/sidecar_fonts/fonts.conf.in`). Over 12 sizes (11 to
+56 px), weights 400, 600 and 700 and both styles, every stack named after a core font, the DS-off
+stack, `sans-serif`, `serif` and fontless text lays out at 1.0000 of the Mac's width; Menlo against
+Liberation Mono 0.9968; `system-ui` (SF on the Mac) a median of 1.0056, 0.92 to 1.09 at the
+extremes of SF's optical sizes. How the config was settled:
+- `<dir prefix="relative">` is not read by fontconfig 2.13.1: `setup.sh` writes the absolute path;
+- each alias puts the Liberation face first in the request (`prepend`), since Chromium (Skia)
+  accepts a match only when its family equals the first family requested, the name asked for, or
+  a metric-compatible twin of it (its own list holds Arial, Times New Roman and Courier New, not
+  Helvetica, Times or Courier);
+- the base image's fonts stay listed (without them ✓★◆ were drawn as boxes), but a request naming
+  DejaVu is renamed to a family nothing has and matched to Liberation Sans, which Chromium refuses
+  for it, so `"DejaVu Sans", Arial` draws Arial's face as on a Mac; appending Liberation Sans to
+  every request instead made `Arimo` resolve too, which no desktop does;
+- including the base image's `/etc/fonts/fonts.conf` instead of the self-contained config resolves
+  every stack alike, except that Arimo and Tinos resolve through its metric aliases;
+- launch time with the bundle: 65 to 98 ms, as without.
+
+**Hinting.** Headless Chromium on Linux hints glyph outlines fully, which rounds advances: DM Sans,
+DM Mono and Barlow lines (330 lines, sizes 12 to 42 px, weights 400 to 700) were 0.952 to 1.079 of
+the Mac's width (median 1.0075). With `--font-render-hinting=none` they are 0.9996 to 1.0004. The
+flag changes no width on the Mac, nor for the Liberation faces.
+
+**CJK and emoji** have no face in the container, before or after: 数据湖仓平台, データレイクハウス and
+🚀✅📈 are drawn as Liberation's replacement glyph, 0.74 to 0.88 of the Mac's width. Noto Sans CJK
+(release Sans2.004, `00_NotoSansCJK.ttc.zip`) is 95 MB, almost three times the whole wheel.
+
+## N4: the face a run with no webfont is written in (Task 15 B8, 2026-11-22)
+
+**The probe.** Each family of the run's stack is set alone, on the run's own distinct characters,
+with the coverage probe font after it (`snapshot_text_metrics.mjs` resolveWrittenFaces); the first
+family whose probe is narrower than 4 em a character somewhere draws it. On 35 tokens (generics,
+system aliases, core fonts, absent and installed faces), each probed on "Hello" this way, the test
+agreed with the face the protocol reported on both machines. Two findings follow from it:
+`-apple-system` and the `ui-*` generics draw nothing in Chrome 158 or 147 (a stack goes on past
+them), and `cursive`, `fantasy`, `math` and `emoji` draw nothing in the container (its text is set
+in the standard face, Liberation Serif), so they are written Times New Roman.
+
+**Accuracy, every run of the 19 matrix decks and both corpora** (162 export documents), the engine's
+written family against the face the protocol reports for the text node that holds the run, mapped
+through the metric table (a hidden macOS face such as `.SF NS` as Arial, a loaded webfont as
+itself):
+
+| | runs | agree | disagree | ambiguous | unmatched |
+|---|---|---|---|---|---|
+| Apps (bundle, Chromium 147) | 3,314 | 3,147 | 0 | 49 | 118 |
+| Mac (Chrome 158) | 3,316 | 3,135 | 13 | 50 | 118 |
+
+The 13 on the Mac are architecture-on's DM Sans, which the deck names without loading and the
+owner's Mac has installed as static fonts: the protocol names the 500 static "DM Sans Medium", and
+the engine writes the family, "DM Sans", by the rule for a family the page did not load (its own
+name, bold from 600). Ambiguous runs are text in several nodes drawn in different faces; unmatched,
+generated text (markers, pseudo-elements). The CDP read itself was not adopted: it reports the faces
+a node's glyphs came from, not which character each drew, so a node of fallback characters alone
+(a row of Harvey balls) names a fallback face, and the run's face still needs the stack's order.
+
+**Time.** On Apps, the two 28-slide decks, three runs each, the engines alternating: long-off 25.26
+→ 25.63 s (median, +1.5 %), long-on 25.72 → 25.93 s (+0.8 %), 7 to 13 ms a slide.
+
 ## D4 and D5: shadow layers
 
 Measured 2026-11-21 (Task 14 B2), on a probe deck rendered in PowerPoint for Mac (its PDF at
@@ -1044,7 +1151,12 @@ and D13 (B6, 2026-11-22) were measured on probe decks the engine's own emitter w
 Slides (a page of synthetic-bold runs in the deck's faces, the data table's model with its
 corner pieces varied, and fills at fractional offsets), converted through Drive, their PDFs and
 LARGE and MEDIUM thumbnails read and the presentations deleted by id, and on the two corpora's
-Google decks.
+Google decks. N3, N4 and D8's symbols (B8, 2026-11-22) were measured on a throwaway app on the dev
+workspace running the sidecar's own bootstrap and Chromium, read through the DevTools protocol,
+against the Mac's Chrome, and on probe decks of symbols written in each candidate face, rendered in
+PowerPoint for Mac and converted through Drive, their PDFs read and the presentations deleted by id;
+the app was deleted afterwards (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`,
+B8).
 
 To re-run (PowerPoint will briefly open a window):
 
