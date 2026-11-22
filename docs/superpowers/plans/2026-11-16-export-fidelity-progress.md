@@ -447,7 +447,7 @@ to 0.03 in each app.
 
 ### Rulings and corrections from B2
 
-- **Ruling (D4, D5):** a shadow layer the box's own shape cannot carry is a *shadow shape*
+- **Ruling (D4, D5), superseded by B5:** a shadow layer the box's own shape cannot carry is a *shadow shape*
   under the box: its border box (shrunk by a negative spread), unoutlined, named "Shadow" in the
   selection pane, filled opaque, since both apps scale a shape's shadow by its fill's alpha and
   cast none from an unfilled shape. Its fill is the box's own colour under an opaque box, else
@@ -456,7 +456,7 @@ to 0.03 in each app.
   box; a shadow shape is reached through the selection pane. pptxgenjs writes no groups, so the
   shapes are ordered under the box, not grouped with it (what a moved box leaves behind: the
   owner-facing notes and the owner decision below).
-- **Ruling (D4, fix round 1):** a ring listed before the first shadow (Tailwind's ring, then
+- **Ruling (D4, fix round 1), superseded by B5:** a ring listed before the first shadow (Tailwind's ring, then
   shadow) paints over that shadow, so when such a ring is a shape of its own the box carries no
   shadow and every shadow layer is a shadow shape, in CSS order. An opaque ring that is the box's
   outline is drawn with the box, over its shadow, and changes nothing.
@@ -485,19 +485,18 @@ to 0.03 in each app.
 - **Owner-facing notes (what a moved object leaves behind):**
   - A card's text and its box were already separate objects before B2: moving the box alone
     has always left its text in place.
-  - A card with a two-layer shadow (every design-system `--shadow-md` and `--shadow-sm` card)
-    has, under its box, a shadow shape that is an **opaque copy of the card's own shape, in the
-    card's own colour, casting the soft shadow**. Moving the card alone leaves that copy behind,
-    a visible ghost card where the card was. Select the card and its "Shadow" together (or
-    delete the "Shadow") to move it cleanly.
-  - An unfilled box's shadow shapes (the data table's wrapper, the medallion frame) are opaque
-    copies of its shape in the slide's colour beneath, casting its shadow; they stay behind too.
+  - *No longer applies since B5:* B2 drew a two-layer card's further layers as opaque copies of
+    its shape under it (and an unfilled box's in the colour beneath), which a moved card left
+    behind as a ghost. A box's layers are now its one fitted shadow on the box itself, so a
+    moved card leaves nothing behind (B5).
   - A moved data table leaves behind its rounded corner pieces (coral above, white below),
     while its own corner cells, unfilled, move with it and show what is beneath them.
   - In the Google deck a dotted border is a freeform stroke, which moves and recolours whole
     but is not a preset line; a dotted box's border is a stroke separate from its box.
 
 ### Owner decision: how a box's extra shadow layers are written
+
+**Decided 2026-11-21: (b), built in B5.** The measurements below are B2's, on the old raster.
 
 | Option | What a moved card leaves | Shadow tail below a `--shadow-md` card (`slide-three-cards`), PowerPoint / Google | Summed darkening, PowerPoint / Google |
 |---|---|---|---|
@@ -915,3 +914,91 @@ square. Every square corner is square and every rounded one rounds by its own ra
 
 The baseline, probe and D11-corpus presentations were deleted by id and confirmed gone
 (`files.get` 404).
+
+## Phase B, batch B5: one fitted shadow per box (the owner's option (b)), engine `fbf1e291`
+
+Commit: `fbf1e291`. The owner chose option (b) (B2's "Owner decision"): a box's `box-shadow`
+layers are its one outer shadow, on its own shape, the native construct of either app, so a
+moved box leaves nothing behind. The method is in `scripts/export_fidelity/CALIBRATION.md` (D4
+and D5, "The fitted shadow"). Both corpora were re-run with `run.py --pin-fonts --powerpoint
+--gslides --baseline`, against a fresh baseline at `688f33b6` on the same 4x raster.
+
+### Scores, baseline (`688f33b6`, B2's option (a)) → B5 (`fbf1e291`, option (b))
+
+In-repo corpus (17 slides): both decks are byte-identical to the baseline's on every slide (its
+one shadow, `.dk-card`'s, is one layer), and every score is the same: PowerPoint mean 1.82,
+Google 2.40.
+
+Design-system corpus (27 slides): only these four slides change, in either deck; every other
+slide, the control set included, scores the same to the hundredth in both apps.
+
+| Slide | What changes | PowerPoint (a) → (b) | Google (a) → (b) |
+|---|---|---|---|
+| slide-three-cards | three `--shadow-md` cards: one fitted shadow each | 1.06 → 1.08 | 0.99 → 1.02 |
+| slide-kpi-dashboard | five `--shadow-sm` cards: one fitted shadow each | 2.05 → 2.06 | 1.93 → 1.91 |
+| slide-medallion | its unfilled `.med-frame` casts none | 1.97 → 2.01 | 1.93 → 1.96 |
+| slide-data-table | its unfilled table wrapper casts none | 1.65 → 1.69 | 1.17 → 1.20 |
+| **mean, 27 slides** | | **1.615 → 1.619** | **1.514 → 1.517** |
+
+| Control slide | PowerPoint | Google |
+|---|---|---|
+| 02-agenda-grid-rules | 1.15 → 1.15 | 1.78 → 1.78 |
+| 05-balance-sheet-two-tables | 2.14 → 2.14 | 1.80 → 1.80 |
+| 12-progress-bars-icons | 1.29 → 1.29 | 1.96 → 1.96 |
+| slide-agenda | 0.87 → 0.87 | 0.96 → 0.96 |
+| slide-lakehouse-blueprint | 2.40 → 2.40 | 2.04 → 2.04 |
+| slide-stats | 1.05 → 1.05 | 1.09 → 1.09 |
+
+No slide is worse than at `688f33b6` by more than 0.05 in either app; the four slides that
+change are the ones B5 is for, each within +0.04 of (a). No text loss, no MODEL DROPS, in both
+corpora and both decks.
+
+### The shadows, measured
+
+Below the first shadowed box, at its centre column: how far the shadow reaches (to under 1
+level of darkening for the cards, 0.5 for the fainter `--shadow-sm` boxes) and the darkening
+summed to the next element (UI / PowerPoint / Google, at 1280 px, the 4x raster):
+
+| Slide | UI | (a) separate shadow shapes | (b) one fitted shadow |
+|---|---|---|---|
+| slide-three-cards (`--shadow-md`) | 26 px, 176 | 20 / 18 px, 160 / 142 | 15 / 13 px, 145 / 130 |
+| slide-kpi-dashboard (`--shadow-sm`) | 4 px, 31 | 3 / 2 px, 24 / 11 | 2 / 3 px, 20 / 22 |
+| slide-medallion (unfilled frame) | 3 px, 13 | 2 / 2 px, 14 / 6 | none / none |
+| slide-data-table (unfilled wrapper) | 4 px, 33 | 3 / 2 px, 28 / 23 | none / none |
+
+### Rulings from B5
+
+- **Ruling (D4, B5):** one shadow per box. One layer with no spread is written as it is; any
+  other set of layers is the one layer closest to them all, fitted by least squares in CSS's
+  box-shadow model over the box's four edges (alpha in closed form, offset and blur on a grid
+  narrowed four times, colour weighted by each layer's own coverage). `--shadow-md` is
+  `0 5.13px 14.34px` 1B3139 at 0.139 and `--shadow-sm` `0 1px 2.58px` at 0.137; the tests pin
+  both, and hold Tailwind's `shadow-lg` to a least-squares minimum of the model.
+- **Ruling (D5, B5):** only a box that paints a fill casts its shadow. An unfilled box casts
+  none: neither app casts a shadow from an unfilled shape, and an outline would cast only a thin
+  frame of itself, which the browser does not paint. A translucent box casts the fitted shadow
+  itself, as before B2 (both apps draw it scaled by the fill's alpha, through the fill). No shape
+  is drawn for a shadow alone, so no opaque fill of the export's own can show.
+- **Ruling (D4 fix round 1, B5):** the box's shadow paints where its first shadow layer does: a
+  ring listed before that layer is drawn over the box (it lies outside the border box and covers
+  nothing of it), any other ring under it. D2's translucent ring stays a shape of its own.
+- **Removed:** the colour-beneath pass (`resolveShadowShapes`), the model's `role` field and its
+  check, and the emitter's "Shadow" name. Tests guard that no shape is named "Shadow", that every
+  shape paints a fill or an outline, and that a forged `role` names nothing.
+
+### Owner-facing notes
+
+- **A moved card leaves nothing behind.** Its shadow is its own (one outer shadow, editable in
+  either app's shadow settings); its text was always a separate object.
+- **The cost of (b):** a `--shadow-md` card's tail is 5 px shorter than with (a) in either app
+  (15 / 13 px against the UI's 26), and an unfilled box (the data table's wrapper, the medallion
+  frame) shows no shadow, where the UI shows a faint 3–4 px one.
+- A moved data table still leaves its rounded corner pieces behind (B3), and in the Google deck a
+  dotted box's border is a stroke separate from its box (B2).
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1i0QhBby50i1QUdtkZn4QGPqnqfmOprwd9t2WjJEVR08/edit
+- Design-system corpus: https://docs.google.com/presentation/d/1BCj-l0KtY67g2oRZbLkg84Ey8ao2LM2P5xrJ0roSkKE/edit
+
+The baseline presentations were deleted by id and confirmed gone (`files.get` 404).

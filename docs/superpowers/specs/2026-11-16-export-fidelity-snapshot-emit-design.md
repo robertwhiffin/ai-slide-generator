@@ -316,15 +316,16 @@ Every item carries its order key, so the emitted stacking matches the screen.
     box has no uniform border, else an unfilled shape of its own. A translucent ring shows
     what lies under it, never the box's fill, so its box keeps its fill at the border box
     (as built, Task 14 B2);
-  - a blurred or offset layer is an outer shadow. One shape carries one, and neither app
-    casts a shadow from an unfilled shape or more than a faint one from a translucent fill.
-    So the box's own shape carries the first layer when its fill is opaque and no ring listed
-    before that layer is a shape of its own (which the box's shadow would paint over), and every
-    other layer is a *shadow shape* under the box: its border box (shrunk by a negative spread),
-    unoutlined, named "Shadow", filled so it shows nothing but its shadow: with the box's own
-    colour under an opaque box, else with the one colour the export paints beneath it. Where
-    no one colour lies beneath (text, a picture, a shape's edge, a picture ground), the
-    shadow shapes are dropped and the box keeps its first layer, as before (as built, B2);
+  - the blurred or offset layers are the box's **one outer shadow**, on its own shape: one
+    shape carries one in either app, and it is how a person gives a box a shadow there. One
+    layer with no spread is written as it is; any other set as the one layer closest to them
+    all, fitted by least squares in CSS's box-shadow model (`CALIBRATION.md`, D4 and D5:
+    `--shadow-md` is `0 5.13px 14.34px` at 0.139). No shape is drawn for a shadow alone. Only
+    a box that paints a fill casts it: neither app casts a shadow from an unfilled shape, and
+    an outline would cast only a thin frame of itself; a translucent fill casts it as both
+    apps draw it, scaled by the fill's alpha. The shadow paints where its first layer does: a
+    ring listed before that layer is drawn over the box, any other ring under it (as built,
+    Task 14 B5, the owner's choice: B2's shadow shapes under the box are gone);
 - cumulative opacity.
 
 An overflow box with round corners clips to its rounded padding box. The clip carries that

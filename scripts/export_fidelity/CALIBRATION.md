@@ -633,10 +633,9 @@ none, 128 the full shadow), and under the rect where its fill lets it through:
 So no shape casts a full shadow unless it is filled opaque, and both apps draw a shadow under
 a translucent fill, through it, where the browser (which paints a box-shadow outside the border
 box only) shows what lies beneath the box. A shape carries one outer shadow (`a:outerShdw`).
-Hence the shadow shape (`snapshot_borders.mjs` shadowShape): each box-shadow layer the box's
-own shape cannot carry is a shape under the box, at its border box, filled opaque so it shows
-nothing but its shadow: with the box's own colour under an opaque box, and otherwise with the
-one colour the export paints beneath it, or not at all where no one colour lies there.
+B2 drew each box-shadow layer the box's own shape could not carry as a shape of its own under
+the box, filled opaque so it showed nothing but its shadow. B5 replaced those shapes with one
+fitted shadow on the box itself (below), so that a moved box leaves nothing behind.
 
 **The blur needs no calibration.** CSS blur radius B is written as `blurRad` B (in points of
 px). White 240 × 160 boxes, 14 px round, on F9F7F4, black at alpha 0.5; the darkening below
@@ -650,6 +649,59 @@ the box summed over 60 px, and where it ends (the last px at ≥ 0.5 level):
 | `0 8px 20px`, 1B3139 at 0.08 | 140, 25 px | 149, 19 px | 124, 18 px |
 
 The total matches within 10 %; both apps fall off a little more steeply than Chrome's Gaussian.
+
+### The fitted shadow (B5)
+
+Decided 2026-11-21 by the owner, built 2026-11-22 (Task 14 B5). One shape carries one outer
+shadow (`a:outerShdw`) in either app, and that is how a person gives a box a shadow there. So a
+box's `box-shadow` layers are written as one shadow on the box's own shape, and no shape is drawn
+for a shadow alone. One layer with no spread is written as it is. Any other set of layers (two or
+more, or one with a spread, which an outer shadow has none of) is written as **the one layer
+closest to them all together**, fitted from the layers themselves (`snapshot_borders.mjs`
+fittedLayer):
+
+1. **The model** (CSS Backgrounds 3: a shadow is the border box offset, spread, and blurred by a
+   Gaussian of half the blur radius). Far from the corners, a layer with offset (x, y), blur B
+   (σ = B / 2), spread s and alpha a covers a point d px outside a long edge of the box, n its
+   outward normal, `a · Q((d − (x, y)·n − s) / σ)`, where Q is the standard normal's upper tail
+   (a step where B is 0). Layers compose as `1 − ∏(1 − c)`.
+2. **The points.** The four edges (bottom, top, right, left) at d = k·R/64, k = 0..64, R the
+   layers' reach (the largest |x| + |y| + spread + 2B) plus 1 px.
+3. **The error** of a single layer (x, y, B, a) with no spread: its coverage less theirs,
+   squared, summed over those points.
+4. **The search.** For each offset and blur the best alpha is solved in closed form (least
+   squares, clamped to 0..1). Offset and blur are found on a grid of 9 points an axis, narrowed
+   4 times to the best point one step either side: the offset within the layers' own, the blur
+   from 0 to their largest plus twice their largest spread.
+5. **The colour** is the layers' colours, each weighted by what it covers alone over the same
+   points.
+6. Lengths are kept to 0.01 px and alpha to 0.001; at most 16 layers are fitted, the first listed.
+
+The fits this gives (the engine's, read back from the deck; the tests pin the first two):
+
+| `box-shadow` | fitted layer |
+|---|---|
+| `--shadow-md`: `0 2px 6px`, `0 8px 20px`, 1B3139 at 0.08 each | `0 5.13px 14.34px`, 1B3139 at 0.139 |
+| `--shadow-sm`: `0 1px 2px` at 0.06, `0 1px 3px` at 0.08 | `0 1px 2.58px`, 1B3139 at 0.137 |
+| `--shadow-lg`: `0 8px 24px`, `0 24px 48px`, 1B3139 at 0.10 each | `0 16px 38.63px`, 1B3139 at 0.184 |
+| Tailwind `shadow-md`: `0 4px 6px -1px`, `0 2px 4px -2px`, black at 0.1 | `0 3.17px 4.12px`, black at 0.117 |
+| Tailwind `shadow-lg`: `0 10px 15px -3px`, `0 4px 6px -4px`, black at 0.1 | `0 7.81px 9.70px`, black at 0.103 |
+| one layer, `0 2px 8px` 1B3139 at 0.08 | itself |
+
+B2's coarser fit of `--shadow-md` (0.5 px and 1 px steps) was `0 5px 15px` at 0.14.
+
+**What no box shape can carry.**
+- **A box with no fill casts no shadow.** Neither app casts a shadow from an unfilled shape (the
+  table above), and an outline would cast only a thin offset frame of itself, which the browser
+  does not paint. Before B2 such an outline carried the first layer; B2 drew shadow shapes filled
+  with the colour beneath; neither is written now.
+- **A translucent box casts the fitted shadow itself**, as before B2: both apps draw it scaled by
+  the fill's alpha, and through the fill.
+- **No opaque fill can show:** no shape is drawn but the box's own.
+
+**Rings.** A spread-only layer is a ring, drawn as before (D2). The box's one shadow paints where
+its first shadow layer does, so a ring listed before that layer is drawn over the box (it lies
+outside the border box and covers nothing of the box), and any other ring under it.
 
 ## D6: dotted borders in Google Slides
 
@@ -846,7 +898,8 @@ D1, X1 and D8 (2026-11-21) were measured on probe decks rendered in PowerPoint a
 through Drive, whose presentation was deleted by id once read, and on the two corpora
 (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B1). D4, D5 and D6 (B2) were
 measured the same way, on probe decks of shapes and lines and on Chrome screenshots at device
-scale 4. D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
+scale 4. The fitted shadow (B5, 2026-11-22) is computed, not measured; its result was measured on
+the design-system corpus (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`, B5). D10 and D7 (B3) were measured on probe decks of native tables and on the two corpora's
 PowerPoint PDFs. D11 (B4) was measured on a probe deck of
 boxes and on a probe corpus through the harness, H1 (B4) on the two corpora's PowerPoint PDFs.
 
