@@ -1598,6 +1598,73 @@ logs none.
   it. The corners improve in both apps.
 - **Limit (N7).** A dashed or dotted side of a rounded box is still a straight line.
 
+### B7 fix round 1 (after B8; at `e455a046`)
+
+Commits: `c7a95282`, `80be4c3a`, `179cf364`, `f2ba234e` and `e455a046`, then the docs.
+
+- **H2: a word written across items is read only across neighbours on one line.** The review
+  found B7's rule took a suffix of any item and a prefix of any other, so a lost "AI", "ML" or
+  "KPI" chip was found from unrelated boxes. The original comparison had the same hole: it ran
+  every item's text together in paint order, and a lost chip's two segments are consecutive in
+  that order ("Customer Data" + "Insights" holds "ai"). Both are replaced.
+  - **The rule.** Both twins find a word in one item's own text, or across the joins of a chain of
+    neighbours. Neighbours are unturned one-line items of one direction that share a line (overlap
+    by more than half the shorter's height, `snapshot_text.mjs`'s own rule). The head's text starts
+    from 0.25 em before the tail's ends to 1.5 em after it, in the larger of their non-script
+    sizes, each text's ends its box's less the snapshot's slack (6% + 4 px). Each item runs on into
+    its nearest neighbour.
+  - **The bound.** The search reads at most 1,024 items; no real slide paints more than 51. The
+    chains are no longer than the slide's text, so B7's 64-character word limit is gone.
+  - **Measured on the slide models.** An atomic inline's edge, slack removed, is 18 px (1 em) for
+    long-off 02's numerals and 9 px (0.45 em) for dense-tpl18 03's chips. A lost chip on the
+    review's probe leaves 43 to 51 px (2.1 to 2.5 em).
+  - **Every real deck** (19 matrix decks, both corpora, both targets): 12,523 words are in one
+    item, 26 across neighbours, and 6 hidden; none is lost. The 26 are B7's 14 and 12 footnote and
+    chip joins the paint-order join used to find. The sidecar's own check logs no `text missing`
+    line on any matrix deck.
+  - **Real-loss controls**, red at `dc18ceac`: the review's probe with its chips lost, in both
+    twins, in the review's order and in paint order; and a real export with its chip boxes taken out.
+- **N7: a four-alike rounded border is one region.** B7 split four sides painted alike at the top
+  left and bottom right dividing lines (its comments said top right and bottom left). Measured on a
+  six-box probe against Chrome, on the band's interior pixels:
+
+  | View | Two regions, on the dividing lines | One region |
+  |---|---|---|
+  | Google Slides' own drawing (thumbnail, 1600 px) | 19–64 levels lighter | 0 |
+  | Both apps' PDFs, MuPDF at 8× | 42–63 | 0–1 |
+  | The harness's PowerPoint view (1×) | 8–16 | 0–1 |
+
+  The band elsewhere reads 0–1 in every view. The one region is the whole border area, its edge
+  cut open along the top left dividing line. PowerPoint's own raster could not be read: its
+  AppleScript PNG save writes nothing. No deck of the corpora or the matrix has the pattern; all
+  stay byte-identical.
+- **H1: a broken frontend install.** esbuild's JavaScript without its platform binary loads, and
+  fails only when it builds. `ui_document.mjs` now stops on one `[export-fidelity]` line, exit 2,
+  naming `npm ci` and esbuild's first line, and writes no document unless it has built them all.
+  `main()` builds the UI's documents before it writes anything.
+- **N7: the border-region geometry lives in `snapshot_borders.mjs`**, the code line for line, its
+  helpers passed in through `env`. Byte-identical: both corpora, both targets, equal B8's final
+  decks; long-off and architecture-off, both targets, equal their exports before the move and B8's
+  matrix decks.
+- **N2: the frontend capture shells are pinned.** `pdf_client.ts`, `pptx_client.ts` and
+  `screenshotCapture.ts` each declare the inherited properties `SLIDE_PREVIEW_RESET_STYLE` does.
+- **Harness**, both corpora, `--pin-fonts --powerpoint --gslides`, against B8's final runs. Scores
+  are unchanged: PowerPoint / Google 1.89 / 2.43 and 1.62 / 1.52. The truth is pixel-identical, and
+  the decks are byte-identical in both targets. No text is lost, and there are 0 MODEL DROPS.
+- **Gate**, serial, `-k "(export or huashu or google) and not timeout"`: 1425 passed, 0 failed,
+  13 skipped; the two other tests that name "timeout" (`test_export_routes_off_event_loop.py`): 2
+  passed. **Full suite** (`-n 6`), without the timeout file: 18089 passed, 0 failed, 28 skipped. The
+  timeout file's 120 tests did not run in this round: the session's permission check refused them,
+  since their watcher kills every Playwright browser on the machine.
+
+Google Slides decks kept for this round:
+- In-repo corpus: https://docs.google.com/presentation/d/1A-UOX8j1qQSBrJ5ONB7AKaHcNHLSHPre5r3xnvjtRPw/edit
+  ("Tellr export revamp — B7 r1, in-repo corpus (pinned fonts, e455a046)")
+- Design-system corpus: https://docs.google.com/presentation/d/17iFvm07taYC42FQ1dSJByKfQUQZvC4uECejBTkdnbOM/edit
+  ("Tellr export revamp — B7 r1, design-system corpus (pinned fonts, e455a046)")
+
+The two seam-probe presentations this round created were deleted by id and confirmed gone (404).
+
 ### Google Slides decks kept for the owner
 
 - In-repo corpus: https://docs.google.com/presentation/d/1emBke93JxrI6tKvPdNTgRSQH8JKSD0h6AstyoWZne9c/edit
