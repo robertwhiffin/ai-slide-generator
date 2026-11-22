@@ -775,6 +775,31 @@ handles in both, and a custom path of one quarter `arcTo` per rounded corner oth
 (`emit_model.cjs`). pptxgenjs writes a preset's two adjustments only through `angleRange`,
 each value × 60000.
 
+The same probe for `round1Rect` (adj: the top-right corner alone) and `round2DiagRect` (adj1:
+the top left and bottom right; adj2: the top right and bottom left), written as the emitter
+writes them (`rectRadius` for the one adjustment, `angleRange` for the two), measured
+2026-11-22:
+
+| box | construct | PowerPoint | Google Slides | Drive keeps it as |
+|---|---|---|---|---|
+| 16 px top-right corner | one roundRect (before) | 1.05, 177 px off | 1.32, 177 px off | ROUND_RECTANGLE |
+| | `round1Rect` | 0.00, 0 | 0.28, 0 | ROUND_1_RECTANGLE |
+| | custom path, `arcTo` | 0.00, 0 | 0.28, 0 | CUSTOM |
+| 40 px top-right corner | `round1Rect` | 0.01, 0 | 0.29, 0 | ROUND_1_RECTANGLE |
+| 16 px top-left and bottom-right | one roundRect (before) | 0.71, 118 | 0.98, 118 | ROUND_RECTANGLE |
+| | `round2DiagRect` | 0.01, 0 | 0.29, 0 | ROUND_2_DIAGONAL_RECTANGLE |
+| 24 px TL and BR, 8 px TR and BL | `round2DiagRect` | 0.01, 0 | 0.29, 0 | ROUND_2_DIAGONAL_RECTANGLE |
+| | custom path, `arcTo` | 0.01, 0 | 0.29, 0 | CUSTOM |
+| 20 px TR and BL | `round2DiagRect` | 0.01, 0 | 0.28, 0 | ROUND_2_DIAGONAL_RECTANGLE |
+| 60 px TL and BR, half the short side | `round2DiagRect` | 0.02, 0 | 0.31, 0 | ROUND_2_DIAGONAL_RECTANGLE |
+| 16 px top right, 4 px border | `round1Rect` | 0.10, 3 | 0.40, 3 | ROUND_1_RECTANGLE |
+| 24/8 px diagonals, 4 px border | `round2DiagRect` | 0.09, 0 | 0.48, 0 | ROUND_2_DIAGONAL_RECTANGLE |
+
+So both presets draw exactly where their pairs fit, as `round2SameRect` does, and the emitter
+writes them too (`cornerPreset`): `round2SameRect` for a top and a bottom pair, `round2DiagRect`
+for two diagonal pairs, `round1Rect` for a top-right corner alone, each corner a circle of at
+most half the short side; any other mix stays a custom path.
+
 **Result** (a probe corpus of three slides through the harness: card headers and footers, a
 24/6 px header, a shadowed top-rounded card, a segmented control, a progress bar's fill, a
 speech bubble, an elliptical box, bordered and dotted boxes, a box a frame clips, a ringed chip,

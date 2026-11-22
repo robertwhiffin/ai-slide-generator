@@ -732,6 +732,9 @@ RENDERER_LABELS = {
     "gslides": "Google Slides",
     "libreoffice": "LibreOffice",
 }
+# The apps scored from their PDF as rasterise_pdf draws it: what a baseline on
+# another raster cannot be compared in.
+PDF_RENDERERS = ("powerpoint", "libreoffice")
 # The decks a run writes, in the order summary.md names them.
 TARGETS = ("pptx", "gslides")
 # A score this much above its baseline's is a slide gone worse (the Task 14
@@ -803,9 +806,11 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
     scores (both runs' means over the same slides), and then every slide worse
     than its baseline by more than REGRESSION_THRESHOLD. A baseline whose
     harness.json does not record this run's PDF raster (one from before it,
-    which has none) rasterised PowerPoint another way: its PowerPoint scores do
-    not compare, and the summary says so. A file the run did not write is
-    taken as empty: a deck it did not export has no column.
+    which has none) rasterised its PDFs another way, so the apps scored from
+    them (PDF_RENDERERS) are not compared with it: their rows and mean are this
+    run's alone, and no rise of theirs is listed; the summary says so. A file
+    the run did not write is taken as empty: a deck it did not export has no
+    column.
     """
     scores = _read_json(out_dir / "scores.json", {})
     record = _read_json(out_dir / HARNESS_RECORD, {})
@@ -824,9 +829,13 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
     baseline_raster = baseline_record.get("pdfRaster")
     raster_differs = baseline_dir is not None and baseline_raster != PDF_RASTER
 
+    def compared(kind: str) -> bool:
+        """Whether this app's scores are set against the baseline's."""
+        return baseline_dir is not None and not (raster_differs and kind in PDF_RENDERERS)
+
     def label(kind: str) -> str:
-        if kind == "powerpoint" and raster_differs:
-            return f"{RENDERER_LABELS[kind]} (baseline rasterised otherwise)"
+        if baseline_dir is not None and not compared(kind):
+            return f"{RENDERER_LABELS[kind]} (not compared: raster differs)"
         return RENDERER_LABELS[kind]
 
     decks = " / ".join(targets)
@@ -851,8 +860,8 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
         lines += [
             "",
             f"The baseline rasterised its PowerPoint PDFs another way "
-            f"({baseline_raster or 'before harness.json recorded it'}), so its PowerPoint "
-            "scores do not compare with these.",
+            f"({baseline_raster or 'before harness.json recorded it'}), and its LibreOffice "
+            "ones with them, so neither app's scores are compared with these.",
         ]
     lines += ["", "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     worse = []
@@ -861,11 +870,11 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
         row = [_cell(name)]
         for kind in renderers:
             now = scores.get(name, {}).get(kind)
-            before = baseline_scores.get(name, {}).get(kind)
+            before = baseline_scores.get(name, {}).get(kind) if compared(kind) else None
             row.append(_score_change(before, now))
             if now is None:
                 continue
-            if baseline_dir is None:
+            if not compared(kind):
                 means[kind][1].append(now)
             elif before is not None:
                 means[kind][0].append(before)
@@ -884,7 +893,7 @@ def write_summary(out_dir: Path, names: list[str], baseline_dir: Path | None = N
     mean_row = ["**mean**"]
     for kind in renderers:
         before, now = means[kind]
-        change = _score_change(_mean(before) if baseline_dir else None, _mean(now))
+        change = _score_change(_mean(before) if compared(kind) else None, _mean(now))
         mean_row.append(f"**{change}**" if now else change)
     mean_row += [""] * (len(header) - len(mean_row))
     lines.append("| " + " | ".join(mean_row) + " |")

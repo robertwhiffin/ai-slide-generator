@@ -359,7 +359,6 @@ function createBorders(env) {
     return shape;
   }
 
-
   // A shape cut to its clip: whole when the clip cuts nothing it paints (its
   // extent) and no rounded padding box of the clip cuts it, the part shown of
   // a plain rect the clip's rect alone cuts, or else the part shown of its

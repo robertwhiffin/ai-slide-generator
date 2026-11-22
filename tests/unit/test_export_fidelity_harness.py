@@ -292,22 +292,53 @@ class TestSummary:
         assert "Worse than the baseline" not in markdown
 
     @pytest.mark.parametrize("raster", [None, "MuPDF at 1x"], ids=["no-record", "another-raster"])
-    def test_a_baseline_rasterised_another_way_is_said_not_to_compare(
+    def test_a_baseline_rasterised_another_way_compares_no_pdf_scores(
         self, tmp_path: Path, raster: str | None
     ) -> None:
-        """A baseline run before the 4x raster (no harness.json), or with another, is flagged."""
+        """A baseline before the 4x raster (no harness.json), or on another: its PDFs' scores
+        do not compare.
+
+        PowerPoint and LibreOffice, both scored from a rasterised PDF, are not
+        set against it: each row shows this run's score alone, the mean is this
+        run's over every slide it scored, and no rise of theirs is listed as
+        worse, so a rise the raster alone makes (02-table's PowerPoint +0.13
+        here) is no regression. Google Slides, scored from its thumbnails, is
+        compared as before.
+        """
         harness = fidelity_harness()
+        out_dir = _current_run(tmp_path)
+        _write_json(
+            out_dir / "scores.json",
+            {
+                "01-cover": {"powerpoint": 4.29, "gslides": 2.82, "libreoffice": 6.0},
+                "02-table": {"powerpoint": 2.13, "gslides": 1.90, "libreoffice": 5.0},
+                "03-failed": {"gslides": 3.10},
+            },
+        )
         baseline = _run_dir(
-            tmp_path, "baseline", {"01-cover": {"powerpoint": 4.35, "gslides": 2.82}}, raster=raster
+            tmp_path,
+            "baseline",
+            {
+                "01-cover": {"powerpoint": 4.35, "gslides": 2.82, "libreoffice": 5.0},
+                "02-table": {"powerpoint": 2.00, "gslides": 1.80, "libreoffice": 4.0},
+            },
+            raster=raster,
         )
-        markdown = harness.write_summary(_current_run(tmp_path), NAMES, baseline).read_text(
-            encoding="utf-8"
-        )
+        markdown = harness.write_summary(out_dir, NAMES, baseline).read_text(encoding="utf-8")
         assert "rasterised its PowerPoint PDFs another way" in markdown, markdown
         rows = _rows(markdown)
-        assert rows["Slide"][1] == "PowerPoint (baseline rasterised otherwise)"
-        # The baseline scored the first slide alone, so both means are over it alone.
-        assert rows["**mean**"][1:3] == ["**4.35 → 4.29**", "**2.82 → 2.82**"], rows["**mean**"]
+        assert rows["Slide"][1:4] == [
+            "PowerPoint (not compared: raster differs)",
+            "Google Slides",
+            "LibreOffice (not compared: raster differs)",
+        ], rows["Slide"]
+        assert rows["02-table"][1:4] == ["2.13", "1.80 → 1.90", "5.00"], rows["02-table"]
+        assert rows["**mean**"][1:4] == ["**3.21**", "**2.31 → 2.36**", "**5.50**"], rows[
+            "**mean**"
+        ]
+        assert "Worse than the baseline by more than 0.05: 02-table (Google Slides +0.10)." in (
+            markdown
+        ), markdown
 
     def test_a_run_without_google_slides_reports_its_deck_alone(self, tmp_path: Path) -> None:
         out_dir = _current_run(tmp_path)

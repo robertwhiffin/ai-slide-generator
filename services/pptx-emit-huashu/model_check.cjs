@@ -22,8 +22,8 @@
 //       they read is as the snapshot writes it (snapshot.mjs SlideModel,
 //       snapshot_text.mjs TextBlock and Run, snapshot_table.mjs TableItem): each
 //       number finite, each colour RRGGBB, each value of a set one of that set,
-//       each text a string (a roundCorners shape's radii four corners of two
-//       lengths each, none below 0); an image item also names a capture that is kept, or
+//       each text a string (a roundCorners shape's radii four corners, each
+//       two lengths above 0 or both 0); an image item also names a capture that is kept, or
 //       none; a native table's cells, spans included, lie inside its grid
 //       and cover each of its slots once;
 //     * the fields: items and captures are lists, background is a raster data:
@@ -130,9 +130,11 @@ function isParagraph(paragraph) {
     isListOf(paragraph.lines, isLine);
 }
 
-// A corner's radii {h, v}: two finite lengths, neither below 0.
+// A corner's radii {h, v}: two finite lengths above 0, or both 0 for a square
+// corner, as the snapshot writes them (cornerGeometry: a corner either radius
+// of which is 0 is square).
 function isCorner(corner) {
-  return hasNumbers(corner, ['h', 'v']) && corner.h >= 0 && corner.v >= 0;
+  return hasNumbers(corner, ['h', 'v']) && ((corner.h > 0 && corner.v > 0) || (corner.h === 0 && corner.v === 0));
 }
 
 function isShape(item) {

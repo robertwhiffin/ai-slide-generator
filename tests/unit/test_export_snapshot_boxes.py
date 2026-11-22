@@ -38,8 +38,10 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from lxml import etree
@@ -51,6 +53,7 @@ from tests.fixtures.export_snapshot_support import (
     Shape,
     browser_rect,
     export_slides,
+    node_json,
     requires_huashu_sidecar,
     slide_background,
     slide_document,
@@ -1141,6 +1144,113 @@ def _has_vertex(points: list[tuple[float, float]], at: tuple[float, float]) -> b
     return any(math.hypot(x - at[0], y - at[1]) <= VERTEX_TOLERANCE_PX for x, y in points)
 
 
+def _walk_path(element: etree._Element, shape: Shape) -> list[dict]:
+    """A custom path's segments in order, walked as the apps draw it, in slide px.
+
+    Each is {kind, start, end}: 'move', 'line' and 'close' (back to the move's
+    point), and 'arc', which also holds its centre, its (horizontal, vertical)
+    radii, its middle point and the corner its start angle names. An arcTo
+    starts at the current point, which lies on its ellipse at its start angle,
+    so its centre is that point less the radii along the start angle, and it
+    ends at the start angle plus its sweep (angles clockwise from 3 o'clock).
+    """
+    path = element.find("p:spPr/a:custGeom/a:pathLst/a:path", NAMESPACES)
+    assert path is not None, "the shape holds no custom path"
+    segments: list[dict] = []
+    current = start = None
+    for command in path:
+        name = etree.QName(command).localname
+        if name in ("moveTo", "lnTo"):
+            point = command.find("a:pt", NAMESPACES)
+            end = (
+                shape.x + int(point.get("x")) / EMU_PER_PX,
+                shape.y + int(point.get("y")) / EMU_PER_PX,
+            )
+            if name == "moveTo":
+                start = end
+            segments.append(
+                {"kind": "move" if name == "moveTo" else "line", "start": current, "end": end}
+            )
+            current = end
+        elif name == "arcTo":
+            horizontal = int(command.get("wR")) / EMU_PER_PX
+            vertical = int(command.get("hR")) / EMU_PER_PX
+            angle = math.radians(int(command.get("stAng")) / 60000)
+            sweep = math.radians(int(command.get("swAng")) / 60000)
+            centre = (
+                current[0] - horizontal * math.cos(angle),
+                current[1] - vertical * math.sin(angle),
+            )
+
+            def at(theta: float, centre=centre, horizontal=horizontal, vertical=vertical):
+                return (
+                    centre[0] + horizontal * math.cos(theta),
+                    centre[1] + vertical * math.sin(theta),
+                )
+
+            segments.append(
+                {
+                    "kind": "arc",
+                    "start": current,
+                    "end": at(angle + sweep),
+                    "middle": at(angle + sweep / 2),
+                    "centre": centre,
+                    "radii": (horizontal, vertical),
+                    "corner": ARC_CORNERS.get(int(command.get("stAng"))),
+                }
+            )
+            current = segments[-1]["end"]
+        elif name == "close":
+            segments.append({"kind": "close", "start": current, "end": start})
+            current = start
+    return segments
+
+
+def _misdrawn(segments: list[dict], box: dict, radii: dict) -> list[str]:
+    """How a walked custom path (_walk_path) strays from ``box`` with its corners rounded by
+    ``radii``: an arc not centred on its CSS corner's centre or not of its radii, a corner CSS
+    rounds with no arc, a vertex, a straight side's middle or an arc's middle or end off the
+    outline, or a close that draws a side of its own. Empty when the path is the outline."""
+    problems = []
+    centres = _corner_centres(box, radii)
+    arcs = [segment for segment in segments if segment["kind"] == "arc"]
+    if sorted(arc["corner"] or "?" for arc in arcs) != sorted(centres):
+        problems.append(f"arcs at {[arc['corner'] for arc in arcs]}, CSS rounds {sorted(centres)}")
+    for segment in segments:
+        kind, start, end = segment["kind"], segment["start"], segment["end"]
+        if kind == "arc":
+            expected = centres.get(segment["corner"])
+            if (
+                expected is None
+                or math.hypot(
+                    segment["centre"][0] - expected[0], segment["centre"][1] - expected[1]
+                )
+                > VERTEX_TOLERANCE_PX
+                or any(
+                    abs(a - b) > RADIUS_TOLERANCE_PX for a, b in zip(segment["radii"], expected[2:])
+                )
+            ):
+                problems.append(
+                    f"the {segment['corner']} arc is centred at {segment['centre']} with radii "
+                    f"{segment['radii']}; CSS's is {expected}"
+                )
+            points = (segment["middle"], end)
+        elif kind == "close":
+            if math.hypot(end[0] - start[0], end[1] - start[1]) > VERTEX_TOLERANCE_PX:
+                problems.append(f"the path closes with a side from {start} to {end}")
+            points = ()
+        elif kind == "line":
+            points = (start, ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2), end)
+        else:
+            points = (end,)
+        problems += [
+            f"a {kind}'s point {point} is off the outline"
+            for point in points
+            if not _on_outline(point, box, radii)
+        ]
+    return problems
+
+
 def _circles(*radii: float) -> dict[str, tuple[float, float]]:
     """Corner radii top left, top right, bottom right, bottom left, each a circle's."""
     return {corner: (radius, radius) for corner, radius in zip(CORNERS, radii)}
@@ -1159,6 +1269,37 @@ CUSTOM_CORNERS = {
     ),
     # Its 16 px corners are past half its 20 px height, which round2SameRect pins them to.
     "top-past-half-the-short-side": ("16px 16px 0 0", 300, 20, _circles(16, 16, 0, 0)),
+    # The same past round1Rect's and round2DiagRect's pin.
+    "top-right-past-half-the-short-side": ("0 16px 0 0", 300, 20, _circles(0, 16, 0, 0)),
+    "diagonal-past-half-the-short-side": ("16px 0", 300, 20, _circles(16, 0, 16, 0)),
+}
+
+# (border-radius, width, height, the preset, each adjustment as a share of the short side):
+# boxes a preset draws exactly, each corner a circle of at most half the short side.
+PRESET_CORNERS = {
+    "top-and-bottom-pairs": (
+        "16px 16px 4px 4px",
+        240,
+        120,
+        "round2SameRect",
+        {"adj1": 16 / 120, "adj2": 4 / 120},
+    ),
+    "top-right-only": ("0 16px 0 0", 240, 120, "round1Rect", {"adj": 16 / 120}),
+    "one-diagonal-pair": ("16px 0", 240, 120, "round2DiagRect", {"adj1": 16 / 120, "adj2": 0}),
+    "two-diagonal-pairs": (
+        "24px 8px",
+        240,
+        120,
+        "round2DiagRect",
+        {"adj1": 24 / 120, "adj2": 8 / 120},
+    ),
+    "the-other-diagonal-pair": (
+        "0 20px",
+        240,
+        120,
+        "round2DiagRect",
+        {"adj1": 0, "adj2": 20 / 120},
+    ),
 }
 
 
@@ -1221,6 +1362,41 @@ class TestMixedCornerRadii:
             )
         }
         assert not wrong, f"the {case} box rounds its corners {drawn}, expected {expected}"
+        rect = browser_rect(document, "#box")
+        _assert_box(box, rect, BOX_TOLERANCE_PX, f"the {case} box")
+        problems = _misdrawn(_walk_path(elements[position], box), rect, expected)
+        assert not problems, f"the {case} box's path is not CSS's outline:\n  " + "\n  ".join(
+            problems
+        )
+
+    @pytest.mark.parametrize("case", tuple(PRESET_CORNERS))
+    def test_corners_a_preset_draws_exactly_are_that_preset(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """A top pair and a bottom pair, a top-right corner alone, one or two diagonal pairs.
+
+        Each is the preset that draws it exactly, its adjustments each radius
+        over the short side, at the browser rect: ``round2SameRect`` (adj1 the
+        top corners, adj2 the bottom), ``round1Rect`` (adj, the top right) and
+        ``round2DiagRect`` (adj1 the top left and bottom right, adj2 the top
+        right and bottom left).
+        """
+        radius, width, height, preset, expected = PRESET_CORNERS[case]
+        body = (
+            '<div class="slide"><div id="box" style="position: absolute; left: 80px; top: 100px; '
+            f"width: {width}px; height: {height}px; border-radius: {radius}; "
+            'background: #2E7D6B;"></div></div>'
+        )
+        shapes, elements, document = _mixed_export(body, monkeypatch)
+        position, box = _filled(shapes, "2E7D6B")
+        assert box.geometry == preset, (
+            f"the {case} box is a {box.geometry}, not {preset}:\n{_describe(shapes)}"
+        )
+        adjustments = _adjustments(elements[position])
+        wanted = {name: round(share * 100000) for name, share in expected.items()}
+        assert set(adjustments) == set(wanted) and all(
+            abs(adjustments[name] - value) <= ADJ_TOLERANCE for name, value in wanted.items()
+        ), f"the {case} box's adjustments are {adjustments}, expected {wanted}"
         _assert_box(box, browser_rect(document, "#box"), BOX_TOLERANCE_PX, f"the {case} box")
 
     def test_a_bordered_top_rounded_box_strokes_its_corners_on_the_borders_centre_line(
@@ -1358,3 +1534,68 @@ class TestMixedCornerRadii:
         bottom = centre_line["y"] + centre_line["h"]
         for corner in ((centre_line["x"], bottom), (centre_line["x"] + centre_line["w"], bottom)):
             assert _has_vertex(points, corner), f"the square corner {corner} is no stroke vertex"
+
+
+EMIT_MODEL_MODULE = (
+    Path(__file__).resolve().parents[2] / "services" / "pptx-emit-huashu" / "emit_model.cjs"
+)
+
+
+def _emitted(items: list[dict], tmp_path: Path) -> bytes:
+    """The deck ``emit_model.cjs emitSlide`` writes for a model holding ``items``."""
+    deck_path = tmp_path / "emitted.pptx"
+    model = {
+        "width": 1280,
+        "height": 720,
+        "background": {"color": "FFFFFF"},
+        "items": items,
+        "captures": [],
+        "fonts": {},
+        "italicFonts": {},
+    }
+    node_json(
+        "const fs = require('fs'); const pptxgen = require('pptxgenjs');"
+        f"const {{ emitSlide }} = require({json.dumps(str(EMIT_MODEL_MODULE))});"
+        "const pres = new pptxgen(); pres.layout = 'LAYOUT_WIDE';"
+        f"emitSlide(pres, {json.dumps(model)}, new Map(), {{ target: 'pptx' }});"
+        "pres.write({ outputType: 'nodebuffer' }).then((deck) => {"
+        f"fs.writeFileSync({json.dumps(str(deck_path))}, deck);"
+        "process.stdout.write(JSON.stringify({ written: deck.length })); });"
+    )
+    return deck_path.read_bytes()
+
+
+@requires_huashu_sidecar
+class TestCornerEmitter:
+    def test_a_corner_with_one_radius_zero_is_drawn_square(self, tmp_path: Path) -> None:
+        """A roundCorners item whose top-right corner is {h: 16, v: 0}: that corner is square.
+
+        CSS draws a corner square when either of its radii is 0, as the
+        snapshot writes it and Google's dotted stroke draws it; the custom
+        path must not cut it with a chamfer from 16 px along the top edge.
+        """
+        item = {
+            "kind": "shape",
+            "id": 0,
+            "order": [0],
+            "x": 80,
+            "y": 100,
+            "w": 240,
+            "h": 120,
+            "geometry": "roundCorners",
+            "radius": 0,
+            "radii": [{"h": 0, "v": 0}, {"h": 16, "v": 0}, {"h": 24, "v": 24}, {"h": 0, "v": 0}],
+            "fill": {"color": "2E7D6B", "alpha": 1},
+            "line": None,
+            "shadow": None,
+            "rotate": None,
+        }
+        pptx = _emitted([item], tmp_path)
+        (shape,) = slide_shapes(pptx)
+        (element,) = slide_shape_elements(pptx)
+        assert shape.geometry == "custGeom", f"the box is a {shape.geometry}"
+        box = {"x": 80, "y": 100, "w": 240, "h": 120}
+        problems = _misdrawn(_walk_path(element, shape), box, _circles(0, 0, 24, 0))
+        assert not problems, "the half-square corner is not drawn square:\n  " + "\n  ".join(
+            problems
+        )

@@ -14,13 +14,14 @@
 // a dotted line or outline as emit_dotted.cjs draws it, Drive having no 1:1 dot.
 //
 // A box whose corners round by different radii (geometry 'roundCorners', a card
-// header's 16px 16px 0 0) is written as the preset round2SameRect when its top
-// corners are one circle and its bottom ones another, each at most half its
-// short side, and otherwise as a custom path of one quarter arc (arcTo) per
-// rounded corner. PowerPoint and Google Slides draw both as CSS draws the box,
-// within their raster's own rounding, and keep the preset a preset (Drive:
-// ROUND_2_SAME_RECTANGLE), so it resizes with circular corners and keeps its
-// handles (Task 14 B4, D11, measured in both apps).
+// header's 16px 16px 0 0) is written as the preset that draws it exactly, when
+// one does (cornerPreset: round2SameRect, round2DiagRect, round1Rect), and
+// otherwise as a custom path of one quarter arc (arcTo) per rounded corner.
+// PowerPoint and Google Slides draw all of them as CSS draws the box, within
+// their raster's own rounding, and keep a preset a preset (Drive:
+// ROUND_2_SAME_RECTANGLE, ROUND_2_DIAGONAL_RECTANGLE, ROUND_1_RECTANGLE), so it
+// resizes with circular corners and keeps its handles (Task 14 B4, D11,
+// measured in both apps; scripts/export_fidelity/CALIBRATION.md D11).
 
 const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
 const { emitTable } = require('./emit_table.cjs');
@@ -102,18 +103,40 @@ const ADJUST_SCALE = 100000;
 // preset's two adjustments: an adjustment a is passed as a / this.
 const PPTXGENJS_ANGLE_UNITS = 60000;
 
-// The top and bottom radii of a roundCorners item that round2SameRect draws
-// exactly, or null: its top corners one circle, its bottom ones another, each
-// at most half its short side, where the preset pins them.
-function sameSideRadii(item) {
-  const [topLeft, topRight, bottomRight, bottomLeft] = item.radii;
+// A roundCorners item's corners, top left first, each its radii {h, v}: a
+// corner either radius of which is 0 is square, {0, 0}, as CSS draws it (and
+// as the snapshot writes it, cornerGeometry).
+function squaredCorners(item) {
+  return item.radii.map((corner) => (corner.h > 0 && corner.v > 0 ? corner : { h: 0, v: 0 }));
+}
+
+// The preset that draws a roundCorners item exactly, {name, radii: px[]}, its
+// adjustments' radii in its own order, or null. A preset rounds its corners by
+// circles, each adjustment a radius over the shape's short side pinned at half
+// of it (the presets' definitions, measured in both apps):
+//   round2SameRect  adj1 the top corners, adj2 the bottom ones;
+//   round2DiagRect  adj1 the top left and bottom right, adj2 the top right and
+//                   bottom left;
+//   round1Rect      adj the top right, the others square.
+// So a box is one when each corner is a circle, they pair as the preset's do,
+// and each radius is at most half its short side.
+function cornerPreset(item) {
+  const [topLeft, topRight, bottomRight, bottomLeft] = squaredCorners(item);
   const near = (a, b) => Math.abs(a - b) <= RADIUS_EPSILON_PX;
-  const circle = (corner) => near(corner.h, corner.v);
-  if (![topLeft, topRight, bottomRight, bottomLeft].every(circle)) return null;
-  if (!near(topLeft.h, topRight.h) || !near(bottomLeft.h, bottomRight.h)) return null;
+  if (![topLeft, topRight, bottomRight, bottomLeft].every((corner) => near(corner.h, corner.v))) return null;
   const half = Math.min(item.w, item.h) / 2;
-  if (topLeft.h > half + RADIUS_EPSILON_PX || bottomRight.h > half + RADIUS_EPSILON_PX) return null;
-  return { top: Math.min(topLeft.h, half), bottom: Math.min(bottomRight.h, half) };
+  const fits = (...corners) => corners.every((corner) => corner.h <= half + RADIUS_EPSILON_PX);
+  const radius = (corner) => Math.min(corner.h, half);
+  if (near(topLeft.h, topRight.h) && near(bottomLeft.h, bottomRight.h) && fits(topLeft, bottomRight)) {
+    return { name: 'round2SameRect', radii: [radius(topLeft), radius(bottomRight)] };
+  }
+  if (near(topLeft.h, bottomRight.h) && near(topRight.h, bottomLeft.h) && fits(topLeft, topRight)) {
+    return { name: 'round2DiagRect', radii: [radius(topLeft), radius(topRight)] };
+  }
+  if (!topLeft.h && !bottomRight.h && !bottomLeft.h && fits(topRight)) {
+    return { name: 'round1Rect', radii: [radius(topRight)] };
+  }
+  return null;
 }
 
 // A roundCorners item's outline as pptxgenjs custom-geometry points, in inches
@@ -121,7 +144,7 @@ function sameSideRadii(item) {
 // a quarter arc of each rounded corner's own radii (arcTo, angles clockwise
 // from 3 o'clock); a square corner is the corner itself.
 function cornerPathPoints(item) {
-  const [topLeft, topRight, bottomRight, bottomLeft] = item.radii;
+  const [topLeft, topRight, bottomRight, bottomLeft] = squaredCorners(item);
   const { w, h } = item;
   const points = [{ x: inches(topLeft.h), y: 0, moveTo: true }, { x: inches(w - topRight.h), y: 0 }];
   const arc = (corner, startAngle) => {
@@ -146,11 +169,14 @@ function shapeGeometry(pres, item) {
   // rectRadius is in inches; pptxgenjs turns it into the preset's adj over the short side.
   if (item.geometry === 'roundRect') return { shapeType: pres.ShapeType.roundRect, options: { rectRadius: inches(item.radius) } };
   if (item.geometry === 'roundCorners') {
-    const radii = sameSideRadii(item);
-    if (!radii) return { shapeType: pres.ShapeType.custGeom, options: { points: cornerPathPoints(item) } };
+    const preset = cornerPreset(item);
+    if (!preset) return { shapeType: pres.ShapeType.custGeom, options: { points: cornerPathPoints(item) } };
+    const shapeType = pres.ShapeType[preset.name];
+    // One adjustment is rectRadius, as a roundRect's; two go through angleRange.
+    if (preset.radii.length === 1) return { shapeType, options: { rectRadius: inches(preset.radii[0]) } };
     const shortSide = Math.min(item.w, item.h);
     const adjust = (radius) => Math.round((radius / shortSide) * ADJUST_SCALE) / PPTXGENJS_ANGLE_UNITS;
-    return { shapeType: pres.ShapeType.round2SameRect, options: { angleRange: [adjust(radii.top), adjust(radii.bottom)] } };
+    return { shapeType, options: { angleRange: preset.radii.map(adjust) } };
   }
   const shapeType = pres.ShapeType[item.geometry];
   if (!shapeType) throw new Error(`[html2pptx] unknown shape geometry: ${item.geometry}`);

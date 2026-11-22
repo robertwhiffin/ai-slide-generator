@@ -495,10 +495,11 @@ Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Dr
   - `ellipse` for circles;
   - rounded rectangles with the radius converted to the preset's adjustment, relative to
     the short side (`min(0.5, r / min(w, h))`);
-  - a box whose corners differ, each corner its own: `round2SameRect` (adj1 the top corners'
-    radius, adj2 the bottom ones', each over the short side) when the top pair is one circle
-    and the bottom pair another, each at most half the short side; else a custom path of one
-    quarter arc per rounded corner, elliptical where CSS's is (as built, Task 14 B4, D11);
+  - a box whose corners differ, each corner its own: the preset that draws it exactly when
+    one does, each corner a circle of at most half the short side (`round2SameRect`: adj1 the
+    top corners, adj2 the bottom; `round2DiagRect`: adj1 the top left and bottom right, adj2
+    the others; `round1Rect`: adj the top right alone); else a custom path of one quarter arc
+    per rounded corner, elliptical where CSS's is (as built, Task 14 B4, D11);
   - per-side lines, fill transparency and outer shadow.
 - **Tables:** `addTable` with explicit `colW` and `rowH`, margins, and all four borders on
   every cell.

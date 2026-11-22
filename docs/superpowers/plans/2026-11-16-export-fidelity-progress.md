@@ -890,6 +890,24 @@ square. Every square corner is square and every rounded one rounds by its own ra
     keeps its handles), and otherwise a custom shape: it moves and recolours whole, but scales
     its corners with it when resized.
 
+### B4 fix round 1
+
+- **D11, the presets:** `round2DiagRect` (two diagonal pairs) and `round1Rect` (a top-right
+  corner alone) are written too where they fit exactly, measured in both apps like
+  `round2SameRect` (`CALIBRATION.md` D11: within 0.00–0.02 in PowerPoint and at Google's floor,
+  0.28–0.31; Drive keeps `ROUND_2_DIAGONAL_RECTANGLE` and `ROUND_1_RECTANGLE`). The ruling above
+  now reads: the preset that draws a box exactly, `round2SameRect`, `round2DiagRect` or
+  `round1Rect`, else the `arcTo` path.
+- **D11, a corner either radius of which is 0** is square in the emitter too (it drew a
+  chamfer), and `model_check.cjs` keeps a corner only with both radii above 0 or both 0, as the
+  snapshot writes it.
+- **summary.md:** a baseline rasterised another way is not compared in PowerPoint or
+  LibreOffice ("not compared: raster differs"): their rows and means are the run's alone, and
+  no rise of theirs is listed as worse. Google Slides is still compared.
+- **Tests:** the custom-path tests walk the path as the apps draw it (every arc centred on its
+  CSS corner's centre, every vertex, side and arc on CSS's outline), which the reviewer's
+  misdrawn-path sabotage now turns red.
+
 ### Google Slides decks kept for the owner
 
 - In-repo corpus: https://docs.google.com/presentation/d/1Bezr8mS5WksUXdLffGfGLO_1IFRr0oKgR7GnvxRKcBE/edit

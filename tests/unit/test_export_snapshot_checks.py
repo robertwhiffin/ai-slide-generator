@@ -2119,6 +2119,8 @@ MODEL_DEFECTS = {
     "shape-corner-radius-nan": (_set("items.9.radii.1.v", NAN), {10}, 0),
     "shape-corner-radius-negative": (_set("items.9.radii.0.h", -4), {10}, 0),
     "shape-corner-radius-a-string": (_set("items.9.radii.2.h", "0"), {10}, 0),
+    # A corner either radius of which is 0 is square: the snapshot writes it {0, 0}.
+    "shape-corner-radius-half-square": (_set("items.9.radii.1", {"h": 16, "v": 0}), {10}, 0),
     "shape-role-not-a-string": (_set("items.8.role", 1), {9}, 0),
     "line-x1-nan": (_set("items.2.x1", NAN), {2}, 0),
     "line-colour-short": (_set("items.2.color", "F00"), {2}, 0),
