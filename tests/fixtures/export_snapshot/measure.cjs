@@ -108,12 +108,15 @@ const { chromium } = require(path.join(SIDECAR_DIR, 'node_modules', 'playwright'
 
 function launchOptions() {
   // The export's launch (render_slide.cjs): Chrome on macOS, Chromium without the sandbox
-  // elsewhere, and the inherited env so LD_LIBRARY_PATH reaches the browser.
+  // and with unhinted glyph layout elsewhere, and the inherited env so LD_LIBRARY_PATH
+  // and FONTCONFIG_FILE reach the browser.
   const options = { env: { ...process.env } };
   if (process.platform === 'darwin') {
     options.channel = 'chrome';
   } else {
-    options.args = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+    options.args = [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none',
+    ];
   }
   return options;
 }

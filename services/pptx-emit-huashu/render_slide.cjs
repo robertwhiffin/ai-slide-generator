@@ -233,6 +233,11 @@ ${helpers.map((helper) => helper.toString()).join('\n')}
 // must export byte-identical pictures, and GPU rasterization on macOS
 // anti-aliased a chart's edges differently in about one capture in twenty.
 // Databricks Apps has no GPU, so this is how it renders anyway.
+// On Linux glyphs are laid out unhinted (--font-render-hinting=none): headless
+// Chromium there hints outlines fully, which rounds every glyph's advance, and
+// measured on Apps' Chromium a webfont line came out 0.95 to 1.08 of its width
+// on a Mac; unhinted it is within 0.0004. Chrome on a Mac lays text out with
+// CoreText, which the flag does not change (Task 15 B8, N3).
 function launchOptions(tmpDir) {
   const options = { env: { ...process.env, TMPDIR: tmpDir }, args: ['--disable-gpu'] };
   if (process.platform === 'darwin') {
@@ -242,6 +247,7 @@ function launchOptions(tmpDir) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--font-render-hinting=none',
     );
   }
   return options;
@@ -578,4 +584,4 @@ async function renderSlide(htmlFile, pres, options = {}) {
   }
 }
 
-module.exports = { renderSlide };
+module.exports = { launchOptions, renderSlide };
