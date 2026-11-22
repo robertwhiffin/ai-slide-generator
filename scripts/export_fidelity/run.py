@@ -616,15 +616,62 @@ def _normalise_text(text: str) -> str:
     return "".join(folded.split()).lower()
 
 
-def _slide_text(slide) -> str:
-    """Every text frame's and table cell's text on ``slide``, run together."""
-    exported = ""
+def _slide_texts(slide) -> list[str]:
+    """The text of every text frame and table cell on ``slide``, in the order the slide holds
+    them (paint order)."""
+    texts = []
     for shape in slide.shapes:
         if shape.has_text_frame:
-            exported += shape.text_frame.text
+            texts.append(shape.text_frame.text)
         if shape.has_table:
-            exported += "".join(cell.text for row in shape.table.rows for cell in row.cells)
-    return exported
+            texts.extend(cell.text for row in shape.table.rows for cell in row.cells)
+    return texts
+
+
+# A word longer than this is not looked for across items, nor an item's text
+# read further than this from its edges: the words a page runs across an
+# atomic inline's edge are short ("1Financials", "Iceberg,"). The bound
+# text_check.cjs ACROSS_LIMIT sets, so the two checks report the same words.
+ACROSS_LIMIT = 64
+
+
+def _item_edges(texts: list[str]) -> tuple[set[str], set[str], set[str]]:
+    """(every suffix, every prefix, each whole text) of the items' normalised texts, up to
+    ACROSS_LIMIT long: what a word written across items is read from (_written_across)."""
+    tails: set[str] = set()
+    heads: set[str] = set()
+    whole: set[str] = set()
+    for text in texts:
+        for length in range(1, min(len(text), ACROSS_LIMIT) + 1):
+            tails.add(text[-length:])
+            heads.add(text[:length])
+        if len(text) <= ACROSS_LIMIT:
+            whole.add(text)
+    return tails, heads, whole
+
+
+def _written_across(word: str, edges: tuple[set[str], set[str], set[str]]) -> bool:
+    """Whether a normalised word is written across items' edges, as text_check.cjs
+    writtenAcross reads it.
+
+    The word is a suffix of one item's text, then the whole text of none or
+    more items, then a prefix of another's, each piece a character or more. An
+    atomic inline (an inline-block numeral, a chip) is a text box of its own,
+    written after the text around it, so a word the page runs across its edge
+    ("1Financials", "Iceberg,") is written in two boxes the slide does not hold
+    side by side (Task 15 H2). The pieces must meet at the boxes' edges, so a
+    word whose piece is lost, or written only inside other text, is lost.
+    """
+    tails, heads, whole = edges
+    if not 2 <= len(word) <= ACROSS_LIMIT:
+        return False
+    # reached[end]: the word's first `end` characters end where an item's text ends.
+    reached = [False] * len(word)
+    for end in range(1, len(word)):
+        reached[end] = word[:end] in tails or any(
+            reached[start] and word[start:end] in whole for start in range(1, end)
+        )
+    return any(reached[start] and word[start:] in heads for start in range(1, len(word)))
 
 
 def _notes_text(slide) -> str | None:
@@ -659,11 +706,13 @@ def check_text_loss(
 ) -> dict[str, list[str]]:
     """Words the browser renders that are absent from the exported slide.
 
-    The reference is the browser's own rendered text (render_truth.cjs writes
-    it), which no extraction code touches, so text the exporter drops shows up
-    here. SVG and canvas text is excluded: it travels inside the picture. A
-    word is lost when its normalised form (_normalise_text) is no substring of
-    its slide's normalised text; a slide the deck lacks loses every word.
+    The reference is the browser's own rendered text of the UI's document
+    (render_truth.cjs writes it), which no extraction code touches, so text the
+    exporter drops shows up here. SVG and canvas text is excluded: it travels
+    inside the picture. A word is lost when its normalised form
+    (_normalise_text) is no substring of its slide's normalised text, run
+    together in the slide's order, and is not written across its text boxes'
+    edges (_written_across); a slide the deck lacks loses every word.
 
     ``hidden_text[i]``, when given, is the hidden text of slide ``names[i]``
     (its slide summary's ``hiddenText``): the words the
@@ -684,13 +733,20 @@ def check_text_loss(
     for index, name in enumerate(names):
         reference = (out_dir / "truth" / f"{name}.txt").read_text(encoding="utf-8")
         slide = slides.get(name)
-        exported_normalised = _normalise_text(_slide_text(slide)) if slide is not None else ""
+        texts = [_normalise_text(text) for text in _slide_texts(slide)] if slide is not None else []
+        texts = [text for text in texts if text]
+        exported_normalised = "".join(texts)
+        edges = None
         hidden = hidden_text[index] if hidden_text is not None and slide is not None else ""
         hidden_words = {_normalise_text(word) for word in hidden.split()}
         lost = []
         for word in reference.split():
             normalised = _normalise_text(word)
-            if normalised not in exported_normalised and normalised not in hidden_words:
+            if normalised in exported_normalised or normalised in hidden_words:
+                continue
+            if edges is None:
+                edges = _item_edges(texts)
+            if not _written_across(normalised, edges):
                 lost.append(word)
         if lost:
             missing[name] = lost

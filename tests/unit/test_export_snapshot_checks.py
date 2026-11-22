@@ -8,8 +8,13 @@ the app log and in the export fidelity harness (spec §6):
   as the reference spells them and in its order, whose normalised form (white
   space and default-ignorable code points removed, lower-cased) is no
   substring of the normalised emitted text, leaving out the slide's hidden
-  words. ``textLossLine(reference, items, hidden)`` collects the emitted text
-  of a slide model's items (text items, which hold every list marker, outside
+  words and the words written across items' edges: an atomic inline (an
+  inline-block numeral, a chip) is an item of its own, so innerText's
+  "1Financials" or "Iceberg," is written in two items, each piece at an item's
+  edge (Task 15 H2); a word longer than ``ACROSS_LIMIT`` is not looked for so,
+  page script being free to write one of any length, and the harness's twin
+  shares the limit. ``textLossLine(reference, items, hidden)`` collects the
+  emitted text of a slide model's items (text items, which hold every list marker, outside
   ones as items of their own and inside ones as tokens of their line, and
   native table cells) and returns ``[html2pptx] text missing: <json array>``,
   or null when nothing is missing. Both are pure, so they are tested here in
@@ -325,6 +330,29 @@ JOINED_BODY = (
 )
 JOINED_DOCUMENT = _case_document(JOINED_BODY)
 
+# Words the page runs across an atomic inline's edge, as real decks write them
+# (the Task 15 matrix): an inline-block numeral before its item's first word
+# (long-off 02), and a chip followed by a comma (dense-tpl18 03). The export
+# writes each atomic inline as an item of its own, painted after the text
+# around it, so innerText's "1Financials" and "Iceberg," are written in two
+# items each.
+ATOMIC_JOINED_WORDS = ("1Financials", "2Operations", "Iceberg,")
+ATOMIC_CHIP = (
+    'style="display: inline-block; padding: 0 8px; border-radius: 999px; '
+    'background: #EEECE6; border: 1px solid #DCE0E2;"'
+)
+ATOMIC_NUMERAL = 'style="display: inline-block; min-width: 28px;"'
+ATOMIC_BODY = (
+    f'<div class="slide">{LEAD}<ol style="list-style: none; margin: 0; padding: 0; '
+    'font-size: 18px;">'
+    f"<li><b {ATOMIC_NUMERAL}>1</b><b>Financials</b> — Revenue up 9% to $1.80B</li>"
+    f"<li><b {ATOMIC_NUMERAL}>2</b><b>Operations</b> — On-time delivery held</li></ol>"
+    '<p style="width: 900px; font-size: 20px;">Open table formats such as '
+    f"<span {ATOMIC_CHIP}>Delta Lake</span> and <span {ATOMIC_CHIP}>Apache Iceberg</span>, "
+    f"together with <span {ATOMIC_CHIP}>MLflow</span>, shorten the path.</p></div>"
+)
+ATOMIC_DOCUMENT = _case_document(ATOMIC_BODY)
+
 # A slide realm that lies about the text a reader of it sees: innerText
 # returns a decoy, and both querySelectorAll copies find nothing, so a reference
 # read through the page's own accessors would hold the decoy and the SVG's
@@ -465,6 +493,13 @@ def _text_item(*lines: tuple[str, ...]) -> dict:
 def _table_item(*cells: list[dict] | None) -> dict:
     """A native table item whose cells hold these paragraphs (None: overlay text, []: none)."""
     return {"kind": "table", "cells": [{"paragraphs": cell} for cell in cells]}
+
+
+def _across_limit() -> int:
+    """text_check.cjs's ACROSS_LIMIT, read from its source."""
+    match = re.search(r"^const ACROSS_LIMIT = (\d+);$", TEXT_CHECK_MODULE.read_text(), re.M)
+    assert match, "text_check.cjs no longer declares ACROSS_LIMIT"
+    return int(match.group(1))
 
 
 def _missing_from_line(line: object) -> list[str]:
@@ -641,6 +676,75 @@ class TestTextLossLine:
         ]
         assert _text_loss_line("Liquidity", items, "") is None
         assert _missing_from_line(_text_loss_line("Liquidity Solvency", items, "")) == ["Solvency"]
+
+    def test_a_numeral_an_inline_block_joins_to_its_word_is_written(self) -> None:
+        """ "1Financials": the numeral is an item of its own, after its line in paint order.
+
+        innerText runs the inline-block numeral into the word after it, and the
+        model writes them in two items, which it does not hold side by side
+        (long-off 02, 03 and 27). Every character is written, at the items'
+        edges, so no word is missing.
+        """
+        items = [
+            _text_item(("Financials — Revenue up 9%",)),
+            _text_item(("1",)),
+            _text_item(("Operations — On-time delivery",)),
+            _text_item(("2",)),
+        ]
+        reference = "1Financials — Revenue up 9% 2Operations — On-time delivery"
+        assert _text_loss_line(reference, items, "") is None
+
+    def test_a_chip_and_the_comma_after_it_are_written(self) -> None:
+        """ "Iceberg,": the chip is an item of its own, the comma starts the text after it.
+
+        The line is cut at the chips, and the chips paint after the line's text
+        (dense-tpl18 03).
+        """
+        items = [
+            _text_item(("Open table formats such as",)),
+            _text_item(("and",)),
+            _text_item((",",)),
+            _text_item(("together with",)),
+            _text_item(("Delta Lake",)),
+            _text_item(("Apache Iceberg",)),
+        ]
+        reference = "Open table formats such as Delta Lake and Apache Iceberg, together with"
+        assert _text_loss_line(reference, items, "") is None
+
+    def test_a_word_split_across_items_is_missing_when_a_piece_is(self) -> None:
+        """CONTROL: the pieces must each be written, and at the items' edges.
+
+        * the word after the numeral lost: "1Financials" is missing;
+        * the numeral lost: "1Financials" is missing;
+        * the comma after the chip lost: "Iceberg," is missing;
+        * a "1" and a "Financials" written inside other text are no edges.
+        """
+        lost_word = [_text_item(("— Revenue up 9%",)), _text_item(("1",))]
+        assert _missing_from_line(_text_loss_line("1Financials", lost_word, "")) == ["1Financials"]
+        lost_numeral = [_text_item(("Financials — Revenue up 9%",))]
+        assert _missing_from_line(_text_loss_line("1Financials", lost_numeral, "")) == [
+            "1Financials"
+        ]
+        lost_comma = [_text_item(("together with",)), _text_item(("Apache Iceberg",))]
+        assert _missing_from_line(_text_loss_line("Iceberg, together", lost_comma, "")) == [
+            "Iceberg,"
+        ]
+        inside = [_text_item(("a total of 1 shown",)), _text_item(("the Financials team",))]
+        assert _missing_from_line(_text_loss_line("1Financials", inside, "")) == ["1Financials"]
+
+    def test_a_page_long_word_is_not_looked_for_across_items(self) -> None:
+        """BOUND: the page writes the reference, so a word of any length can reach the check.
+
+        The items hold every run of 1 to ACROSS_LIMIT x's, which makes a word of
+        x's fit their edges at every point: read across items without the
+        limit, a 20,000-character word costs a cubic number of character
+        copies, far past the Node call's timeout. Longer than the limit, it is
+        not looked for, and is missing.
+        """
+        limit = _across_limit()
+        items = [_text_item(("x" * length,)) for length in range(1, limit + 1)]
+        word = "x" * 20000
+        assert _missing_from_line(_text_loss_line(word, items, "")) == [word]
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1217,58 @@ class TestHarnessOracle:
         dashed = _deck_of_texts([["end-to-end"]])
         assert reference_text_loss(dashed, ["end\u2013to\u2013end"]) == [["end\u2013to\u2013end"]]
 
+    def test_a_numeral_an_inline_block_joins_to_its_word_is_no_loss(self) -> None:
+        """ "1Financials": the numeral is a text box of its own, after its line's (long-off 02).
+
+        Every character is written, at the boxes' edges, so no word is lost.
+        """
+        pptx = _deck_of_texts(
+            [["Financials — Revenue up 9%", "1", "Operations — On-time delivery", "2"]]
+        )
+        reference = "1Financials — Revenue up 9% 2Operations — On-time delivery"
+        assert reference_text_loss(pptx, [reference]) == [[]]
+
+    def test_a_chip_and_the_comma_after_it_are_no_loss(self) -> None:
+        """ "Iceberg,": the chip is a text box of its own; the comma starts the box after it
+        (dense-tpl18 03)."""
+        pptx = _deck_of_texts(
+            [
+                [
+                    "Open table formats such as",
+                    "and",
+                    ",",
+                    "together with",
+                    "Delta Lake",
+                    "Apache Iceberg",
+                ]
+            ]
+        )
+        reference = "Open table formats such as Delta Lake and Apache Iceberg, together with"
+        assert reference_text_loss(pptx, [reference]) == [[]]
+
+    def test_the_harness_reads_words_across_boxes_as_the_sidecar_does(self) -> None:
+        """The two checks report the same words: one limit to the words read across items."""
+        assert fidelity_harness().ACROSS_LIMIT == _across_limit()
+
+    def test_a_word_split_across_boxes_is_lost_when_a_piece_is(self) -> None:
+        """CONTROL: each piece must be written, and at the boxes' edges.
+
+        The word after the numeral, the numeral, or the comma after the chip
+        lost; and a "1" and a "Financials" written only inside other text.
+        """
+        cases = {
+            "lost word": (["— Revenue up 9%", "1"], "1Financials", ["1Financials"]),
+            "lost numeral": (["Financials — Revenue up 9%"], "1Financials", ["1Financials"]),
+            "lost comma": (["together with", "Apache Iceberg"], "Iceberg, together", ["Iceberg,"]),
+            "inside": (
+                ["a total of 1 shown", "the Financials team"],
+                "1Financials",
+                ["1Financials"],
+            ),
+        }
+        for name, (texts, reference, lost) in cases.items():
+            assert reference_text_loss(_deck_of_texts([texts]), [reference]) == [lost], name
+
 
 @pytest.mark.slow
 @requires_huashu_sidecar
@@ -1134,6 +1290,28 @@ class TestHarnessJoinedScript:
             f"fixture drift: the PowerPoint deck writes no word joiner: {[s.text for s in joined]}"
         )
         assert text_loss(logged.pptx, [JOINED_DOCUMENT]) == [[]]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestWordsAcrossAtomicInlines:
+    def test_a_numeral_and_a_chip_joined_to_their_text_are_not_reported_missing(self) -> None:
+        """Through a real export, neither check reports what every item writes.
+
+        innerText reads "1Financials", "2Operations" and "Iceberg," as words
+        (checked first); the export writes the numerals and the chip as items of
+        their own. The sidecar logs no ``text missing`` line, and the harness's
+        oracle reports nothing lost.
+        """
+        words = browser_text(ATOMIC_DOCUMENT).split()
+        assert all(word in words for word in ATOMIC_JOINED_WORDS), (
+            f"fixture drift: innerText no longer runs the words together: {words}"
+        )
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([ATOMIC_DOCUMENT], monkeypatch=monkeypatch)
+        assert logged.failures == [], logged.failures
+        assert text_missing_reports(logged.stderr) == [], f"stderr:\n{logged.stderr[-3000:]}"
+        assert text_loss(logged.pptx, [ATOMIC_DOCUMENT]) == [[]]
 
 
 # ---------------------------------------------------------------------------
