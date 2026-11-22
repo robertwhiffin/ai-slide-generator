@@ -104,8 +104,9 @@ a fragile, easy-to-break bundling chain:
    `tests/unit/test_verify_app_wheel_huashu.py` keeps that list equal to the
    graph of the source tree.
 5. **`.databricksignore`** excludes the bulky uncompressed
-   `services/pptx-emit-huashu/node_modules/`, `fonts/` and `playwright-browsers/`
-   from `deploy_local` uploads.
+   `services/pptx-emit-huashu/node_modules/`, `fonts/`, `fonts-staging/` (the
+   staging directory `setup.sh` extracts the font bundle into) and
+   `playwright-browsers/` from `deploy_local` uploads.
 
 **What to flag in review.** Raise a concern when a diff touches any link in
 this chain in a way that could break it silently:

@@ -71,6 +71,7 @@ node_modules/
 services/pptx-emit-huashu/sys-libs/
 services/pptx-emit-huashu/sys-libs-bullseye/
 services/pptx-emit-huashu/fonts/
+services/pptx-emit-huashu/fonts-staging/
 frontend/.vite/
 frontend/dist/
 *.local

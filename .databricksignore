@@ -8,7 +8,8 @@ services/html-to-pptx/tests/.out/
 # too: at boot its setup.sh extracts node_modules/ from the shipped
 # node_modules.tar.gz and installs Chromium, so these local, uncompressed copies
 # stay out of an upload. fonts/ is the font bundle's (fonts-liberation.tar.gz),
-# extracted the same way.
+# extracted the same way, through fonts-staging/.
 services/pptx-emit-huashu/node_modules/
 services/pptx-emit-huashu/fonts/
+services/pptx-emit-huashu/fonts-staging/
 services/pptx-emit-huashu/playwright-browsers/

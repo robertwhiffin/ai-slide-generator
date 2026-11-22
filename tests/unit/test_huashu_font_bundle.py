@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import xml.dom.minidom
 from pathlib import Path
 
@@ -174,7 +175,7 @@ def _sidecar_copy(directory: Path) -> Path:
     return directory
 
 
-def _run_setup(directory: Path) -> subprocess.CompletedProcess:
+def _run_setup(directory: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     # No node_modules here: the Chromium step is skipped, nothing is downloaded.
     return subprocess.run(
         ["sh", str(directory / "setup.sh")],
@@ -182,7 +183,42 @@ def _run_setup(directory: Path) -> subprocess.CompletedProcess:
         text=True,
         timeout=120,
         check=False,
+        env=env,
     )
+
+
+def _face_digests(directory: Path) -> dict[str, str]:
+    """The sha256 of each face extracted into a sidecar directory's fonts/liberation."""
+    faces = directory / "fonts" / "liberation"
+    if not faces.is_dir():
+        return {}
+    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in faces.iterdir()}
+
+
+_RELEASE_FACES = {name: digest for name, digest in UPSTREAM_SHA256.items() if name.endswith(".ttf")}
+
+
+def _truncated_bundle() -> bytes:
+    """The bundle cut off halfway, as an interrupted copy or download leaves it: tar extracts
+    the members before the cut, part of the next, and then fails."""
+    data = BUNDLE.read_bytes()
+    truncated = data[: len(data) // 2]
+    with pytest.raises((EOFError, tarfile.ReadError)):
+        with tarfile.open(fileobj=io.BytesIO(truncated), mode="r:gz") as bundle:
+            bundle.getmembers()
+    return truncated
+
+
+def _removable(path: Path) -> bool:
+    """Whether the current user can remove ``path`` despite its directory's mode (root can),
+    read without removing it: ``os.access`` on the directory for writing."""
+    return os.access(path.parent, os.W_OK)
+
+
+def _later_than(path: Path, seconds: int) -> None:
+    """Sets ``path``'s mtime ``seconds`` after now (before it, when negative)."""
+    moment = time.time() + seconds
+    os.utime(path, (moment, moment))
 
 
 def _written_config(directory: Path) -> xml.dom.minidom.Document:
@@ -240,6 +276,129 @@ class TestSetupScript:
         assert _run_setup(sidecar).returncode == 0
 
         assert _dirs(_written_config(sidecar))[0] == str(sidecar.resolve() / "fonts" / "liberation")
+
+    def test_an_interrupted_extraction_is_completed_on_the_next_boot(self, tmp_path: Path) -> None:
+        """A boot whose extraction failed part way (the bundle cut off halfway) leaves no config
+        pointing at part of a bundle; the next boot, with the whole bundle, whose mtime is older
+        than that first boot (an unchanged install), ends with all twelve faces, each the
+        release's own bytes, and the config."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        (sidecar / BUNDLE.name).write_bytes(_truncated_bundle())
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert not (sidecar / "fonts" / "fonts.conf").exists(), (
+            "a config was written for a bundle that did not extract"
+        )
+        shutil.copyfile(BUNDLE, sidecar / BUNDLE.name)
+        _later_than(sidecar / BUNDLE.name, -3600)
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert _face_digests(sidecar) == _RELEASE_FACES
+        assert _dirs(_written_config(sidecar))[0] == str(sidecar.resolve() / "fonts" / "liberation")
+
+    def test_a_newer_bundle_that_fails_to_extract_leaves_the_whole_one_in_place(
+        self, tmp_path: Path
+    ) -> None:
+        """A newer bundle cut off halfway: the faces and config already in place stay whole."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        assert _run_setup(sidecar).returncode == 0
+        (sidecar / BUNDLE.name).write_bytes(_truncated_bundle())
+        _later_than(sidecar / BUNDLE.name, 3600)
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert _face_digests(sidecar) == _RELEASE_FACES
+        assert _dirs(_written_config(sidecar))[0] == str(sidecar.resolve() / "fonts" / "liberation")
+
+    def test_a_failed_extraction_is_tried_again_on_the_next_boot(self, tmp_path: Path) -> None:
+        """Boot 1 (two hours ago) extracted a whole bundle; a newer one, installed an hour ago,
+        failed to extract on boot 2, which still wrote the config (moving fonts/'s mtime past
+        the bundle's). Boot 3, the bundle intact, extracts it: nothing of boot 1's stays."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        assert _run_setup(sidecar).returncode == 0
+        marker = sidecar / "fonts" / "liberation" / "from-boot-1"
+        marker.write_text("")
+        for path in [sidecar / "fonts", *(sidecar / "fonts").rglob("*")]:
+            _later_than(path, -7200)
+        (sidecar / BUNDLE.name).write_bytes(_truncated_bundle())
+        _later_than(sidecar / BUNDLE.name, -3600)
+        assert _run_setup(sidecar).returncode == 0
+        assert marker.exists(), "fixture drift: boot 2's failed extraction replaced the bundle"
+        shutil.copyfile(BUNDLE, sidecar / BUNDLE.name)
+        _later_than(sidecar / BUNDLE.name, -3600)
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert not marker.exists(), "the bundle that failed to extract was not tried again"
+        assert _face_digests(sidecar) == _RELEASE_FACES
+
+    def test_a_partial_bundle_an_earlier_setup_left_gets_no_config(self, tmp_path: Path) -> None:
+        """A fonts/ holding part of a bundle and a config for it, as a cut-off extraction under
+        the earlier setup.sh left it: a boot whose own extraction fails removes the config, so
+        the wrapper sets no FONTCONFIG_FILE; the next whole extraction replaces the part."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        partial = sidecar / "fonts" / "liberation"
+        partial.mkdir(parents=True)
+        shutil.copyfile(TEMPLATE, sidecar / "fonts" / "fonts.conf.in")
+        (sidecar / "fonts" / "fonts.conf").write_text("<fontconfig/>")
+        (partial / "LiberationMono-Bold.ttf").write_bytes(
+            _bundle_file("fonts/liberation/LiberationMono-Bold.ttf")
+        )
+        (sidecar / BUNDLE.name).write_bytes(_truncated_bundle())
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert not (sidecar / "fonts" / "fonts.conf").exists(), (
+            "a config names a bundle that is not whole"
+        )
+        shutil.copyfile(BUNDLE, sidecar / BUNDLE.name)
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert _face_digests(sidecar) == _RELEASE_FACES
+        assert _dirs(_written_config(sidecar))[0] == str(sidecar.resolve() / "fonts" / "liberation")
+
+    @pytest.mark.parametrize("failing", ["rm", "touch"])
+    def test_a_failing_command_in_the_font_step_still_reaches_the_chromium_step(
+        self, tmp_path: Path, failing: str
+    ) -> None:
+        """The font step is a warning, never a stop, under setup.sh's ``set -e``: with ``rm``
+        unable to clear a stale fonts/ directory, or ``touch`` failing, setup still runs the
+        Chromium install (here a stand-in ``node`` that records its arguments)."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        (sidecar / "node_modules" / "playwright").mkdir(parents=True)
+        (sidecar / "node_modules" / "playwright" / "cli.js").write_text("")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        record = tmp_path / "node-arguments"
+        commands = {"node": f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{record}"\n'}
+        locked = sidecar / "fonts" / "locked"
+        if failing == "touch":
+            commands["touch"] = "#!/bin/sh\nexit 1\n"
+        else:
+            locked.mkdir(parents=True)
+            (locked / "face.ttf").write_text("")
+            locked.chmod(0o555)
+        for name, script in commands.items():
+            (bin_dir / name).write_text(script)
+            (bin_dir / name).chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        try:
+            if failing == "rm" and _removable(locked / "face.ttf"):
+                pytest.skip("rm cannot fail here: the tests run as a user no mode stops")
+
+            result = _run_setup(sidecar, env)
+        finally:
+            # Wherever setup left it, so the temporary directory can be removed.
+            for directory in sidecar.rglob(locked.name):
+                directory.chmod(0o755)
+
+        assert result.returncode == 0, result.stderr
+        assert record.is_file() and record.read_text().splitlines() == [
+            "node_modules/playwright/cli.js install chromium"
+        ], "setup stopped before the Chromium step"
 
     def test_without_the_bundle_setup_still_finishes(self, tmp_path: Path) -> None:
         sidecar = tmp_path / "sidecar"
@@ -398,15 +557,18 @@ class TestTheWheel:
         assert "fonts-liberation.tar.gz" in BOOTSTRAP_FILES
 
     def test_the_wheel_ships_the_bundle_but_never_its_extracted_fonts(self) -> None:
+        """Nor the staging directory an interrupted extraction leaves (setup.sh)."""
         patterns = _sidecar_ignore_patterns()
 
         assert not any(fnmatch.fnmatch(BUNDLE.name, pattern) for pattern in patterns)
-        assert any(fnmatch.fnmatch("fonts", pattern) for pattern in patterns)
+        for extracted in ("fonts", "fonts-staging"):
+            assert any(fnmatch.fnmatch(extracted, pattern) for pattern in patterns), extracted
 
     def test_the_extracted_fonts_are_never_committed_or_uploaded(self) -> None:
         for ignore_file in (".gitignore", ".databricksignore"):
             lines = (REPO_ROOT / ignore_file).read_text().splitlines()
-            assert "services/pptx-emit-huashu/fonts/" in lines, ignore_file
+            for extracted in ("fonts", "fonts-staging"):
+                assert f"services/pptx-emit-huashu/{extracted}/" in lines, (ignore_file, extracted)
 
     def test_the_publish_check_verifies_the_bundle(self) -> None:
         result = subprocess.run(
