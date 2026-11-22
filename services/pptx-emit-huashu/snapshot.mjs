@@ -2413,8 +2413,9 @@ async function snapshotPage(config, pseudoData, renderer) {
   // snapped past a box's edge by a part of a px still lies on it, and a corner
   // cell's shape meets its neighbours' fills, and the table's own box, on whole px.
   // In the deck that keeps the browser's grid, the shape runs under each opaque
-  // native cell beside it (CORNER_RUN_UNDER_PX, runUnderPolygon). Every cut cell
-  // is unfilled before any shape is drawn, so none counts as another's neighbour.
+  // native cell beside it (CORNER_RUN_UNDER_PX; snapshot_table.mjs
+  // runUnderPolygon, over the table's own slot grid). Every cut cell is
+  // unfilled before any shape is drawn, so none counts as another's neighbour.
   function pushTable(layout, order, clip) {
     const item = layout.item;
     const rounds = (WHOLE_PIXEL_TABLES ? snappedClip(clip) : clip).rounds || [];
@@ -2436,10 +2437,9 @@ async function snapshotPage(config, pseudoData, renderer) {
         if (cutters.length) cut.push({ cell, fill: cell.fill, rect, cutters });
       }
       for (let index = 0; index < cut.length; index++) cut[index].cell.fill = null;
-      const owners = cut.length && CORNER_RUN_UNDER_PX > 0 ? slotOwners(item) : null;
       for (let index = 0; index < cut.length; index++) {
         const { cell, fill, rect, cutters } = cut[index];
-        let region = owners ? runUnderPolygon(item, owners, cell, rect) : [
+        let region = CORNER_RUN_UNDER_PX > 0 ? tableLayout.runUnderPolygon(layout, cell, rect, CORNER_RUN_UNDER_PX) : [
           { x: rect.left, y: rect.top },
           { x: rect.right, y: rect.top },
           { x: rect.right, y: rect.bottom },
@@ -2451,77 +2451,6 @@ async function snapshotPage(config, pseudoData, renderer) {
     }
     items.push({ ...item, id: nextItemId++, order });
     stats.tables++;
-  }
-
-  // Each grid slot of a table item, row by row, -> the cell that covers it, its
-  // spans included (an item holds a cell for every slot, an empty one where no
-  // cell of the table reaches). The grid holds at most COLLECTION_ITEM_LIMIT
-  // slots (snapshot_table.mjs slotsOf), which bounds the walk.
-  function slotOwners(item) {
-    const columnCount = item.colWidths.length;
-    const rowCount = item.rowHeights.length;
-    const owners = [];
-    for (let index = 0; index < rowCount * columnCount && index < COLLECTION_ITEM_LIMIT; index++) owners.push(null);
-    for (let index = 0; index < item.cells.length && index < COLLECTION_ITEM_LIMIT; index++) {
-      const cell = item.cells[index];
-      for (let row = cell.row; row < cell.row + cell.rowspan && row < rowCount; row++) {
-        for (let col = cell.col; col < cell.col + cell.colspan && col < columnCount; col++) owners[row * columnCount + col] = cell;
-      }
-    }
-    return owners;
-  }
-
-  // Whether every grid slot of rows fromRow..toRow and columns fromCol..toCol
-  // lies in the table and is covered by a cell the table paints opaquely.
-  function opaqueSlots(item, owners, fromRow, toRow, fromCol, toCol) {
-    const columnCount = item.colWidths.length;
-    if (fromRow < 0 || fromCol < 0 || toRow >= item.rowHeights.length || toCol >= columnCount) return false;
-    for (let row = fromRow; row <= toRow; row++) {
-      for (let col = fromCol; col <= toCol; col++) {
-        const owner = owners[row * columnCount + col];
-        if (!(owner && owner.fill && owner.fill.alpha >= 1)) return false;
-      }
-    }
-    return true;
-  }
-
-  // A cut cell's grid rect run under its opaque native neighbours, clockwise
-  // from its top left (CORNER_RUN_UNDER_PX). Each side whose every slot across
-  // is an opaque cell moves out by the run-under, or by half that row's or
-  // column's size where that is less, so the shape stays well inside the cell
-  // that covers it. A corner between two such sides moves out with both where
-  // the slot across that corner is opaque too, and keeps the cell's own corner
-  // otherwise: a notch, which clipConvex still cuts whole, the convex rounded
-  // boxes cutting only the table's outer corners, where no side moves.
-  function runUnderPolygon(item, owners, cell, rect) {
-    const lastRow = cell.row + cell.rowspan;
-    const lastCol = cell.col + cell.colspan;
-    const reach = (opaque, size) => (opaque ? Math.min(CORNER_RUN_UNDER_PX, size / 2) : 0);
-    const top = reach(opaqueSlots(item, owners, cell.row - 1, cell.row - 1, cell.col, lastCol - 1), item.rowHeights[cell.row - 1]);
-    const bottom = reach(opaqueSlots(item, owners, lastRow, lastRow, cell.col, lastCol - 1), item.rowHeights[lastRow]);
-    const left = reach(opaqueSlots(item, owners, cell.row, lastRow - 1, cell.col - 1, cell.col - 1), item.colWidths[cell.col - 1]);
-    const right = reach(opaqueSlots(item, owners, cell.row, lastRow - 1, lastCol, lastCol), item.colWidths[lastCol]);
-    // Each corner: the side before it moved out, the side after it moved out, and the slot across it.
-    const corners = [
-      { x: rect.left, y: rect.top, before: { x: -left, y: 0 }, after: { x: 0, y: -top }, row: cell.row - 1, col: cell.col - 1 },
-      { x: rect.right, y: rect.top, before: { x: 0, y: -top }, after: { x: right, y: 0 }, row: cell.row - 1, col: lastCol },
-      { x: rect.right, y: rect.bottom, before: { x: right, y: 0 }, after: { x: 0, y: bottom }, row: lastRow, col: lastCol },
-      { x: rect.left, y: rect.bottom, before: { x: 0, y: bottom }, after: { x: -left, y: 0 }, row: lastRow, col: cell.col - 1 },
-    ];
-    const polygon = [];
-    for (let index = 0; index < corners.length; index++) {
-      const corner = corners[index];
-      const beforeMoves = corner.before.x !== 0 || corner.before.y !== 0;
-      const afterMoves = corner.after.x !== 0 || corner.after.y !== 0;
-      if (beforeMoves && afterMoves && !opaqueSlots(item, owners, corner.row, corner.row, corner.col, corner.col)) {
-        polygon.push({ x: corner.x + corner.before.x, y: corner.y + corner.before.y });
-        polygon.push({ x: corner.x, y: corner.y });
-        polygon.push({ x: corner.x + corner.after.x, y: corner.y + corner.after.y });
-      } else {
-        polygon.push({ x: corner.x + corner.before.x + corner.after.x, y: corner.y + corner.before.y + corner.after.y });
-      }
-    }
-    return polygon;
   }
 
   // A rounded padding box with its edges on the whole px nearest them, its radii kept.

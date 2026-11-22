@@ -82,14 +82,19 @@
 // by any clip and unrotated.
 //
 // /**
-//  * TableLayout = {collapse, item, parts, cells}   (page-side only)
+//  * TableLayout = {collapse, item, parts, cells, slots, slotCells}   (page-side only)
 //  *   collapse  border-collapse: collapse, whose table border is the grid's;
 //  *   item      the TableItem, its cells' text still to come (snapshot.mjs);
 //  *   parts     every element whose box the item draws: row groups, rows,
 //  *             columns, column groups and cells;
 //  *   cells     cell element -> {model: TableCell, grid: {left, top, right, bottom},
 //  *             blocks}: blocks when it holds block layout (holdsInlineContent),
-//  *             whose content is overlay items whatever it holds.
+//  *             whose content is overlay items whatever it holds;
+//  *   slots     slots[row][col] the index in slotCells of the TableCell covering
+//  *             that grid slot, columns left to right on the slide (slotsOf's
+//  *             grid in visual columns), every slot covered;
+//  *   slotCells the item's TableCells in that index order: the same objects as
+//  *             item.cells, so a fill pushTable takes off one is off here too.
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
@@ -1072,11 +1077,16 @@ function createTableLayout(env) {
       modelCells.push(modelCell);
       if (cell.element) cells.set(cell.element, { model: modelCell, grid: gridRect, blocks: cell.blocks });
     }
+    // model.visualSlots indexes model.cells, which modelCells follows until it is sorted.
+    const slotCells = [];
+    for (let index = 0; index < modelCells.length; index++) slotCells.push(modelCells[index]);
     modelCells.sort((a, b) => a.row - b.row || a.col - b.col);
     return {
       collapse,
       parts,
       cells,
+      slots: model.visualSlots,
+      slotCells,
       item: {
         kind: 'table',
         x: columnLines[0],
@@ -1139,7 +1149,65 @@ function createTableLayout(env) {
     return true;
   }
 
-  return { collectTable, collectCellText };
+  // Whether every grid slot of rows fromRow..toRow and columns fromCol..toCol
+  // lies in the layout's table and is covered by a cell the table paints
+  // opaquely (its TableCell's fill, as it stands now).
+  function opaqueSlots(layout, fromRow, toRow, fromCol, toCol) {
+    const item = layout.item;
+    if (fromRow < 0 || fromCol < 0 || toRow >= item.rowHeights.length || toCol >= item.colWidths.length) return false;
+    for (let row = fromRow; row <= toRow; row++) {
+      for (let col = fromCol; col <= toCol; col++) {
+        const owner = layout.slotCells[layout.slots[row][col]];
+        if (!(owner && owner.fill && owner.fill.alpha >= 1)) return false;
+      }
+    }
+    return true;
+  }
+
+  // runUnderPolygon(layout, cell, rect, distance) -> a corner cell's grid
+  // rect `rect` run `distance` px under its opaque native neighbours, clockwise
+  // from its top left (snapshot.mjs pushTable, CORNER_RUN_UNDER_PX). Each side
+  // whose every slot across is an opaque cell moves out by the distance, or by
+  // half that row's or column's size where that is less, so the shape stays
+  // well inside the cell that covers it. A corner between two such sides moves
+  // out with both where the slot across that corner is opaque too, and keeps
+  // the cell's own corner otherwise: a notch, which clipConvex still cuts
+  // whole, the convex rounded boxes cutting only the table's outer corners,
+  // where no side moves. The cells a rounded corner cuts are unfilled first,
+  // so none is another's opaque neighbour.
+  function runUnderPolygon(layout, cell, rect, distance) {
+    const item = layout.item;
+    const lastRow = cell.row + cell.rowspan;
+    const lastCol = cell.col + cell.colspan;
+    const reach = (opaque, size) => (opaque ? Math.min(distance, size / 2) : 0);
+    const top = reach(opaqueSlots(layout, cell.row - 1, cell.row - 1, cell.col, lastCol - 1), item.rowHeights[cell.row - 1]);
+    const bottom = reach(opaqueSlots(layout, lastRow, lastRow, cell.col, lastCol - 1), item.rowHeights[lastRow]);
+    const left = reach(opaqueSlots(layout, cell.row, lastRow - 1, cell.col - 1, cell.col - 1), item.colWidths[cell.col - 1]);
+    const right = reach(opaqueSlots(layout, cell.row, lastRow - 1, lastCol, lastCol), item.colWidths[lastCol]);
+    // Each corner: the side before it moved out, the side after it moved out, and the slot across it.
+    const corners = [
+      { x: rect.left, y: rect.top, before: { x: -left, y: 0 }, after: { x: 0, y: -top }, row: cell.row - 1, col: cell.col - 1 },
+      { x: rect.right, y: rect.top, before: { x: 0, y: -top }, after: { x: right, y: 0 }, row: cell.row - 1, col: lastCol },
+      { x: rect.right, y: rect.bottom, before: { x: right, y: 0 }, after: { x: 0, y: bottom }, row: lastRow, col: lastCol },
+      { x: rect.left, y: rect.bottom, before: { x: 0, y: bottom }, after: { x: -left, y: 0 }, row: lastRow, col: cell.col - 1 },
+    ];
+    const polygon = [];
+    for (let index = 0; index < corners.length; index++) {
+      const corner = corners[index];
+      const beforeMoves = corner.before.x !== 0 || corner.before.y !== 0;
+      const afterMoves = corner.after.x !== 0 || corner.after.y !== 0;
+      if (beforeMoves && afterMoves && !opaqueSlots(layout, corner.row, corner.row, corner.col, corner.col)) {
+        polygon.push({ x: corner.x + corner.before.x, y: corner.y + corner.before.y });
+        polygon.push({ x: corner.x, y: corner.y });
+        polygon.push({ x: corner.x + corner.after.x, y: corner.y + corner.after.y });
+      } else {
+        polygon.push({ x: corner.x + corner.before.x + corner.after.x, y: corner.y + corner.before.y + corner.after.y });
+      }
+    }
+    return polygon;
+  }
+
+  return { collectTable, collectCellText, runUnderPolygon };
 }
 
 export const TABLE_SOURCE = createTableLayout.toString();
