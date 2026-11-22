@@ -309,7 +309,14 @@ Every item carries its order key, so the emitted stacking matches the screen.
 **Boxes.** For each painted element, the snapshot records:
 - background colour, with alpha kept as fill transparency;
 - each border side: a uniform border becomes the shape outline, otherwise one line per
-  side, keeping `dashed` and `dotted`;
+  side, keeping `dashed` and `dotted`. On a box whose corners round, each solid side is
+  instead the region CSS paints for it (CSS Backgrounds 3 §5): a filled path between the
+  rounded border box and the rounded padding box (inner radii the outer ones less the
+  border, floored at 0, unscaled as Chrome draws them), divided from its neighbours by the
+  line from the border box's corner through the padding box's, running on round a corner
+  whose neighbour has no width, neighbours painted alike one path (as built, Task 15 B7: a
+  one-sided border on a rounded card was a straight bar whose square ends stood out past
+  the corners);
 - all four corner radii;
 - outer `box-shadow`, every layer, in the order CSS paints them (the last listed lowest):
   - a spread-only layer is a ring: the box's outline when it is opaque, listed first and the

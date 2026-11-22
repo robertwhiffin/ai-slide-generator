@@ -4,7 +4,8 @@
 // walk calls for every box that paints.
 //
 // A border that is the same on all four sides is the box shape's outline; one
-// that differs between sides is a line per painted side (pushSideLines). A
+// that differs between sides is a line per painted side, or, on a box whose
+// corners round, the region CSS paints for each solid side (pushSideBorders). A
 // spread-only box-shadow layer is a ring: the box's outline when it is opaque
 // and on top, else an unfilled shape of its own. The blurred or offset layers
 // are the box's one outer shadow, on its own shape (shadowOf): one layer as it
@@ -29,7 +30,10 @@
 //                     returns the items pushed;
 //   roundsCut         (shape, clip) -> whether the clip's rounded padding boxes
 //                     (its rounds) cut what its rect shows of the shape;
-//   pushSideLines     (box, sides, order, clip) -> pushes a line per painted side.
+//   usedCornerRadii   (style, box) -> its corners' used radii [{h, v}], top left first;
+//   pushSideBorders   (box, sides, radii, order, clip) -> pushes each painted
+//                     side: on a box whose `radii` round a corner, a solid side's
+//                     region as CSS paints it, else a line per side.
 // It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox,
 // reportShadowFits and sliceOf.
 
@@ -44,10 +48,12 @@ function createBorders(env) {
     pushShape,
     pushClippedShape,
     roundsCut,
-    pushSideLines,
+    usedCornerRadii,
+    pushSideBorders,
   } = env;
   // A border that is the same on all four sides is the shape's outline. A
-  // border that differs between sides is a line per painted side (pushSideLines).
+  // border that differs between sides is a line per painted side, or each
+  // solid side's region on a box whose corners round (pushSideBorders).
   // A spread-only box-shadow layer is a ring (paintedLayers).
   const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
 
@@ -405,7 +411,11 @@ function createBorders(env) {
   //     covers nothing of the box), and every other ring under the box;
   // * the box's own shape: its background colour and its shadow, outlined by
   //   its uniform border or else by its outline ring (ringedShape);
-  // * a border that differs between sides, over the fill (pushSideLines).
+  // * a border that differs between sides, over the fill (pushSideBorders):
+  //   on a box whose corners round, each solid side the region CSS paints for
+  //   it, which follows the corners and tapers; else, and for a dashed or
+  //   dotted side, a line along it. A fragment box-decoration-break slices
+  //   keeps a line per side.
   // No shape is drawn for a shadow alone.
   // The slide root's ground is the slide background (the background transfer,
   // preprocess.mjs, put it on body, or for an image ground its picture,
@@ -448,7 +458,7 @@ function createBorders(env) {
     if (shadow) {
       for (let index = firstShadow - 1; index >= 0; index--) ringAt(index);
     }
-    if (sides) pushSideLines(box, sides, order, clip);
+    if (sides) pushSideBorders(box, sides, sliced ? null : usedCornerRadii(s, box), order, clip);
   }
 
   // The shape of a box outlined by `line` (or null), which CSS paints inside

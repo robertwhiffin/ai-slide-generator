@@ -25,7 +25,13 @@ native shape:
   when its top corners are one circle and its bottom ones another, each at
   most half the short side, and otherwise a custom path of one quarter arc per
   rounded corner (Task 14 B4, D11: before, one ``roundRect`` rounded all four
-  by the largest).
+  by the largest);
+* on a box whose corners round, a border that differs between sides paints
+  each solid side as the region CSS paints for it, a filled custom shape that
+  follows the corners and tapers (Task 15 N7: before, a straight line along the
+  side, its square ends past the corners). Its pixels are held against Chrome's
+  own screenshot at every corner; a uniform border stays the shape's outline,
+  and a square box, a dashed side and a sliced inline fragment keep a line.
 
 Every assertion reads the emitted slide XML (``slide_shapes``) and, where the
 geometry matters, compares it with the browser's own layout of the very same
@@ -52,6 +58,7 @@ from tests.fixtures.export_snapshot_support import (
     EMU_PER_PX,
     NAMESPACES,
     Shape,
+    browser_pixels,
     browser_rect,
     export_logged,
     export_slides,
@@ -1637,4 +1644,354 @@ class TestCornerEmitter:
         problems = _misdrawn(_walk_path(element, shape), box, _circles(0, 0, 24, 0))
         assert not problems, "the half-square corner is not drawn square:\n  " + "\n  ".join(
             problems
+        )
+
+
+# ---------------------------------------------------------------------------
+# One-sided borders on rounded boxes (Task 15 N7)
+# ---------------------------------------------------------------------------
+
+# Each case: a 200 x 110 white box on the slide, its own style, the colours of
+# its painted sides, and the regions its solid sides are (neighbours painted
+# alike are one). In the UI a side's border follows the rounded corners and
+# tapers to nothing, CSS painting the area between the rounded border box and
+# the rounded padding box (CSS Backgrounds 3 §5); a straight line along the
+# side stands its square ends out past the cut-away corners (long-off 22's
+# list cards, ``border-radius: 10px; border-left: 4px solid``).
+SIDE_BLUE = "1F4FD8"
+SIDE_RED = "FF3621"
+SIDE_GREEN = "00A972"
+SIDE_GREY = "5A6B73"
+ROUNDED_SIDE_CASES = {
+    "left-only": ("border-radius: 10px; border-left: 4px solid #1F4FD8;", (SIDE_BLUE,), 1),
+    "top-only": ("border-radius: 16px; border-top: 6px solid #FF3621;", (SIDE_RED,), 1),
+    "left-and-right": (
+        "border-radius: 20px; border-left: 8px solid #1F4FD8; border-right: 3px solid #00A972;",
+        (SIDE_BLUE, SIDE_GREEN),
+        2,
+    ),
+    "wider-than-radius": ("border-radius: 8px; border-left: 14px solid #1F4FD8;", (SIDE_BLUE,), 1),
+    "elliptical": (
+        "border-radius: 40px / 20px; border-left: 6px solid #1F4FD8; "
+        "border-top: 2px solid #FF3621;",
+        (SIDE_BLUE, SIDE_RED),
+        2,
+    ),
+    "accent-card": (
+        "border-radius: 12px; border: 1px solid #5A6B73; border-left: 5px solid #1F4FD8;",
+        (SIDE_BLUE, SIDE_GREY),
+        2,
+    ),
+    "turned": (
+        "border-radius: 10px; border-left: 4px solid #1F4FD8; transform: rotate(6deg);",
+        (SIDE_BLUE,),
+        1,
+    ),
+    # The box sits 2 px past its wrapper's left edge, which clips it.
+    "clipped": ("border-radius: 10px; border-left: 4px solid #1F4FD8;", (SIDE_BLUE,), 1),
+    # Four sides painted alike, their widths differing: two regions, split at the
+    # top right and bottom left corners, none a ring.
+    "four-alike": (
+        "border-radius: 12px; border: 3px solid #1F4FD8; border-bottom-width: 7px;",
+        (SIDE_BLUE,),
+        2,
+    ),
+    # Inner radii that overlap their side: the top left's 170 px less no border,
+    # beside a right border wider than its own 30 px radius, so the padding
+    # box's top (160 px) is shorter than they are. Chrome draws them as they
+    # are, unscaled.
+    "inner-overlap": (
+        "border-radius: 170px 30px 0 0 / 40px 40px 0 0; border-top: 3px solid #1F4FD8; "
+        "border-right: 40px solid #00A972;",
+        (SIDE_BLUE, SIDE_GREEN),
+        2,
+    ),
+}
+ROUNDED_SIDE_BOX = (200, 110)
+# The guards: a uniform border stays the rounded shape's outline; a square box,
+# and a dashed side, keep a line along the side.
+ROUNDED_SIDE_GUARDS = {
+    "uniform": "border-radius: 12px; border: 2px solid #1F4FD8;",
+    "square": "border-left: 4px solid #1F4FD8;",
+    "dashed": "border-radius: 10px; border-left: 4px dashed #1F4FD8;",
+}
+# A rounded inline box with a left border, broken over two lines: each fragment
+# box-decoration-break slices keeps a line per side.
+SLICED_INLINE = (
+    '<p id="sliced" style="position: absolute; left: 60px; top: 616px; width: 150px; margin: 0; '
+    'font-size: 18px; line-height: 40px;"><span style="background: #FFFFFF; border-radius: 6px; '
+    'border-left: 4px solid #1F4FD8; padding: 2px 6px;">Revenue grew in every region</span></p>'
+)
+# Screen colours within this of a side's colour are that side's paint, and this
+# far or more from it are not (anti-aliased pixels between are not judged).
+SIDE_PAINT_TOLERANCE = 30
+NOT_SIDE_PAINT = 150
+# Points this near an edge of what the deck paints are not judged: each is the
+# middle of a device pixel half a CSS px wide (scale 2), which the browser
+# paints whole only when it lies whole on one side of an edge, so half its
+# diagonal (0.354 px), plus the deck's arcs' tolerance (0.05 px) and layout
+# rounding.
+EDGE_MARGIN_PX = 0.45
+# The colours each case is judged in pixel by pixel, where not all its sides':
+# a 1 px side has no device pixel that far from both its edges, so the accent
+# card's grey sides are judged by their construct alone.
+PIXEL_JUDGED_COLOURS = {"accent-card": (SIDE_BLUE,)}
+# The squares sampled at each corner of a box's bounds, px, at 1 px; its sides
+# between them are sampled every SIDE_SAMPLE_STEP_PX along, as deep.
+CORNER_SAMPLE_PX = 24
+SIDE_SAMPLE_STEP_PX = 3
+# Each side is judged at least this many points in its colour and out of it.
+MIN_JUDGED_POINTS = 30
+PX_PER_PT = 4 / 3
+
+
+def _rounded_side_slide() -> str:
+    """Every case and guard on one slide, four to a row, each box #<name>."""
+    names = (*ROUNDED_SIDE_CASES, *ROUNDED_SIDE_GUARDS)
+    width, height = ROUNDED_SIDE_BOX
+    boxes = []
+    for position, name in enumerate(names):
+        left = 60 + (position % 4) * 300
+        top = 60 + (position // 4) * 210
+        style = (
+            ROUNDED_SIDE_CASES[name][0] if name in ROUNDED_SIDE_CASES else ROUNDED_SIDE_GUARDS[name]
+        )
+        box = (
+            f'<div id="{name}" style="position: absolute; left: {{left}}px; top: {{top}}px; '
+            f"width: {width}px; height: {height}px; box-sizing: border-box; background: #FFFFFF; "
+            f'{style}"></div>'
+        )
+        if name == "clipped":
+            boxes.append(
+                f'<div style="position: absolute; left: {left}px; top: {top}px; width: {width}px; '
+                f'height: {height}px; overflow: hidden;">{box.format(left=-2, top=0)}</div>'
+            )
+        else:
+            boxes.append(box.format(left=left, top=top))
+    return f'<div class="slide">{"".join(boxes)}{SLICED_INLINE}</div>'
+
+
+
+ROUNDED_SIDE_SLIDE = _rounded_side_slide()
+
+
+@pytest.fixture(scope="module")
+def rounded_side_export() -> tuple[bytes, str]:
+    """The rounded one-sided borders slide, exported once, with its document."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx = _export_one(ROUNDED_SIDE_SLIDE, monkeypatch)
+    return pptx, _document(ROUNDED_SIDE_SLIDE)
+
+
+def _box_items(
+    pptx: bytes, bounds: dict, colours: tuple[str, ...]
+) -> list[tuple[Shape, etree._Element]]:
+    """The deck's border items in ``colours`` within ``bounds`` (give or take 2 px): every
+    custom path filled with one, and every line stroked with one."""
+    found = []
+    for shape, element in zip(slide_shapes(pptx), slide_shape_elements(pptx)):
+        within = (
+            shape.x >= bounds["x"] - 2
+            and shape.y >= bounds["y"] - 2
+            and shape.x + shape.w <= bounds["x"] + bounds["w"] + 2
+            and shape.y + shape.h <= bounds["y"] + bounds["h"] + 2
+        )
+        painted = (shape.geometry == "custGeom" and shape.fill in colours) or (
+            shape.kind == "line" and shape.line in colours
+        )
+        if within and painted:
+            found.append((shape, element))
+    return found
+
+
+def _segment_distance(point, start, end) -> float:
+    """How far ``point`` lies from the segment ``start``-``end``."""
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = dx * dx + dy * dy
+    share = (
+        0.0 if length == 0 else ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length
+    )
+    share = min(1.0, max(0.0, share))
+    return math.hypot(point[0] - start[0] - share * dx, point[1] - start[1] - share * dy)
+
+
+def _polygon_holds(points, point) -> bool:
+    """Whether the polygon ``points`` holds ``point`` (crossing count)."""
+    inside = False
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[index - 1]
+        if (y1 > point[1]) != (y2 > point[1]):
+            crossing = x1 + (point[1] - y1) * (x2 - x1) / (y2 - y1)
+            if crossing > point[0]:
+                inside = not inside
+    return inside
+
+
+def _outline(shape: Shape, element: etree._Element) -> list[tuple[float, float]]:
+    """What one border item paints, as a polygon in slide px: a path's points, or a line's
+    flat-capped stroke."""
+    if shape.kind != "line":
+        return _path_vertices(element, shape)
+    start = (shape.x, shape.y + shape.h) if shape.flip_v else (shape.x, shape.y)
+    end = (shape.x + shape.w, shape.y) if shape.flip_v else (shape.x + shape.w, shape.y + shape.h)
+    length = math.hypot(end[0] - start[0], end[1] - start[1])
+    half = (shape.line_w_pt or 0) * PX_PER_PT / 2
+    normal = (-(end[1] - start[1]) / length * half, (end[0] - start[0]) / length * half)
+    return [
+        (start[0] + normal[0], start[1] + normal[1]),
+        (end[0] + normal[0], end[1] + normal[1]),
+        (end[0] - normal[0], end[1] - normal[1]),
+        (start[0] - normal[0], start[1] - normal[1]),
+    ]
+
+
+def _sample_points(bounds: dict) -> list[tuple[float, float]]:
+    """Points over a box's bounds near its edges, each the middle of a device pixel at scale 2:
+    each corner square at every px, the bands along the sides between them every
+    SIDE_SAMPLE_STEP_PX along."""
+    left, top = math.floor(bounds["x"]) - 1, math.floor(bounds["y"]) - 1
+    right = math.ceil(bounds["x"] + bounds["w"]) + 1
+    bottom = math.ceil(bounds["y"] + bounds["h"]) + 1
+    depth = CORNER_SAMPLE_PX
+    points = []
+    for x in range(left, right):
+        for y in range(top, bottom):
+            near_x = x < left + depth or x >= right - depth
+            near_y = y < top + depth or y >= bottom - depth
+            along_x_band = near_x and (y - top) % SIDE_SAMPLE_STEP_PX == 0
+            along_y_band = near_y and (x - left) % SIDE_SAMPLE_STEP_PX == 0
+            if (near_x and near_y) or along_x_band or along_y_band:
+                points.append((x + 0.25, y + 0.25))
+    return points
+
+
+def _distance(colour: tuple[int, int, int], hex_colour: str) -> int:
+    return max(
+        abs(channel - int(hex_colour[index * 2 : index * 2 + 2], 16))
+        for index, channel in enumerate(colour)
+    )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestRoundedOneSidedBorders:
+    @pytest.mark.parametrize("name", tuple(ROUNDED_SIDE_CASES))
+    def test_each_side_is_painted_where_the_browser_paints_it(
+        self, rounded_side_export: tuple[bytes, str], name: str
+    ) -> None:
+        """Every point the browser paints in a side's colour, and none it does not, the deck does.
+
+        Sampled at each corner of the box at every px and along its sides,
+        each point read from Chrome's own screenshot: in the side's colour, or
+        clearly not (anti-aliased pixels between are not judged). The deck's
+        items in that colour (each a filled path, or a line's stroke) must
+        hold exactly the first, beyond EDGE_MARGIN_PX of their edges. A line
+        along the side paints the square ends past the rounded corners.
+        """
+        pptx, document = rounded_side_export
+        _, colours, _ = ROUNDED_SIDE_CASES[name]
+        bounds = browser_rect(document, f"#{name}")
+        if name == "clipped":
+            bounds = {**bounds, "x": bounds["x"] + 2, "w": bounds["w"] - 2}
+        points = _sample_points(bounds)
+        screen = browser_pixels(document, points)
+        items = _box_items(pptx, bounds, colours)
+        assert items, f"the {name} box has no border item in {colours}"
+        for colour in PIXEL_JUDGED_COLOURS.get(name, colours):
+            painted = [
+                _outline(shape, element)
+                for shape, element in items
+                if colour in (shape.fill, shape.line)
+            ]
+            extra, missing, judged = [], [], {"painted": 0, "bare": 0}
+            for point, shown in zip(points, screen):
+                distance = _distance(shown, colour)
+                if SIDE_PAINT_TOLERANCE < distance < NOT_SIDE_PAINT:
+                    continue
+                if any(
+                    _segment_distance(point, outline[index - 1], outline[index]) <= EDGE_MARGIN_PX
+                    for outline in painted
+                    for index in range(len(outline))
+                ):
+                    continue
+                held = any(_polygon_holds(outline, point) for outline in painted)
+                judged["painted" if distance <= SIDE_PAINT_TOLERANCE else "bare"] += 1
+                if held and distance >= NOT_SIDE_PAINT:
+                    extra.append(point)
+                elif not held and distance <= SIDE_PAINT_TOLERANCE:
+                    missing.append(point)
+            assert min(judged.values()) >= MIN_JUDGED_POINTS, (
+                f"fixture drift: the {name} box's {colour} side is judged at {judged} point(s)"
+            )
+            assert not extra and not missing, (
+                f"the {name} box's {colour} side: the deck paints {len(extra)} point(s) the "
+                f"browser does not ({extra[:6]}) and misses {len(missing)} it paints "
+                f"({missing[:6]})"
+            )
+
+    @pytest.mark.parametrize("name", tuple(ROUNDED_SIDE_CASES))
+    def test_a_rounded_boxs_solid_sides_are_filled_regions_not_lines(
+        self, rounded_side_export: tuple[bytes, str], name: str
+    ) -> None:
+        """Each run of sides painted alike is one filled custom shape, with no outline, native.
+
+        No line is drawn for a solid side of a rounded box; neighbouring sides
+        painted alike (the accent card's grey top, right and bottom) are one.
+        """
+        pptx, document = rounded_side_export
+        _, colours, regions = ROUNDED_SIDE_CASES[name]
+        bounds = browser_rect(document, f"#{name}")
+        items = _box_items(pptx, bounds, colours)
+        lines = [shape for shape, _ in items if shape.kind == "line"]
+        paths = [shape for shape, _ in items if shape.geometry == "custGeom"]
+        assert not lines, f"the {name} box's sides are lines: {[shape.line for shape in lines]}"
+        assert len(paths) == regions and all(shape.line is None for shape in paths), (
+            f"the {name} box's sides are {len(paths)} region(s) "
+            f"{[(shape.fill, shape.line) for shape in paths]}, expected {regions} filled, unstroked"
+        )
+
+    def test_a_uniform_border_stays_the_rounded_shapes_outline(
+        self, rounded_side_export: tuple[bytes, str]
+    ) -> None:
+        """GUARD: four identical sides are one roundRect outlined by the border, as before."""
+        pptx, document = rounded_side_export
+        bounds = browser_rect(document, "#uniform")
+        shapes = [
+            shape
+            for shape in slide_shapes(pptx)
+            if shape.kind != "text"
+            and bounds["x"] - 2 <= shape.x <= bounds["x"] + bounds["w"]
+            and bounds["y"] - 2 <= shape.y <= bounds["y"] + bounds["h"]
+        ]
+        assert [(shape.geometry, shape.fill, shape.line) for shape in shapes] == [
+            ("roundRect", "FFFFFF", SIDE_BLUE)
+        ], f"the uniform box is drawn as:\n{_describe(shapes)}"
+
+    def test_a_sliced_inline_fragment_keeps_a_line_per_side(
+        self, rounded_side_export: tuple[bytes, str]
+    ) -> None:
+        """GUARD: an inline box broken over lines keeps its left border as a line.
+
+        box-decoration-break: slice takes the left side off the second
+        fragment, so the fragments' sides differ; such a fragment keeps a line
+        per side, as before.
+        """
+        pptx, document = rounded_side_export
+        bounds = browser_rect(document, "#sliced")
+        assert bounds["h"] > 60, f"fixture drift: the inline box no longer breaks: {bounds}"
+        items = _box_items(pptx, bounds, (SIDE_BLUE,))
+        assert [shape.kind for shape, _ in items] == ["line"], (
+            "the sliced fragments' left border is drawn as "
+            f"{[(shape.kind, shape.geometry) for shape, _ in items]}"
+        )
+
+    @pytest.mark.parametrize("name", ("square", "dashed"))
+    def test_a_square_box_and_a_dashed_side_keep_a_line(
+        self, rounded_side_export: tuple[bytes, str], name: str
+    ) -> None:
+        """GUARD: a box no corner of which rounds, and a dashed side, are a line along the side."""
+        pptx, document = rounded_side_export
+        items = _box_items(pptx, browser_rect(document, f"#{name}"), (SIDE_BLUE,))
+        assert [shape.kind for shape, _ in items] == ["line"], (
+            f"the {name} box's side is drawn as {[(s.kind, s.geometry) for s, _ in items]}"
         )

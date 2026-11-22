@@ -51,11 +51,13 @@
 //  *   right, bottom right, bottom left, {0, 0} for a square one (cornerShape).
 //  *   path and closed for geometry
 //  *   'path' only: the polylines it draws, in px from its top left, each closed or
-//  *   each open; a shape a clip cuts that is not a plain rect, see pushClippedShape.
+//  *   each open; a shape a clip cuts that is not a plain rect, see pushClippedShape,
+//  *   and the border region of a rounded box's solid side, see pushSideBorders.
 //  *   shadow is a box's one outer shadow, its box-shadow layers fitted to one,
 //  *   snapshot_borders.mjs shadowOf; no shape is drawn for a shadow alone)
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}   (one painted side of a
-//  *   border that differs between sides, along its centre line; see pushSideLines)
+//  *   border that differs between sides, along its centre line, on a box no corner
+//  *   of which rounds, or dashed or dotted; see pushSideLines and pushSideBorders)
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
 //  *  {kind:'text', x,y,w,h, rotate:number|null, wrap:boolean, align:'left'|'center'|'right',
 //  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
@@ -804,10 +806,11 @@ async function snapshotPage(config, pseudoData, renderer) {
   // top right, bottom right, bottom left}; its bounds are the rect around them
   // all, which is what shownPart reads. What the rounds cut is cut to them as
   // well: a shape's fill and outline (pushClippedShape, through
-  // snapshot_borders.mjs pushBoxShape), a side line (pushSideLines), a native
-  // table's corner cells (pushTable) and its own background, and a picture,
-  // which is then the browser's own, cut (emitReplaced). Text is never cut: a
-  // text box cannot clip its glyphs, and a slide keeps it clear of its corners.
+  // snapshot_borders.mjs pushBoxShape), a side line (pushSideLines) or
+  // region (pushSideBorders), a native table's corner cells (pushTable) and
+  // its own background, and a picture, which is then the browser's own, cut
+  // (emitReplaced). Text is never cut: a text box cannot clip its glyphs, and
+  // a slide keeps it clear of its corners.
   const SLIDE_CLIP = { left: 0, top: 0, right: SLIDE_WIDTH, bottom: SLIDE_HEIGHT };
   const NO_CLIP = { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
   const VIEWPORT_CLIPS = { tree: NO_CLIP, flow: SLIDE_CLIP, absolute: SLIDE_CLIP, fixed: SLIDE_CLIP };
@@ -1127,7 +1130,8 @@ async function snapshotPage(config, pseudoData, renderer) {
     pushShape,
     pushClippedShape,
     roundsCut,
-    pushSideLines,
+    usedCornerRadii,
+    pushSideBorders,
   });
 
   // ─── side lines ──────────────────────────────────────────────────────
@@ -1202,6 +1206,231 @@ async function snapshotPage(config, pseudoData, renderer) {
         (Math.abs(shown.from.x - shown.to.x) <= SAME_POINT_PX && shown.from.y <= shown.to.y);
       pushLine(order, forward ? shown.from : shown.to, forward ? shown.to : shown.from, side);
     }
+  }
+
+  // ─── border regions ──────────────────────────────────────────────────
+  // A box whose corners round and whose border differs between sides paints
+  // each solid side as CSS does (CSS Backgrounds 3 §5), not as a line along
+  // it, whose square ends would stand out past the cut-away corners (Task 15
+  // N7):
+  // * the border area lies between the rounded border box and the rounded
+  //   padding box, each inner radius the outer one less the border beside it,
+  //   floored at 0 (a corner either of whose radii is then 0 is square), and
+  //   not scaled where two of them overlap their side: Chrome draws them as
+  //   they are (measured: scaled, a 170 px corner beside a square one lost
+  //   17 of the browser's border pixels);
+  // * a side's part of it runs between the lines that divide it from its
+  //   neighbours at the corners, each from the border box's corner through
+  //   the padding box's (Chrome's border painter: the line a square corner's
+  //   miter is). Where the neighbour has no width that line runs along the
+  //   neighbour's edge, so the side runs on round the corner to where its
+  //   outer and inner edges meet, tapering to nothing where the radius is the
+  //   wider;
+  // * neighbouring sides painted alike are one region together, so no seam
+  //   divides them; four alike (their widths differing) are two, split at the
+  //   top right and bottom left corners, so that no region is a ring.
+  // Each region is one filled path, its arcs polygons within ARC_TOLERANCE_PX,
+  // turned with the box and cut to the clip, its rect and then any rounded
+  // padding box of it, as a side's triangle is. Dashed and dotted sides stay
+  // lines (pushSideLines). A box whose padding box is empty, and a box no
+  // corner of which rounds, keep a line per side.
+  const SIDE_ORDER = ['Top', 'Right', 'Bottom', 'Left'];
+  // Each side's place in SIDE_ORDER, which is the index of the corner it starts at clockwise.
+  const SIDE_INDEX = { Top: 0, Right: 1, Bottom: 2, Left: 3 };
+
+  // The corners of `box`, clockwise from the top left, in slide px before any
+  // turn: each {x, y} its border box corner, {sx, sy} the way into the box,
+  // wx and wy the widths of the sides that meet there across x and across y,
+  // {h, v} its outer radii and {ih, iv} its inner ones, and the sides before
+  // and after it clockwise. Null when the padding box is empty.
+  function borderCorners(box, widths, radii) {
+    const right = box.x + box.w;
+    const bottom = box.y + box.h;
+    const corners = [
+      { x: box.x, y: box.y, sx: 1, sy: 1, wx: widths.Left, wy: widths.Top, before: 'Left', after: 'Top' },
+      { x: right, y: box.y, sx: -1, sy: 1, wx: widths.Right, wy: widths.Top, before: 'Top', after: 'Right' },
+      { x: right, y: bottom, sx: -1, sy: -1, wx: widths.Right, wy: widths.Bottom, before: 'Right', after: 'Bottom' },
+      { x: box.x, y: bottom, sx: 1, sy: -1, wx: widths.Left, wy: widths.Bottom, before: 'Bottom', after: 'Left' },
+    ];
+    const innerW = box.w - widths.Left - widths.Right;
+    const innerH = box.h - widths.Top - widths.Bottom;
+    if (!(innerW > 0 && innerH > 0)) return null;
+    for (let index = 0; index < corners.length; index++) {
+      const corner = corners[index];
+      const radius = radii[index];
+      const rounds = radius.h > 0 && radius.v > 0;
+      corner.h = rounds ? radius.h : 0;
+      corner.v = rounds ? radius.v : 0;
+      const ih = rounds ? Math.max(0, radius.h - corner.wx) : 0;
+      const iv = rounds ? Math.max(0, radius.v - corner.wy) : 0;
+      corner.ih = ih > 0 && iv > 0 ? ih : 0;
+      corner.iv = ih > 0 && iv > 0 ? iv : 0;
+    }
+    return corners;
+  }
+
+  // Where the line dividing a corner's two sides crosses one of its
+  // quarter-ellipses, as the ellipse's parameter t: a point at t lies
+  // (a + h (1 - cos t), b + v (1 - sin t)) into the box from the corner, (a, b)
+  // the quarter's own corner (the border box's for the outer edge, the padding
+  // box's, (wx, wy), for the inner), so t is 0 on the side across x and pi/2
+  // on the side across y. The line runs from the border box's corner along
+  // (wx, wy), through the padding box's corner, so in either quarter's frame
+  // it is the ray from its own corner along (wx, wy): the nearer root of
+  // (s wx / h - 1)^2 + (s wy / v - 1)^2 = 1. A neighbour with no width puts
+  // the crossing at the quarter's end on that neighbour's side.
+  function crossingParameter(wx, wy, h, v) {
+    const p = wx / h;
+    const q = wy / v;
+    const along = ((p + q) - Math.sqrt(2 * p * q)) / (p * p + q * q);
+    return Math.atan2(1 - along * q, 1 - along * p);
+  }
+
+  // The points of a corner's outer (inner false) or inner quarter from
+  // parameter `from` to `to` (crossingParameter's), in slide px before any
+  // turn, appended to `points`; a square corner's one point.
+  function cornerArc(corner, inner, from, to, points) {
+    const h = inner ? corner.ih : corner.h;
+    const v = inner ? corner.iv : corner.v;
+    const offsetA = inner ? corner.wx : 0;
+    const offsetB = inner ? corner.wy : 0;
+    if (!(h > 0 && v > 0)) {
+      points.push({ x: corner.x + corner.sx * offsetA, y: corner.y + corner.sy * offsetB });
+      return;
+    }
+    const steps = Math.max(1, Math.ceil(arcSteps(Math.max(h, v)) * Math.abs(to - from) / (Math.PI / 2)));
+    for (let step = 0; step <= steps; step++) {
+      const angle = from + (to - from) * (step / steps);
+      points.push({
+        x: corner.x + corner.sx * (offsetA + h * (1 - Math.cos(angle))),
+        y: corner.y + corner.sy * (offsetB + v * (1 - Math.sin(angle))),
+      });
+    }
+  }
+
+  // The parameter at which a corner's outer (inner false) or inner quarter
+  // meets one of its sides: 0 on the side across x (Left, Right), pi/2 on
+  // the side across y (Top, Bottom).
+  function sideParameter(side) {
+    return side === 'Top' || side === 'Bottom' ? Math.PI / 2 : 0;
+  }
+
+  // Where a corner's dividing line crosses its outer (inner false) or inner
+  // quarter, as crossingParameter's parameter; 0 for a square quarter, whose
+  // one point is the crossing.
+  function dividingParameter(corner, inner) {
+    const h = inner ? corner.ih : corner.h;
+    const v = inner ? corner.iv : corner.v;
+    if (!(h > 0 && v > 0)) return 0;
+    return crossingParameter(corner.wx, corner.wy, h, v);
+  }
+
+  // The runs of solid painted sides one region each draws, in clockwise
+  // order from the top: each {sides: [name], paint: {color, alpha}}.
+  // Neighbours painted alike share a run; four alike are split in two.
+  function borderRuns(solid) {
+    const same = (a, b) => Boolean(a && b && a.color === b.color && a.alpha === b.alpha);
+    let start = -1;
+    for (let index = 0; index < SIDE_ORDER.length && start < 0; index++) {
+      const side = solid[SIDE_ORDER[index]];
+      if (side && !same(solid[SIDE_ORDER[(index + SIDE_ORDER.length - 1) % SIDE_ORDER.length]], side)) start = index;
+    }
+    if (start < 0) {
+      if (!solid.Top) return [];
+      return [{ sides: ['Top', 'Right'], paint: solid.Top }, { sides: ['Bottom', 'Left'], paint: solid.Bottom }];
+    }
+    const runs = [];
+    let run = null;
+    for (let step = 0; step < SIDE_ORDER.length; step++) {
+      const name = SIDE_ORDER[(start + step) % SIDE_ORDER.length];
+      const side = solid[name];
+      if (!side) {
+        run = null;
+        continue;
+      }
+      if (run && same(run.paint, side)) {
+        run.sides.push(name);
+        continue;
+      }
+      run = { sides: [name], paint: side };
+      runs.push(run);
+    }
+    return runs;
+  }
+
+  // The border region of a run of sides (borderRuns), as a polygon in slide
+  // px before any turn: its outer edge clockwise from the dividing line at
+  // its first side's start corner to the one at its last side's end corner,
+  // each corner within the run whole, then its inner edge back.
+  function runRegion(corners, sides) {
+    const cornerBefore = (side) => corners[SIDE_INDEX[side]];
+    const cornerAfter = (side) => corners[(SIDE_INDEX[side] + 1) % corners.length];
+    const edge = (inner) => {
+      const points = [];
+      const first = cornerBefore(sides[0]);
+      cornerArc(first, inner, dividingParameter(first, inner), sideParameter(first.after), points);
+      for (let index = 0; index + 1 < sides.length; index++) {
+        const corner = cornerAfter(sides[index]);
+        cornerArc(corner, inner, sideParameter(corner.before), sideParameter(corner.after), points);
+      }
+      const last = cornerAfter(sides[sides.length - 1]);
+      cornerArc(last, inner, sideParameter(last.before), dividingParameter(last, inner), points);
+      return points;
+    };
+    const outer = edge(false);
+    const inner = edge(true);
+    for (let index = inner.length - 1; index >= 0; index--) outer.push(inner[index]);
+    return outer;
+  }
+
+  // Pushes the border regions of a box's solid painted sides, the rest as
+  // lines (pushSideLines). `radii` are its used corner radii (usedCornerRadii),
+  // or null for a box drawn with a line per side whatever its corners (a
+  // fragment box-decoration-break slices). A box no corner of which rounds,
+  // or whose padding box is empty, is a line per side.
+  function pushSideBorders(box, sides, radii, order, clip) {
+    let rounds = false;
+    for (let index = 0; radii && index < radii.length; index++) {
+      if (radii[index].h > 0 && radii[index].v > 0) rounds = true;
+    }
+    const corners = rounds ? borderCorners(box, sides.widths, radii) : null;
+    if (!corners) {
+      pushSideLines(box, sides, order, clip);
+      return;
+    }
+    // Every side an own property, so a side that is not solid reads null, never
+    // a value page script set on Object.prototype.
+    const solid = { Top: null, Right: null, Bottom: null, Left: null };
+    const lines = [];
+    for (let index = 0; index < sides.painted.length; index++) {
+      const side = sides.painted[index];
+      if (side.dash === 'solid') solid[side.side] = side;
+      else lines.push(side);
+    }
+    const centreX = box.x + box.w / 2;
+    const centreY = box.y + box.h / 2;
+    const radians = (box.rotate || 0) * Math.PI / 180;
+    const runs = borderRuns(solid);
+    for (let index = 0; index < runs.length; index++) {
+      const points = runRegion(corners, runs[index].sides);
+      let region = [];
+      for (let point = 0; point < points.length; point++) {
+        const dx = points[point].x - centreX;
+        const dy = points[point].y - centreY;
+        region.push(radians
+          ? {
+            x: centreX + dx * Math.cos(radians) - dy * Math.sin(radians),
+            y: centreY + dx * Math.sin(radians) + dy * Math.cos(radians),
+          }
+          : points[point]);
+      }
+      region = clipPolygon(region, clip);
+      const cutting = cuttingRounds(clip, region, 0);
+      for (let round = 0; round < cutting.length && region.length; round++) region = clipConvex(region, cutting[round]);
+      const paint = runs[index].paint;
+      if (region.length >= 3) pushPath(order, [region], true, { color: paint.color, alpha: paint.alpha }, null, null);
+    }
+    if (lines.length) pushSideLines(box, { widths: sides.widths, painted: lines }, order, clip);
   }
 
   // What a clip's rounded padding boxes that cut it show of a segment the
