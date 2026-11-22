@@ -1429,3 +1429,174 @@ Commits: `8b7896c8`, `21eb955f` and `4e17eaea`, then the docs.
 
 The probe and test presentations B6 created were deleted by id and confirmed gone (404). The decks
 earlier phases kept are untouched.
+
+## Task 15, batch B7: the export document, a turned label, one-sided rounded borders and two harness findings (N2, N5, N7, H1, H2), engine `bc23aa55`
+
+Commits: `f8da5216` (H1), `afc913d7` (N2), `c05e0712` (H2), `d5ff1d5f` and `3e6d9fdd` (N5),
+`bc23aa55` and `8c7aa34f` (N7), then this ledger. The defects come from the real-deck matrix
+(`.superpowers/sdd/2026-11-16-export-fidelity-snapshot-emit/task-15-matrix-report.md` §4 and §12).
+Both corpora and the four matrix decks the defects come from (long-on, long-off, finance-on,
+architecture-off) were run with `run.py --pin-fonts --powerpoint --gslides`, and so was a probe
+corpus of the new tests' fixtures.
+
+### How it was measured
+
+- **The truth is now the UI's document** (H1). Every run below renders its truth from the slide as
+  the slide viewer builds it, with `frontend/src/services/slideDocument.ts` itself.
+- **Corpora:** the branch head against B6's final runs (`2ccfb12d`), whose truth was the export
+  document.
+- **Matrix decks and the probe corpus:** the head against the engine at `7d77df77` (a `git archive`
+  extract) driven by the new harness, so both sides are scored against the same UI truth.
+
+### Scores
+
+**Corpora, B6 (`2ccfb12d`) → B7 (`bc23aa55`).**
+- All four decks (two corpora, each written for PowerPoint and for Google Slides) are
+  byte-identical to B6's, apart from the timestamps in `docProps/core.xml`. No corpus box has the
+  N7 pattern, no turned label is a flex container, and every corpus slide sets its own font.
+- The truth is the same pixel for pixel on 42 of 44 slides. Only those two slides' scores can
+  move, and only with the truth:
+
+| Slide | Why the truth differs | PowerPoint | Google |
+|---|---|---|---|
+| 11-chartjs-canvas | The UI runs the slide's script inline, so Chart.js draws its legend before DM Sans loads, in Times, and lays the doughnut out around it; the export runs its scripts after its chart wait | 1.06 → 2.18 | 1.63 → 2.72 |
+| slide-content | 5 px at one level of 255: the export shell paints `html` white, which the UI leaves to the canvas | 2.20 → 2.20 | 1.75 → 1.75 |
+| **mean, in-repo (17)** | | **1.82 → 1.89** | **2.37 → 2.43** |
+| **mean, design system (27)** | | **1.62 → 1.62** | **1.52 → 1.52** |
+
+B6's own renders of slide 11, scored against the new truth, are 2.18 and 2.72 too, so like for
+like nothing moved. `summary.md` lists slide 11 as worse in both apps, and says beside it that its
+truth changed.
+
+**Matrix decks, `7d77df77` → `bc23aa55`, on the same UI truth.**
+
+| Deck | Slides | PowerPoint mean | Google mean | Scores better / same / worse | What changed |
+|---|---|---|---|---|---|
+| long-on (DS on) | 28 | 5.74 → **2.93** | 6.22 → **2.15** | 56 / 0 / 0 | N2: its text inherits body's font |
+| finance-on (DS on) | 3 | 10.52 → **5.90** | 11.78 → **4.98** | 6 / 0 / 0 | N2 |
+| long-off (DS off) | 28 | 4.92 → 4.90 | 5.00 → 4.98 | 22 / 34 / 0 | N7 on 02, 03, 13, 22, 27; N5 on 20 |
+| architecture-off (DS off) | 3 | 6.26 → 6.23 | 5.68 → 5.69 | 5 / 0 / 1 (03, Google +0.03) | N7 on 01 and 03 |
+
+`summary.md`, every deck: "Worse than the baseline by more than 0.05: none."
+
+**The probe corpus** (the N7 test slide and the seven N5 variants, `7d77df77` → head): the rounded
+sides slide 0.63 → 0.20 in PowerPoint and 0.93 → 0.47 in Google; every axis variant improves, by up
+to 0.09.
+
+**Health.** Text loss is none in every deck of every run, and MODEL DROPS 0; no capture or export
+failed. Determinism (Phase C's tool): two fresh pinned exports each of both corpora and of long-off
+(which holds the new N5 and N7 constructs), both targets, have the same `structural_manifest` as
+each other and as the final run's decks (146, 202 and 167 entries).
+
+### What was measured on each defect (UI / before / after, at 1280 px)
+
+**N2, long-on 05's "So what" paragraph.** The UI's document draws it in `Times-Roman` (the DevTools
+protocol's face) and breaks it into 4 lines. Before, the export document drew `.SFNS-Regular` and
+both decks wrote 5 lines. Now the export document draws `Times-Roman`, and both decks write the
+UI's 4 lines, broken in the same places in PowerPoint and Google. The deck names the face "Times",
+the stack's first family (N4 is B8's).
+
+**N5, long-off 20's "IMPACT"** (ink rows inside the 470 px axis box):
+
+| | UI | PowerPoint | Google |
+|---|---|---|---|
+| before | 347–399 | 561–606 | 553–606 |
+| after | 347–399 | **354–399** | **345–399** |
+
+The word now starts where the UI's starts, in both apps; its other end differs only by each app's
+face for "Inter" (N4). On the probe's pinned DM Sans, every variant's ink is the UI's to a pixel in
+both apps: centred, flex-start, flex-end, no rotation, vertical-lr, a start item under
+`text-align: center`, and two anonymous items. Before, every variant but flex-start lay elsewhere:
+at an end of the axis, or, for the start item under `text-align: center`, at its middle.
+
+**N7, the corners** (pixels within each box's two left corners more than 48 levels off the UI):
+
+| Deck, slide | Boxes | PowerPoint | Google |
+|---|---|---|---|
+| long-off 02 | 5 | 340 → 0 | 325 → 5 |
+| long-off 03 | 3 | 204 → 36 | 195 → 36 |
+| long-off 13 | 5 | 577 → 206 | 553 → 177 |
+| long-off 22 | 8 | 528 → 0 | 512 → 4 |
+| long-off 27 | 4 | 272 → 0 | 260 → 2 |
+| architecture-off 01 | 3 | 133 → 60 | 118 → 63 |
+| **all** | 28 | **2054 → 302** | **1963 → 287** |
+
+The 5× crops show each side following the corners and tapering, in both apps. What remains is the
+fitted shadow's edge (long-off 13's tiles) and the 1 px grey border's anti-aliasing.
+
+On the probe's boxes (each box's four corners, PowerPoint / Google, before → after):
+
+| Case | Before | After |
+|---|---|---|
+| left-only | 69 / 126 | 1 / 2 |
+| top-only | 157 / 191 | 1 / 1 |
+| left and right, two colours | 424 / 441 | 9 / 12 |
+| wider than the radius | 34 / 119 | 0 / 0 |
+| elliptical | 446 / 503 | 9 / 14 |
+| the accent card | 171 / 221 | 0 / 0 |
+| turned | 60 / 85 | 1 / 3 |
+| clipped | 139 / 139 | 1 / 2 |
+| four alike | 217 / 337 | 6 / 4 |
+| overlapping inner radii | 344 / 345 | 0 / 1 |
+| guard: the uniform outline | 0 / 40 | 0 / 40 |
+| guard: the square box | 0 / 99 | 0 / 99 |
+| guard: the dashed side | 116 / 146 | 116 / 146 |
+
+**H1, the truth.** On a template deck the truth now shows the slide's ground, as the UI does (the
+test's template fixture: the section's F9F7F4, where the export document showed the page's
+0E1A1F).
+
+**H2, the text-loss comparison.** On the head's long-off decks the old comparison reports
+"1Financials" and 4 more words (02), "1$45M", "2$30M" and "3210" (03), and "1Board" and 3 more
+(27); on the matrix's dense-tpl18 decks, "Iceberg," and "Catalog,". The new one reports nothing.
+The `7d77df77` engine logged the same words as `[html2pptx] text missing` on long-off; the head
+logs none.
+
+### Rulings from B7
+
+- **Ruling (N2).** The export shell sets no inherited property the UI's shell does not, a font
+  above all. Fontless text gets Chrome's default face (Times on the Mac); no named face replaces
+  it. Every route builds through `build_slide_html`, and the frontend's capture shells set no font.
+  The typeface the deck names for such text is B8's (N4).
+- **Ruling (N5).** A flex or grid container's text is its anonymous items', which the container
+  places. Each item is a turned item over its own text, written as unturned text's `'text'`
+  placement writes it. A turn root whose text is its own keeps its layout box.
+- **Ruling (N7, the construct).** A solid side of a box whose corners round is the region CSS
+  paints for it: a filled `custGeom` polygon (the path support D3's clipped shapes use), its arcs
+  within 0.05 px. It is not built of `arcTo` pieces: a side's arcs start and end at the dividing
+  line, part-way round an elliptical quarter, and how the apps read a partial elliptical `arcTo`'s
+  angles is unmeasured, where a polygon draws the same in both (D3). It is native and editable,
+  and recolours and moves whole.
+- **Ruling (N7, the geometry, measured against Chrome's pixels).** Inner radii are the outer ones
+  less the border, floored at 0, and not scaled where they overlap their side (scaled, a 170 px
+  corner beside a square one lost 17 of Chrome's border pixels). The dividing line runs from the
+  border box's corner through the padding box's (Chrome's border painter). Neighbours painted
+  alike are one path; four alike, two.
+- **Ruling (N7, kept as before).** A uniform border stays the shape's outline, byte for byte. A
+  square box, a dashed or dotted side, a fragment `box-decoration-break` slices, and a box whose
+  padding box is empty keep a line per side.
+- **Ruling (H1).** The harness's truth is the UI's document, built by `slideDocument.ts`; the
+  fixture format's deck scripts run as each slide's scripts. The harness needs
+  `frontend/node_modules` (`npm ci` in `frontend/`), and stops before exporting without it.
+- **Ruling (H2).** A word is also found when it is written across items' edges: a suffix of one
+  item, then whole items, then a prefix of another, each piece at an edge. A word over 64
+  characters is not looked for in this way, because page script writes the reference. The
+  sidecar's check and the harness's share the rule and the limit.
+- **Residual (11-chartjs-canvas).** On a cold load the UI draws the corpus chart's legend in Times,
+  and the export draws it in DM Sans. The truth records the UI as it is; the export is not changed
+  to match a race in the UI.
+- **Residual (N7, Google, architecture-off 03, +0.03).** All of it lies on the two part-covered
+  rows of a 4 px band's straight middle at y 223.8. Chrome paints the border on whole pixels (rows
+  224–227 at 1×). PowerPoint, before and after, and Google's path draw it where the model places
+  it. The corners improve in both apps.
+- **Limit (N7).** A dashed or dotted side of a rounded box is still a straight line.
+
+### Google Slides decks kept for the owner
+
+- In-repo corpus: https://docs.google.com/presentation/d/1emBke93JxrI6tKvPdNTgRSQH8JKSD0h6AstyoWZne9c/edit
+  ("Tellr export revamp — B7, in-repo corpus (pinned fonts, bc23aa55)")
+- Design-system corpus: https://docs.google.com/presentation/d/1Qrbbgg01v3obJrrfYFpteJrb2nD11rSMV8FALiAEwig/edit
+  ("Tellr export revamp — B7, design-system corpus (pinned fonts, bc23aa55)")
+
+The matrix-deck and probe presentations B7 created (12) were deleted by id and confirmed gone (404).
+The decks earlier phases kept, and the T15 decks, are untouched.

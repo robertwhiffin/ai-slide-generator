@@ -38,7 +38,7 @@ This is counter-intuitive, so it is worth stating plainly: slide content is expe
 
 > **Inter-surface agreement is not a correctness oracle.** A test asserting that all preview surfaces match one another will pass when every surface is wrong in the same way. Any parity assertion must compare against ground truth, not against a sibling surface.
 
-**Where the resets belong.** Shell resets are narrow rather than universal, and they are not uniform across builders: the Python slide builder's shell reset omits `box-sizing` entirely, while the preview host applies `box-sizing: border-box` to the host's **direct child**. What matters is that no rule reaches slide content generally — which works because `box-sizing` does not inherit.
+**Where the resets belong.** Shell resets are narrow rather than universal, and they are not uniform across builders: the Python slide builder's shell reset omits `box-sizing` entirely, while the preview host applies `box-sizing: border-box` to the host's **direct child**. What matters is that no rule reaches slide content generally — which works because `box-sizing` does not inherit. A property that does inherit reaches every slide's text that does not set it, so neither shell declares one the other does not: the Python builder's shell once gave `body` an Inter font stack the UI's never set, and fontless text broke its lines differently in the export (Task 15 N2). `tests/unit/test_export_document_ui_parity.py` reads both shells' rules and pins it.
 
 **Deleting a shell reset is not the fix either.** Removing the margin/padding reset lets the export shell overflow its own frame, because the document sizes itself with `width: 100%` and then pads `body`. Narrow them; do not delete them.
 
