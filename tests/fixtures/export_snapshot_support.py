@@ -193,6 +193,9 @@ NODE_TIMEOUT_SECONDS = 30
 FONT_WEIGHT_STEP = 100
 FONT_WEIGHT_MIN = 100
 FONT_WEIGHT_MAX = 900
+# The keywords a face's weight descriptor may be instead: "normal" for a face declared
+# with none.
+FONT_WEIGHT_KEYWORDS = {"normal": 400, "bold": 700}
 
 NAMESPACES = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -1144,8 +1147,12 @@ def browser_title(document_html: str) -> str:
 
 
 def _face_weights(weight: str) -> list[int]:
-    """The hundreds a FontFace ``weight`` descriptor covers: ``"600"`` or a range ``"100 900"``."""
-    bounds = [int(round(float(value))) for value in weight.split()]
+    """The hundreds a FontFace ``weight`` descriptor covers: ``"600"``, a range ``"100 900"``,
+    or a keyword, ``"normal"`` (a face declared with no weight) or ``"bold"``."""
+    bounds = [
+        FONT_WEIGHT_KEYWORDS[value] if value in FONT_WEIGHT_KEYWORDS else int(round(float(value)))
+        for value in weight.split()
+    ]
     low, high = min(bounds), max(bounds)
     return [
         hundred

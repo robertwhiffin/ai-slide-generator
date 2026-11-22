@@ -298,10 +298,12 @@ function createTextLayout(env) {
   // container).
   const STANDARD_FACE = 'Times New Roman';
   // The container's base-image faces, which no desktop has: never a face a run
-  // is written in, whether the machine has them or the page loaded a face of
-  // that name. The sidecar's fontconfig keeps them for per-character fallback
-  // and lets no stack name them; a stack naming one is read as if it did not
-  // draw (baseImageFace). Lower-cased prefix.
+  // is written in where the machine draws them. The sidecar's fontconfig keeps
+  // them for per-character fallback and lets no stack name them; a stack's
+  // family of that name that is no webfont the page loaded is read as if it did
+  // not draw (baseImageFace). A webfont the page loaded under that name is the
+  // page's own face, the same on every machine, and is written as any loaded
+  // webfont is. Lower-cased prefix.
   const BASE_IMAGE_FACE_PREFIX = 'dejavu';
   const REGULAR_WEIGHT = 400;
   const BOLD_WEIGHT = 700;
@@ -739,7 +741,7 @@ function createTextLayout(env) {
   }
 
   // Whether `name` is a base-image face (BASE_IMAGE_FACE_PREFIX), which no run
-  // is written in.
+  // is written in unless the page loaded a webfont of that name.
   function baseImageFace(name) {
     return String(name).toLowerCase().indexOf(BASE_IMAGE_FACE_PREFIX) === 0;
   }

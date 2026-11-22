@@ -21,9 +21,10 @@ metrics:
   ``Times New Roman``;
 * a webfont the page loaded later in the stack -> that webfont, named by weight;
 * any other face the browser drew (a font installed on the machine) -> itself;
-* never a face named DejaVu, the container's base image's (its fontconfig keeps it
-  for per-character fallback and lets no stack name it), even one the page has:
-  the stack goes on to its next family.
+* never the container's base-image DejaVu, a face the page did not load (its
+  fontconfig keeps it for per-character fallback and lets no stack name it); a
+  webfont the page loaded named DejaVu is the page's own bytes, the face the layout
+  was measured in, and is written as itself, as any loaded webfont is.
 
 The global Review Focus 3 holds: ``system-ui, Arial`` at 600 is ``Arial`` plus bold.
 
@@ -53,6 +54,7 @@ from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
     Shape,
     browser_face_families,
+    browser_loaded_weights,
     export_slides,
     requires_huashu_sidecar,
     slide_document,
@@ -63,6 +65,10 @@ pytestmark = [pytest.mark.slow, requires_huashu_sidecar]
 
 DS_OFF_STACK = "Inter, &quot;SF Pro Display&quot;, Helvetica, Arial, sans-serif"
 HARVEY = "Legend: ○ lowest · ◔ low · ◑ medium · ◕ high · ● highest"
+# Where a paragraph's stack names the page's own face called DejaVu (_slide).
+DEJAVU = "@DEJAVU@"
+# Characters the page's DejaVu face lacks (it covers ASCII alone): a run of them alone.
+DEJAVU_LACKS = "½ ◔"
 
 # (id, inline style, text): each paragraph of the slide.
 PARAGRAPHS = (
@@ -77,7 +83,13 @@ PARAGRAPHS = (
         "font-weight: 600;",
         "Brand falls back caf\u00e9",
     ),
-    ("dejavu", "font-family: &quot;DejaVu Sans&quot;, Arial;", "DejaVu named"),
+    ("dejavu", f"font-family: &quot;{DEJAVU}&quot;, Arial;", "DejaVu named"),
+    (
+        "dejavu-later",
+        f"font-family: &quot;Missing Face&quot;, &quot;{DEJAVU}&quot;, sans-serif;",
+        "DejaVu later in the stack",
+    ),
+    ("dejavu-lacks", f"font-family: &quot;{DEJAVU}&quot;, Arial;", DEJAVU_LACKS),
     ("serif-first", "font-family: serif, Arial;", "Serif comes first"),
     (
         "arimo-webfont",
@@ -99,31 +111,45 @@ PARAGRAPHS = (
     ("won-arial", "font-family: Arial;", "Price ₩5 here"),
     ("won-webfont", "", "Cost ₩7 now"),
 )
-# A face named DejaVu the page itself has, as the export's container has its base image's
-# DejaVu: the run is never written in it (snapshot_text.mjs baseImageFace).
-DEJAVU_FACE = (
-    "<style>@font-face { font-family: 'DejaVu Sans'; "
-    "src: local('Helvetica'), local('Arial'), local('Liberation Sans'); }</style>"
-)
 # A webfont the page loads whose name the metric table holds (here a local() alias of
 # Arial): a loaded webfont keeps its own name, as every webfont does.
 ARIMO_FACE = (
     "<style>@font-face { font-family: 'Arimo'; "
     "src: local('Arial'), local('Liberation Sans'); }</style>"
 )
-SLIDE = (
-    '<div class="slide">'
-    + DEJAVU_FACE
-    + ARIMO_FACE
-    + "".join(
-        f'<p id="{element_id}" style="{style} font-size: 20px; margin: 0 0 4px;">{text}</p>'
-        for element_id, style, text in PARAGRAPHS
+
+
+def _slide(dejavu: str) -> str:
+    """The slide, the page's own face that its DejaVu paragraphs name called ``dejavu``.
+
+    That face is a webfont the page loads, a local() alias of Arial for ASCII alone, named
+    as the export's container names its base image's DejaVu.
+    """
+    face = (
+        f"<style>@font-face {{ font-family: '{dejavu}'; "
+        "src: local('Helvetica'), local('Arial'), local('Liberation Sans'); "
+        "unicode-range: U+0000-007F; }</style>"
     )
-    + '<table id="cell-table" style="border-collapse: collapse; font-size: 16px;">'
-    f'<tr><td id="empty-cell" style="font-family: {DS_OFF_STACK}; width: 80px; height: 24px;">'
-    "</td><td>Filled</td></tr></table>"
-    "</div>"
-)
+    return (
+        '<div class="slide">'
+        + face
+        + ARIMO_FACE
+        + "".join(
+            f'<p id="{element_id}" style="{style.replace(DEJAVU, dejavu)} font-size: 20px; '
+            f'margin: 0 0 4px;">{text}</p>'
+            for element_id, style, text in PARAGRAPHS
+        )
+        + '<table id="cell-table" style="border-collapse: collapse; font-size: 16px;">'
+        f'<tr><td id="empty-cell" style="font-family: {DS_OFF_STACK}; width: 80px; height: 24px;">'
+        "</td><td>Filled</td></tr></table>"
+        "</div>"
+    )
+
+
+SLIDE = _slide("DejaVu Sans")
+# The same slide, its DejaVu face a webfont of another name, which no rule singles out.
+TWIN_FACE = "Twin Sans"
+TWIN_SLIDE = _slide(TWIN_FACE)
 # The same slide whose script replaces the page realm's FontFace and FontFaceSet methods.
 HOSTILE_SLIDE = (
     "<script>"
@@ -161,12 +187,15 @@ def _written_for(drawn: str) -> str:
 
 @pytest.fixture(scope="module")
 def decks() -> Iterator[dict[str, bytes]]:
-    """The slide and its hostile twin, exported once for each target."""
+    """The slide, its hostile twin and its renamed twin, exported once for each target."""
     exported = {}
     with pytest.MonkeyPatch.context() as monkeypatch:
         for target in ("pptx", "gslides"):
             exported[target], failures = export_slides(
-                [SLIDE, HOSTILE_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+                [SLIDE, HOSTILE_SLIDE, TWIN_SLIDE],
+                css=DECK_CSS,
+                monkeypatch=monkeypatch,
+                target=target,
             )
             assert failures == [], f"the export rejected the slide: {failures}"
     yield exported
@@ -235,7 +264,6 @@ class TestTheWrittenFaceIsTheFaceDrawn:
             pytest.param("system-arial", "System Arial", "Arial", True, id="review-focus-3"),
             pytest.param("fontless", "Fontless", "Times New Roman", False, id="fontless"),
             pytest.param("inter", "Inter alone", "Times New Roman", False, id="nothing-draws"),
-            pytest.param("dejavu", "DejaVu named", "Arial", False, id="never-dejavu"),
             pytest.param("mono", "Generic mono", "Courier New", False, id="monospace"),
             pytest.param("cursive", "Cursive", "Times New Roman", False, id="cursive"),
             pytest.param("platform", "Platform stack", "Arial", False, id="platform-stack"),
@@ -309,6 +337,55 @@ class TestTheWrittenFaceIsTheFaceDrawn:
         for target, deck in decks.items():
             runs = _runs(_box(slide_shapes(deck, 0), "Arimo webfont"))
             assert runs == [("Arimo webfont text", "Arimo", False)], f"{target}: {runs}"
+
+    def test_a_loaded_webfont_named_dejavu_is_written_as_itself(
+        self, decks: dict[str, bytes], document: str
+    ) -> None:
+        """A webfont the page loaded named DejaVu is the page's own bytes, the same on a laptop
+        and on Apps, and the face the layout was measured in: it is written by its own name,
+        first in its stack or later, as any loaded webfont is. A run of characters it lacks
+        alone keeps it too, as every webfont's run does: ½ (WGL4) is written in the run's
+        fallback face, Arial, and ◔ in MS PGothic (D8). Only the container's own DejaVu, a face
+        the page did not load, is never written; the sidecar's fontconfig keeps it from every
+        stack (test_huashu_font_bundle.py)."""
+        assert "DejaVu Sans" in browser_loaded_weights(document), (
+            "fixture drift: the page's DejaVu Sans is no loaded webfont"
+        )
+        for target, deck in decks.items():
+            shapes = slide_shapes(deck, 0)
+            assert _runs(_box(shapes, "DejaVu named")) == [
+                ("DejaVu named", "DejaVu Sans", False)
+            ], target
+            assert _runs(_box(shapes, "DejaVu later")) == [
+                ("DejaVu later in the stack", "DejaVu Sans", False)
+            ], target
+            assert _runs(_box(shapes, DEJAVU_LACKS)) == [
+                ("½", "Arial", False),
+                (" ", "DejaVu Sans", False),
+                ("◔", "MS PGothic", False),
+            ], target
+
+    def test_a_loaded_webfont_named_dejavu_is_written_as_one_of_any_other_name(
+        self, decks: dict[str, bytes]
+    ) -> None:
+        """The slide again with the page's DejaVu face named Twin Sans: every text box is written
+        alike, the name aside. That includes a run of characters the face lacks alone (½ ◔),
+        which keeps its loaded webfont as its face, as every webfont's run does, its characters
+        written as D8 says."""
+        for target, deck in decks.items():
+            named = [_runs(shape) for shape in slide_shapes(deck, 0) if shape.paras]
+            renamed = [
+                [
+                    (text, "DejaVu Sans" if typeface == TWIN_FACE else typeface, bold)
+                    for text, typeface, bold in _runs(shape)
+                ]
+                for shape in slide_shapes(deck, 2)
+                if shape.paras
+            ]
+            assert any(DEJAVU_LACKS in "".join(run[0] for run in runs) for runs in named), (
+                f"fixture drift: {target} has no box of {DEJAVU_LACKS!r}"
+            )
+            assert renamed == named, target
 
     def test_a_table_cells_own_face_is_the_face_drawn(self, decks: dict[str, bytes]) -> None:
         """The empty cell's face, its paragraph mark's, is Arial, not the stack's first family."""
