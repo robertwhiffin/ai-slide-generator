@@ -272,6 +272,8 @@ TABLES_CSS = (
 .rounded-table tbody tr:nth-child(even) { background: #F3F3F3; }
 .rounded-table tr.rule td { height: 1px; padding: 0; background: #DCE0E2;
                             font-size: 0; line-height: 0; }
+.rounded-table.fixed-grid { table-layout: fixed; }
+.rounded-table.fixed-grid tr { height: 50px; }
 #plain { position: absolute; font-size: 18px; background: #FFFFFF; border-radius: 12px;
          box-shadow: 0 2px 8px rgba(27, 49, 57, 0.12); }
 #plain th, #plain td { padding: 10px 16px; text-align: left; }
@@ -832,6 +834,7 @@ TRANSLUCENT_SLOTS_OF = {
     "translucent": TRANSLUCENT_SLOTS,
     "span-corner": ((1, 1),),
     "span-neighbour": ((1, 1),),
+    "fixed-span": ((1, 1),),
 }
 # Each Google-deck corner body's corner slots and the fill its piece paints.
 CORNER_PIECE_FILLS = {
@@ -841,25 +844,47 @@ CORNER_PIECE_FILLS = {
     "pair": {(0, 0): "FF5F46", (0, 1): "FF5F46", (2, 0): "F3F3F3", (2, 1): "F3F3F3"},
     "span-corner": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
     "span-neighbour": {(0, 0): "FF5F46", (0, 3): "FF5F46", (3, 0): "F3F3F3", (3, 3): "F3F3F3"},
+    "fixed": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
+    "fixed-span": {(0, 0): "FF5F46", (0, 3): "FF5F46", (3, 0): "F3F3F3", (3, 3): "F3F3F3"},
 }
-# The box (left, top, right, bottom, CSS px) of each body's top left corner piece in the
-# deck for Google Slides, from the browser's grid lines (GOOGLE_CORNER_GRID): each side
-# beside an opaque native cell 1 px past its line, beside the 1 px rule row half that,
-# and every other side on its line.
+# The rounded data table on a grid no font moves (``table-layout: fixed``, ``<col>``
+# widths, rows 50 px tall): its lines are 88 / 388 / 688 / 988 and 160 / 210 / 260 / 310.
+FIXED_BODY = (
+    '<div class="slide"><div id="fixed-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table fixed-grid"><colgroup><col style="width: 300px;">'
+    '<col style="width: 300px;"><col style="width: 300px;"></colgroup><thead><tr>'
+    "<th>Use case</th><th>Measurement</th><th>Cost</th></tr></thead>"
+    "<tbody><tr><td>UC 1</td><td>Batch load</td><td>$184</td></tr>"
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# SPAN_NEIGHBOUR_BODY on such a grid, four 225 px columns (each header cell's width plus
+# its 36 px of padding; ``<col>`` widths here would lay the grid 1/64 px wider than the
+# wrapper, which would then cut the table): lines 88 / 313 / 538 / 763 / 988 and
+# 160 / 210 / 260 / 310 / 360.
+FIXED_SPAN_BODY = (
+    '<div class="slide"><div id="fixed-span-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table fixed-grid"><thead><tr>'
+    '<th rowspan="2" style="width: 189px;">Use case</th>'
+    '<th colspan="2" style="width: 414px;">Measurement</th><th style="width: 189px;">Cost</th>'
+    '</tr><tr><th style="background: rgba(255, 95, 70, 0.5);">Run</th><th>Load</th>'
+    "<th>List</th></tr></thead><tbody><tr><td>UC 1</td><td>Batch</td><td>4 TB</td>"
+    "<td>$184</td></tr><tr><td>UC 2</td><td>DLT</td><td>1 TB</td><td>$142</td></tr>"
+    "</tbody></table></div></div>"
+)
+# The top left corner piece's box (left, top, right, bottom, CSS px) in the deck for
+# Google Slides, worked out by hand from those lines: ``fixed``'s 1 px past its right
+# line (388) and its bottom line (210); ``fixed-span``'s (the cell spanning two rows,
+# 160 to 260) on its right line (313), a translucent slot across that side, and 1 px past
+# its bottom line.
 GOOGLE_CORNER_BOXES = {
-    "rounded": (88.0, 160.0, 383.75, 208.0),
-    "thin": (88.0, 160.0, 383.75, 207.5),
-    "span-corner": (88.0, 160.0, 787.1094, 207.0),
-    "span-neighbour": (88.0, 160.0, 375.9531, 255.0),
+    "fixed": (88.0, 160.0, 389.0, 211.0),
+    "fixed-span": (88.0, 160.0, 313.0, 261.0),
 }
-# The browser's grid lines those boxes are measured from: the corner cell's right
-# column line and bottom row line.
-GOOGLE_CORNER_GRID = {
-    "rounded": (382.75, 207.0),
-    "thin": (382.75, 207.0),
-    "span-corner": (787.1094, 207.0),
-    "span-neighbour": (375.9531, 254.0),
-}
+# The browser's lines those boxes are worked out from: the corner cell's right column
+# line and bottom row line.
+GOOGLE_CORNER_GRID = {"fixed": (388.0, 210.0), "fixed-span": (313.0, 260.0)}
 # How far, in the deck for Google Slides, a corner cell's shape runs under each opaque
 # native neighbour (snapshot.mjs CORNER_RUN_UNDER_PX; CALIBRATION.md D13).
 CORNER_RUN_UNDER_PX = 1.0
@@ -963,6 +988,8 @@ INLINE_BODIES = {
     "pair": PAIR_BODY,
     "span-corner": SPAN_CORNER_BODY,
     "span-neighbour": SPAN_NEIGHBOUR_BODY,
+    "fixed": FIXED_BODY,
+    "fixed-span": FIXED_SPAN_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
     "dots": DOTS_BODY,
@@ -3638,7 +3665,17 @@ class TestRoundedWrapper:
         )
 
     @pytest.mark.parametrize(
-        "name", ["rounded", "translucent", "thin", "pair", "span-corner", "span-neighbour"]
+        "name",
+        [
+            "rounded",
+            "translucent",
+            "thin",
+            "pair",
+            "span-corner",
+            "span-neighbour",
+            "fixed",
+            "fixed-span",
+        ],
     )
     def test_in_the_deck_for_google_a_corner_piece_runs_under_its_opaque_neighbours(
         self, google_inline_export: Callable[[str], bytes], name: str
@@ -3795,12 +3832,15 @@ class TestRoundedWrapper:
     ) -> None:
         """D13 in literal px: the top left corner piece's box in the deck for Google Slides.
 
-        Each box is the browser's grid read off once (GOOGLE_CORNER_GRID) and
-        moved by hand: ``rounded``'s piece 1 px past its right line (382.75)
-        and its bottom line (207); ``thin``'s 1 px right and 0.5 px down, into
-        its 1 px rule row; ``span-corner``'s nowhere, its bottom slots one
-        translucent and its right neighbour another corner cell;
-        ``span-neighbour``'s 1 px down only. Each side within 0.01 px.
+        On grids no font moves (``table-layout: fixed``, ``<col>`` widths, 50 px
+        rows), each box is worked out by hand from the lines, not from the
+        engine's rule: ``fixed``'s piece runs 1 px past its right line (388) and
+        its bottom line (210); ``fixed-span``'s, the cell spanning two rows,
+        stays on its right line (313), a header cell spanning two columns above
+        a translucent slot across that side, and runs 1 px past its bottom line
+        (260). Each side within 0.01 px. (The auto-laid bodies' lines move with
+        the live webfont DECK_CSS loads, by up to 0.08 px between runs, so
+        their boxes are checked against the deck's own grid instead.)
         """
         document = _inline_document(name)
         (table,) = browser_tables(document, "table")
