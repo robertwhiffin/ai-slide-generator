@@ -27,6 +27,7 @@ import ast
 import ctypes
 import ctypes.util
 import fnmatch
+import gzip
 import hashlib
 import io
 import json
@@ -128,7 +129,9 @@ class TestTheBundle:
         assert _bundle_file("fonts/fonts.conf.in") == TEMPLATE.read_bytes()
 
     def test_the_build_script_rebuilds_it_byte_for_byte(self) -> None:
-        """Reproducible: the release's faces and licence, packed again, are the committed bytes."""
+        """Reproducible: the release's faces and licence, packed again, are the committed tar
+        stream, byte for byte. The tar stream, decompressed: the compressed bytes are the zlib's
+        that wrote them, and another zlib may write the same stream otherwise."""
         members = {
             name: _bundle_file(
                 f"fonts/liberation/{name}" if name.endswith(".ttf") else f"fonts/{name}"
@@ -140,7 +143,7 @@ class TestTheBundle:
             build_fonts_tarball.bundle_files(members, TEMPLATE.read_bytes())
         )
 
-        assert rebuilt == BUNDLE.read_bytes()
+        assert gzip.decompress(rebuilt) == gzip.decompress(BUNDLE.read_bytes())
 
     def test_its_headers_carry_no_build_time_or_builder(self) -> None:
         for member in _bundle_members().values():

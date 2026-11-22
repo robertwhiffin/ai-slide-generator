@@ -18,7 +18,8 @@ fonts.conf.in, and SOURCE, naming the release and its checksum.
 
 It is reproducible: every member has a fixed mtime, owner and mode, the members
 are in a fixed order, and the gzip header carries no name or time, so two builds
-from the same release are byte-identical. Standard library only.
+from the same release are byte-identical with the same zlib, and their tar
+streams are byte-identical with any. Standard library only.
 """
 
 from __future__ import annotations
