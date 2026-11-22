@@ -22,12 +22,12 @@
 //   familyOf          a font-family stack -> the face a run starts with;
 //   probeFaceOf       (style, family, scale) -> the face a probe is set in;
 //   drawingTokensOf   a stack -> its families, {name, css, baseImage}, each as a
-//                     probe sets it alone;
+//                     probe sets it alone, baseImage whether it is a base-image
+//                     face (snapshot_text.mjs baseImageFace), never written
+//                     unless the page loaded a webfont of that name;
 //   writtenFamilyOf   (name, webfont) -> the face a run its stack's family `name`
 //                     drew is written in;
 //   undrawnFamilyOf   a stack -> the face a run nothing in it drew is written in;
-//   baseImageFace     a family name -> whether it is a base-image face, never
-//                     written unless the page loaded a webfont of that name;
 //   pendingParagraphs, pendingRuns, pendingFonts   what the walk queued for
 //                     applyMetrics (a table cell's own face among the fonts);
 //   coverageFont      {family, advanceEm, bytes}, the coverage probe font
@@ -43,7 +43,6 @@ function createTextMetrics(layout) {
     drawingTokensOf,
     writtenFamilyOf,
     undrawnFamilyOf,
-    baseImageFace,
     pendingParagraphs,
     pendingRuns,
     pendingFonts,
@@ -400,9 +399,9 @@ function createTextMetrics(layout) {
   // and the rest as Arial, Times New Roman or Courier New, any other installed
   // face as itself. A loaded webfont is the page's own bytes, the face the
   // layout was measured in on every machine, so it is written whatever its
-  // name, DejaVu's too. A base-image face the page did not load
-  // (snapshot_text.mjs baseImageFace) is never probed, so never written: it is
-  // the container's alone. Where none draws, the run is written in
+  // name, DejaVu's too. A base-image face the page did not load (a token's
+  // baseImage, snapshot_text.mjs baseImageFace) is never probed, so never
+  // written: it is the container's alone. Where none draws, the run is written in
   // undrawnFamilyOf's face. One probe pass; where it cannot be read, each run
   // keeps its stack's first family.
   function resolveWrittenFaces(webfonts) {

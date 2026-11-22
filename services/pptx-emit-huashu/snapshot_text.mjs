@@ -361,7 +361,6 @@ function createTextLayout(env) {
     drawingTokensOf,
     writtenFamilyOf,
     undrawnFamilyOf,
-    baseImageFace,
     pendingParagraphs,
     pendingRuns,
     pendingFonts,
