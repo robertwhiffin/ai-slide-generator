@@ -117,6 +117,7 @@ from tests.fixtures.export_snapshot_support import (
     export_corpus,
     export_documents,
     export_slides,
+    fidelity_harness,
     google_slides_presentation,
     node_json,
     overlaps,
@@ -269,6 +270,8 @@ TABLES_CSS = (
 .rounded-table td { padding: 13px 18px; }
 .rounded-table tbody tr:nth-child(odd) { background: #fff; }
 .rounded-table tbody tr:nth-child(even) { background: #F3F3F3; }
+.rounded-table tr.rule td { height: 1px; padding: 0; background: #DCE0E2;
+                            font-size: 0; line-height: 0; }
 #plain { position: absolute; font-size: 18px; background: #FFFFFF; border-radius: 12px;
          box-shadow: 0 2px 8px rgba(27, 49, 57, 0.12); }
 #plain th, #plain td { padding: 10px 16px; text-align: left; }
@@ -762,6 +765,53 @@ OFFSET_BODY = ROUNDED_BODY.replace("top: 160px;", "top: 160.4px;").replace(
 CLEAR_BODY = ROUNDED_BODY.replace(
     "overflow: hidden; ", "overflow: hidden; padding: 12px; background: #FFFFFF; "
 ).replace('id="rounded-wrapper"', 'id="clear-wrapper"')
+# The rounded data table with two translucent cells: the header's middle cell, and
+# the first body row's middle cell, its row painting nothing. In the deck for Google
+# Slides a corner cell's shape runs 1 px under each opaque native neighbour (D13):
+# not under the translucent header cell, and with the corner square under the
+# translucent body cell, the bottom corners' diagonal neighbour, left out.
+TRANSLUCENT_BODY = (
+    '<div class="slide"><div id="translucent-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th>Use case</th>'
+    '<th style="background: rgba(255, 95, 70, 0.5);">Measurement</th><th>Cost</th></tr></thead>'
+    '<tbody><tr style="background: none;"><td style="background: #FFFFFF;">UC 1</td>'
+    '<td style="background: rgba(27, 49, 57, 0.1);">Batch load</td>'
+    '<td style="background: #FFFFFF;">$184</td></tr>'
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# The slots TRANSLUCENT_BODY paints translucent.
+TRANSLUCENT_SLOTS = ((0, 1), (1, 1))
+# The rounded data table with a 1 px rule row under its header (``tr.rule``, DCE0E2):
+# a corner piece runs under an opaque row that thin by half its height, so it ends
+# inside that row, short of the line beneath it.
+THIN_BODY = (
+    '<div class="slide"><div id="thin-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th>Use case</th><th>Measurement</th>'
+    '<th>Cost</th></tr><tr class="rule"><td></td><td></td><td></td></tr></thead>'
+    "<tbody><tr><td>UC 1</td><td>Batch load</td><td>$184</td></tr>"
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# The rounded data table in two columns: its corner cells meet each other, and a corner
+# cell's shape runs under no other corner cell, which the table leaves unfilled too.
+PAIR_BODY = (
+    '<div class="slide"><div id="pair-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 600px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th>Use case</th><th>Cost</th></tr></thead>'
+    "<tbody><tr><td>UC 1</td><td>$184</td></tr><tr><td>UC 2</td><td>$142</td></tr>"
+    "</tbody></table></div></div>"
+)
+# Each Google-deck corner body's corner slots and the fill its piece paints.
+CORNER_PIECE_FILLS = {
+    "rounded": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
+    "translucent": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
+    "thin": {(0, 0): "FF5F46", (0, 2): "FF5F46", (3, 0): "F3F3F3", (3, 2): "F3F3F3"},
+    "pair": {(0, 0): "FF5F46", (0, 1): "FF5F46", (2, 0): "F3F3F3", (2, 1): "F3F3F3"},
+}
+# How far, in the deck for Google Slides, a corner cell's shape runs under each opaque
+# native neighbour (snapshot.mjs CORNER_RUN_UNDER_PX; CALIBRATION.md D13).
+CORNER_RUN_UNDER_PX = 1.0
 # A vertex within this of the corner arc lies on it (the arc is drawn as a polygon).
 ARC_TOLERANCE_PX = 0.1
 # A table whose own background (F3F3F3, under unfilled cells) fills a wrapper
@@ -857,6 +907,9 @@ INLINE_BODIES = {
     "rounded": ROUNDED_BODY,
     "offset": OFFSET_BODY,
     "clear": CLEAR_BODY,
+    "translucent": TRANSLUCENT_BODY,
+    "thin": THIN_BODY,
+    "pair": PAIR_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
     "dots": DOTS_BODY,
@@ -1371,6 +1424,24 @@ def inline_export() -> Iterator[Callable[[str], bytes]]:
             if name not in exported:
                 pptx, failures = export_slides(
                     [INLINE_BODIES[name]], css=TABLES_CSS, monkeypatch=monkeypatch
+                )
+                assert failures == [] and pptx, f"the export rejected the {name} slide: {failures}"
+                exported[name] = pptx
+            return exported[name]
+
+        yield export
+
+
+@pytest.fixture(scope="module")
+def google_inline_export() -> Iterator[Callable[[str], bytes]]:
+    """Inline document ``name`` exported alone for Google Slides (``target="gslides"``), once."""
+    exported: dict[str, bytes] = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+
+        def export(name: str) -> bytes:
+            if name not in exported:
+                pptx, failures = export_slides(
+                    [INLINE_BODIES[name]], css=TABLES_CSS, monkeypatch=monkeypatch, target="gslides"
                 )
                 assert failures == [] and pptx, f"the export rejected the {name} slide: {failures}"
                 exported[name] = pptx
@@ -3199,6 +3270,48 @@ def _corner_of(rect: dict, corner: str) -> tuple[float, float]:
     )
 
 
+def _inside_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    """Whether ``point`` lies inside the closed ``polygon`` (even-odd ray casting)."""
+    x, y = point
+    inside = False
+    for index, (x1, y1) in enumerate(polygon):
+        x2, y2 = polygon[index - 1]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _opaque_slot(frame: Shape, row: int, col: int) -> bool:
+    """Whether grid slot ``(row, col)`` lies in the table and its a:tc paints an opaque fill."""
+    assert frame.table is not None
+    if not (0 <= row < len(frame.table.row_heights) and 0 <= col < len(frame.table.col_widths)):
+        return False
+    owner_row, owner_col = table_slot_owner(frame.table, row, col)
+    cell = frame.table.rows[owner_row][owner_col]
+    return cell.fill is not None and cell.fill_alpha is None
+
+
+def _corner_piece(
+    shapes: list[Shape], elements: list, frame_position: int, fill: str, rect: dict
+) -> list[tuple[float, float]]:
+    """The vertices of the one custom shape under the frame filled ``fill`` whose box holds the
+    centre of the cell ``rect``: the corner cell's piece."""
+    centre = (rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
+    found = [
+        position
+        for position, shape in enumerate(shapes[:frame_position])
+        if shape.geometry == "custGeom"
+        and shape.fill == fill
+        and shape.x <= centre[0] <= shape.x + shape.w
+        and shape.y <= centre[1] <= shape.y + shape.h
+    ]
+    assert len(found) == 1, (
+        f"expected one {fill} custom shape under the table at {rect}, got {len(found)}:\n"
+        f"{_describe(shapes)}"
+    )
+    return _custom_geometry_points(elements[found[0]], shapes[found[0]])
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestRoundedWrapper:
@@ -3469,6 +3582,138 @@ class TestRoundedWrapper:
         assert not outside and all(arcs.values()), (
             f"the table's ground has vertices outside the snapped wrapper {snapped} "
             f"{outside[:4]}; on its arcs: {arcs}"
+        )
+
+    @pytest.mark.parametrize("name", ["rounded", "translucent", "thin", "pair"])
+    def test_in_the_deck_for_google_a_corner_piece_runs_under_its_opaque_neighbours(
+        self, google_inline_export: Callable[[str], bytes], name: str
+    ) -> None:
+        """D13: Google draws a native cell on whole pixels, a shape anti-aliased.
+
+        In Drive's thumbnail a native cell fills each pixel whose top left
+        corner it holds, so its edge moves off a corner piece's anti-aliased
+        one, and where it moves away a light seam shows (the data table's coral
+        header, 73 levels; CALIBRATION.md D13). So in the deck for Google
+        Slides, which keeps the browser's grid, each corner cell's custom shape
+        runs under every opaque native cell beside it, which paints over the
+        overlap:
+        * a side whose neighbour is an opaque native cell runs 1 px past the
+          cell's grid line, or half that row's height where the row is under
+          2 px (``thin``: a 1 px rule row under the header), so it ends inside
+          the neighbour; the shape's box is the cell's rect grown so, and it
+          covers the strip there;
+        * a side on the table's outer edge, or whose neighbour is translucent
+          (``translucent``: the header's middle cell), stays on the line;
+        * between two grown sides the corner square is covered where the cell
+          across that corner is opaque too, and left out where it is not
+          (``translucent``: the first body row's middle cell);
+        * no corner cell's shape runs under another corner cell, which the
+          table leaves unfilled too (``pair``: a two-column table);
+        * the outer corner is still cut to the wrapper's 8 px arc, and the
+          corner cell's own a:tc is unfilled.
+        """
+        document = _inline_document(name)
+        pptx = google_inline_export(name)
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        (table,) = browser_tables(document, "table")
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), f"the {name} data table")
+        assert frame.table is not None
+        heights, widths = frame.table.row_heights, frame.table.col_widths
+        if name == "translucent":
+            alphas = {
+                slot: frame.table.rows[slot[0]][slot[1]].fill_alpha for slot in TRANSLUCENT_SLOTS
+            }
+            assert all(alpha is not None and alpha < 1 for alpha in alphas.values()), (
+                f"fixture drift: the translucent slots' fill alphas are {alphas}"
+            )
+        if name == "thin":
+            assert abs(heights[1] - 1) < 0.05 and _opaque_slot(frame, 1, 0), (
+                f"fixture drift: the rule row is {heights[1]:.3f} px tall, filled "
+                f"{frame.table.rows[1][0].fill}"
+            )
+        wrong = []
+        for (row, col), fill in CORNER_PIECE_FILLS[name].items():
+            corner = ("top" if row == 0 else "bottom") + "-" + ("left" if col == 0 else "right")
+            cell = frame.table.rows[row][col]
+            if cell.fill is not None:
+                wrong.append(f"slot ({row}, {col}): its a:tc is filled {cell.fill}")
+            rect = table_cell_rect(frame, row, col)
+            points = _corner_piece(shapes, elements, frame_position, fill, rect)
+            left, top = rect["x"], rect["y"]
+            right, bottom = left + rect["w"], top + rect["h"]
+
+            def reach(opaque: bool, size: float) -> float:
+                return min(CORNER_RUN_UNDER_PX, size / 2) if opaque else 0.0
+
+            reaches = {
+                "top": reach(_opaque_slot(frame, row - 1, col), heights[row - 1] if row else 0),
+                "bottom": reach(
+                    _opaque_slot(frame, row + 1, col),
+                    heights[row + 1] if row + 1 < len(heights) else 0,
+                ),
+                "left": reach(_opaque_slot(frame, row, col - 1), widths[col - 1] if col else 0),
+                "right": reach(
+                    _opaque_slot(frame, row, col + 1),
+                    widths[col + 1] if col + 1 < len(widths) else 0,
+                ),
+            }
+            # Inside the run-under, half way; or, where a side does not run under, 0.5 px past it.
+            depth = {side: reaches[side] / 2 if reaches[side] else -0.5 for side in reaches}
+            middle_x, middle_y = (left + right) / 2, (top + bottom) / 2
+            probes = {
+                "top strip": ((middle_x, top - abs(depth["top"])), bool(reaches["top"])),
+                "bottom strip": (
+                    (middle_x, bottom + abs(depth["bottom"])),
+                    bool(reaches["bottom"]),
+                ),
+                "left strip": ((left - abs(depth["left"]), middle_y), bool(reaches["left"])),
+                "right strip": ((right + abs(depth["right"]), middle_y), bool(reaches["right"])),
+                "the cell's middle": ((middle_x, middle_y), True),
+            }
+            for vertical, horizontal in (
+                ("top", "left"),
+                ("top", "right"),
+                ("bottom", "left"),
+                ("bottom", "right"),
+            ):
+                if reaches[vertical] and reaches[horizontal]:
+                    x = left - depth["left"] if horizontal == "left" else right + depth["right"]
+                    y = top - depth["top"] if vertical == "top" else bottom + depth["bottom"]
+                    across = _opaque_slot(
+                        frame,
+                        row + (-1 if vertical == "top" else 1),
+                        col + (-1 if horizontal == "left" else 1),
+                    )
+                    probes[f"the {vertical}-{horizontal} corner square"] = ((x, y), across)
+            corner_x, corner_y = _corner_of(rect, corner)
+            inward = (0.5 if "left" in corner else -0.5, 0.5 if "top" in corner else -0.5)
+            probes["the square corner the arc cuts"] = (
+                (corner_x + inward[0], corner_y + inward[1]),
+                False,
+            )
+            for what, (point, expected) in probes.items():
+                if _inside_polygon(point, points) != expected:
+                    wrong.append(
+                        f"slot ({row}, {col}) {corner}: {what} {point} is "
+                        f"{'not ' if expected else ''}covered; its run-under per side: {reaches}"
+                    )
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            box = {"left": min(xs), "top": min(ys), "right": max(xs), "bottom": max(ys)}
+            expected_box = {
+                "left": left - reaches["left"],
+                "top": top - reaches["top"],
+                "right": right + reaches["right"],
+                "bottom": bottom + reaches["bottom"],
+            }
+            off = {side: round(box[side] - expected_box[side], 4) for side in box}
+            if any(abs(delta) > 0.01 for delta in off.values()):
+                wrong.append(
+                    f"slot ({row}, {col}) {corner}: its box {box} is off {expected_box} by {off}"
+                )
+        assert not wrong, f"the {name} table's corner pieces in the Google deck:\n" + "\n".join(
+            [*wrong, _describe(shapes)]
         )
 
 
@@ -4198,6 +4443,130 @@ class TestTablesThroughGoogleSlides:
             f"Drive's table borders differ from the browser's (presentation "
             f"{conversion.presentation_id}, deleted after reading):\n  " + "\n  ".join(problems)
         )
+
+    def test_a_rounded_tables_corner_pieces_meet_their_neighbours_as_its_cells_do(
+        self, google_inline_export: Callable[[str], bytes]
+    ) -> None:
+        """D13, opt-in (``TELLR_GOOGLE_TESTS=1``): the rounded data table in Drive's thumbnail.
+
+        The table's deck for Google Slides, converted through Drive and read
+        back as its LARGE thumbnail. Every inner edge of each corner piece (its
+        side beside the header or body cell, and its side above or below the
+        next row) shows no more than the 2 levels native cells show: no light
+        column where a coral piece meets the coral header cell, and the piece's
+        edge above the white row drawn as the header cell's beside it. The
+        table's first inner column line lies 0.44 of a thumbnail pixel past
+        one, where the piece meeting its neighbour on the line seamed by 104
+        levels, and its header's bottom 0.75 past one, where the piece's row
+        was 46 levels lighter than the header cell's (CALIBRATION.md D13). The
+        presentation is deleted afterwards.
+        """
+        document = _inline_document("rounded")
+        (table,) = browser_tables(document, "table")
+        pptx = google_inline_export("rounded")
+        _, frame = _frame_for(slide_shapes(pptx), _grid_rect(table), "the rounded data table")
+        phase = (table_column_edges(frame)[1] * THUMBNAIL_SCALE) % 1
+        assert 0.05 < phase < 0.95, (
+            f"fixture drift: the first inner column line lies {phase:.2f} past a thumbnail pixel"
+        )
+        conversion = google_slides_presentation(pptx, ["rounded"])
+        try:
+            image = _google_thumbnail(conversion.presentation, 0)
+        finally:
+            delete_drive_file(conversion.presentation_id)
+        problems = _corner_piece_edges_in_google(image, frame)
+        assert not problems, "Google's thumbnail shows the corner pieces' edges:\n  " + (
+            "\n  ".join(problems)
+        )
+
+
+# Drive's LARGE thumbnail is 1600 px wide: 1.25 of its pixels to a CSS px.
+THUMBNAIL_SCALE = 1.25
+# A boundary within this many levels (any channel) of what Google draws between two native
+# cells: native cell boundaries show 0 in the thumbnail (CALIBRATION.md D13).
+THUMBNAIL_SEAM_LEVELS = 2
+
+
+def _google_thumbnail(presentation: dict, index: int) -> Image.Image:
+    """Slide ``index`` of a converted presentation as Drive's LARGE (1600 px) thumbnail."""
+    harness = fidelity_harness()
+    token = harness._google_token()
+    page = presentation["slides"][index]["objectId"]
+    thumbnail = json.loads(
+        harness._google_request(
+            f"https://slides.googleapis.com/v1/presentations/{presentation['presentationId']}"
+            f"/pages/{page}/thumbnail?thumbnailProperties.thumbnailSize=LARGE",
+            token,
+        )
+    )
+    return Image.open(BytesIO(harness._google_request(thumbnail["contentUrl"], token))).convert(
+        "RGB"
+    )
+
+
+def _thumbnail_profile(
+    image: Image.Image, line: float, span: tuple[float, float], vertical: bool
+) -> list[tuple[int, ...]]:
+    """The thumbnail's pixels across the grid ``line`` (CSS px; a column line when ``vertical``),
+    two either side of it, each the per-channel median along ``span`` (CSS px) of the line."""
+    centre = int(line * THUMBNAIL_SCALE)
+    first, last = int(span[0] * THUMBNAIL_SCALE), int(span[1] * THUMBNAIL_SCALE)
+    profile = []
+    for offset in range(centre - 2, centre + 3):
+        samples = [
+            image.getpixel((offset, along) if vertical else (along, offset))
+            for along in range(first, last)
+        ]
+        profile.append(
+            tuple(
+                sorted(sample[channel] for sample in samples)[len(samples) // 2]
+                for channel in range(3)
+            )
+        )
+    return profile
+
+
+def _corner_piece_edges_in_google(image: Image.Image, frame: Shape) -> list[str]:
+    """Every inner edge of each corner piece of the rounded data table, in Google's thumbnail.
+
+    An edge between two fills alike (a coral piece beside the coral header cell) is a seam
+    where any pixel across it strays from that fill; an edge between two fills (the coral
+    piece above the white body cell) is a seam where its profile differs from the native
+    neighbour's on the same line (the header cell beside the piece, above the same white row).
+    Each beyond THUMBNAIL_SEAM_LEVELS, the levels native cells show, is listed."""
+    columns, rows = table_column_edges(frame), table_row_edges(frame)
+    margin = ROUNDED_RADIUS_PX + 3
+    problems = []
+    for (row, col), corner in ROUNDED_CORNERS.items():
+        fill = tuple(int(ROUNDED_FILLS[row][col][i : i + 2], 16) for i in (0, 2, 4))
+        across_col = col + (1 if "left" in corner else -1)
+        line = columns[col + 1] if "left" in corner else columns[col]
+        span = (rows[row] + margin, rows[row + 1] - margin)
+        neighbour = tuple(int(ROUNDED_FILLS[row][across_col][i : i + 2], 16) for i in (0, 2, 4))
+        assert neighbour == fill, f"fixture drift: slot ({row}, {across_col}) is not {fill}"
+        profile = _thumbnail_profile(image, line, span, vertical=True)
+        stray = max(
+            abs(pixel[channel] - fill[channel]) for pixel in profile for channel in range(3)
+        )
+        if stray > THUMBNAIL_SEAM_LEVELS:
+            problems.append(
+                f"slot ({row}, {col}) {corner}: across column line {line:.3f} the thumbnail strays "
+                f"{stray} levels from #{ROUNDED_FILLS[row][col]}: {profile}"
+            )
+        across_row = row + (1 if "top" in corner else -1)
+        line = rows[row + 1] if "top" in corner else rows[row]
+        piece_span = (columns[col] + margin, columns[col + 1] - margin)
+        native_span = (columns[across_col] + margin, columns[across_col + 1] - margin)
+        piece = _thumbnail_profile(image, line, piece_span, vertical=False)
+        native = _thumbnail_profile(image, line, native_span, vertical=False)
+        differs = max(abs(a - b) for p, q in zip(piece, native) for a, b in zip(p, q))
+        if differs > THUMBNAIL_SEAM_LEVELS:
+            problems.append(
+                f"slot ({row}, {col}) {corner}: across row line {line:.3f} (toward row "
+                f"{across_row}) the piece's profile {piece} differs from the native cell's "
+                f"{native} by {differs} levels"
+            )
+    return problems
 
 
 def _weighed(found: tuple[str | None, float], colour: str, width_px: float, what: str) -> list[str]:
