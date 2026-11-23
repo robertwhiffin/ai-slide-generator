@@ -108,6 +108,7 @@ markers = [
     "integration: marks tests as integration tests (require Databricks connection)",
     "live: marks tests that require a live Databricks connection (excluded in CI with -m 'not live')",
     "slow: marks tests as slow running",
+    "network: loads the slide CSP's CDN hosts (cdn.jsdelivr.net, Google Fonts, cdn.tailwindcss.com); skips itself when they cannot be reached",
     "postgres: marks tests that require a reachable PostgreSQL (they self-skip when none is)",
     "image_tool: the architect's generate_image tool may be bound (otherwise tests/conftest.py patches nodes._image_generation_available to False)",
 ]

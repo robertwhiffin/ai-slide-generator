@@ -8,9 +8,12 @@ text in another face asks for that face then. The faces and their status are
 read through the pristine-realm accessors (``dom_access.mjs``), or the page's
 own (``OWN_DOM_ACCESS``) where no pristine realm can be had.
 
-The late face here is DM Mono (the pinned copy), served from a local server
-that answers after ``LATE_FONT_DELAY_SECONDS``, so it is loading when the page
-is read unless the export waits for it. Every slide holds one paragraph; the
+The late face here is DM Mono (the pinned copy), answered after
+``LATE_FONT_DELAY_SECONDS``, so it is loading when the page is read unless the
+export waits for it: inside the export's own browser by a route a preload
+adds (``LATE_FONT_PRELOAD``), since the export's request guard aborts a local
+server's requests, and to the font accessors' own browser by a local server.
+Every slide holds one paragraph; the
 oracle is the width the export gives that paragraph's text box:
 
 * ``settled`` sets the paragraph in the late face from the start: the width the
@@ -149,10 +152,68 @@ def _documents(font_url: str) -> dict[str, str]:
     }
 
 
+# The export's own browser loads nothing from a local server: its request guard
+# (request_guard.cjs) aborts every request a slide's page makes but its own file,
+# data:, blob: and the slide CSP's hosts. So the late face is served inside that
+# browser: a preload (NODE_OPTIONS --import) routes LATE_FONT_URL in each slide's
+# context, after the guard has routed every request, and answers it with
+# LATE_FONT after LATE_FONT_DELAY_SECONDS. Playwright tries the route registered
+# last first, so the guard never sees the face's request, and nothing leaves
+# the machine.
+LATE_FONT_URL = "https://late-font.invalid/DMMono-400-latin.woff2"
+LATE_FONT_PRELOAD = """
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+const require = createRequire(%(sidecar)s);
+const { chromium } = require('playwright-core');
+const font = fs.readFileSync(%(font)s);
+const launch = chromium.launch.bind(chromium);
+chromium.launch = async (options) => {
+  const browser = await launch(options);
+  const newContext = browser.newContext.bind(browser);
+  browser.newContext = async (...contextArguments) => {
+    const context = await newContext(...contextArguments);
+    const newPage = context.newPage.bind(context);
+    context.newPage = async (...pageArguments) => {
+      await context.route(%(url)s, async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, %(delay_ms)d));
+        await route.fulfill({
+          status: 200,
+          contentType: 'font/woff2',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: font,
+        }).catch(() => {});
+      });
+      return newPage(...pageArguments);
+    };
+    return context;
+  };
+  return browser;
+};
+"""
+
+
 @pytest.fixture(scope="module")
-def font_deck(late_font_url: str) -> Iterator[tuple[list[str], LoggedExport]]:
-    documents = _documents(late_font_url)
+def font_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[list[str], LoggedExport]]:
+    documents = _documents(LATE_FONT_URL)
+    preload = tmp_path_factory.mktemp("late-font") / "late_font.mjs"
+    preload.write_text(
+        LATE_FONT_PRELOAD
+        % {
+            "sidecar": json.dumps(str(pptx_from_html_huashu.SIDECAR_SCRIPT)),
+            "font": json.dumps(str(LATE_FONT)),
+            "url": json.dumps(LATE_FONT_URL),
+            "delay_ms": LATE_FONT_DELAY_SECONDS * 1000,
+        },
+        encoding="utf-8",
+    )
+    sidecar_env = pptx_from_html_huashu.sidecar_subprocess_env
     with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            pptx_from_html_huashu,
+            "sidecar_subprocess_env",
+            lambda: {**sidecar_env(), "NODE_OPTIONS": f"--import={preload.as_uri()}"},
+        )
         logged = export_logged(list(documents.values()), monkeypatch=monkeypatch)
     assert logged.failures == [], logged.failures
     yield list(documents), logged

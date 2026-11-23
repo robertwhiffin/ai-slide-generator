@@ -34,6 +34,52 @@ SLIDE_CSP_META = (
     f'<meta http-equiv="Content-Security-Policy" content="{SLIDE_CSP}">'
 )
 
+# The export's request guard (services/pptx-emit-huashu/request_guard.cjs) aborts
+# every request a slide's page makes in the sidecar's Chromium but the slide's
+# own file, data:, blob:, and the https hosts SLIDE_CSP allows for that kind of
+# request; it also stops navigations, which the CSP cannot. These are the fetch
+# directives that name https hosts, each with the request type it governs, as
+# Playwright's resourceType() names it. Every other directive allows no https
+# host (default-src 'none'), and the guard allows none for its requests either.
+_CSP_DIRECTIVE_REQUEST_TYPES = {
+    "script-src": "script",
+    "style-src": "stylesheet",
+    "font-src": "font",
+}
+_CSP_HTTPS_HOST = re.compile(r"https://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)")
+
+
+def slide_csp_request_hosts(csp: str = SLIDE_CSP) -> dict[str, tuple[str, ...]]:
+    """The https hosts a slide's page may load, by request type, as ``csp`` allows them.
+
+    Read from each fetch directive's ``https://host`` sources, in order. The
+    guard matches a host exactly, on https's own port, so a source it could not
+    mirror raises ``ValueError``: an https source with a path, a port or a
+    wildcard, or one in a directive outside ``_CSP_DIRECTIVE_REQUEST_TYPES``
+    (whose requests the guard would then abort although the CSP allows them).
+    """
+    hosts: dict[str, tuple[str, ...]] = {}
+    for directive in csp.split(";"):
+        name, *sources = directive.split() or [""]
+        https = [source for source in sources if source.lower().startswith("https:")]
+        if not https:
+            continue
+        if name not in _CSP_DIRECTIVE_REQUEST_TYPES:
+            raise ValueError(f"{name} allows https sources {https}, which the export's request guard does not mirror")
+        names = []
+        for source in https:
+            matched = _CSP_HTTPS_HOST.fullmatch(source)
+            if matched is None:
+                raise ValueError(f"{name} source {source!r} is not an https host the request guard can match")
+            names.append(matched.group(1))
+        hosts[_CSP_DIRECTIVE_REQUEST_TYPES[name]] = tuple(names)
+    return hosts
+
+
+# What the export's sidecar is given as its request guard's hosts (``allowedHosts``):
+# SLIDE_CSP's own, its one source.
+SLIDE_CSP_REQUEST_HOSTS = slide_csp_request_hosts()
+
 # Uniform root-slide reset for server-built slide documents. MUST stay in sync
 # with the frontend builder's SLIDE_ROOT_RESET_STYLE
 # (frontend/src/services/slideDocument.ts): every render/export surface

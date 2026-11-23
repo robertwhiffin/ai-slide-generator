@@ -64,6 +64,7 @@ SIDECAR_SOURCES = (
     "preprocess.mjs",
     "pseudo.mjs",
     "render_slide.cjs",
+    "request_guard.cjs",
     "snapshot.mjs",
     "snapshot_borders.mjs",
     "snapshot_table.mjs",

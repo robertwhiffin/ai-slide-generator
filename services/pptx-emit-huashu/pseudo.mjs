@@ -9,7 +9,7 @@
 // through the DevTools protocol (a Playwright CDPSession on the slide's page),
 // once the page has settled and just before the snapshot:
 //
-//   readPseudoElements(page) -> PseudoData (below), handed to the snapshot
+//   readPseudoElements(page, log) -> PseudoData (below), handed to the snapshot
 //                               evaluation as its argument (snapshot.mjs).
 //
 // * The box is DOM.getBoxModel's border quad of the pseudo-element node
@@ -83,8 +83,8 @@ const PSEUDO_TEXT_DEPTH_LIMIT = 16;
 const PROTOCOL_BATCH = 256;
 const NO_PSEUDO_ELEMENTS = { hosts: [], count: 0, truncated: false };
 
-function reportTruncation(what) {
-  console.error(
+function reportTruncation(what, log) {
+  log.error(
     `[html2pptx] collection truncated at ${what} in the pseudo-element read: content past that ` +
     'point is NOT in the exported deck. This bound is unreachable for real slide content, so ' +
     'meeting it means the document presented an implausible collection.'
@@ -127,7 +127,7 @@ function pseudoNodesOf(node) {
 
 // The document's elements that generate a ::before, ::after or ::marker, in
 // DOM pre-order, and every element that carries the host attribute already.
-function findHosts(root) {
+function findHosts(root, log) {
   const hosts = [];
   const marked = [];
   const pending = [{ node: root, depth: 0 }];
@@ -136,7 +136,7 @@ function findHosts(root) {
   while (pending.length) {
     const next = pending.pop();
     if (++visited > COLLECTION_ITEM_LIMIT) {
-      reportTruncation(`${COLLECTION_ITEM_LIMIT} nodes`);
+      reportTruncation(`${COLLECTION_ITEM_LIMIT} nodes`, log);
       truncated = true;
       break;
     }
@@ -149,7 +149,7 @@ function findHosts(root) {
     const children = Array.isArray(node.children) ? node.children : [];
     if (!children.length) continue;
     if (next.depth >= WALK_STEP_LIMIT) {
-      if (!truncated) reportTruncation(`depth ${WALK_STEP_LIMIT}`);
+      if (!truncated) reportTruncation(`depth ${WALK_STEP_LIMIT}`, log);
       truncated = true;
       continue;
     }
@@ -279,9 +279,9 @@ function isQuad(quad) {
   return Array.isArray(quad) && quad.length === 8 && quad.every((value) => Number.isFinite(value));
 }
 
-async function readThrough(session) {
+async function readThrough(session, log) {
   const { root } = await session.send('DOM.getDocument', { depth: -1 });
-  const found = findHosts(root);
+  const found = findHosts(root, log);
   const pseudoNodes = [];
   for (const host of found.hosts) {
     for (const type of PSEUDO_TYPES) {
@@ -339,7 +339,7 @@ async function readThrough(session) {
   const written = await sendInBatches(hostIds.map((nodeId, index) => ({ nodeId, index })), (host) =>
     session.send('DOM.setAttributeValue', { nodeId: host.nodeId, name: PSEUDO_HOST_ATTRIBUTE, value: String(host.index) })
       .then(() => true));
-  reportFailures({
+  reportFailures(log, {
     unread,
     unremoved: removed.filter((result) => result !== true).length,
     unmarked: written.filter((result) => result !== true).length,
@@ -348,25 +348,26 @@ async function readThrough(session) {
 }
 
 // One count line for what the read could not do; nothing when it did it all.
-function reportFailures({ unread, unremoved, unmarked }) {
+function reportFailures(log, { unread, unremoved, unmarked }) {
   if (!unread && !unremoved && !unmarked) return;
-  console.error(
+  log.error(
     `[html2pptx] pseudo-elements: ${unmarked} host(s) could not be marked, ` +
     `${unremoved} stale host attribute(s) could not be taken off and ${unread} box read(s) failed; ` +
     'the ::before, ::after and ::marker they hold may be missing from the exported deck or drawn on the wrong element'
   );
 }
 
-// readPseudoElements(page) -> PseudoData. Never throws: a page whose
-// pseudo-elements cannot be read exports without them, and says so.
-export async function readPseudoElements(page) {
+// readPseudoElements(page, log) -> PseudoData. Never throws: a page whose
+// pseudo-elements cannot be read exports without them, and says so, through
+// `log` (its error(line); the console when none is given).
+export async function readPseudoElements(page, log = console) {
   let session = null;
   try {
     session = await page.context().newCDPSession(page);
-    return await readThrough(session);
+    return await readThrough(session, log);
   } catch (error) {
     const message = oneLine(String((error && error.message) || error).split('\n')[0]);
-    console.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before, ::after and list markers`);
+    log.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before, ::after and list markers`);
     return NO_PSEUDO_ELEMENTS;
   } finally {
     if (session) await session.detach().catch(() => {});

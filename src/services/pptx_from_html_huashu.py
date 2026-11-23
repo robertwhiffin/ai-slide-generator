@@ -14,6 +14,18 @@ runs the sidecar's ``setup.sh`` to install them) or ``ENVIRONMENT=development``.
 Until then the export routes answer 503, and the frontend's Google Slides
 export falls back to the records pipeline.
 
+Requests. A slide's page reads nothing but its slide: the sidecar decides every
+request its Chromium makes (``request_guard.cjs``, through Playwright's
+routing), whatever the document says, since slide script can navigate a page
+where no CSP reaches and a caller's document may carry none. It allows the
+slide's own file, ``data:`` and ``blob:``, and the https hosts the slide CSP
+allows for each kind of request, ``SIDECAR_REQUEST_HOSTS``, which this module
+passes in the stdin payload (``allowedHosts``); it aborts everything else (any
+other file, ``http:``, loopback and link-local addresses, other hosts,
+WebSockets) and closes popups. A slide whose page navigates away from it fails,
+its failure in the list ``build_pptx_huashu`` returns, and the rest of the deck
+is written.
+
 Timeout. A run past ``SIDECAR_TIMEOUT_SECONDS`` must end node and every
 Chromium it launched: killed alone, node would leave its browser running with
 no parent, holding its memory until the app restarts. Playwright launches each
@@ -137,6 +149,8 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, NamedTuple
+
+from src.utils.html_safety import SLIDE_CSP_REQUEST_HOSTS
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +378,14 @@ _SIDECAR_ENV_ALLOWLIST = (
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
 )
+
+
+# The https hosts a slide's page may load in the sidecar's Chromium, by request
+# type: the slide CSP's (html_safety.SLIDE_CSP_REQUEST_HOSTS), passed in the stdin
+# payload as ``allowedHosts``. The sidecar's request guard aborts every other
+# request a slide's page makes, and fails a slide that navigates away from itself
+# (module docstring, Requests).
+SIDECAR_REQUEST_HOSTS: Mapping[str, tuple[str, ...]] = SLIDE_CSP_REQUEST_HOSTS
 
 
 def sidecar_subprocess_env() -> dict[str, str]:
@@ -1183,6 +1205,8 @@ def _export_deck(
         "bypassValidation": bypass_validation,
         # The app the deck is written for (module docstring, Renderer target).
         "target": target,
+        # What a slide's page may load (module docstring, Requests).
+        "allowedHosts": {kind: list(hosts) for kind, hosts in SIDECAR_REQUEST_HOSTS.items()},
     }).encode("utf-8")
 
     # A place among this worker's exports for the whole export, refused at once

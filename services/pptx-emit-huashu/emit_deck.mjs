@@ -7,7 +7,14 @@
 //
 // stdin payload (UTF-8 JSON, no schema validation here — wrapper enforces):
 //   { title?: string, slides: [{ html: string, notes?: string }],
-//     bypassValidation?: boolean, target?: 'pptx' | 'gslides' }
+//     bypassValidation?: boolean, target?: 'pptx' | 'gslides',
+//     allowedHosts?: { [resourceType]: string[] } }
+//
+// allowedHosts is the https hosts a slide's page may load, by kind of request:
+// the wrapper's are the slide CSP's (src/utils/html_safety.py
+// SLIDE_CSP_REQUEST_HOSTS). The request guard aborts every other request a
+// slide's page makes (request_guard.cjs); without the field, a page loads no
+// https host at all.
 //
 // target is the renderer the deck is written for: 'pptx' (the default) for
 // PowerPoint, 'gslides' for the Google Slides conversion. The engine writes
@@ -97,13 +104,21 @@ async function main() {
   // isn't installed yet, the require itself succeeds but the first slide throws.
   let renderSlide;
   let dotTableBorders;
+  let requestHostsOf;
   try {
     ({ renderSlide } = require('./render_slide.cjs'));
     ({ dotTableBorders } = require('./emit_table.cjs'));
+    ({ requestHostsOf } = require('./request_guard.cjs'));
   } catch (e) {
     console.error('[huashu] failed to load render_slide.cjs:', oneLine(e.message));
     console.error('[huashu] hint: cd services/pptx-emit-huashu && npm install && npx playwright install chromium');
     process.exit(4);
+  }
+
+  const { hosts: requestHosts, ignored } = requestHostsOf(payload.allowedHosts);
+  if (ignored) {
+    console.error(`[huashu] allowedHosts: ${ignored} entr${ignored === 1 ? 'y is' : 'ies are'} no request ` +
+      'type and host names, and allow nothing');
   }
 
   const pres = new pptxgen();
@@ -124,7 +139,7 @@ async function main() {
     try {
       await fs.writeFile(tmpHtml, slide.html, 'utf-8');
       // { slide } for the notes below; throws for a slide it rejects.
-      const result = await renderSlide(tmpHtml, pres, { bypassValidation, target });
+      const result = await renderSlide(tmpHtml, pres, { bypassValidation, target, requestHosts });
       if (slide.notes && result.slide && typeof result.slide.addNotes === 'function') {
         result.slide.addNotes(slide.notes);
       }

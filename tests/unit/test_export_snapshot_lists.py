@@ -418,10 +418,9 @@ UNREAD_BOXES_SCRIPT = """
     const launch = playwright.chromium.launch.bind(playwright.chromium);
     playwright.chromium.launch = async (options) => {
       const browser = await launch(options);
-      const newPage = browser.newPage.bind(browser);
-      browser.newPage = async (...args) => {
-        const page = await newPage(...args);
-        const context = page.context();
+      const newContext = browser.newContext.bind(browser);
+      browser.newContext = async (...args) => {
+        const context = await newContext(...args);
         const newSession = context.newCDPSession.bind(context);
         context.newCDPSession = async (target) => {
           const session = await newSession(target);
@@ -445,7 +444,7 @@ UNREAD_BOXES_SCRIPT = """
             detach: () => session.detach(),
           };
         };
-        return page;
+        return context;
       };
       return browser;
     };

@@ -691,11 +691,11 @@ CDP_UNAVAILABLE_SCRIPT = """
     const launch = playwright.chromium.launch.bind(playwright.chromium);
     playwright.chromium.launch = async (options) => {
       const browser = await launch(options);
-      const newPage = browser.newPage.bind(browser);
-      browser.newPage = async (...args) => {
-        const page = await newPage(...args);
-        page.context().newCDPSession = unavailable;
-        return page;
+      const newContext = browser.newContext.bind(browser);
+      browser.newContext = async (...args) => {
+        const context = await newContext(...args);
+        context.newCDPSession = unavailable;
+        return context;
       };
       return browser;
     };

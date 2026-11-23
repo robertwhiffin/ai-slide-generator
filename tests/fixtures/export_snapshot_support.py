@@ -127,7 +127,9 @@ SNAPSHOT_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_snapshot"
 MEASURE_SCRIPT = SNAPSHOT_FIXTURE_DIR / "measure.cjs"
 FIDELITY_HARNESS = REPO_ROOT / "scripts" / "export_fidelity" / "run.py"
 
-DECK_CSS: str = (CORPUS_DIR / "deck.css").read_text(encoding="utf-8")
+# The corpus deck's CSS as committed, its webfonts loaded from Google Fonts.
+CORPUS_DECK_CSS: str = (CORPUS_DIR / "deck.css").read_text(encoding="utf-8")
+DECK_CSS: str = CORPUS_DECK_CSS
 # deck.json carries the corpus deck's ``title``, ``scripts`` and ``external_scripts``.
 CORPUS_DECK: dict = json.loads((CORPUS_DIR / "deck.json").read_text(encoding="utf-8"))
 

@@ -3,7 +3,7 @@
 // picture of exactly what the browser painted for it, taken from the original,
 // untouched page.
 //
-//   captureAll(page, captures) -> Map<captureId, 'data:image/png;base64,…'>
+//   captureAll(page, captures, log) -> Map<captureId, 'data:image/png;base64,…'>
 //
 // `captures` is model.captures (snapshot.mjs): {id, x,y,w,h, mode, selector,
 // pseudo, hiddenWithin, paint, bordersHidden}. The snapshot has already named each target
@@ -32,8 +32,9 @@
 // html and body kept as they are, their text transparent, every other element
 // hidden, on the white canvas the slide is painted on. It is the slide's
 // background picture: what the browser paints under all the root holds.
-// A capture that fails is logged and has no entry in the map: its picture is
-// skipped (emit_model.cjs) and counted in the slide summary. The slide stays.
+// A capture that fails is logged, through `log` (its error(line); the console
+// when none is given), and has no entry in the map: its picture is skipped
+// (emit_model.cjs) and counted in the slide summary. The slide stays.
 //
 // The stylesheet goes in through the screenshot's own `style` option, not
 // page.addStyleTag. Playwright applies that option from its utility world, an
@@ -230,7 +231,7 @@ async function captureOne(page, capture, viewport) {
 // the same pictures in the same order every time. A capture's id and the
 // reason it failed come from the page, so each is printed on one line
 // (log_line.cjs oneLine).
-async function captureAll(page, captures) {
+async function captureAll(page, captures, log = console) {
   const pictures = new Map();
   const ordered = (captures || []).slice().sort((a, b) => captureNumber(a) - captureNumber(b));
   // A page with no fixed viewport has no edge a clip must stay inside.
@@ -241,7 +242,7 @@ async function captureAll(page, captures) {
     // The snapshot could not name its target, and has said so.
     if (capture.failed) continue;
     if (timedOut) {
-      console.error(`[html2pptx] capture failed: ${oneLine(capture.id)} not attempted: an earlier capture of this slide timed out`);
+      log.error(`[html2pptx] capture failed: ${oneLine(capture.id)} not attempted: an earlier capture of this slide timed out`);
       continue;
     }
     try {
@@ -249,7 +250,7 @@ async function captureAll(page, captures) {
     } catch (error) {
       if (error && error.name === 'TimeoutError') timedOut = true;
       const message = oneLine(String((error && error.message) || error).split('\n')[0]);
-      console.error(`[html2pptx] capture failed: ${oneLine(capture.id)} ${message}`);
+      log.error(`[html2pptx] capture failed: ${oneLine(capture.id)} ${message}`);
     }
   }
   return pictures;

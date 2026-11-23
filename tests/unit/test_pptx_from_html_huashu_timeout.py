@@ -167,15 +167,20 @@ const { chromium } = require('playwright-core');
 const launch = chromium.launch.bind(chromium);
 chromium.launch = async (options) => {
   const browser = await launch(options);
-  const newPage = browser.newPage.bind(browser);
-  browser.newPage = async (...pageArguments) => {
-    const page = await newPage(...pageArguments);
-    const goto = page.goto.bind(page);
-    page.goto = async (...gotoArguments) => {
-      await goto(...gotoArguments);
-      for (;;) { /* the event loop blocked */ }
+  const newContext = browser.newContext.bind(browser);
+  browser.newContext = async (...contextArguments) => {
+    const context = await newContext(...contextArguments);
+    const newPage = context.newPage.bind(context);
+    context.newPage = async (...pageArguments) => {
+      const page = await newPage(...pageArguments);
+      const goto = page.goto.bind(page);
+      page.goto = async (...gotoArguments) => {
+        await goto(...gotoArguments);
+        for (;;) { /* the event loop blocked */ }
+      };
+      return page;
     };
-    return page;
+    return context;
   };
   return browser;
 };

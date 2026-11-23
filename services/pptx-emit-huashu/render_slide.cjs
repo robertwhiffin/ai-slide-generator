@@ -31,7 +31,14 @@
 //                        lacks a word of the reference, then the slide's
 //                        summary line, both on stderr (spec §6).
 //
-// renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir })
+// Each slide has a browser and a browser context of its own, whose every
+// request the request guard decides (request_guard.cjs): the page reads its
+// slide's own file, data: and blob: URLs and the hosts the slide CSP allows
+// (`requestHosts`, emit_deck.mjs), and nothing else. A slide whose page
+// navigates away from it is stopped at once and fails: its browser is closed
+// and nothing it read is exported.
+//
+// renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts })
 //   -> { slide, summary }
 // Each slide that renders logs
 //   [html2pptx] text missing: <json array>   when a word is missing, then
@@ -49,11 +56,13 @@
 // emit_deck.mjs attaches the speaker notes to the returned `slide`.
 
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
 const { logJson, oneLine } = require('./log_line.cjs');
 const { checkModel, dropLine } = require('./model_check.cjs');
+const { guardContext } = require('./request_guard.cjs');
 const { textLossLine } = require('./text_check.cjs');
 const { EMU_PER_IN, PT_PER_PX, PX_PER_IN } = require('./units.cjs');
 
@@ -270,12 +279,29 @@ function forwardConsole(page) {
   });
 }
 
+// ─── the slide's log ───────────────────────────────────────────────────
+// What the reads of one slide say on stderr. A slide that is stopped (its page
+// left the slide) has its browser closed under reads still under way, and
+// what those say once it is gone is about no page at all, so it is dropped:
+// none of it lands among the next slide's lines.
+function slideLog() {
+  let live = true;
+  return {
+    error(line) {
+      if (live) console.error(line);
+    },
+    stop() {
+      live = false;
+    },
+  };
+}
+
 // ─── settle ────────────────────────────────────────────────────────────
 // pageFontsSettled, bounded here, not in the page: a font set that never
 // reports ready, or a face that never finishes loading, must cost seconds, not
 // the export. Either is said on stderr, since the slide is then read with the
 // fonts it has.
-async function waitForFonts(page, sources) {
+async function waitForFonts(page, sources, log) {
   let timer;
   try {
     const settled = await Promise.race([
@@ -283,10 +309,10 @@ async function waitForFonts(page, sources) {
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), FONTS_READY_TIMEOUT_MS); }),
     ]);
     if (settled !== true) {
-      console.error(`[html2pptx] the slide's fonts did not finish loading within ${FONTS_READY_TIMEOUT_MS} ms — continuing`);
+      log.error(`[html2pptx] the slide's fonts did not finish loading within ${FONTS_READY_TIMEOUT_MS} ms — continuing`);
     }
   } catch (e) {
-    console.error(`[html2pptx] document.fonts.ready failed: ${oneLine(e.message)} — continuing`);
+    log.error(`[html2pptx] document.fonts.ready failed: ${oneLine(e.message)} — continuing`);
   } finally {
     clearTimeout(timer);
   }
@@ -301,26 +327,26 @@ async function waitForCanvases(page, sources) {
   }
 }
 
-async function finishAnimations(page, sources) {
+async function finishAnimations(page, sources, log) {
   try {
     return await page.evaluate(sources.finishAnimations);
   } catch (e) {
-    console.error(`[html2pptx] finishing animations failed: ${oneLine(e.message)} — continuing`);
+    log.error(`[html2pptx] finishing animations failed: ${oneLine(e.message)} — continuing`);
     return { finished: 0, cancelled: 0, unfinished: 0 };
   }
 }
 
-async function settle(page, sources) {
+async function settle(page, sources, log) {
   try {
     await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS });
   } catch (e) { /* ignore — some slides legitimately keep a long-poll open */ }
-  await waitForFonts(page, sources);
+  await waitForFonts(page, sources, log);
   await waitForCanvases(page, sources);
-  return finishAnimations(page, sources);
+  return finishAnimations(page, sources, log);
 }
 
 // ─── preprocess ────────────────────────────────────────────────────────
-async function runPreprocess(page, sources) {
+async function runPreprocess(page, sources, log) {
   try {
     const result = await page.evaluate(sources.preprocess);
     if (result && typeof result === 'object') {
@@ -329,13 +355,13 @@ async function runPreprocess(page, sources) {
       // locator regression. The page-side '[preprocess] no slide root' line
       // carries the shape that was actually seen.
       if (result.bgTransferred === 'no-root') {
-        console.error('[preprocess] slide-root locator resolved NO root: this slide ' +
-                      'exports with the untouched body background (white).');
+        log.error('[preprocess] slide-root locator resolved NO root: this slide ' +
+                  'exports with the untouched body background (white).');
       }
     }
     return result;
   } catch (e) {
-    console.error(`[preprocess] failed: ${oneLine(e.message)} — continuing without`);
+    log.error(`[preprocess] failed: ${oneLine(e.message)} — continuing without`);
     return null;
   }
 }
@@ -437,12 +463,12 @@ function reportValidation(validationErrors, bypassValidation) {
 // ─── checks ────────────────────────────────────────────────────────────
 // The page's rendered text (pageRenderedText), or null when it could not be
 // read: the slide still exports, unchecked, and the log says so.
-async function readRenderedText(page, sources) {
+async function readRenderedText(page, sources, log) {
   try {
     const text = await page.evaluate(sources.renderedText);
     return typeof text === 'string' ? text : null;
   } catch (e) {
-    console.error(`[html2pptx] reading the slide's rendered text failed: ${oneLine(e.message)} — its text is not checked for loss`);
+    log.error(`[html2pptx] reading the slide's rendered text failed: ${oneLine(e.message)} — its text is not checked for loss`);
     return null;
   }
 }
@@ -465,11 +491,14 @@ function elapsedMs(start) {
 // check leaves out, and `target` the renderer the deck is written for.
 // `modelDrops` is how many captures, items and model fields Node could not
 // take from the page as the snapshot writes them (model_check.cjs), 0 for a
-// slide whose script shaped none of its model.
+// slide whose script shaped none of its model. `blockedRequests` is how many
+// requests and WebSockets of the slide's page the request guard aborted, and
+// `closedPopups` how many popups it closed (request_guard.cjs): 0 and 0 for a
+// slide that asks for nothing but its own file and the CSP's hosts.
 //   readings  {preprocessResult, animations, pseudoData, captureMs, target,
-//             dropped}: what the slide's render read besides the model.
+//             dropped, requests}: what the slide's render read besides the model.
 function summarise(model, captures, readings) {
-  const { preprocessResult, animations, pseudoData, captureMs, target, dropped } = readings;
+  const { preprocessResult, animations, pseudoData, captureMs, target, dropped, requests } = readings;
   const kinds = {};
   let pictures = 0;
   let skippedPictures = 0;
@@ -499,6 +528,8 @@ function summarise(model, captures, readings) {
     hiddenText: model.reference.hiddenText,
     target,
     modelDrops: dropped.items + dropped.captures + dropped.fields,
+    blockedRequests: requests.blockedRequests,
+    closedPopups: requests.closedPopups,
   };
 }
 
@@ -513,56 +544,93 @@ function reportChecks(summary, model, renderedText) {
 }
 
 // ─── the slide ─────────────────────────────────────────────────────────
+// The error a slide whose page navigated away from it fails with. The URL is
+// the page's, so only its scheme is said.
+function leftSlideError(scheme) {
+  return new Error(
+    `the slide's page navigated away from the slide (to a ${scheme}: URL), so it is not ` +
+    'exported: an export reads nothing but its own slide'
+  );
+}
+
+// Everything the render reads from the slide's page, in order.
+async function readPage(page, slideUrl, sources, target, log) {
+  await page.goto(slideUrl);
+  const animations = await settle(page, sources, log);
+  const preprocessResult = await runPreprocess(page, sources, log);
+  // The background transfer writes body's inline style, which starts any
+  // transition a deck declares on it; finish that too before reading.
+  await finishAnimations(page, sources, log);
+  // A finished animation can set text in a face nothing had asked for yet
+  // (its end state's font-family or weight), which loads only now.
+  await waitForFonts(page, sources, log);
+  const bodyDimensions = await readBodyDimensions(page, sources);
+  // Read from the settled page the snapshot reads, just before it.
+  const pseudoData = await sources.readPseudoElements(page, log);
+  // Checked before the captures and everything after use any of it.
+  const { model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData, { target })));
+  const drops = dropLine(dropped);
+  if (drops) log.error(drops);
+  // Capture id -> data: PNG for the targets the model names in model.captures,
+  // taken from this page as the snapshot left it. A target without an entry
+  // is a failed capture: its picture is skipped.
+  const captureStart = performance.now();
+  const captures = await captureAll(page, model.captures, log);
+  const captureMs = model.captures.length ? elapsedMs(captureStart) : 0;
+  // Last, once every picture is taken: the read hides the graphics.
+  const renderedText = await readRenderedText(page, sources, log);
+  return {
+    animations, preprocessResult, bodyDimensions, pseudoData, model, dropped, captures, captureMs, renderedText,
+  };
+}
+
+// The slide's page read in a browser of its own, its requests guarded
+// (request_guard.cjs), and the browser closed whatever happens. A page that
+// leaves the slide stops the read at once: the slide fails, and what the read
+// still had under way is abandoned with the browser.
+async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
+  const log = slideLog();
+  let stopSlide;
+  const stopped = new Promise((resolve, reject) => { stopSlide = reject; });
+  stopped.catch(() => {});
+  let left = false;
+  const leave = (scheme) => {
+    if (left) return;
+    left = true;
+    log.stop();
+    stopSlide(leftSlideError(scheme));
+  };
+  const browser = await chromium.launch(launchOptions(tmpDir));
+  try {
+    const context = await browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
+    const guard = await guardContext(context, slideUrl, requestHosts, leave);
+    const page = await context.newPage();
+    guard.watch(page);
+    forwardConsole(page);
+    const reading = readPage(page, slideUrl, sources, target, log);
+    reading.catch(() => {});
+    const readings = await Promise.race([reading, stopped]);
+    return { ...readings, requests: guard.counts() };
+  } finally {
+    log.stop();
+    await browser.close();
+  }
+}
+
 async function renderSlide(htmlFile, pres, options = {}) {
   const {
     tmpDir = process.env.TMPDIR || '/tmp',
     bypassValidation = false,
     target = 'pptx',
+    requestHosts = new Map(),
   } = options;
 
   try {
     const sources = await loadPageSources();
-    const browser = await chromium.launch(launchOptions(tmpDir));
     const filePath = path.isAbsolute(htmlFile) ? htmlFile : path.join(process.cwd(), htmlFile);
-    let bodyDimensions;
-    let model;
-    let preprocessResult;
-    let animations;
-    let pseudoData;
-    let captures;
-    let captureMs;
-    let renderedText;
-    let dropped;
-    try {
-      const page = await browser.newPage({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
-      forwardConsole(page);
-      await page.goto(`file://${filePath}`);
-      animations = await settle(page, sources);
-      preprocessResult = await runPreprocess(page, sources);
-      // The background transfer writes body's inline style, which starts any
-      // transition a deck declares on it; finish that too before reading.
-      await finishAnimations(page, sources);
-      // A finished animation can set text in a face nothing had asked for yet
-      // (its end state's font-family or weight), which loads only now.
-      await waitForFonts(page, sources);
-      bodyDimensions = await readBodyDimensions(page, sources);
-      // Read from the settled page the snapshot reads, just before it.
-      pseudoData = await sources.readPseudoElements(page);
-      // Checked before the captures and everything after use any of it.
-      ({ model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData, { target }))));
-      const drops = dropLine(dropped);
-      if (drops) console.error(drops);
-      // Capture id -> data: PNG for the targets the model names in model.captures,
-      // taken from this page as the snapshot left it. A target without an entry
-      // is a failed capture: its picture is skipped.
-      const captureStart = performance.now();
-      captures = await captureAll(page, model.captures);
-      captureMs = model.captures.length ? elapsedMs(captureStart) : 0;
-      // Last, once every picture is taken: the read hides the graphics.
-      renderedText = await readRenderedText(page, sources);
-    } finally {
-      await browser.close();
-    }
+    const slideUrl = pathToFileURL(filePath).href;
+    const readings = await readSlide(slideUrl, sources, { tmpDir, target, requestHosts });
+    const { bodyDimensions, model, captures, renderedText } = readings;
 
     reportValidation([
       ...bodyDimensions.errors,
@@ -571,9 +639,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
     ], bypassValidation);
 
     const slide = emitSlide(pres, model, captures, { target });
-    const summary = summarise(model, captures, {
-      preprocessResult, animations, pseudoData, captureMs, target, dropped,
-    });
+    const summary = summarise(model, captures, { ...readings, target });
     reportChecks(summary, model, renderedText);
     return { slide, summary };
   } catch (error) {
