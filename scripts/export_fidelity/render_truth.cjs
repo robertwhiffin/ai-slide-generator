@@ -31,8 +31,10 @@ async function renderOne(browser, htmlPath, outDir, scale) {
   await page.evaluate(() => document.fonts.ready);
   const canvasCount = await page.evaluate(() => document.querySelectorAll('canvas').length);
   if (canvasCount > 0) {
+    // The options are waitForFunction's third argument; the second is the page function's.
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll('canvas')).every((c) => c.width > 0 && c.height > 0),
+      undefined,
       { timeout: 5000 },
     ).catch(() => {});
     await page.waitForTimeout(2000);

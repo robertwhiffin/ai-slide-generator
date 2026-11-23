@@ -38,6 +38,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -769,3 +770,28 @@ class TestUiDocumentsBroken:
         )
         assert completed.returncode != 0 and "buildSlideDocument failed" in completed.stderr
         assert not out_dir.exists(), sorted(path.name for path in out_dir.iterdir())
+
+
+# A canvas that never gets a drawing buffer: render_truth.cjs's canvas wait ends at
+# its own timeout (5 s), then settles 2 s. Its options are waitForFunction's third
+# argument: passed as the second (the page function's argument), the wait would
+# take Playwright's default, 30 s.
+UNREADY_CANVAS_DOCUMENT = (
+    "<!doctype html><html><head><meta charset='utf-8'></head><body>"
+    "<canvas width='0' height='0'></canvas><p>Unready canvas</p></body></html>"
+)
+UNREADY_CANVAS_BOUND_SECONDS = 20
+
+
+@requires_huashu_sidecar
+def test_the_truth_waits_its_own_timeout_for_a_canvas_that_never_draws(tmp_path: Path) -> None:
+    """render_truth.cjs on a canvas of no size: done within 20 s, its 5 s wait and 2 s settle
+    and the load, where a 30 s wait would not be."""
+    document = tmp_path / "unready.html"
+    document.write_text(UNREADY_CANVAS_DOCUMENT, encoding="utf-8")
+    started = time.monotonic()
+    fidelity_harness().render_truth([document], tmp_path)
+    elapsed = time.monotonic() - started
+
+    assert (tmp_path / "truth" / "unready.png").exists()
+    assert elapsed < UNREADY_CANVAS_BOUND_SECONDS, f"the truth took {elapsed:.1f} s"

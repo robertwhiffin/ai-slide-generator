@@ -98,7 +98,7 @@ Tellr renders the deck and uploads it to Drive in one step. When complete, a lin
 3. It writes those slides as a PowerPoint file made for Google Slides
 4. It uploads the file to your Drive with your Google authorization, and Drive converts it to a Google Slides presentation
 5. If a slide cannot be rendered, the export still completes, and the message names the slides that are missing
-6. If the server's exports are all busy, you see "Exports are busy right now. Please try again in a minute.
+6. If the server's exports are all busy, you see "Exports are busy right now. Please try again in a minute."
 
 ## Troubleshooting
 
