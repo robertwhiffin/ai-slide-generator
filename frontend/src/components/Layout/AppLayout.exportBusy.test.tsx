@@ -1,5 +1,5 @@
 /**
- * A busy worker's 429 on the Google Slides export: AppLayout's handleExportGoogleSlides ->
+ * A failed Google Slides export: AppLayout's handleExportGoogleSlides ->
  * api.exportToGoogleSlides -> POST /api/export/google-slides/from-huashu.
  *
  * Contract: when the worker has no room for another export,
@@ -7,7 +7,8 @@
  * `{"detail": "Exports are busy right now. Please try again in a minute."}`. AppLayout shows that
  * detail as it is, in an error toast, and the export does NOT fall back to the records pipeline: the
  * client falls back only on a 503 (not installed here), and running it on a 429 would hide the
- * message behind a slower, different export.
+ * message behind a slower, different export. The same for an export that timed out (504) or failed
+ * (500): its detail is shown, and nothing falls back. A 503 does fall back: the control.
  *
  * This file mounts the REAL AppLayout inside the real SessionProvider, GenerationProvider and
  * ToastProvider, and runs the REAL api.exportToGoogleSlides over a stubbed `fetch` that records every
@@ -167,10 +168,11 @@ class MemoryStorage implements Storage {
 type Call = { method: string; path: string };
 
 /**
- * The server: the Google Slides Chrome route answers the busy 429; the records route (a fallback)
- * a presentation; anything else (AppLayout's current-user read) a user. Every request is recorded.
+ * The server: the Google Slides Chrome route answers `status` with `detail`; the records route (a
+ * fallback) a presentation; anything else (AppLayout's current-user read) a user. Every request is
+ * recorded.
  */
-function busyServer() {
+function failingServer(status: number, detail: string) {
   const calls: Call[] = [];
   vi.stubGlobal(
     'fetch',
@@ -178,9 +180,9 @@ function busyServer() {
       const path = new URL(String(input), 'http://x').pathname;
       calls.push({ method: (init?.method ?? 'GET').toUpperCase(), path });
       if (path === HUASHU_ROUTE) {
-        return new Response(JSON.stringify({ detail: BUSY }), {
-          status: 429,
-          headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
+        return new Response(JSON.stringify({ detail }), {
+          status,
+          headers: { 'Content-Type': 'application/json', ...(status === 429 ? { 'Retry-After': '60' } : {}) },
         });
       }
       if (path === '/api/export/google-slides/from-records') {
@@ -197,9 +199,9 @@ function busyServer() {
 
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
 
-/** Mount AppLayout on the deck's session and export it to Google Slides while the worker is busy. */
-async function exportWhileBusy() {
-  const calls = busyServer();
+/** Mount AppLayout on the deck's session and export it to Google Slides, the route answering `status`. */
+async function exportAnswered(status: number, detail: string) {
+  const calls = failingServer(status, detail);
   render(
     <MemoryRouter initialEntries={['/sessions/sess-a/edit']}>
       <ToastProvider>
@@ -234,20 +236,37 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('the Google Slides export while the worker is busy (429)', () => {
-  it('shows the busy detail as it is, in an error toast', async () => {
-    await exportWhileBusy();
+// The details the routes answer an export that timed out (504) or failed otherwise (500) with.
+const TIMED_OUT = 'The Google Slides export took longer than 180 s and was stopped. Try again, or a smaller deck.';
+const FAILED = 'The Google Slides export failed: huashu sidecar exited 1 with no pptx and no result line.';
+
+describe.each([
+  ['the worker is busy', 429, BUSY],
+  ['the export timed out', 504, TIMED_OUT],
+  ['the export failed', 500, FAILED],
+])('the Google Slides export when %s (%i)', (_case, status, detail) => {
+  it('shows the detail as it is, in an error toast', async () => {
+    await exportAnswered(status, detail);
 
     const toasts = screen.getAllByTestId('toast');
     expect(toasts).toHaveLength(1);
-    expect(within(toasts[0]).getByText(BUSY)).toBeInTheDocument();
+    expect(within(toasts[0]).getByText(detail)).toBeInTheDocument();
     expect(toasts[0]).toHaveClass('bg-red-600');
   });
 
   it('does not fall back to the records pipeline', async () => {
-    const { exportPosts } = await exportWhileBusy();
+    const { exportPosts } = await exportAnswered(status, detail);
 
     expect(exportPosts).toEqual([HUASHU_ROUTE]);
     expect(h.exportStatuses).not.toContain(FALLBACK_STATUS);
+  });
+});
+
+describe('the Google Slides export where the pipeline is not installed (503)', () => {
+  it('falls back to the records pipeline', async () => {
+    const { exportPosts } = await exportAnswered(503, 'Huashu pipeline unavailable: not installed');
+
+    expect(exportPosts).toEqual([HUASHU_ROUTE, '/api/export/google-slides/from-records']);
+    expect(h.exportStatuses).toContain(FALLBACK_STATUS);
   });
 });

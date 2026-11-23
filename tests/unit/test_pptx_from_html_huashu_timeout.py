@@ -1036,8 +1036,8 @@ class TestTheWaitForASidecarIsBounded:
     timeout and a Drive upload stays under the Apps proxy's 300 s per request, by
     some 40 s). An export past either
     bound raises ``HuashuBusyError``, which the export routes answer 429. It is not
-    a ``HuashuExportError``: the routes answer that 500 or 503, and the frontend
-    answers a 503 by falling back to the records pipeline.
+    a ``HuashuExportError``: the routes answer that 500, 503 or 504, and the
+    frontend answers a 503 alone by falling back to the records pipeline.
     """
 
     @requires_node

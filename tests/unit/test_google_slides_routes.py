@@ -541,6 +541,33 @@ class TestFromHuashuEndpoint:
         assert len(calls) == 1, f"build_pptx_huashu was called {len(calls)} times"
         assert calls[0]["target"] == "gslides" and calls[0]["bypass_validation"] is True, calls[0]
 
+    @pytest.mark.parametrize(
+        ("error", "status"),
+        [
+            ("HuashuUnavailableError", 503),
+            ("HuashuTimeoutError", 504),
+            ("HuashuExportError", 500),
+        ],
+    )
+    def test_each_failure_of_the_pipeline_is_answered_its_status(
+        self, test_client, monkeypatch, error, status
+    ):
+        """503 only where the pipeline cannot run, which the frontend falls back on; a timed-out
+        export 504 and any other failure 500, which it shows (M1)."""
+        from src.services import pptx_from_html_huashu
+
+        def fake_build(**_):
+            raise getattr(pptx_from_html_huashu, error)("the pipeline's own message")
+
+        _stub_huashu_route(monkeypatch, fake_build)
+
+        resp = test_client.post(
+            "/api/export/google-slides/from-huashu", json={"session_id": "s-gslides"}
+        )
+
+        assert resp.status_code == status, resp.text
+        assert "the pipeline's own message" in resp.json()["detail"], resp.text
+
     def test_a_deck_of_failed_slides_is_logged_by_its_count(
         self, test_client, monkeypatch, caplog
     ):

@@ -1295,7 +1295,8 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     """Export the deck's slides to an editable .pptx through the snapshot engine.
 
     Returns 503 if the gate (``pptx_from_html_huashu.is_available``) doesn't
-    pass, and 429 with ``Retry-After`` when the worker has no room for another
+    pass, 504 if the sidecar ran past its timeout, 500 if it failed otherwise,
+    and 429 with ``Retry-After`` when the worker has no room for another
     export just now (``HuashuBusyError``, ``exports_busy``). On a partial
     success (some slides reject, others pass), still returns the .pptx
     with an ``X-Huashu-Failures`` header carrying the per-slide error
@@ -1306,6 +1307,8 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     from src.services.pptx_from_html_huashu import (
         HuashuBusyError,
         HuashuExportError,
+        HuashuTimeoutError,
+        HuashuUnavailableError,
         build_pptx_huashu,
         is_available,
     )
@@ -1351,9 +1354,16 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         )
     except HuashuBusyError as e:
         raise exports_busy(e, route="PPTX") from e
+    except HuashuUnavailableError as e:
+        # The gate passed above and failed here: the frontend falls back on it.
+        logger.error("Huashu pipeline unavailable: %s", e)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except HuashuTimeoutError as e:
+        logger.error("Huashu sidecar timed out: %s", e)
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if not pptx_bytes:
         # All slides rejected by huashu validation — return a structured

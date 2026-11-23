@@ -1926,11 +1926,13 @@ export const api = {
    * the deck is written for Google Slides) → Drive auto-convert.
    *
    * Tries the high-fidelity pipeline first. On 503 ("not available" — the
-   * deployment hasn't been bootstrapped yet) falls back to the records
-   * pipeline (DOM walker → pptxgenjs) so deployments without the runtime
-   * artifacts keep working in slow-but-functional mode. Any other error, a
-   * 429 when the worker's exports are busy included, is thrown with the
-   * route's message for the UI to show.
+   * deployment hasn't been bootstrapped yet, the one status the route answers
+   * for that alone) falls back to the records pipeline (DOM walker →
+   * pptxgenjs) so deployments without the runtime artifacts keep working in
+   * slow-but-functional mode. Any other error is thrown with the route's
+   * message for the UI to show, never fallen back on: a 429 when the worker's
+   * exports are busy, a 504 when the export ran past its timeout, a 500 when
+   * it failed otherwise.
    *
    * Drive auto-converts on upload (mimeType=application/vnd.google-apps.
    * presentation). Single synchronous round-trip — no polling.

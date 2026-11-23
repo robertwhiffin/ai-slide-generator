@@ -644,6 +644,8 @@ def export_google_slides_from_huashu(
     from src.services.pptx_from_html_huashu import (
         HuashuBusyError,
         HuashuExportError,
+        HuashuTimeoutError,
+        HuashuUnavailableError,
         build_pptx_huashu,
     )
 
@@ -698,11 +700,25 @@ def export_google_slides_from_huashu(
     except HuashuBusyError as exc:
         # Not a 503: the frontend answers that by falling back to the records pipeline.
         raise exports_busy(exc, route="Google Slides") from exc
-    except HuashuExportError as exc:
-        logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
+    except HuashuUnavailableError as exc:
+        # The one failure the frontend falls back to the records pipeline on.
+        logger.error("Huashu pipeline unavailable for Google Slides export: %s", exc)
         raise HTTPException(
             status_code=503,
             detail=f"Huashu pipeline unavailable: {exc}",
+        ) from exc
+    except HuashuTimeoutError as exc:
+        # Shown, not fallen back on: the pipeline is installed and ran.
+        logger.error("Huashu pipeline timed out for Google Slides export: %s", exc)
+        raise HTTPException(
+            status_code=504,
+            detail=f"The Google Slides export took too long and was stopped: {exc}",
+        ) from exc
+    except HuashuExportError as exc:
+        logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"The Google Slides export failed: {exc}",
         ) from exc
 
     if not pptx_bytes:

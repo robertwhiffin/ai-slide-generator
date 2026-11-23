@@ -11,8 +11,10 @@ Availability. ``is_available()`` gates every call: it needs node, the
 sidecar's ``node_modules`` and a Playwright Chromium, and either
 ``HUASHU_PIPELINE_ENABLED=1`` (set by the deployed app's app.yaml, whose boot
 runs the sidecar's ``setup.sh`` to install them) or ``ENVIRONMENT=development``.
-Until then the export routes answer 503, and the frontend's Google Slides
-export falls back to the records pipeline.
+Until then the wrapper raises ``HuashuUnavailableError``, the export routes
+answer 503, and the frontend falls back to the records pipeline. A run past its
+timeout is ``HuashuTimeoutError`` (504), any other failure ``HuashuExportError``
+(500): those the frontend shows, falling back on neither.
 
 Requests. A slide's page reads nothing but its slide: the sidecar decides every
 request its Chromium makes (``request_guard.cjs``, through Playwright's
@@ -444,7 +446,27 @@ def sidecar_subprocess_env() -> dict[str, str]:
 
 
 class HuashuExportError(RuntimeError):
-    """Raised when the huashu sidecar cannot run at all (setup, timeout)."""
+    """Raised when the export produced no deck: the sidecar ran and failed.
+
+    The export routes answer it 500. Two kinds of it they answer otherwise:
+    ``HuashuUnavailableError`` and ``HuashuTimeoutError``.
+    """
+
+
+class HuashuUnavailableError(HuashuExportError):
+    """Raised when the pipeline cannot run here at all: not enabled, or not installed.
+
+    The export routes answer it 503, on which the frontend falls back to the
+    records pipeline: this deployment has no snapshot engine to try.
+    """
+
+
+class HuashuTimeoutError(HuashuExportError):
+    """Raised when the sidecar ran past ``SIDECAR_TIMEOUT_SECONDS`` and was ended.
+
+    The export routes answer it 504, which the frontend shows: the pipeline is
+    installed, and a records export would not stand in for it silently.
+    """
 
 
 class HuashuBusyError(RuntimeError):
@@ -453,8 +475,9 @@ class HuashuBusyError(RuntimeError):
     Either every export place is taken (the sidecar slots and the queue for
     them) or the wait for a slot ran past ``SIDECAR_WAIT_SECONDS``. Not a
     ``HuashuExportError``: the export routes answer this 429 with a message to
-    retry, but a ``HuashuExportError`` 500 or 503, and the frontend answers a
-    503 by falling back to the records pipeline.
+    retry, but a ``HuashuExportError`` 500 (``HuashuTimeoutError`` 504,
+    ``HuashuUnavailableError`` 503), and the frontend answers a 503 alone by
+    falling back to the records pipeline.
     """
 
 
@@ -1209,7 +1232,7 @@ def _run_measured(
         )
     except subprocess.TimeoutExpired as e:
         summary.outcome = "timeout"
-        raise HuashuExportError(
+        raise HuashuTimeoutError(
             f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
         ) from e
     finally:
@@ -1337,7 +1360,7 @@ def build_pptx_huashu(
     if target not in RENDER_TARGETS:
         raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
     if not is_available():
-        raise HuashuExportError(
+        raise HuashuUnavailableError(
             "huashu pipeline not available: it needs HUASHU_PIPELINE_ENABLED=1 "
             "(Databricks Apps, whose boot runs the sidecar's setup.sh) or "
             "ENVIRONMENT=development, node on PATH, the sidecar's node_modules "

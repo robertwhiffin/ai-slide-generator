@@ -363,7 +363,7 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 5. Backend checks the user may view the deck and is authorized, builds each slide's HTML, and runs the snapshot engine for Google Slides (`build_pptx_huashu(..., bypass_validation=True, target="gslides")`)
 6. The PPTX is uploaded to Drive (a re-export replaces the session's earlier presentation), which converts it; every Drive request is bounded by `DRIVE_HTTP_TIMEOUT_SECONDS`
 7. The response carries `presentation_id`, `presentation_url`, `total_slides`, `succeeded` and `failures`, in one synchronous round-trip
-8. On a 503 (the sidecar not installed on the deployment) the frontend falls back to `/from-records`; on a 429 it shows the busy message
+8. On a 503, which the route answers only where the sidecar cannot run (not installed or not enabled on the deployment, `HuashuUnavailableError`), the frontend falls back to `/from-records`. Every other failure it shows as the route words it, falling back on none: a 429 (the worker's exports are busy), a 504 (the sidecar ran past its timeout, `HuashuTimeoutError`) or a 500 (it failed otherwise). The PPTX route answers the same statuses
 
 **Features:**
 - Produces editable Google Slides (not static images), from the same snapshot of the page as the PowerPoint export
