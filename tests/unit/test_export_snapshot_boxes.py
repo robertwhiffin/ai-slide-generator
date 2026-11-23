@@ -839,9 +839,11 @@ class TestShadowLayers:
             f'box-shadow: 0 1px 2px rgba(0,0,0,.1), 0 {index + 2}px 6px rgba(0,0,0,.1);"></div>'
             for index in range(FIT_BUDGET + 1)
         )
+        # The budget line is the page's own (snapshot_borders.mjs): the debug text logs it.
         logged = export_logged(
             [slide_document(f'<div class="slide">{boxes}</div>', css=DECK_CSS)],
             monkeypatch=monkeypatch,
+            debug_text=True,
         )
         assert logged.failures == [] and logged.pptx, logged.failures
         shapes = slide_shapes(logged.pptx)

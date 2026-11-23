@@ -14,11 +14,14 @@ sidecar prints counts and fixed text only:
 * a message a page's failure carried is said by its length (a Node or browser failure
   that carries no page text, a slide past its deadline or one that left itself, is said
   whole);
-* what a page logs itself is bounded: each message cut at ``PAGE_MESSAGE_LIMIT``
-  characters, and at most ``PAGE_MESSAGES_PER_SLIDE`` messages a slide.
+* what a page logs itself (its console, the slide's script and the engine's page-side
+  passes alike, since the page's realm builds both) is counted, by level, in one
+  ``[html2pptx] page console:`` line a slide.
 
 ``TELLR_EXPORT_DEBUG_TEXT=1`` adds the words: the summary's ``hiddenText``, a text-loss
-line naming them, the quotes and the messages. No app passes it: it is not in the
+line naming them, the quotes and the messages, and what a page logs, bounded: each
+message cut at ``PAGE_MESSAGE_LIMIT`` characters, and at most ``PAGE_MESSAGES_PER_SLIDE``
+messages a slide to each stream. No app passes it: it is not in the
 sidecar's env allowlist, and the export fidelity harness, which reads the words, adds it
 for its own runs alone (``sidecar_debug_text``). A failure entry, which goes to the user
 who exported the deck and not to the log, keeps its whole message.
@@ -33,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -288,14 +292,81 @@ def _page_limits() -> dict:
     )
 
 
+# A slide whose script logs its own words at three levels, once with the engine's
+# [html2pptx] prefix, once with [preprocess], once with neither.
+CONSOLE_WORD = "Zyqconsoleword"
+CONSOLE_BODY = (
+    '<div class="slide"><h1>Console</h1><script>'
+    f"console.warn('[html2pptx] {CONSOLE_WORD} warned');"
+    f"console.error('[preprocess] {CONSOLE_WORD} errored');"
+    f"console.log('{CONSOLE_WORD} logged');"
+    "</script></div>"
+)
+PAGE_CONSOLE_LINE = "[html2pptx] page console: "
+PAGE_CONSOLE_COUNTS = re.compile(
+    r"(?P<messages>\d+) message\(s\) \((?P<levels>[^)]*)\), (?P<engine>\d+) with the engine's prefix"
+)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestWhatAPageLogsIsCounted:
+    def test_without_the_flag_no_word_a_page_logs_is_logged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slide's script logs its words, under the engine's prefixes too: none is logged.
+
+        What a page logs is its own text, whatever its prefix: the wrapper
+        prints nothing of it and logs no record of it. One line counts the
+        slide's messages by level, and how many carry the engine's prefix.
+        """
+        logged = _export([slide_document(CONSOLE_BODY)], monkeypatch, debug_text=False)
+        assert logged.failures == [], logged.failures
+
+        assert CONSOLE_WORD not in logged.everything, (
+            f"a word the page logged is in the log:\n{logged.everything[-3000:]}"
+        )
+        counted = [line for line in logged.stderr.splitlines() if PAGE_CONSOLE_LINE in line]
+        assert len(counted) == 1, counted
+        match = PAGE_CONSOLE_COUNTS.search(counted[0])
+        assert match, counted[0]
+        levels = {
+            level: int(count)
+            for count, level in (part.split(" ") for part in match.group("levels").split(", "))
+        }
+        # The deck's own chart script logs one message on every slide besides the slide's three.
+        assert levels["error"] == 1 and levels["warning"] == 1 and levels["log"] >= 1, levels
+        assert int(match.group("messages")) == sum(levels.values()), counted[0]
+        assert int(match.group("engine")) == 2, counted[0]
+
+    def test_with_the_flag_what_a_page_logs_is_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With ``TELLR_EXPORT_DEBUG_TEXT=1`` each message is forwarded, one line each.
+
+        The prefixed messages go to stderr behind "Browser console:", which
+        the wrapper echoes; the unprefixed one goes to stdout. Nothing counts
+        them.
+        """
+        logged = _export([slide_document(CONSOLE_BODY)], monkeypatch, debug_text=True)
+        assert logged.failures == [], logged.failures
+
+        forwarded = [line for line in logged.stderr.splitlines() if CONSOLE_WORD in line]
+        assert len(forwarded) == 2 and all(BROWSER_CONSOLE in line for line in forwarded), forwarded
+        assert [line for line in logged.stderr.splitlines() if PAGE_CONSOLE_LINE in line] == []
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestWhatAPageLogsIsBounded:
     def test_each_message_is_cut_and_a_slide_logs_a_bounded_number(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """With the flag, what a page logs is forwarded within its bounds."""
         limits = _page_limits()
-        logged = export_logged([slide_document(FLOODING_BODY)], monkeypatch=monkeypatch)
+        logged = export_logged(
+            [slide_document(FLOODING_BODY)], monkeypatch=monkeypatch, debug_text=True
+        )
         forwarded = [
             line.split(BROWSER_CONSOLE, 1)[1]
             for line in logged.stderr.splitlines()

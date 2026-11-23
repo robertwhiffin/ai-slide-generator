@@ -389,17 +389,22 @@ def _export_documents(
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
     allow_model_drops: bool = False,
+    debug_text: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """``build_pptx_huashu`` over ``documents``; ``target`` is passed only when given.
 
     The sidecar's stderr is teed while it runs, and a slide model the model
     check dropped part of fails the export (``assert_no_model_drops``). A test
     that means to drop part of a model (a slide script that forges one) says so
-    with ``allow_model_drops=True``.
+    with ``allow_model_drops=True``. With ``debug_text`` the sidecar logs a
+    slide's own text too, as the fidelity harness runs it (its
+    ``sidecar_debug_text``): what each page logs among it, the engine's own
+    page-side lines included, which without it are only counted.
     """
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
     targets = {} if target is None else {"target": target}
-    with teed_stderr() as buffer:
+    debug = fidelity_harness().sidecar_debug_text() if debug_text else contextlib.nullcontext()
+    with teed_stderr() as buffer, debug:
         exported = pptx_from_html_huashu.build_pptx_huashu(
             title,
             [{"html": document} for document in documents],
@@ -420,6 +425,7 @@ def export_slides(
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
     allow_model_drops: bool = False,
+    debug_text: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export slide bodies through the production wrapper.
 
@@ -429,7 +435,7 @@ def export_slides(
     from ``build_pptx_huashu(..., bypass_validation=True)``, with ``target``
     (the renderer the deck is written for) when one is given. A slide model
     the model check drops part of fails it (``_export_documents``), unless
-    ``allow_model_drops``.
+    ``allow_model_drops``; ``debug_text`` is ``_export_documents``'.
     """
     documents = [
         slide_document(
@@ -447,6 +453,7 @@ def export_slides(
         monkeypatch=monkeypatch,
         target=target,
         allow_model_drops=allow_model_drops,
+        debug_text=debug_text,
     )
 
 
@@ -503,6 +510,7 @@ def export_documents(
     monkeypatch: pytest.MonkeyPatch,
     title: str = TEST_DECK_TITLE,
     allow_model_drops: bool = False,
+    debug_text: bool = False,
 ) -> tuple[bytes, list[dict]]:
     """Export complete slide documents, one slide each and in order, through the production wrapper.
 
@@ -515,6 +523,7 @@ def export_documents(
         title=title,
         monkeypatch=monkeypatch,
         allow_model_drops=allow_model_drops,
+        debug_text=debug_text,
     )
 
 
@@ -587,14 +596,14 @@ def export_logged(
     fidelity harness runs it (its ``sidecar_debug_text``): the summary's
     ``hiddenText`` and the text-loss line naming them (``text_missing_reports``).
     """
-    debug = fidelity_harness().sidecar_debug_text() if debug_text else contextlib.nullcontext()
-    with teed_stderr() as buffer, debug:
+    with teed_stderr() as buffer:
         pptx, failures = _export_documents(
             documents,
             title=TEST_DECK_TITLE,
             monkeypatch=monkeypatch,
             target=target,
             allow_model_drops=allow_model_drops,
+            debug_text=debug_text,
         )
     return LoggedExport(pptx=pptx, failures=failures, stderr=buffer.getvalue())
 

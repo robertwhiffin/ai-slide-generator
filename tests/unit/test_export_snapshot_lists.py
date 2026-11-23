@@ -1820,7 +1820,10 @@ class TestMarkerReadFailures:
         _guard_markers(markers, ("1. ", "2. "), "the unmeasured list")
         capsys.readouterr()
         pptx, failures = export_slides(
-            [_with_script(UNMEASURED_BODY, script)], css=css, monkeypatch=monkeypatch
+            [_with_script(UNMEASURED_BODY, script)],
+            css=css,
+            monkeypatch=monkeypatch,
+            debug_text=True,
         )
         stderr = capsys.readouterr().err
         assert failures == [] and pptx, f"the lying page did not export: {failures}"

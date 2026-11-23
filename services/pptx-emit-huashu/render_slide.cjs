@@ -70,7 +70,7 @@ const { pathToFileURL } = require('url');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
-const { bounded, debugText, logJson, oneLine, pageText } = require('./log_line.cjs');
+const { bounded, debugText, logJson, oneLine, pageText, DEBUG_TEXT_ENV } = require('./log_line.cjs');
 const { checkModel, dropLine } = require('./model_check.cjs');
 const { guardContext } = require('./request_guard.cjs');
 const { lostWords, wordsOf, TEXT_MISSING_PREFIX } = require('./text_check.cjs');
@@ -286,35 +286,54 @@ function launchOptions(tmpDir) {
   return options;
 }
 
-// [preprocess] and [html2pptx] lines report content leaving the deck, so they go
-// to stderr, the only stream pptx_from_html_huashu.py echoes into the app log.
-// Page chatter stays on stdout. Slide script can log anything, so each message
-// is written on one line (log_line.cjs oneLine), behind "Browser console:": no
-// line break in it can start a line of the sidecar's own (a slide summary, the
-// __HUASHU_RESULT__ failure list). The engine's own page-side lines name counts,
-// tags and their own text, none of a slide's; a slide's script could still log
-// its own words with the engine's prefix, so each message is cut at
-// PAGE_MESSAGE_LIMIT characters and a slide logs PAGE_MESSAGES_PER_SLIDE of
-// them at most to each stream: what a page logs costs the log a bounded part.
-// Measured over the engine's suites, its longest page-side line is 249
-// characters (a slide with no root, preprocess.mjs, which names each of the
-// body's section and article wrappers); a longer one keeps its first
+// What a slide's page logs is its own text: the slide's script can log its
+// words, under the engine's own prefix too, and the engine's page-side passes
+// run in the page's realm, which builds what they say. So it reaches no log
+// unless the debug text is on (log_line.cjs debugText), which no app sets:
+// without it, once the slide has been read, one [html2pptx] page console line
+// counts its messages by level (Playwright's console message type) and says
+// how many carry the engine's prefix ([preprocess] or [html2pptx]); a slide
+// that logged nothing says nothing.
+//
+// With the debug text on, [preprocess] and [html2pptx] lines, which report
+// content leaving the deck, go to stderr, the only stream
+// pptx_from_html_huashu.py echoes into the app log, and the rest of a page's
+// chatter to stdout. Slide script can log anything, so each message is written
+// on one line (log_line.cjs oneLine), behind "Browser console:": no line break
+// in it can start a line of the sidecar's own (a slide summary, the
+// __HUASHU_RESULT__ failure list). Each is cut at PAGE_MESSAGE_LIMIT
+// characters, and a slide logs PAGE_MESSAGES_PER_SLIDE of them at most to
+// each stream. Measured over the engine's suites, its longest page-side line
+// is 249 characters (a slide with no root, preprocess.mjs, which names each of
+// the body's section and article wrappers); a longer one keeps its first
 // PAGE_MESSAGE_LIMIT characters and says how many it left out.
 const PAGE_MESSAGE_LIMIT = 1000;
 const PAGE_MESSAGES_PER_SLIDE = 100;
+const ENGINE_PREFIXES = ['[preprocess]', '[html2pptx]'];
 
-// Returns {report()}, which says on each stream how many of the page's
-// messages went past the bound, once the slide has been read.
+// Returns {report()}, which, once the slide has been read, logs its count line
+// (debug text off), or says on each stream how many of the page's messages
+// went past the bound (debug text on).
 function forwardConsole(page) {
+  const forwarding = debugText();
   const streams = {
     stderr: { write: (line) => console.error(line), left: PAGE_MESSAGES_PER_SLIDE, over: 0 },
     stdout: { write: (line) => console.log(line), left: PAGE_MESSAGES_PER_SLIDE, over: 0 },
   };
+  const levels = Object.create(null);
+  let messages = 0;
+  let engine = 0;
   page.on('console', (msg) => {
     const text = String(msg.text());
-    const stream = text.startsWith('[preprocess]') || text.startsWith('[html2pptx]')
-      ? streams.stderr
-      : streams.stdout;
+    const engineLine = ENGINE_PREFIXES.some((prefix) => text.startsWith(prefix));
+    if (!forwarding) {
+      const level = String(msg.type());
+      levels[level] = (levels[level] || 0) + 1;
+      messages += 1;
+      if (engineLine) engine += 1;
+      return;
+    }
+    const stream = engineLine ? streams.stderr : streams.stdout;
     if (stream.left <= 0) {
       stream.over += 1;
       return;
@@ -324,6 +343,13 @@ function forwardConsole(page) {
   });
   return {
     report() {
+      if (!forwarding) {
+        if (!messages) return;
+        const byLevel = Object.keys(levels).sort().map((level) => `${levels[level]} ${level}`).join(', ');
+        console.error(`[html2pptx] page console: ${messages} message(s) (${byLevel}), ${engine} with the ` +
+          `engine's prefix, not logged (${DEBUG_TEXT_ENV}=1 logs them)`);
+        return;
+      }
       for (const stream of Object.values(streams)) {
         if (!stream.over) continue;
         stream.write(`[html2pptx] page console: ${stream.over} more message(s) not logged: ` +

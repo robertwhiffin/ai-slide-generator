@@ -50,7 +50,11 @@ from src.api.routes.export import build_slide_html
 from src.domain.slide_deck import SlideDeck
 from src.services import pptx_from_html_huashu
 from src.utils.html_utils import find_slide_roots
-from tests.fixtures.export_snapshot_support import build_pptx_guarded, hermetic_document
+from tests.fixtures.export_snapshot_support import (
+    build_pptx_guarded,
+    fidelity_harness,
+    hermetic_document,
+)
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
     GROUND,
@@ -427,7 +431,9 @@ class TestChromiumParserNestingLimit:
         is emitted by the preprocess pass, which runs first either way.
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        build_pptx_guarded("slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}])
+        # The diagnostic is the page's own line: the debug text logs it.
+        with fidelity_harness().sidecar_debug_text():
+            build_pptx_guarded("slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr, (
@@ -448,7 +454,8 @@ class TestChromiumParserNestingLimit:
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
         html = (FIXTURE_DIR / "rootless.html").read_text(encoding="utf-8")
-        build_pptx_guarded("slide root depth", [{"html": html}])
+        with fidelity_harness().sidecar_debug_text():
+            build_pptx_guarded("slide root depth", [{"html": html}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr
