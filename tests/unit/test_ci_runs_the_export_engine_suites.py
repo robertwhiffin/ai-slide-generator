@@ -13,12 +13,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 JOB = "export-engine-tests"
 SUITES = '-k "export or huashu or google"'
+NO_NETWORK = '-m "not network"'
+# How the job's comment tells a developer to run the deselected tests themselves.
+HAND_RUN = 'pytest tests/unit -m network -k "export or huashu or google"'
 
 
 def _workflow() -> dict:
@@ -62,3 +66,16 @@ def test_it_runs_every_export_suite_the_timeout_file_included_in_parallel() -> N
     assert "tests/unit" in run and SUITES in run and "-n auto" in run
     assert "timeout" not in run, f"the timeout file must run here: {run}"
     assert not re.search(r"--ignore|--deselect", run), run
+
+
+def test_it_leaves_out_the_tests_that_load_the_network(pytestconfig: pytest.Config) -> None:
+    """A test marked ``network`` loads the slide CSP's CDNs live, so a CDN's hiccup would
+    fail a required job: the job deselects the marker, which pytest knows (an unknown one
+    would select nothing silently), and its comment says how to run those tests by hand."""
+    run = _step_running("pytest")["run"]
+    assert NO_NETWORK in run, run
+    markers = [marker.split(":", 1)[0] for marker in pytestconfig.getini("markers")]
+    assert "network" in markers, markers
+    assert HAND_RUN in WORKFLOW.read_text(encoding="utf-8"), (
+        f"the job's comment does not say how to run the network tests by hand ({HAND_RUN!r})"
+    )

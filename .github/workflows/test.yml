@@ -189,8 +189,11 @@ jobs:
   # installing Playwright's Chromium with its system libraries, and the
   # frontend's esbuild, which builds the UI's documents the harness tests
   # compare against. The suites load nothing from the network
-  # (tests/unit/conftest.py), but for the one test marked `network`, which loads
-  # the slide CSP's CDNs and skips itself where they cannot be reached.
+  # (tests/unit/conftest.py), but for the tests marked `network`, which load the
+  # slide CSP's CDNs live: a CDN's hiccup would fail this required job, so it
+  # deselects them (-m "not network"). Run them by hand, with the sidecar
+  # installed as below:
+  #   pytest tests/unit -m network -k "export or huashu or google"
   # On the unit job's triggers, and on a change to the sidecar alone.
   export-engine-tests:
     name: Export Engine Tests
@@ -225,7 +228,7 @@ jobs:
 
       - name: Run the export suites
         run: |
-          pytest tests/unit -k "export or huashu or google" -n auto --tb=short \
+          pytest tests/unit -k "export or huashu or google" -m "not network" -n auto --tb=short \
             --junitxml=test-results/export-engine-results.xml
 
       - name: Upload export engine test results
