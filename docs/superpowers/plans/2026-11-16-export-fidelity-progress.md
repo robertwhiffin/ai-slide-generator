@@ -2036,3 +2036,86 @@ Google Slides decks kept for this batch:
   ("Tellr export revamp — fix A, design-system corpus (pinned fonts, 68459255)")
 
 No other presentation was created; the earlier decks and the T15 decks are untouched.
+
+## Final fix B: fidelity and the checks
+
+The final whole-branch review's fidelity and check findings (I5 to I10, M3, M5, M6, M10, M11, the
+triage's FIX lines) and Fix A's two residuals (WebRTC, page console text). Commits
+`801b9fd9..1a4c0b52` and this ledger on `feat/export-revamp`, each pushed.
+
+- **I5, a symbol takes the face its target draws at the UI's size** (`1122fd0b`). MS PGothic drew
+  the Harvey quarters at about half the UI's size in both apps. Measured per glyph against the UI
+  (Chrome on a Mac draws them from Menlo), at 1× and 2×, regular and bold (CALIBRATION D8, per
+  target): the deck for PowerPoint writes 381 symbols in Segoe UI Symbol (the quarters among them),
+  the deck for Google Slides 47 in JetBrains Mono (◔◕) and 142 in Noto Sans JP (◐◑, ★☆), as no face
+  Google hosts draws all four; MS PGothic keeps the rest, MS Gothic a monospace run's. A face is
+  written only for the symbols its app drew in it itself (coverage re-checked over the 982 per
+  target), so none falls back or draws as a box. Slide 18: PowerPoint 2.93 → 2.93, Google 2.48 → 2.47, the quarters at about the UI's size in
+  both (`fixB/crop-18-table.png`, `crop-18-legend.png`).
+- **I6, a word read across words holds each whole** (`aab08052`). Both twins (`text_check.cjs`
+  writtenIn, `run.py` _written_in): a word is inside one word of a text, or two or more of its words
+  whole, one after the other; a word read across a join holds the tail's last word and the head's
+  first. The same rule reads one item's own text, its white space and line ends ending words, so a
+  short word lost inside one item between words that spell it is reported too. Red first through a
+  real export: the B7 re-review's 16 px unpadded and `padding: 0 2px` chips, whose lost sides are
+  neighbours. The docs say what is checked, and the 1,024-box bound is the first 1,024 boxes the rule
+  can read: unturned one-line text boxes.
+- **I7, the ellipsis and movedBody** (`130c39c8`). The "…" takes the move and body of the words
+  the cut keeps; a moved line's movedBody bounds its words alone. New fixtures: the kept-move ellipsis
+  lines (down and up) and the down-direction two-span line.
+- **I8, measureProbes** (`826caa26`). Every declaration of a probe's style is `!important`
+  (importantCss, which ends no declaration at a semicolon inside quotes); the fixed style also resets
+  display, sizing, containment, writing mode and the transforms. A probe of text that paints with no
+  positive width is unmeasured, its readers treat it as unread, and the pass says how many on an
+  `[html2pptx] text metric probes` line.
+- **I9, capitalize** (`801b9fd9`): the browser's word boundaries, each measured in Chrome.
+- **I10, the corner pieces' neighbours** (`f4279654`): a short-row and an RTL rounded body make
+  copying `slotCells` after the sort red; a span drift guard; the docstring; CALIBRATION D13's note.
+- **The C1 residual, WebRTC** (`e9c195ef`). An init script takes `RTCPeerConnection` and
+  `webkitRTCPeerConnection` away in every realm of the context (measured: the page, a fresh iframe,
+  a srcdoc iframe, an `<object>`, a popup), and the browser launches with the
+  `disable_non_proxied_udp` policy under both flag names (Chrome reads one, Chromium the other). A slide
+  that tries every realm reaches neither a local STUN (UDP) nor TURN (TCP) listener; in a plain
+  browser it reaches both. The policy alone measured to stop UDP but not TURN over TCP.
+- **The S1 residual, page console text** (`614342b9`). Without `TELLR_EXPORT_DEBUG_TEXT=1` no page
+  console text reaches the log, the engine's own page-side lines included (the page's realm builds
+  them): one `[html2pptx] page console:` line a slide counts its messages by level and how many carry
+  the engine's prefixes. With the flag, as before.
+- **The `return DEFAULT_FACE`**: re-checked, not unreachable. `lackingFaceOf` never held one (the
+  history from `a2ce66e6`); `snapshot_text.mjs` has two, `fallbackFaceOf`'s for a stack with no
+  generic keyword (`"DM Sans"` alone) and `familyOf`'s for a stack with no family (a page's
+  replaced style getters). Both stay.
+- **M3, L146** (`7e1cc093`): no plan references in code or the export tests (a hygiene test scans
+  them), no raw invisible characters; the font bundle rebuilt from the pinned release for
+  `fonts.conf.in`. **M5, M6** (`c83c68fc`). **M10, L221** (`854ff521`). **M11** (`9058ac22`): the
+  canvas wait was `page.waitForFunction`, whose predicate the slide CSP refused at once, so it waited
+  for nothing: it now polls through `page.evaluate`, and says a canvas still without a buffer;
+  `gradientMiddle` says a throw once a slide.
+- **Triage**: L66, L93, L94, L97, L169, L173, L290 (`89bc1ce6`); L143, L144 (`1cbd44be`); L190,
+  L195, L199, L200 (`64cd51fa`); L167 (`a137ebd2`): a word's Range rects are now read through the
+  pristine realm, which a new DOMRectList hostile twin pins.
+
+- **Harness** (both corpora, `--pin-fonts --powerpoint --gslides`, at `1a4c0b52`, against Fix A's
+  final runs): in-repo corpus, only slide 18's part differs, in both decks, as I5 writes it; every
+  other score equal, mean 1.95 → 1.95 (PowerPoint) and 2.44 → 2.44 (Google). Design-system corpus:
+  both decks equal Fix A's part for part (core.xml aside), every score equal (1.62 / 1.52). No text
+  lost in either deck of either corpus, 0 MODEL DROPS, nothing worse by more than 0.05. A second
+  export of each corpus for each target is byte-identical to the run's. The I6 to I9 changes touch
+  no corpus slide's output.
+- **Tests.** The gate (`-k "(export or huashu or google) and not timeout"`, the timeout file
+  ignored, `-n 6`): 1812 passed, 0 failed, 13 skipped (Fix A: 1593 / 0 / 13; 177 of the new ones
+  are the source-hygiene test's case per source file). Full suite (`-n auto`, the timeout file
+  ignored): 18484 passed, 0 failed, 28 skipped (Fix A: 18261 / 0 / 28). Every behavioural test was
+  red first; 68 sabotages red, every file restored (`fixB/*sabotage-results.json`). Two went green
+  first and were mended: a sabotage of the capitalize context that changed nothing (replaced by one
+  that does), and the semicolon-in-a-family case, whose first fixture named an unloaded face
+  (now a loaded one).
+- **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`.
+- **A local flake.** One orphaned Playwright Chromium (`playwright_chromiumdev_profile-*`, no
+  page) was left after the gate, as in Fix A's runs; it was ended.
+
+Google Slides decks kept for this batch (intermediate probe decks deleted by id):
+- In-repo corpus: https://docs.google.com/presentation/d/1Xo1wLmW44v_p92F4rl5unmJNjH-OYFWv0CutnIW7pIA/edit
+  ("Tellr export revamp — fix B, in-repo corpus (pinned fonts, 1a4c0b52)")
+- Design-system corpus: https://docs.google.com/presentation/d/1nP3nPwLERMa8k-5ZW3VzqnI9t4qFiGyXPPgIziFRxFc/edit
+  ("Tellr export revamp — fix B, design-system corpus (pinned fonts, 1a4c0b52)")
