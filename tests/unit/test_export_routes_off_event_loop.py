@@ -444,7 +444,13 @@ WAIT_BOUND_SECONDS = 1
 
 
 def _bound(monkeypatch: pytest.MonkeyPatch, *, cap: int, queue: int, wait: float) -> None:
-    """The worker's sidecar bounds: ``cap`` run at once, ``queue`` more wait, each ``wait`` s."""
+    """The sidecar bounds: ``cap`` slots, ``queue`` more exports wait for one, each ``wait`` s.
+
+    The container's slots stood in for by this process's own semaphore: one worker's
+    exports contend for them alone here (the slots across workers:
+    ``test_export_sidecar_slots_across_workers.py``).
+    """
+    monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slot_count", cap)
     monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap))
     monkeypatch.setattr(
         pptx_from_html_huashu, "_sidecar_admissions", threading.BoundedSemaphore(cap + queue)
@@ -495,7 +501,7 @@ def _assert_asks_for_a_retry(response: httpx.Response) -> None:
 class TestABusyWorkerAsksForARetry:
     """Past its sidecar bounds, a worker answers an export 429, ``Retry-After: 60``, on both routes.
 
-    Cap 1: one sidecar per worker. An export past the cap and the
+    One slot: one sidecar at once. An export past the slot and the
     ``TELLR_SIDECAR_QUEUE`` waiting ones is answered at once, and one that waits
     ``TELLR_SIDECAR_WAIT_SECONDS`` for a slot is answered then. Its detail is a
     sentence the frontend shows as it is, in an alert or a toast. It is never a 503
@@ -542,7 +548,7 @@ class TestABusyWorkerAsksForARetry:
         """Normal use: the second export waits its turn and is built; neither is refused."""
         _bound(
             monkeypatch,
-            cap=pptx_from_html_huashu.sidecar_concurrency({}),
+            cap=pptx_from_html_huashu.sidecar_slot_count({}),
             queue=pptx_from_html_huashu.sidecar_queue({}),
             wait=pptx_from_html_huashu.sidecar_wait_seconds({}),
         )
@@ -697,8 +703,9 @@ class TestAWorkerFullOfExportsStillAnswers:
     default, shared with every sync ``def`` route and every authenticated request's
     identity lookup (``user_auth_middleware``). Unbounded, 40 waiting exports took them
     all, and the worker answered none of those until the exports drained. Here
-    ``EXPORT_BURST`` exports reach one worker at the default bounds. The cap plus the
-    queue of them (16) are parked, one running and the rest waiting; the others are
+    ``EXPORT_BURST`` exports reach one worker at the default bounds, a worker run.py did
+    not start and so alone in its container: one export for its one slot and the queue
+    (16) are parked, one running and the rest waiting; the others are
     answered 429 at once; and a sync route and an authenticated async route each answer
     within ``ANSWER_WITHIN_SECONDS``.
     """
@@ -717,7 +724,7 @@ class TestAWorkerFullOfExportsStillAnswers:
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith("TELLR_SIDECAR_")
+            if not key.startswith("TELLR_SIDECAR_") and key != "UVICORN_WORKERS"
         }
         env.update(
             DATABASE_URL=f"sqlite:///{tmp_path / 'worker.sqlite'}",
@@ -746,7 +753,7 @@ class TestAWorkerFullOfExportsStillAnswers:
                 f"{name}: {status or 'no answer'} after {seconds:.1f}s, "
                 f"with {measured['parked']} of {EXPORT_BURST} exports parked"
             )
-        cap = pptx_from_html_huashu.sidecar_concurrency({})
+        cap = pptx_from_html_huashu.sidecar_slot_count({})
         queue = pptx_from_html_huashu.sidecar_queue({})
         assert measured["parked"] == cap + queue, measured
         refused = EXPORT_BURST - cap - queue

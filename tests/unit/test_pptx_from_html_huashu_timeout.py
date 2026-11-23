@@ -892,8 +892,14 @@ def _recorded_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_secon
 
 
 def _bound(monkeypatch: pytest.MonkeyPatch, *, cap: int, queue: int, wait: float) -> None:
-    """The worker's sidecar bounds: ``cap`` run at once, ``queue`` more wait, each ``wait`` s."""
+    """The sidecar bounds: ``cap`` slots, ``queue`` more exports wait for one, each ``wait`` s.
+
+    The container's slots stood in for by this process's own semaphore: one worker's
+    exports contend for them alone here (the slots across workers:
+    ``test_export_sidecar_slots_across_workers.py``).
+    """
     monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_cap", cap)
+    monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slot_count", cap)
     monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_queue", queue)
     monkeypatch.setattr(pptx_from_html_huashu, "_sidecar_slots", threading.BoundedSemaphore(cap))
     monkeypatch.setattr(
@@ -955,11 +961,13 @@ def _free(semaphore: threading.BoundedSemaphore) -> int:
 
 @requires_node
 class TestTheSidecarsAreCappedPerWorker:
-    """Each node and Chromium tree takes about 790 MB: a worker runs at most its cap at once.
+    """Each node and Chromium tree takes about 790 MB: at most the container's slots run at once.
 
-    The cap is ``TELLR_SIDECAR_CONCURRENCY`` (default 1 per worker process).
-    An export past it waits for a slot, says so once on its log, and starts its
-    timeout only once it has the slot, logging how long it waited.
+    The slots are ``UVICORN_WORKERS`` x ``TELLR_SIDECAR_CONCURRENCY`` (default 1 per
+    worker process), the container's; ``_bound`` stands this process's own semaphore in
+    for them (across workers: ``test_export_sidecar_slots_across_workers.py``). An export
+    past them waits for a slot, says so once on its log, and starts its timeout only once
+    it has the slot, logging how long it waited.
     """
 
     def _two_exports(
@@ -1244,7 +1252,7 @@ class TestTheBoundsAreCheckedAgainstTheApp:
     def test_the_default_bounds_are_within_both(self) -> None:
         assert (
             pptx_from_html_huashu.sidecar_bounds_warnings(
-                pptx_from_html_huashu.sidecar_concurrency({}),
+                pptx_from_html_huashu.sidecar_slot_count({}),
                 pptx_from_html_huashu.sidecar_queue({}),
                 pptx_from_html_huashu.sidecar_wait_seconds({}),
             )
@@ -1338,11 +1346,13 @@ class TestTheBoundsAreCheckedAgainstTheApp:
         assert len(budget) == 1 and imported < budget[0] < started, (
             f"the budget warning is not one line of the app's startup: {lines}"
         )
+        workers = pptx_from_html_huashu.sidecar_workers(env)
         cap = pptx_from_html_huashu.sidecar_concurrency(env)
         queue = pptx_from_html_huashu.sidecar_queue(env)
         bounds_line = (
-            f"[huashu] export sidecars per worker: {cap} at once, {queue} more waiting, "
-            "each up to 200s"
+            f"[huashu] export sidecars: {workers * cap} slot(s) in the container "
+            f"({workers} worker(s) x TELLR_SIDECAR_CONCURRENCY={cap}); a worker lets in one "
+            f"export per slot and {queue} more to wait for one, each up to 200s"
         )
         bounds = [index for index, line in enumerate(lines) if line == bounds_line]
         assert len(bounds) == 1 and imported < bounds[0] < started, (
