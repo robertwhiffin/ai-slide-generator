@@ -60,6 +60,7 @@ from tests.fixtures.export_snapshot_support import (
     slide_document,
     slide_shapes,
 )
+from tests.unit.test_export_snapshot_lists import LYING_ZERO_PROBES_SCRIPT
 
 pytestmark = [pytest.mark.slow, requires_huashu_sidecar]
 
@@ -403,6 +404,26 @@ class TestTheWrittenFaceIsTheFaceDrawn:
             }
             hostile = {fragment: _runs(_box(slide_shapes(deck, 1), fragment)) for fragment in plain}
             assert hostile == plain, f"{target}: the hostile slide is written {hostile}"
+
+    def test_a_run_whose_probes_all_measure_nothing_keeps_its_stacks_first_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A page whose every offscreen probe measures no width writes ``Georgia, serif`` as Georgia.
+
+        Its slide script makes each probe report zero sizes (as one the page
+        hid would), so no probe says which family drew the run: the run keeps
+        its stack's first family, as it does when the probes cannot be read
+        at all. Taking that as "nothing in the stack drew it" writes serif's
+        table face, Times New Roman.
+        """
+        slide = (
+            '<div class="slide"><p id="georgia" style="font-family: Georgia, serif; font-size: 20px;">'
+            f"Georgia stack</p><script>{LYING_ZERO_PROBES_SCRIPT}</script></div>"
+        )
+        deck, failures = export_slides([slide], css=DECK_CSS, monkeypatch=monkeypatch)
+        assert failures == [] and deck, f"the export rejected the slide: {failures}"
+
+        assert _faces(_box(slide_shapes(deck, 0), "Georgia stack")) == {"Georgia"}
 
 
 class TestSymbolsAreWrittenInAFaceEveryAppDraws:

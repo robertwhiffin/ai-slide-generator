@@ -90,7 +90,7 @@ function createEllipsis(env, layout) {
     if (ellipsisAdvances[css] === undefined) {
       const sizes = measureProbes([{ css, text: ELLIPSIS, baseline: false }],
         'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"');
-      const width = sizes ? Number(sizes[0].w) : NaN;
+      const width = sizes && sizes[0] ? Number(sizes[0].w) : NaN;
       ellipsisAdvances[css] = Number.isFinite(width) && width >= 0 ? width : null;
     }
     const advance = ellipsisAdvances[css];

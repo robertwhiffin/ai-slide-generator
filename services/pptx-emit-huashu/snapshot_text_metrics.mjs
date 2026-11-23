@@ -51,9 +51,17 @@ function createTextMetrics(layout) {
 
   // Metric probes: a <div> on documentElement, offscreen and hidden, so it
   // moves nothing in body's layout; white-space: pre so it never wraps, and no
-  // box edges, so its border box is its text.
+  // box edges, so its border box is its text. The rest undoes what a deck rule
+  // on `html > div` could set to hide the probe, size it apart from its text,
+  // or turn or scale it. measureProbes makes every declaration !important.
   const PROBE_STYLE = 'position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;' +
-    'margin:0;padding:0;border:0;text-indent:0;text-transform:none;';
+    'margin:0;padding:0;border:0;text-indent:0;text-transform:none;' +
+    'display:block;float:none;width:auto;height:auto;min-width:0;min-height:0;max-width:none;max-height:none;' +
+    'contain:none;container-type:normal;content-visibility:visible;writing-mode:horizontal-tb;' +
+    'transform:none;rotate:none;scale:none;translate:none;';
+  // A probe's text that paints: anything but marks and format characters,
+  // which a probe of only them measures no width for.
+  const PAINTED_TEXT = /[^\p{M}\p{Cf}]/u;
   // Under line-height: normal the probe's height is the face's natural line height.
   const LINE_PROBE_TEXT = 'Hg';
   // An empty inline-block sits with its bottom on the baseline; at zero height
@@ -200,20 +208,25 @@ function createTextMetrics(layout) {
   // setter (hostile_text_nodes). Every probe is made, put in and taken off
   // through the pristine realm (dom_access.mjs): page script can make the
   // page's own remove do nothing, and a probe left after body would restyle
-  // what the walk reads (html > body:not(:last-child)).
+  // what the walk reads (html > body:not(:last-child)). Every declaration of a
+  // probe's style is !important (importantCss), so no deck rule restyles it. A
+  // probe of text that paints (PAINTED_TEXT) whose width is no positive number
+  // measured nothing (the page hid or emptied it): its size is null, and the
+  // probes so left are announced with `loss`.
   function measureProbes(probes, loss) {
     const elements = [];
     const parts = [];
     let sizes = [];
+    let unmeasured = 0;
     try {
       const root = queryOne('html');
       for (let index = 0; index < probes.length; index++) {
         const element = dom.createElement('div');
-        dom.setAttribute(element, 'style', PROBE_STYLE + probes[index].css);
+        dom.setAttribute(element, 'style', importantCss(PROBE_STYLE + probes[index].css));
         let marker = null;
         if (probes[index].baseline) {
           marker = dom.createElement('span');
-          dom.setAttribute(marker, 'style', BASELINE_MARKER_STYLE);
+          dom.setAttribute(marker, 'style', importantCss(BASELINE_MARKER_STYLE));
           dom.appendChild(element, marker);
         }
         const text = dom.createTextNode(probes[index].text);
@@ -226,6 +239,11 @@ function createTextMetrics(layout) {
       for (let index = 0; index < elements.length; index++) {
         const rect = elements[index].getBoundingClientRect();
         const size = { w: Number(rect.width), h: Number(rect.height) };
+        if (!(size.w > 0) && PAINTED_TEXT.test(String(probes[index].text))) {
+          sizes.push(null);
+          unmeasured += 1;
+          continue;
+        }
         if (parts[index].marker) {
           range.setStart(parts[index].text, 0);
           range.setEnd(parts[index].text, probes[index].text.length);
@@ -243,7 +261,49 @@ function createTextMetrics(layout) {
         try { dom.remove(elements[index]); } catch (e) { /* already detached: nothing to undo */ }
       }
     }
+    if (sizes && unmeasured) {
+      console.warn('[html2pptx] text metric probes: ' + unmeasured + ' of ' + probes.length +
+        ' measured no width, as the page hid or emptied them; where they are read, ' + loss);
+    }
     return sizes;
+  }
+
+  // `css`, declarations separated by semicolons, with each declaration made
+  // !important: a style attribute's !important declaration wins over any
+  // rule's, an !important one included. A semicolon inside quotes (a family
+  // name) or brackets separates nothing.
+  function importantCss(css) {
+    const text = String(css);
+    let result = '';
+    let declaration = '';
+    let quote = '';
+    let depth = 0;
+    for (let index = 0; index < text.length && index < COLLECTION_ITEM_LIMIT; index++) {
+      const character = text[index];
+      if (quote) {
+        if (character === quote) quote = '';
+        else if (character === '\\' && index + 1 < text.length) declaration += text[index++];
+        declaration += text[index];
+        continue;
+      }
+      if (character === '"' || character === "'") quote = character;
+      else if (character === '(') depth += 1;
+      else if (character === ')') depth = Math.max(0, depth - 1);
+      else if (character === ';' && depth === 0) {
+        result += importantDeclaration(declaration);
+        declaration = '';
+        continue;
+      }
+      declaration += character;
+    }
+    return result + importantDeclaration(declaration);
+  }
+
+  // One declaration of importantCss, !important and closed; '' for none.
+  function importantDeclaration(declaration) {
+    const trimmed = declaration.trim();
+    if (!trimmed) return '';
+    return /!\s*important$/i.test(trimmed) ? trimmed + ';' : trimmed + ' !important;';
   }
 
   // A face's line, as line-height: normal sets it: its height is the natural
@@ -434,14 +494,18 @@ function createTextMetrics(layout) {
     for (let index = 0; index < asked.length; index++) {
       const { target, face, count, probes } = asked[index];
       let family = null;
+      let read = !probes.length;
       for (let token = 0; token < probes.length && family === null; token++) {
         const size = sizes[probes[token].probe];
+        if (size) read = true;
         if (size && size.w < (count - 1) * advance + lackingAt) {
           const name = probes[token].token.name;
           family = writtenFamilyOf(name, isWebfont(webfonts, name));
         }
       }
-      target.family = family === null ? undrawnFamilyOf(face.stack) : family;
+      // A run none of whose probes measured keeps its stack's first family.
+      if (family !== null) target.family = family;
+      else if (read) target.family = undrawnFamilyOf(face.stack);
     }
   }
 
@@ -662,8 +726,8 @@ function createTextMetrics(layout) {
     if (!sizes) return;
     let unmeasured = 0;
     for (let index = 0; index < wanted.length; index++) {
-      const full = sizes[wanted[index].full].w;
-      const glyphs = sizes[wanted[index].glyphs].w;
+      const full = sizes[wanted[index].full] ? sizes[wanted[index].full].w : NaN;
+      const glyphs = sizes[wanted[index].glyphs] ? sizes[wanted[index].glyphs].w : NaN;
       if (Number.isFinite(full) && Number.isFinite(glyphs) && full >= 0 && glyphs >= 0) {
         wanted[index].marker.list.advance = { full, glyphs };
       } else {
@@ -728,7 +792,7 @@ function createTextMetrics(layout) {
       const pending = pendingParagraphs[index];
       if (paragraphProbes[index] < 0) continue;
       const line = sizes[paragraphProbes[index]];
-      if (!(line.h > 0)) continue;
+      if (!line || !(line.h > 0)) continue;
       const lineHeight = /px$/.test(pending.lineHeight) ? parseFloat(pending.lineHeight) : line.h;
       if (lineHeight > 0) pending.paragraph.lineHeightPx = lineHeight * pending.face.scale;
       if (line.ascent > 0) pending.paragraph.ascentPx = line.ascent * pending.face.scale;
@@ -738,9 +802,10 @@ function createTextMetrics(layout) {
     for (let index = 0; index < pendingRuns.length; index++) {
       const pending = pendingRuns[index];
       const scale = pending.face.scale;
-      const drawn = pending.width === null ? sizes[runProbes[index].browserCut].w * scale : pending.width;
-      const exportCut = sizes[runProbes[index].exportCut].w * scale;
-      const unkernedCut = sizes[runProbes[index].unkernedCut].w * scale;
+      const widthOf = (probe) => (sizes[probe] ? sizes[probe].w * scale : NaN);
+      const drawn = pending.width === null ? widthOf(runProbes[index].browserCut) : pending.width;
+      const exportCut = widthOf(runProbes[index].exportCut);
+      const unkernedCut = widthOf(runProbes[index].unkernedCut);
       const characters = characterCount(pending.run.text);
       if (!(drawn > 0 && exportCut > 0 && characters > 0)) continue;
       const delta = (drawn - exportCut) / characters;
@@ -826,7 +891,7 @@ function createTextMetrics(layout) {
     if (contentHeights[css] === undefined) {
       const sizes = measureProbes([{ css, text: LINE_PROBE_TEXT, baseline: true }],
         'turned text is placed across its lines by its font size, not by its face');
-      const content = sizes ? Number(sizes[0].content) : NaN;
+      const content = sizes && sizes[0] ? Number(sizes[0].content) : NaN;
       contentHeights[css] = Number.isFinite(content) && content > 0 ? content : null;
     }
     const content = contentHeights[css];

@@ -386,7 +386,14 @@ LYING_PROBES_SCRIPT = """(function() {
     return { left: NaN, top: NaN, right: NaN, bottom: NaN, width: NaN, height: NaN };
   };
 })();"""
+# The same lie with zero sizes, as a probe the page hides or empties measures.
+LYING_ZERO_PROBES_SCRIPT = LYING_PROBES_SCRIPT.replace("NaN", "0")
 UNMEASURED_LINE = "[html2pptx] list markers:"
+# What the export says of a probe pass some of whose probes measured nothing
+# (snapshot_text_metrics.mjs measureProbes), and the pass that reads line
+# spacing and tracking.
+UNMEASURED_PROBES_LINE = "[html2pptx] text metric probes:"
+UNMEASURED_SPACING = "line spacing"
 UNMEASURED_BODY = (
     '<div class="slide"><p class="dk-eyebrow">Unmeasured</p>'
     '<div class="lm-col" style="left: 120px; top: 160px;">'
@@ -1683,6 +1690,103 @@ class TestNothingLeftInThePage:
         )
 
 
+# Deck rules on the document element's div children, which are the offscreen
+# probes the text metrics are read with (snapshot_text_metrics.mjs
+# measureProbes) and nothing on a slide: one that hides the probes, one that
+# restyles their text, and two that take their width away.
+PROBE_RULES = {
+    "hidden": "display: none",
+    "restyled": "font-size: 40px; letter-spacing: 6px; font-family: serif",
+    "size-contained": "contain: size",
+    "scaled": "transform: scale(0)",
+}
+PROBED_CSS = DECK_CSS + KINDS_CSS + "\n#lm-left-inside { list-style-position: inside; }\n"
+PROBED_TWIN_TEXT = "AVATAR Toyota WAVE"
+PROBED_TWIN_FACES = ("Semi;colon Sans", "Plain Sans")
+
+
+def _probe_rule_css(rule: str) -> str:
+    """``html > div`` set to each declaration of ``rule``, every one ``!important``."""
+    declarations = "; ".join(f"{part.strip()} !important" for part in rule.split(";"))
+    return f"\nhtml > div {{ {declarations} }}\n"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestProbeStyle:
+    @pytest.mark.parametrize("rule", list(PROBE_RULES.values()), ids=list(PROBE_RULES))
+    def test_a_deck_rule_on_the_probes_leaves_the_slide_as_it_is_without_it(
+        self, monkeypatch: pytest.MonkeyPatch, rule: str
+    ) -> None:
+        """A deck's ``html > div { … !important }`` exports the slide its twin without it does.
+
+        The rule matches no element of the slide (each list item's box is the
+        same with and without it), only the probes the export adds to the
+        document element. The probes' own style is ``!important``, which a
+        style attribute's declaration wins with over any rule's, so the slide
+        with the rule (an outside and an inside list, and their text) exports
+        a whole artifact equal to its twin's. A probe style a rule outranks
+        measures nothing hidden, contained or scaled to nothing, and the
+        restyled one the wrong face, so the markers, the line spacing and the
+        tracking move.
+        """
+        css = PROBED_CSS + _probe_rule_css(rule)
+        benign_document = _document(LEFTOVER_BODY, css=PROBED_CSS)
+        ruled_document = _document(LEFTOVER_BODY, css=css)
+        assert browser_each_rect(ruled_document, "li") == browser_each_rect(benign_document, "li"), (
+            "fixture drift: the rule moves the slide's own list items"
+        )
+        benign = _export(LEFTOVER_BODY, monkeypatch, css=PROBED_CSS)
+        ruled = _export(LEFTOVER_BODY, monkeypatch, css=css)
+
+        assert structural_manifest(ruled) == structural_manifest(benign), (
+            f"html > div {{ {rule} }} changes the export:\nruled:\n{_describe(slide_shapes(ruled))}\n"
+            f"benign:\n{_describe(slide_shapes(benign))}"
+        )
+
+    def test_a_family_named_with_a_semicolon_is_probed_in_its_face(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A webfont named "Semi;colon Sans" is tracked as its twin of another name is.
+
+        Two paragraphs of the same text, each in a webfont the page loads from
+        the same local face: "Semi;colon Sans" and "Plain Sans". The probes
+        that measure their tracking set each run's own face. A semicolon
+        inside a quoted family name ends no declaration of a probe's style, so
+        both runs are written in their own faces with the same size and
+        tracking. Splitting the style there renames the probe's face to one
+        the page did not load, and its run is tracked to another face's widths.
+        """
+        faces = "".join(
+            f"@font-face {{ font-family: '{name}'; "
+            "src: local('Helvetica'), local('Arial'), local('Liberation Sans'); }"
+            for name in PROBED_TWIN_FACES
+        )
+        paragraph = (
+            '<p style="font-family: &quot;%s&quot;, &quot;DM Sans&quot;; font-size: 28px;">'
+            f"{PROBED_TWIN_TEXT}</p>"
+        )
+        body = (
+            f'<div class="slide"><style>{faces}</style>'
+            + "".join(paragraph % name for name in PROBED_TWIN_FACES)
+            + "</div>"
+        )
+        shapes = slide_shapes(_export(body, monkeypatch))
+        boxes = sorted(
+            (shape for shape in shapes if shape.kind == "text" and PROBED_TWIN_TEXT in shape.text),
+            key=lambda shape: shape.y,
+        )
+        assert len(boxes) == 2, f"expected the two paragraphs' boxes:\n{_describe(shapes)}"
+        semicolon, plain = (
+            [(run.typeface, run.size_pt, run.spc_pt) for run in _text_runs(box)] for box in boxes
+        )
+        assert plain and all(spc != 0 for _, _, spc in plain), (
+            f"fixture drift: the plain twin is written untracked: {plain}"
+        )
+        assert [typeface for typeface, _, _ in semicolon] == [PROBED_TWIN_FACES[0]] * len(semicolon)
+        assert [run[1:] for run in semicolon] == [run[1:] for run in plain]
+
+
 # ---------------------------------------------------------------------------
 # What the export cannot read of a marker it says
 # ---------------------------------------------------------------------------
@@ -1691,15 +1795,23 @@ class TestNothingLeftInThePage:
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestMarkerReadFailures:
+    @pytest.mark.parametrize(
+        "script", [LYING_PROBES_SCRIPT, LYING_ZERO_PROBES_SCRIPT], ids=["nan", "zero"]
+    )
     def test_marker_widths_that_cannot_be_measured_are_announced(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], script: str
     ) -> None:
         """A page that lies about its probes' sizes exports its markers, and the export says so.
 
         Its slide script makes every offscreen probe (left: -10000px) report
-        NaN sizes, so no marker's advance can be measured. The markers still
-        export as text items on their browser boxes, and one ``[html2pptx]
-        list markers:`` line counts the markers left unmeasured.
+        NaN sizes, or zero sizes, as a probe the page hides measures: a probe
+        of text that paints measured no width, so neither counts as measured.
+        No marker's advance can be measured. The markers still export as text
+        items on their browser boxes, one ``[html2pptx] list markers:`` line
+        counts the markers left unmeasured, and an ``[html2pptx] text metric
+        probes:`` line says the slide's line spacing went unmeasured.
+        Counting a zero width as measured places every marker at no advance
+        and says nothing.
         """
         css = DECK_CSS + KINDS_CSS
         markers = browser_each_pseudo(
@@ -1708,7 +1820,7 @@ class TestMarkerReadFailures:
         _guard_markers(markers, ("1. ", "2. "), "the unmeasured list")
         capsys.readouterr()
         pptx, failures = export_slides(
-            [_with_script(UNMEASURED_BODY, LYING_PROBES_SCRIPT)], css=css, monkeypatch=monkeypatch
+            [_with_script(UNMEASURED_BODY, script)], css=css, monkeypatch=monkeypatch
         )
         stderr = capsys.readouterr().err
         assert failures == [] and pptx, f"the lying page did not export: {failures}"
@@ -1716,6 +1828,10 @@ class TestMarkerReadFailures:
         lines = [line for line in stderr.splitlines() if UNMEASURED_LINE in line]
         assert len(lines) == 1 and "2 " in lines[0], (
             f"expected one {UNMEASURED_LINE!r} line counting 2 markers, got {lines}"
+        )
+        probe_lines = [line for line in stderr.splitlines() if UNMEASURED_PROBES_LINE in line]
+        assert [line for line in probe_lines if UNMEASURED_SPACING in line], (
+            f"no {UNMEASURED_PROBES_LINE!r} line says the line spacing went unmeasured: {probe_lines}"
         )
         shapes = slide_shapes(pptx)
         for marker in markers:
