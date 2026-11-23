@@ -99,7 +99,8 @@ export const DOM_ACCESS_SOURCE = `
       // How a pass adds the nodes it measures with and takes them off again
       // (snapshot_text.mjs measureProbes): page script can take away the page
       // realm's own, and a node left in the page restyles what the pass reads.
-      // Document's methods are called with this realm's document as receiver.
+      // Document's methods are called with the page's own document as receiver,
+      // so what they make belongs to the page, which the pass reads.
       const createElement = realm.Document.prototype.createElement;
       const createTextNode = realm.Document.prototype.createTextNode;
       const appendChild = realm.Node.prototype.appendChild;
@@ -154,7 +155,7 @@ export const DOM_ACCESS_SOURCE = `
         textData: (node) => characterData.get.call(node),
         // Throws for an element that is not HTML (an <svg>): callers guard it.
         innerText: (el) => renderedText.get.call(el),
-        // The receiver stays this realm's document; a native lookup with an explicit receiver works across realms.
+        // The receiver is the page's own document, not the pristine realm's; a native lookup with an explicit receiver works across realms.
         documentQuerySelector: (selector) => docQuery.call(document, selector),
         documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
         elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),

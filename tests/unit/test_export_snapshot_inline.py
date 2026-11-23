@@ -1,7 +1,8 @@
 """Snapshot engine: inline decorations and atomic inline boxes.
 
-The snapshot engine keeps a sentence's text in its sentence and draws what
-sits inside the line around it (spec §3 Text, *Inline decorations* and
+The snapshot engine writes a sentence's text where the browser lays it out,
+in one item but where an atomic inline splits its line, and draws what sits
+inside the line around it (spec §3 Text, *Inline decorations* and
 *Inline boxes*):
 
 * an inline element with a background, a border or padding (a pill, a code

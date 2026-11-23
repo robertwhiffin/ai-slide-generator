@@ -469,8 +469,9 @@ class TestSnapshotPaintOrder:
         Appendix E): its own block child paints over its background, and the in-flow
         block it overlaps paints under it even though that block is later in the DOM.
 
-        ``#after`` is an in-flow block, so its box starts beside the float's top
-        and the float covers its left part, exactly as the browser draws it.
+        ``#after`` is an in-flow block, so its box starts at the float's top,
+        under the float, which covers its left part, exactly as the browser draws
+        it.
         """
         body = (
             '<div class="slide">'

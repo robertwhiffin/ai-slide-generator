@@ -80,6 +80,8 @@ POISONED = {
 
 # The line reportCollectionLoss prints when a bound is met, as the sidecar echoes it.
 COLLECTION_LOSS_LINE = "[html2pptx] collection"
+# Where the text layout's own budget says it was met (snapshot_text.mjs spend).
+TEXT_LAYOUT_BUDGET = "in the snapshot text layout"
 
 
 def _export_snapshot(
@@ -127,8 +129,14 @@ class TestThePoisoningIsActuallyHostile:
                 f"{fixture}: {name} was not configurable, so the fixture could not "
                 f"replace it: {report}"
             )
-        assert report["bites"] and all(report["bites"].values()), (
-            f"{fixture}: a replacement did not take effect for a reader of the realm: {report}"
+        # Each replacement, keyed by its property, took effect for a reader of the realm.
+        replaced = {name.split(".", 1)[1] for name in POISONED[fixture]}
+        assert set(report["bites"]) == replaced, (
+            f"{fixture}: the fixture checks {sorted(report['bites'])}, it replaces {sorted(replaced)}"
+        )
+        untaken = sorted(name for name in replaced if report["bites"][name] is not True)
+        assert not untaken, (
+            f"{fixture}: these replacements did not take effect for a reader of the realm: {untaken}"
         )
 
 
@@ -177,6 +185,8 @@ class TestTheSnapshotEngineTerminates:
 
         assert pptx and failures == [], f"the export did not complete: {failures}"
         stderr = capsys.readouterr().err
-        assert COLLECTION_LOSS_LINE in stderr, (
-            f"the text walk met its bound without announcing it; sidecar stderr:\n{stderr}"
+        lines = [line for line in stderr.splitlines() if COLLECTION_LOSS_LINE in line]
+        assert lines, f"the text walk met its bound without announcing it; sidecar stderr:\n{stderr}"
+        assert any(TEXT_LAYOUT_BUDGET in line for line in lines), (
+            f"the bound met is not the text layout's own ({TEXT_LAYOUT_BUDGET!r}): {lines}"
         )

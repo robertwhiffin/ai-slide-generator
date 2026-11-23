@@ -1724,9 +1724,10 @@ function createTextLayout(env) {
   // inline edge (its tokens' segments differ), or an inset with text on one
   // side of it only. Under box-decoration-break: slice an element's start inset
   // is on the line of the text after its opening edge, and its end inset on
-  // the line of the text before its closing edge (markEdges), so a line that
-  // starts with the one or ends with the other holds an inset too: a dot that
-  // leads a paragraph pushes in its first line alone.
+  // the line of the text before its closing edge (markAfterOpening,
+  // markBeforeClosing), so a line that starts with the one or ends with the
+  // other holds an inset too: a dot that leads a paragraph pushes in its first
+  // line alone.
   function isCut(line) {
     const tokens = line.tokens;
     if (tokens.length && (tokens[0].afterOpening || tokens[tokens.length - 1].beforeClosing)) return true;
