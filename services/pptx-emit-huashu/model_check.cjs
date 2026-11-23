@@ -21,7 +21,8 @@
 //     * an item is kept when its kind is one the emitters write and every field
 //       they read is as the snapshot writes it (snapshot.mjs SlideModel,
 //       snapshot_text.mjs TextBlock and Run, snapshot_table.mjs TableItem): each
-//       number finite, each colour RRGGBB, each value of a set one of that set,
+//       number finite and in the range the emitters can write it in (RANGES,
+//       below), each colour RRGGBB, each value of a set one of that set,
 //       each text a string (a roundCorners shape's radii four corners, each
 //       two lengths above 0 or both 0); an image item also names a capture that is kept, or
 //       none; a native table's cells, spans included, lie inside its grid
@@ -34,7 +35,37 @@
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
 //     The one log line that says what was dropped; null when nothing was.
 
-const { RASTER_DATA_URI } = require('./emit_model.cjs');
+const { PPTXGENJS_INCH_LIMIT, RASTER_DATA_URI } = require('./emit_model.cjs');
+const { PT_PER_PX, PX_PER_IN } = require('./units.cjs');
+
+// RANGES. pptxgenjs writes a number it is given as it is, so one past the range
+// its XML attribute takes (ECMA-376 Part 1) writes a deck outside its schema,
+// which PowerPoint repairs or refuses. The snapshot writes every number of a
+// real slide inside these (an angle it turns to 0..360, a length from 0), so
+// only a model slide script shaped falls outside them:
+// * an alpha is 0..1 (a:alpha, ST_PositiveFixedPercentage);
+// * a length (a box's size, a line's width, a shadow's blur and offset, a
+//   radius, a column or row) is from 0 (a:ext, ST_PositiveCoordinate; a:ln w,
+//   ST_LineWidth); a line's width at most ST_LineWidth's 20116800 EMU,
+//   2112 px. A text box's insets and a cell's margins are no lengths: bodyPr's
+//   lIns and a cell's marL are ST_Coordinate32, which runs either way, and a
+//   turned box's top inset comes out a hair under 0 (-0.00002 px measured);
+// * a shadow's angle is 0 up to a turn (dir, ST_PositiveFixedAngle);
+// * a rotation is a turn either way at most;
+// * a run's size is 0 (none written) or 1 to 4000 pt (sz, ST_TextFontSize
+//   100..400000); a run's three trackings, which emit_typography.cjs adds,
+//   2000 pt either way each, so their sum is inside spc's 4000 pt (ST_TextPoint);
+// * a line height and a line's growth, written as spacing, at most 1584 pt,
+//   2112 px (spcPts, ST_TextSpacingPoint 0..158400);
+// * a path's point lies within PPTXGENJS_INCH_LIMIT inches of the origin, as
+//   each item's box must (emit_model.cjs inRange).
+const FULL_TURN_DEG = 360;
+const LINE_WIDTH_LIMIT_PX = 2112;
+const SPACING_LIMIT_PX = 2112;
+const RUN_SIZE_MIN_PT = 1;
+const RUN_SIZE_MAX_PT = 4000;
+const TRACKING_LIMIT_PT = 2000;
+const COORDINATE_LIMIT_PX = PPTXGENJS_INCH_LIMIT * PX_PER_IN;
 
 const CAPTURE_ID = /^c\d+$/;
 const COLOUR = /^[0-9A-Fa-f]{6}$/;
@@ -57,13 +88,39 @@ function isNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-// A number the snapshot may leave out (null, or no field at all).
-function isOptionalNumber(value) {
-  return value === null || value === undefined || isNumber(value);
-}
-
 function isCount(value) {
   return Number.isInteger(value) && value >= 0;
+}
+
+function isAlpha(value) {
+  return isNumber(value) && value >= 0 && value <= 1;
+}
+
+function isLength(value) {
+  return isNumber(value) && value >= 0;
+}
+
+// A length the snapshot may leave out.
+function isOptionalLength(value, limit = Infinity) {
+  return value === null || value === undefined || (isLength(value) && value <= limit);
+}
+
+// A rotation the snapshot may leave out (null for an unturned item).
+function isRotation(value) {
+  return value === null || value === undefined || (isNumber(value) && Math.abs(value) <= FULL_TURN_DEG);
+}
+
+function isRunSize(px) {
+  return isNumber(px) &&
+    (px === 0 || (px * PT_PER_PX >= RUN_SIZE_MIN_PT && px * PT_PER_PX <= RUN_SIZE_MAX_PT));
+}
+
+function isTracking(px) {
+  return isNumber(px) && Math.abs(px * PT_PER_PX) <= TRACKING_LIMIT_PT;
+}
+
+function isCoordinate(value) {
+  return isNumber(value) && Math.abs(value) <= COORDINATE_LIMIT_PX;
 }
 
 function isColour(value) {
@@ -86,18 +143,25 @@ function isBox(value) {
   return hasNumbers(value, ['x', 'y', 'w', 'h']);
 }
 
+// An item's box: its size a length.
+function isSizedBox(value) {
+  return isBox(value) && isLength(value.w) && isLength(value.h);
+}
+
 // A shape's fill, or a native table cell's: {color, alpha}.
 function isFill(value) {
-  return isObject(value) && isColour(value.color) && isNumber(value.alpha);
+  return isObject(value) && isColour(value.color) && isAlpha(value.alpha);
 }
 
 // A shape's outline, a line item, or a cell's border: {color, alpha, widthPx, dash}.
 function isStroke(value) {
-  return isFill(value) && isNumber(value.widthPx) && DASHES.has(value.dash);
+  return isFill(value) && isLength(value.widthPx) && value.widthPx <= LINE_WIDTH_LIMIT_PX &&
+    DASHES.has(value.dash);
 }
 
 function isShadow(value) {
-  return isFill(value) && hasNumbers(value, ['blurPx', 'offsetPx', 'angle']);
+  return isFill(value) && isLength(value.blurPx) && isLength(value.offsetPx) &&
+    isNumber(value.angle) && value.angle >= 0 && value.angle < FULL_TURN_DEG;
 }
 
 function isRun(run) {
@@ -106,25 +170,26 @@ function isRun(run) {
     typeof run.family === 'string' &&
     isNumber(run.weight) &&
     typeof run.italic === 'boolean' &&
-    isNumber(run.sizePx) &&
+    isRunSize(run.sizePx) &&
     isColour(run.color) &&
-    isNumber(run.letterSpacingPx) &&
+    isTracking(run.letterSpacingPx) &&
     typeof run.underline === 'boolean' &&
     typeof run.strike === 'boolean' &&
     (run.baseline === null || BASELINES.has(run.baseline)) &&
-    isNumber(run.opticalTrackingPx) &&
-    isNumber(run.unkernedTrackingPx);
+    isTracking(run.opticalTrackingPx) &&
+    isTracking(run.unkernedTrackingPx);
 }
 
 function isLine(line) {
-  return isObject(line) && isListOf(line.runs, isRun) && (line.growthPx === undefined || isNumber(line.growthPx));
+  return isObject(line) && isListOf(line.runs, isRun) &&
+    (line.growthPx === undefined || isOptionalLength(line.growthPx, SPACING_LIMIT_PX));
 }
 
 function isParagraph(paragraph) {
   return isObject(paragraph) &&
-    isNumber(paragraph.sizePx) &&
-    isOptionalNumber(paragraph.lineHeightPx) &&
-    isOptionalNumber(paragraph.ascentPx) &&
+    isLength(paragraph.sizePx) &&
+    isOptionalLength(paragraph.lineHeightPx, SPACING_LIMIT_PX) &&
+    isOptionalLength(paragraph.ascentPx) &&
     isListOf(paragraph.lines, isLine);
 }
 
@@ -136,15 +201,16 @@ function isCorner(corner) {
 }
 
 function isShape(item) {
-  if (!isBox(item) || !GEOMETRIES.has(item.geometry) || !isOptionalNumber(item.rotate)) return false;
-  if (item.geometry === 'roundRect' ? !isNumber(item.radius) : !isOptionalNumber(item.radius)) return false;
+  if (!isSizedBox(item) || !GEOMETRIES.has(item.geometry) || !isRotation(item.rotate)) return false;
+  if (item.geometry === 'roundRect' ? !isLength(item.radius) : !isOptionalLength(item.radius)) return false;
   if (item.geometry === 'roundCorners' && !(isListOf(item.radii, isCorner) && item.radii.length === CORNER_COUNT)) return false;
   if (item.fill !== null && !isFill(item.fill)) return false;
   if (item.line !== null && !isStroke(item.line)) return false;
   if (item.shadow !== null && !isShadow(item.shadow)) return false;
   if (item.geometry !== 'path') return true;
   return typeof item.closed === 'boolean' &&
-    isListOf(item.path, (polyline) => isListOf(polyline, (point) => hasNumbers(point, ['x', 'y'])));
+    isListOf(item.path, (polyline) => isListOf(polyline, (point) =>
+      isObject(point) && isCoordinate(point.x) && isCoordinate(point.y)));
 }
 
 function isLineItem(item) {
@@ -152,16 +218,16 @@ function isLineItem(item) {
 }
 
 function isImage(item, captureIds) {
-  return isBox(item) &&
-    isOptionalNumber(item.rotate) &&
-    isOptionalNumber(item.alpha) &&
+  return isSizedBox(item) &&
+    isRotation(item.rotate) &&
+    (item.alpha === null || item.alpha === undefined || isAlpha(item.alpha)) &&
     (item.src === null || item.src === undefined || typeof item.src === 'string') &&
     (item.captureId === null || item.captureId === undefined || captureIds.has(item.captureId));
 }
 
 function isText(item) {
-  return isBox(item) &&
-    isOptionalNumber(item.rotate) &&
+  return isSizedBox(item) &&
+    isRotation(item.rotate) &&
     typeof item.wrap === 'boolean' &&
     ALIGNMENTS.has(item.align) &&
     typeof item.rtl === 'boolean' &&
@@ -183,7 +249,7 @@ function isCell(cell, rows, columns) {
     (cell.rtl === undefined || typeof cell.rtl === 'boolean') &&
     (cell.font === null || cell.font === undefined || (isObject(cell.font) &&
       typeof cell.font.family === 'string' && isNumber(cell.font.weight) &&
-      typeof cell.font.italic === 'boolean' && isNumber(cell.font.sizePx))) &&
+      typeof cell.font.italic === 'boolean' && isLength(cell.font.sizePx))) &&
     (cell.paragraphs === null || isListOf(cell.paragraphs, isParagraph));
 }
 
@@ -216,8 +282,8 @@ function fillsGrid(cells, rows, columns) {
 // no cells for one with no columns.
 function isTable(item) {
   const grid = hasNumbers(item, ['x', 'y']) &&
-    isListOf(item.colWidths, isNumber) &&
-    isListOf(item.rowHeights, isNumber);
+    isListOf(item.colWidths, isLength) &&
+    isListOf(item.rowHeights, isLength);
   if (!grid) return false;
   const rows = item.rowHeights.length;
   const columns = item.colWidths.length;

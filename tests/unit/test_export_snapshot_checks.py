@@ -2980,6 +2980,76 @@ MODEL_DEFECTS = {
     ),
 }
 
+# A number past the range the emitters can write it in (M2): pptxgenjs writes it as
+# it is, and the XML is then outside its schema: an alpha past 0..1 (a:alpha), a
+# negative length (a:ext, a:ln w, a shadow's blurRad and dist), a shadow angle past
+# 0..360 (dir), a run size under 1 pt or past 4000 pt (sz, 100..400000), a tracking
+# past 4000 pt either way (spc), a rotation past a turn either way (rot), a
+# coordinate past the 100 inches pptxgenjs reads as inches.
+MODEL_RANGE_DEFECTS = {
+    "shape-fill-alpha-above-1": (_set("items.0.fill.alpha", 1.5), {0}, 0),
+    "shape-fill-alpha-negative": (_set("items.0.fill.alpha", -0.1), {0}, 0),
+    "shape-outline-alpha-above-1": (_set("items.0.line.alpha", 2), {0}, 0),
+    "shape-outline-width-negative": (_set("items.0.line.widthPx", -1), {0}, 0),
+    "shape-outline-width-past-the-schema": (_set("items.0.line.widthPx", 3000), {0}, 0),
+    "shape-shadow-alpha-negative": (_set("items.0.shadow.alpha", -0.5), {0}, 0),
+    "shape-shadow-blur-negative": (_set("items.0.shadow.blurPx", -1), {0}, 0),
+    "shape-shadow-offset-negative": (_set("items.0.shadow.offsetPx", -1), {0}, 0),
+    "shape-shadow-angle-a-turn": (_set("items.0.shadow.angle", 360), {0}, 0),
+    "shape-shadow-angle-negative": (_set("items.0.shadow.angle", -10), {0}, 0),
+    "shape-w-negative": (_set("items.0.w", -5), {0}, 0),
+    "shape-h-negative": (_set("items.0.h", -5), {0}, 0),
+    "shape-radius-negative": (_set("items.0.radius", -2), {0}, 0),
+    "shape-rotate-past-a-turn": (_set("items.1.rotate", 400), {1}, 0),
+    "shape-path-point-past-the-inch-limit": (_set("items.1.path.0.1.x", 1e30), {1}, 0),
+    "line-alpha-above-1": (_set("items.2.alpha", 1.2), {2}, 0),
+    "line-width-negative": (_set("items.2.widthPx", -3), {2}, 0),
+    "image-alpha-above-1": (_set("items.4.alpha", 1.5), {4}, 0),
+    "image-w-negative": (_set("items.4.w", -1), {4}, 0),
+    "image-rotate-past-a-turn": (_set("items.4.rotate", -400), {4}, 0),
+    "text-w-negative": (_set("items.5.w", -1), {5}, 0),
+    "text-paragraph-size-negative": (_set("items.5.paragraphs.0.sizePx", -1), {5}, 0),
+    "text-paragraph-line-height-negative": (_set("items.5.paragraphs.0.lineHeightPx", -1), {5}, 0),
+    "text-paragraph-ascent-negative": (_set("items.5.paragraphs.0.ascentPx", -1), {5}, 0),
+    "text-line-growth-negative": (_set("items.5.paragraphs.1.lines.1.growthPx", -1), {5}, 0),
+    "text-run-size-negative": (_set("items.5.paragraphs.0.lines.0.runs.0.sizePx", -10), {5}, 0),
+    "text-run-size-under-a-point": (_set("items.5.paragraphs.0.lines.0.runs.0.sizePx", 1), {5}, 0),
+    "text-run-size-past-the-schema": (_set("items.5.paragraphs.0.lines.0.runs.0.sizePx", 6000), {5}, 0),
+    "text-run-tracking-past-the-schema": (_set("items.5.paragraphs.0.lines.0.runs.0.letterSpacingPx", 3000), {5}, 0),
+    "text-run-tracking-past-the-schema-negative": (_set("items.5.paragraphs.0.lines.0.runs.0.opticalTrackingPx", -3000), {5}, 0),
+    "table-column-width-negative": (_set("items.7.colWidths.1", -1), {7}, 0),
+    "table-row-height-negative": (_set("items.7.rowHeights.0", -1), {7}, 0),
+    "table-cell-fill-alpha-above-1": (_set("items.7.cells.0.fill.alpha", 2), {7}, 0),
+    "table-cell-border-width-negative": (_set("items.7.cells.0.borders.top.widthPx", -1), {7}, 0),
+    "table-cell-font-size-negative": (_set("items.7.cells.0.font.sizePx", -1), {7}, 0),
+    "table-cell-run-size-under-a-point": (
+        _set("items.7.cells.0.paragraphs.0.lines.0.runs.0.sizePx", 1),
+        {7},
+        0,
+    ),
+}
+# The bounds themselves are in range: the snapshot writes each of them.
+MODEL_RANGE_BOUNDS = {
+    "alpha-0": _set("items.0.fill.alpha", 0),
+    "alpha-1": _set("items.0.line.alpha", 1),
+    "width-0": _set("items.0.line.widthPx", 0),
+    "blur-0": _set("items.0.shadow.blurPx", 0),
+    "offset-0": _set("items.0.shadow.offsetPx", 0),
+    "angle-0": _set("items.0.shadow.angle", 0),
+    "angle-under-a-turn": _set("items.0.shadow.angle", 359.99),
+    "rotate-a-turn": _set("items.1.rotate", 360),
+    "rotate-back-a-turn": _set("items.4.rotate", -360),
+    "box-0": _set_each(("items.4.w", 0), ("items.4.h", 0)),
+    "run-size-0": _set("items.5.paragraphs.0.lines.0.runs.0.sizePx", 0),
+    "run-size-1-pt": _set("items.5.paragraphs.0.lines.0.runs.0.sizePx", 4 / 3),
+    "run-size-4000-pt": _set("items.5.paragraphs.0.lines.0.runs.0.sizePx", 16000 / 3),
+    "tracking-negative": _set("items.5.paragraphs.0.lines.0.runs.0.letterSpacingPx", -2),
+    # A turned box's top inset, as the snapshot measured it: a coordinate, which runs either way.
+    "inset-a-hair-under-0": _set("items.6.inset.top", -2e-5),
+    "margin-negative": _set("items.7.cells.0.margin.left", -1),
+}
+
+
 # (mutation, the field reset, as an empty slide has it).
 MODEL_FIELD_DEFECTS = {
     "background-colour-injected": (
@@ -3105,6 +3175,27 @@ class TestModelCheck:
         by_id = {item["id"]: item for item in valid["items"]}
         for item in checked["model"]["items"]:
             assert item == by_id[item["id"]], item
+
+    @pytest.mark.parametrize("defect", tuple(MODEL_RANGE_DEFECTS))
+    def test_each_number_past_its_range_drops_its_item(self, defect: str) -> None:
+        mutate, dropped_items, dropped_captures = MODEL_RANGE_DEFECTS[defect]
+        model = _valid_model()
+        mutate(model)
+        checked = _check_model(model)
+        assert checked["dropped"] == {
+            "items": len(dropped_items),
+            "captures": dropped_captures,
+            "fields": 0,
+        }, checked["dropped"]
+        kept_ids = {item["id"] for item in checked["model"]["items"]}
+        assert not kept_ids & dropped_items, kept_ids
+
+    @pytest.mark.parametrize("bound", tuple(MODEL_RANGE_BOUNDS))
+    def test_each_range_keeps_its_bounds(self, bound: str) -> None:
+        model = _valid_model()
+        MODEL_RANGE_BOUNDS[bound](model)
+        checked = _check_model(model)
+        assert checked["dropped"] == {"items": 0, "captures": 0, "fields": 0}, checked["dropped"]
 
     @pytest.mark.parametrize("defect", tuple(MODEL_FIELD_DEFECTS))
     def test_each_invalid_field_is_reset_and_counted(self, defect: str) -> None:

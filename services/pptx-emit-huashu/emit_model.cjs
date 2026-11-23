@@ -326,4 +326,4 @@ function emitSlide(pres, model, captures, renderer) {
   return slide;
 }
 
-module.exports = { emitSlide, pictureData, RASTER_DATA_URI };
+module.exports = { emitSlide, pictureData, PPTXGENJS_INCH_LIMIT, RASTER_DATA_URI };
