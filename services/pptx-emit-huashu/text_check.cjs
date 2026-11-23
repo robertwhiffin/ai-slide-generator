@@ -13,33 +13,38 @@
 // characters, so it needs no fold, and the two report the same words.
 //
 //   missingWords(reference, emitted, hidden) -> string[]
-//     The reference's words, as it spells them and in its order, whose
-//     normalised form is in no emitted text and is no hidden word. A word is a
-//     run of characters between white space. `emitted` is the slide's emitted
-//     text: one string, or the text of each item that holds some, each
-//     compared alone, never run on into the next item's. Normalising folds
-//     compatibility forms (NFKC: a literal "¹" is "1", a ligature its letters,
-//     a fullwidth form its ASCII), then removes white space and
-//     default-ignorable code points (a word joiner, which the PowerPoint deck
-//     writes after a line-ending script run, a zero-width space, a soft
-//     hyphen), then lower-cases, so the words of one text a renderer runs
-//     together ("Revenueup10.7%") are not missing. `hidden` is the slide's
-//     hidden text (snapshot.mjs model.reference.hiddenText): words the page
-//     reads that the slide does not show, each whole, which are no loss.
-//   acrossText(items) -> string
-//     The normalised text a slide model's items hold across neighbours: each
-//     chain of neighbouring text items (neighbourChains), its items' texts run
-//     together in its order, one chain a line. An atomic inline (an
-//     inline-block numeral, a chip) is a text item of its own, painted after
-//     the text around it, so a word the page runs across its edge
-//     ("1Financials", a numeral and the word after it; "Iceberg,", a chip and
-//     the comma after it) is written in two items, which are neighbours. A
-//     word written in items that are not neighbours (the letters of a lost
-//     chip that end and start the boxes either side of where it was) is not
-//     in this text (Task 15 H2, fix round 1).
+//     The reference's words, as it spells them and in its order, that are
+//     written in no emitted text (writtenIn) and are no hidden word. A word is
+//     a run of characters between white space. `emitted` is the slide's
+//     emitted text: one string, or the text of each item that holds some
+//     (its lines one a line), each compared alone, never run on into the next
+//     item's. A word is written in a text when its normalised form is inside
+//     one of the text's normalised words, or is two or more of them whole, one
+//     after the other: so the words of one text a renderer runs together
+//     ("Revenueup10.7%") are not missing, and a short word the end of one word
+//     and the start of the next spell ("AI" in "Data Insights") is.
+//     Normalising folds compatibility forms (NFKC: a literal "¹" is "1", a
+//     ligature its letters, a fullwidth form its ASCII), then removes white
+//     space and default-ignorable code points (a word joiner, which the
+//     PowerPoint deck writes after a line-ending script run, a zero-width
+//     space, a soft hyphen), then lower-cases. `hidden` is the slide's hidden
+//     text (snapshot.mjs model.reference.hiddenText): words the page reads
+//     that the slide does not show, each whole, which are no loss.
+//   acrossWords(items) -> string[][]
+//     The normalised words a slide model's items hold across neighbours: each
+//     chain of neighbouring text items (neighbourChains), its items' words in
+//     its order. An atomic inline (an inline-block numeral, a chip) is a text
+//     item of its own, painted after the text around it, so a word the page
+//     runs across its edge ("1Financials", a numeral and the word after it;
+//     "Iceberg,", a chip and the comma after it) is written in two items,
+//     which are neighbours, as the tail's last word and the head's first,
+//     each whole. A word written in items that are not neighbours, or only in
+//     part of the words either side of a join (the letters of a lost chip
+//     that end and start the boxes either side of where it was), is not
+//     written across them.
 //   lostWords(reference, items, hidden) -> string[]
-//     The words missingWords finds in no item's text that are not in
-//     acrossText(items) either: the slide's lost words.
+//     The words missingWords finds in no item's text that no chain of
+//     acrossWords(items) writes either: the slide's lost words.
 //   textLossLine(reference, items, hidden) -> string | null
 //     '[html2pptx] text missing: <json array>' naming lostWords, or null when
 //     none is missing. It names a slide's own words, so render_slide.cjs logs
@@ -84,29 +89,55 @@ function wordsOf(text) {
   return textOf(text).split(WORD_SEPARATOR).filter((word) => word.length > 0);
 }
 
+// The normalised words of `text`, less those that normalise to nothing.
+function normalisedWords(text) {
+  return wordsOf(text).map(normalise).filter((word) => word.length > 0);
+}
+
+// Whether `word` (normalised) is written in `words` (a text's normalised
+// words, in order): inside one of them, or as two or more of them whole, one
+// after the other. A word read across words holds each of them whole: "AI" is
+// in neither "data" nor "insights", nor is it the two of them, so "Data
+// Insights" does not write it.
+function writtenIn(word, words) {
+  for (let first = 0; first < words.length; first++) {
+    if (words[first].includes(word)) return true;
+    let joined = words[first];
+    for (let next = first + 1; next < words.length && word.startsWith(joined) && joined.length < word.length; next++) {
+      joined += words[next];
+      if (joined === word) return true;
+    }
+  }
+  return false;
+}
+
 // A word that normalises to nothing (default-ignorable code points alone) is
 // in every text.
 function missingWords(reference, emitted, hidden) {
-  const texts = (Array.isArray(emitted) ? emitted : [emitted]).map(normalise).filter((text) => text.length > 0);
+  const texts = (Array.isArray(emitted) ? emitted : [emitted]).map(normalisedWords).filter((words) => words.length > 0);
   const hiddenWords = new Set(wordsOf(hidden).map(normalise));
   const missing = [];
   for (const word of wordsOf(reference)) {
     const normalised = normalise(word);
-    if (!normalised || hiddenWords.has(normalised) || texts.some((text) => text.includes(normalised))) continue;
+    if (!normalised || hiddenWords.has(normalised) || texts.some((words) => writtenIn(normalised, words))) continue;
     missing.push(word);
   }
   return missing;
 }
 
-// The text of a text item's or a table cell's paragraphs, run by run.
+// The text of a text item's or a table cell's paragraphs: each line's runs
+// run on into each other, the lines one a line, so a line's end ends a word,
+// as the deck's line break does where the harness reads it.
 function paragraphsText(paragraphs) {
-  const parts = [];
+  const lines = [];
   for (const paragraph of Array.isArray(paragraphs) ? paragraphs : []) {
     for (const line of (paragraph && paragraph.lines) || []) {
+      const parts = [];
       for (const run of (line && line.runs) || []) parts.push(textOf(run && run.text));
+      lines.push(parts.join(''));
     }
   }
-  return parts.join('');
+  return lines.join('\n');
 }
 
 // The text of each text item and native table cell, in the model's order.
@@ -125,19 +156,23 @@ function emittedTexts(items) {
 
 // ─── words across neighbours ─────────────────────────────────────────
 // A word no item holds whole is written when it lies across the joins of a
-// chain of neighbouring text items. Two items are neighbours, the tail and
-// then the head, when both are unturned and of one line, run the same way,
-// share a line, and the head's text starts within an atomic inline's edge of
-// where the tail's ends. An atomic inline's edge (its padding, border and
-// margin, and the room its content box leaves its text) is the gap between
-// its text and the text beside it: 18 px (1 em) for long-off 02's numerals and
-// 9 px (0.45 em) for dense-tpl18 03's chips, measured on the slide models the
-// Task 15 matrix decks export. A lost chip leaves both its edges, its own text
-// and the spaces either side of it between the boxes around it: 43 to 51 px
-// (2.1 to 2.5 em) on the review's probe. The rule reads the boxes the
-// snapshot laid out, less their slack, which the harness's twin reads from the
-// written deck (scripts/export_fidelity/run.py _across_text), with the same
-// constants.
+// chain of neighbouring text items, holding the tail's last word and the
+// head's first whole at each join it crosses (writtenIn over the chain's
+// words). Two items are neighbours, the tail and then the head, when both are
+// unturned and of one line, run the same way, share a line, and the head's
+// text starts within an atomic inline's edge of where the tail's ends. An
+// atomic inline's edge (its padding, border and margin, and the room its
+// content box leaves its text) is the gap between its text and the text
+// beside it: 18 px (1 em) for long-off 02's numerals and 9 px (0.45 em) for
+// dense-tpl18 03's chips, measured on the slide models those matrix decks
+// export. A lost chip leaves both its edges, its own text and the spaces
+// either side of it between the boxes around it: 43 to 51 px (2.1 to 2.5 em)
+// for padded chips, no neighbours; 1.25 to 1.45 em for a 16 px "AI" with no
+// padding or 2 px of it, which are neighbours, and whose letters the
+// whole-word rule does not read across them. The rule reads the boxes the
+// snapshot laid out, less their slack, which the harness's twin reads from
+// the written deck (scripts/export_fidelity/run.py _across_words), with the
+// same constants.
 //
 // snapshot_text.mjs textBlock's width slack: a text box is its text, or a
 // centred or right-aligned block's content box, widened by SLACK_FRACTION of
@@ -155,9 +190,10 @@ const SAME_LINE_OVERLAP = 0.5;
 const NEIGHBOUR_GAP_EM = 1.5;
 const NEIGHBOUR_OVERLAP_EM = 0.25;
 // The rule compares every item it reads with every other, so it reads at most
-// this many, the first the slide paints, page script being free to paint any
-// number: no slide of the Task 15 matrix or the corpora paints more than 51
-// text items. An item past them is no neighbour.
+// this many of the items it can read (unturned one-line text items), the
+// first the slide paints, page script being free to paint any number: no
+// slide of the corpora or the matrix decks paints more than 51 text items.
+// An item past them is no neighbour.
 const ACROSS_ITEM_LIMIT = 1024;
 
 // The largest size (px) of an item's runs that are no superscript or
@@ -177,7 +213,7 @@ function sizeOf(paragraphs) {
   return size;
 }
 
-// A text item as the neighbour rule reads it: its normalised text; where its
+// A text item as the neighbour rule reads it: its normalised words; where its
 // text starts and ends along its line, mirrored for right-to-left text so that
 // a line always runs on to larger values; its top and bottom; its size; and
 // its direction. Null for an item that is turned, of more than one line, has
@@ -188,13 +224,13 @@ function placedText(item) {
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(w) || !Number.isFinite(h) || !(h > 0)) {
     return null;
   }
-  const text = normalise(paragraphsText(item.paragraphs));
-  if (!text) return null;
+  const words = normalisedWords(paragraphsText(item.paragraphs));
+  if (!words.length) return null;
   const extent = Math.max(0, (w - SLACK_PX) / (1 + SLACK_FRACTION));
   const left = item.align === 'center' ? x + (w - extent) / 2 : item.align === 'right' ? x + w - extent : x;
   const rtl = Boolean(item.rtl);
   return {
-    text,
+    words,
     start: rtl ? -(left + extent) : left,
     end: rtl ? -left : left + extent,
     top: y,
@@ -216,7 +252,7 @@ function joinGap(tail, head) {
 }
 
 // The chains of neighbours among `placed` (placedText's, in the order the
-// slide paints them), each its items' texts run together. Each item is
+// slide paints them), each its items' words in its order. Each item is
 // followed by its nearest neighbour, the head whose text starts soonest after
 // its own ends (the first painted, of equals); a head follows only the nearest
 // of the tails it is nearest to; and a join that would close a loop is left
@@ -253,29 +289,31 @@ function neighbourChains(placed) {
   const chains = [];
   for (let start = 0; start < count; start++) {
     if (previous[start] >= 0 || next[start] < 0) continue;
-    let text = '';
-    for (let at = start; at >= 0; at = next[at]) text += placed[at].text;
-    chains.push(text);
+    const words = [];
+    for (let at = start; at >= 0; at = next[at]) {
+      for (const word of placed[at].words) words.push(word);
+    }
+    chains.push(words);
   }
   return chains;
 }
 
-function acrossText(items) {
+function acrossWords(items) {
   const placed = [];
   for (const item of Array.isArray(items) ? items : []) {
     if (placed.length >= ACROSS_ITEM_LIMIT) break;
     const text = placedText(item);
     if (text) placed.push(text);
   }
-  return neighbourChains(placed).join('\n');
+  return neighbourChains(placed);
 }
 
 // The chains are read only when a word is in no item's own text.
 function lostWords(reference, items, hidden) {
   let missing = missingWords(reference, emittedTexts(items), hidden);
   if (missing.length) {
-    const across = acrossText(items);
-    missing = missing.filter((word) => !across.includes(normalise(word)));
+    const chains = acrossWords(items);
+    missing = missing.filter((word) => !chains.some((words) => writtenIn(normalise(word), words)));
   }
   return missing;
 }
@@ -295,7 +333,7 @@ function isDefaultIgnorable(character) {
 
 module.exports = {
   missingWords,
-  acrossText,
+  acrossWords,
   lostWords,
   textLossLine,
   wordsOf,

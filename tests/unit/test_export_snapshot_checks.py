@@ -544,6 +544,22 @@ def _probe(names: tuple[str, ...]) -> tuple[Box, ...]:
 
 PROBE_PAINT_ORDER = tuple(PROBE_BOXES)
 PROBE_LOST_IN_PAINT_ORDER = tuple(name for name in PROBE_PAINT_ORDER if name not in PROBE_CHIPS)
+# The B7 re-review's probes: a chip whose two sides are neighbours once it is
+# lost, its "AI" 16 px between 20 px text, with no padding (1.25 em left
+# between them) and with 2 px of it each side (1.45 em).
+NEIGHBOURED_CHIPS = {
+    "a 16 px chip, unpadded": "display: inline-block; font-size: 16px;",
+    "a 16 px chip, padding 0 2px": "display: inline-block; padding: 0 2px; font-size: 16px;",
+}
+
+
+def _neighboured_chip_body(chip_style: str) -> str:
+    return (
+        f'<div class="slide"><p {PROBE_PARAGRAPH}>Customer Data '
+        f'<span style="{chip_style}">AI</span> Insights for every team</p></div>'
+    )
+
+
 # The slide the probe's boxes were measured on, for the real export.
 PROBE_CHIP = (
     'style="display: inline-block; padding: 0 8px; border-radius: 999px; '
@@ -750,6 +766,18 @@ ACROSS_CASES: dict[str, tuple[tuple[Box, ...], str, list[str]]] = {
         (_box_around("a", 100, 102), _box_around("b", 100, 102)),
         "ab",
         [],
+    ),
+    # REAL LOSS: a lost chip narrow enough that its two sides are neighbours
+    # (a 16 px "AI" with no padding left 28 px, 1.4 em, between the 20 px
+    # text either side): a word read across a join holds the tail's last word
+    # and the head's first whole, and "Data" + "Insights" spell "AI" only in part.
+    "a lost chip between neighbours whose edge letters spell it": (
+        (
+            _box_around("Customer Data", 88, 240, size=20, h=26),
+            _box_around("Insights for every team", 268, 495, size=20, h=26),
+        ),
+        "Customer Data AI Insights for every team",
+        ["AI"],
     ),
     # A long line's slack is no edge: the tail's box runs 52 px past its text,
     # over the 60 px a lost chip left.
@@ -1175,6 +1203,17 @@ class TestMissingWords:
     def test_a_word_only_partly_emitted_is_missing(self) -> None:
         assert _missing_words("profit1", "profit", "") == ["profit1"]
 
+    def test_a_word_the_emitted_words_spell_only_in_part_is_missing(self) -> None:
+        """REAL LOSS: a word read across a text's words holds each of them whole.
+
+        "AI" is the end of "Data" and the start of "Insights", and "profit1" the
+        start of "profit 12": neither is written. "Revenueup10.7%" is three
+        whole words of "Revenue up 10.7%", one after the other, and is.
+        """
+        assert _missing_words("Data AI Insights", "Data Insights", "") == ["AI"]
+        assert _missing_words("profit1", "profit 12", "") == ["profit1"]
+        assert _missing_words("Revenueup10.7%", "Revenue up 10.7%", "") == []
+
     def test_hidden_words_are_not_missing(self) -> None:
         assert _missing_words("Revenue secretword grew", "Revenue grew", "") == ["secretword"]
         assert _missing_words("Revenue secretword grew", "Revenue grew", "secretword") == []
@@ -1235,6 +1274,18 @@ class TestTextLossLine:
             "paragraphs": [*_paragraphs(("Cash",), ("Liquidity",)), *_paragraphs(("ratio",))],
         }
         assert _text_loss_line("Cash Liquidity ratio", [item], "") is None
+
+    def test_a_line_end_ends_a_word(self) -> None:
+        """REAL LOSS: a lost "AI" is not the end of one line and the start of the next.
+
+        A line's runs run on into each other; its last word and the next
+        line's first are two words, which a word read across them holds
+        whole, as a word broken across two lines ("extraordi" | "nary") does.
+        """
+        lines = _text_item(("Data",), ("Insights",))
+        assert _missing_from_line(_text_loss_line("Data AI Insights", [lines], "")) == ["AI"]
+        broken = _text_item(("Revenue was extraordi",), ("nary this year",))
+        assert _text_loss_line("Revenue was extraordinary this year", [broken], "") is None
 
     def test_native_table_cells_are_emitted_text(self) -> None:
         """A cell's paragraphs are its text; an overlay cell (null) or empty one ([]) has none."""
@@ -1812,6 +1863,15 @@ class TestHarnessOracle:
         dashed = _deck_of_texts([["end-to-end"]])
         assert reference_text_loss(dashed, ["end\u2013to\u2013end"]) == [["end\u2013to\u2013end"]]
 
+    def test_a_word_the_boxs_words_spell_only_in_part_is_missing(self) -> None:
+        """REAL LOSS: as ``missingWords``, a word read across a box's words holds each whole:
+        across two words of one line, or the last of one paragraph and the first of the next."""
+        spaced = _deck_of_texts([["Data Insights"]])
+        assert reference_text_loss(spaced, ["Data AI Insights"]) == [["AI"]]
+        broken = _deck_of_texts([["Data\nInsights"]])
+        assert reference_text_loss(broken, ["Data AI Insights"]) == [["AI"]]
+        assert reference_text_loss(spaced, ["DataInsights"]) == [[]]
+
     def test_boxes_the_slide_paints_one_after_the_other_are_no_neighbours(self) -> None:
         """GUARD: a word is in one box's text or across neighbours, never across boxes merely
         written one after the other (python-pptx stacks _deck_of_texts' boxes a line apart)."""
@@ -1919,6 +1979,44 @@ class TestWordsAcrossAtomicInlines:
         lost = _without_text_boxes(logged.pptx, PROBE_CHIPS)
         assert text_loss(lost, [document]) == [list(PROBE_CHIPS)]
         assert _sidecar_missing(_boxes_of_slide(lost), reference) == list(PROBE_CHIPS)
+
+    @pytest.mark.parametrize("chip", tuple(NEIGHBOURED_CHIPS))
+    def test_a_chip_whose_lost_sides_are_neighbours_is_reported_by_both_checks(
+        self, chip: str
+    ) -> None:
+        """REAL LOSS: the B7 re-review's probes, exported, then the chip taken out of the deck.
+
+        Exported whole, neither check reports a word. Taken out, the chip
+        leaves its two sides close enough to be neighbours (its edge is under
+        1.5 em), so their texts run on into each other ("Customer Data" +
+        "Insights for every team"), and its letters are the tail's end and
+        the head's start. A word read across a join holds the tail's last word
+        and the head's first whole, so "AI" is still lost, by both checks.
+        """
+        from pptx import Presentation
+
+        document = _pinned_case_document(_neighboured_chip_body(NEIGHBOURED_CHIPS[chip]))
+        reference = browser_text(document)
+        assert "AI" in reference.split(), f"fixture drift: innerText reads {reference!r}"
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            logged = export_logged([document], monkeypatch=monkeypatch)
+        assert logged.failures == [], logged.failures
+        assert text_missing_reports(logged.stderr) == [], f"stderr:\n{logged.stderr[-3000:]}"
+        assert text_loss(logged.pptx, [document]) == [[]]
+
+        lost = _without_text_boxes(logged.pptx, ("AI",))
+        harness = fidelity_harness()
+        tail, head = (
+            harness._placed_text(shape)
+            for text in ("Customer Data", "Insights for every team")
+            for shape in Presentation(io.BytesIO(lost)).slides[0].shapes
+            if shape.has_text_frame and shape.text_frame.text.strip() == text
+        )
+        assert harness._join_gap(tail, head) is not None, (
+            "fixture drift: the chip's two sides are no neighbours once it is lost"
+        )
+        assert text_loss(lost, [document]) == [["AI"]]
+        assert _sidecar_missing(_boxes_of_slide(lost), reference) == ["AI"]
 
 
 # ---------------------------------------------------------------------------

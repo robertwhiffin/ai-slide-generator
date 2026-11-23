@@ -656,6 +656,29 @@ def _normalise_text(text: str) -> str:
     return "".join(folded.split()).lower()
 
 
+def _normalised_words(text: str) -> list[str]:
+    """The normalised words of ``text`` (text_check.cjs normalisedWords): its runs of
+    characters between white space, each normalised, less those that normalise to nothing."""
+    return [word for word in (_normalise_text(part) for part in text.split()) if word]
+
+
+def _written_in(word: str, words: list[str]) -> bool:
+    """Whether ``word`` (normalised) is written in ``words`` (text_check.cjs writtenIn): inside
+    one of them, or as two or more of them whole, one after the other. A word read across words
+    holds each of them whole, so "Data Insights" does not write "AI"."""
+    for first, start in enumerate(words):
+        if word in start:
+            return True
+        joined = start
+        following = first + 1
+        while following < len(words) and len(joined) < len(word) and word.startswith(joined):
+            joined += words[following]
+            if joined == word:
+                return True
+            following += 1
+    return False
+
+
 def _slide_texts(slide) -> list[str]:
     """The text of every text frame and table cell on ``slide``, in the order the slide holds
     them (paint order)."""
@@ -671,16 +694,18 @@ def _slide_texts(slide) -> list[str]:
 # Words across neighbours, as text_check.cjs reads them from the slide model
 # (its "words across neighbours" section has the rule and its measurements):
 # a word no text box holds whole is written when it lies across the joins of a
-# chain of neighbouring boxes. Two boxes are neighbours, the tail and then the
-# head, when both are unturned and of one line (wrap="none"), run the same way,
-# share a line, and the head's text starts within an atomic inline's edge of
-# where the tail's ends. An atomic inline (an inline-block numeral, a chip) is
-# a text box of its own, written after the text around it, so a word the page
-# runs across its edge ("1Financials", "Iceberg,") is written in two boxes,
-# which are neighbours; a lost chip's letters at the ends of the boxes either
-# side of where it was are not (Task 15 H2, fix round 1). The deck's boxes are
-# the model's (emit_text.cjs writes each item's x, w and h as they are, its y
-# raised by its first-line offset), and the constants are text_check.cjs's.
+# chain of neighbouring boxes, holding the tail's last word and the head's
+# first whole at each join it crosses (_written_in over the chain's words).
+# Two boxes are neighbours, the tail and then the head, when both are unturned
+# and of one line (wrap="none"), run the same way, share a line, and the
+# head's text starts within an atomic inline's edge of where the tail's ends.
+# An atomic inline (an inline-block numeral, a chip) is a text box of its own,
+# written after the text around it, so a word the page runs across its edge
+# ("1Financials", "Iceberg,") is written in two boxes, which are neighbours; a
+# lost chip's letters at the ends of the boxes either side of where it was are
+# no whole words of theirs. The deck's boxes are the model's (emit_text.cjs
+# writes each item's x, w and h as they are, its y raised by its first-line
+# offset), and the constants are text_check.cjs's.
 #
 # snapshot_text.mjs textBlock's width slack, on the side a box's alignment grows.
 SLACK_FRACTION = 0.06
@@ -693,7 +718,7 @@ SAME_LINE_OVERLAP = 0.5
 NEIGHBOUR_GAP_EM = 1.5
 NEIGHBOUR_OVERLAP_EM = 0.25
 # The boxes the rule reads, every one compared with every other: the first the
-# slide paints.
+# slide paints of those it can read (unturned one-line text boxes).
 ACROSS_ITEM_LIMIT = 1024
 EMU_PER_PX = 9525
 PX_PER_PT = 4 / 3
@@ -702,10 +727,10 @@ _DRAWING_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
 class _Placed(NamedTuple):
     """A text box as the neighbour rule reads it (text_check.cjs placedText): its normalised
-    text; where its text starts and ends along its line, mirrored for right-to-left text so
+    words; where its text starts and ends along its line, mirrored for right-to-left text so
     that a line always runs on to larger values; its top and bottom; its size; its direction."""
 
-    text: str
+    words: tuple[str, ...]
     start: float
     end: float
     top: float
@@ -729,8 +754,8 @@ def _placed_text(shape) -> _Placed | None:
     box = (shape.left, shape.top, shape.width, shape.height)
     if any(value is None for value in box) or not shape.height > 0:
         return None
-    text = _normalise_text(frame.text)
-    if not text:
+    words = tuple(_normalised_words(frame.text))
+    if not words:
         return None
     x, y, w, h = (value / EMU_PER_PX for value in box)
     sizes = [
@@ -745,7 +770,7 @@ def _placed_text(shape) -> _Placed | None:
     extent = max(0.0, (w - SLACK_PX) / (1 + SLACK_FRACTION))
     left = x + (w - extent) / 2 if align == "ctr" else x + w - extent if align == "r" else x
     return _Placed(
-        text=text,
+        words=words,
         start=-(left + extent) if rtl else left,
         end=-left if rtl else left + extent,
         top=y,
@@ -768,9 +793,9 @@ def _join_gap(tail: _Placed, head: _Placed) -> float | None:
     return gap if -NEIGHBOUR_OVERLAP_EM * em <= gap <= NEIGHBOUR_GAP_EM * em else None
 
 
-def _neighbour_chains(placed: list[_Placed]) -> list[str]:
-    """The chains of neighbours among ``placed`` (in paint order), each its boxes' texts run
-    together, as text_check.cjs neighbourChains joins them: each box followed by its nearest
+def _neighbour_chains(placed: list[_Placed]) -> list[list[str]]:
+    """The chains of neighbours among ``placed`` (in paint order), each its boxes' words in
+    its order, as text_check.cjs neighbourChains joins them: each box followed by its nearest
     neighbour (the first painted, of equals), a head following only the nearest of the
     tails it is nearest to, and a join that would close a loop left out, nearest first."""
     count = len(placed)
@@ -801,18 +826,19 @@ def _neighbour_chains(placed: list[_Placed]) -> list[str]:
     for start in range(count):
         if previous[start] >= 0 or following[start] < 0:
             continue
-        text, at = "", start
+        words: list[str] = []
+        at = start
         while at >= 0:
-            text += placed[at].text
+            words.extend(placed[at].words)
             at = following[at]
-        chains.append(text)
+        chains.append(words)
     return chains
 
 
-def _across_text(slide) -> str:
-    """The normalised text ``slide``'s boxes hold across neighbours, one chain a line
-    (text_check.cjs acrossText): the chains of its first ACROSS_ITEM_LIMIT boxes the rule
-    can read."""
+def _across_words(slide) -> list[list[str]]:
+    """The normalised words ``slide``'s boxes hold across neighbours, a list per chain
+    (text_check.cjs acrossWords): the chains of the first ACROSS_ITEM_LIMIT boxes of it the
+    rule can read, unturned one-line text boxes."""
     placed: list[_Placed] = []
     for shape in slide.shapes:
         if len(placed) >= ACROSS_ITEM_LIMIT:
@@ -820,7 +846,7 @@ def _across_text(slide) -> str:
         box = _placed_text(shape)
         if box is not None:
             placed.append(box)
-    return "\n".join(_neighbour_chains(placed))
+    return _neighbour_chains(placed)
 
 
 def _notes_text(slide) -> str | None:
@@ -859,10 +885,11 @@ def check_text_loss(
     (render_truth.cjs writes it), which no extraction code touches, so text the
     exporter drops shows up here. SVG and canvas text is excluded: it travels
     inside the picture. A word is lost when its normalised form
-    (_normalise_text) is in no text box's or table cell's normalised text,
-    each read alone, and is not written across neighbouring text boxes
-    (_across_text), as text_check.cjs textLossLine reads the slide model; a
-    slide the deck lacks loses every word.
+    (_normalise_text) is written (_written_in: inside one word, or as whole
+    words one after the other) in no text box's or table cell's words, each
+    read alone, nor across neighbouring text boxes (_across_words), as
+    text_check.cjs textLossLine reads the slide model; a slide the deck lacks
+    loses every word.
 
     ``hidden_text[i]``, when given, is the hidden text of slide ``names[i]``
     (its slide summary's ``hiddenText``): the words the
@@ -883,8 +910,8 @@ def check_text_loss(
     for index, name in enumerate(names):
         reference = (out_dir / "truth" / f"{name}.txt").read_text(encoding="utf-8")
         slide = slides.get(name)
-        texts = [_normalise_text(text) for text in _slide_texts(slide)] if slide is not None else []
-        texts = [text for text in texts if text]
+        texts = [_normalised_words(text) for text in _slide_texts(slide)] if slide is not None else []
+        texts = [words for words in texts if words]
         hidden = hidden_text[index] if hidden_text is not None and slide is not None else ""
         hidden_words = {_normalise_text(word) for word in hidden.split()}
         lost = []
@@ -893,12 +920,16 @@ def check_text_loss(
             # A word that normalises to nothing is in every text.
             if not normalised or normalised in hidden_words:
                 continue
-            if not any(normalised in text for text in texts):
+            if not any(_written_in(normalised, words) for words in texts):
                 lost.append(word)
         # The chains are read only when a word is in no box's own text.
         if lost and slide is not None:
-            across = _across_text(slide)
-            lost = [word for word in lost if _normalise_text(word) not in across]
+            chains = _across_words(slide)
+            lost = [
+                word
+                for word in lost
+                if not any(_written_in(_normalise_text(word), chain) for chain in chains)
+            ]
         if lost:
             missing[name] = lost
     (out_dir / f"text_loss{_target_suffix(target)}.json").write_text(
