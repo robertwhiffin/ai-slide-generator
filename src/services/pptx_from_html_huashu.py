@@ -34,6 +34,18 @@ deck, made where the sidecar's TMPDIR would otherwise be (``_export_deck``). So
 whatever a sidecar ended at its timeout leaves there, its slides and its
 browsers' profiles, is removed with that directory.
 
+Logs. Every line the sidecar prints on stderr is echoed into the app's log
+(``[huashu-emit] …``), which every manager of the app reads, outside Tellr's
+per-deck permissions. So the sidecar prints no text of a slide's own: a slide
+summary counts its hidden words (``hiddenWords``), the text-loss line names its
+slide and how many words it lost, a validation message names the text box it
+quotes by its length, a message a slide's page made (a failure's, a read's) is
+said by its length, and what a page logs itself is cut and bounded per slide.
+``SIDECAR_DEBUG_TEXT_ENV`` adds the words, and no app passes it: it is not in
+``_SIDECAR_ENV_ALLOWLIST``, and the export fidelity harness adds it for its own
+runs alone. A failure's whole message stays in the list ``build_pptx_huashu``
+returns, which the routes give the user who exported the deck.
+
 Timeout. A run past ``SIDECAR_TIMEOUT_SECONDS`` must end node and every
 Chromium it launched: killed alone, node would leave its browser running with
 no parent, holding its memory until the app restarts. Playwright launches each
@@ -386,6 +398,13 @@ _SIDECAR_ENV_ALLOWLIST = (
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
 )
+
+# The one variable that lets the sidecar log a slide's own words (module
+# docstring, Logs; log_line.cjs DEBUG_TEXT_ENV). It is not in
+# _SIDECAR_ENV_ALLOWLIST, so no app passes it, however its environment is set:
+# the export fidelity harness adds it for its own runs alone
+# (scripts/export_fidelity/run.py sidecar_debug_text).
+SIDECAR_DEBUG_TEXT_ENV = "TELLR_EXPORT_DEBUG_TEXT"
 
 
 # The https hosts a slide's page may load in the sidecar's Chromium, by request

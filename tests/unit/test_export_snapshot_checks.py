@@ -135,16 +135,21 @@ EXISTING_SUMMARY_KEYS = (
     "captureFailures",
 )
 # The keys the checks add to the summary: the item counts, the capture time, the
-# hidden text and the target. modelDrops is the model check's count (model_check.cjs).
+# count of the hidden text's words and the target. modelDrops is the model check's
+# count (model_check.cjs), blockedRequests and closedPopups the request guard's
+# (request_guard.cjs). The hidden text itself is the summary's hiddenText only with
+# the sidecar's debug text on (export_logged(..., debug_text=True)).
 ADDED_SUMMARY_KEYS = (
     "text",
     "shapes",
     "lines",
     "tables",
     "captureMs",
-    "hiddenText",
+    "hiddenWords",
     "target",
     "modelDrops",
+    "blockedRequests",
+    "closedPopups",
 )
 # No `pseudo` key: the pseudo-element count is the existing pseudoElements.
 REPLACED_SUMMARY_KEY = "pseudo"
@@ -1425,7 +1430,8 @@ class TestSlideSummary:
     def test_a_slide_that_hides_nothing_has_no_hidden_text(
         self, counts_export: LoggedExport
     ) -> None:
-        assert _only_summary(counts_export)["hiddenText"] == ""
+        summary = _only_summary(counts_export)
+        assert summary["hiddenWords"] == 0 and "hiddenText" not in summary, summary
 
     def test_the_summary_records_the_powerpoint_target(self, counts_export: LoggedExport) -> None:
         assert _only_summary(counts_export)["target"] == "pptx"
@@ -1517,7 +1523,7 @@ def hidden_deck(tmp_path_factory: pytest.TempPathFactory) -> Iterator[HiddenDeck
         for case in HIDDEN_DECK
     ]
     with pytest.MonkeyPatch.context() as monkeypatch:
-        logged = export_logged(documents, monkeypatch=monkeypatch)
+        logged = export_logged(documents, monkeypatch=monkeypatch, debug_text=True)
     assert logged.failures == [], f"the export rejected a slide: {logged.failures}"
     out_dir = tmp_path_factory.mktemp("hidden-deck")
     documents_dir = out_dir / "documents"
@@ -1597,7 +1603,7 @@ class TestHiddenText:
 @pytest.fixture(scope="module")
 def ellipsis_export() -> Iterator[LoggedExport]:
     with pytest.MonkeyPatch.context() as monkeypatch:
-        yield export_logged([ELLIPSIS_DOCUMENT], monkeypatch=monkeypatch)
+        yield export_logged([ELLIPSIS_DOCUMENT], monkeypatch=monkeypatch, debug_text=True)
 
 
 @pytest.mark.slow
@@ -1643,7 +1649,7 @@ class TestTextLossIsLogged:
     @pytest.fixture(scope="class")
     def select_export(self) -> Iterator[LoggedExport]:
         with pytest.MonkeyPatch.context() as monkeypatch:
-            yield export_logged([SELECT_DOCUMENT], monkeypatch=monkeypatch)
+            yield export_logged([SELECT_DOCUMENT], monkeypatch=monkeypatch, debug_text=True)
 
     def test_a_slide_that_loses_visible_text_names_it(self, select_export: LoggedExport) -> None:
         """On a slide with a capture: the reference is read once the picture is taken.
@@ -2264,7 +2270,7 @@ class TestForgedResultLine:
                     (FORGED_MESSAGE_START, FORGED_RESULT_LINE, FORGED_SUMMARY_LINE)
                 )
                 exports[line_break] = export_logged(
-                    [_forging_slide(message)], monkeypatch=monkeypatch
+                    [_forging_slide(message)], monkeypatch=monkeypatch, debug_text=True
                 )
         yield exports
 
@@ -2358,7 +2364,7 @@ class TestHiddenTextOnOneLine:
             '<span style="opacity: 0;">alpha\x85beta</span> grew</p></div>'
         )
         with pytest.MonkeyPatch.context() as monkeypatch:
-            logged = export_logged([document], monkeypatch=monkeypatch)
+            logged = export_logged([document], monkeypatch=monkeypatch, debug_text=True)
         summary = _only_summary(logged)
         assert summary["hiddenText"] == "alpha\x85beta", summary
         assert text_missing_reports(logged.stderr) == [], logged.stderr[-3000:]

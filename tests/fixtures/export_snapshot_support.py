@@ -529,14 +529,19 @@ def export_logged(
     monkeypatch: pytest.MonkeyPatch,
     target: str | None = None,
     allow_model_drops: bool = False,
+    debug_text: bool = False,
 ) -> LoggedExport:
     """``export_documents`` (with ``target`` when given), keeping what the wrapper printed.
 
     ``build_pptx_huashu`` echoes the sidecar's stderr with ``print(...,
     file=sys.stderr)``; it is teed into a buffer here and still reaches the
     real stderr. Usable from module-scoped fixtures, where ``capsys`` is not.
+    With ``debug_text`` the sidecar logs each slide's words as well, as the
+    fidelity harness runs it (its ``sidecar_debug_text``): the summary's
+    ``hiddenText`` and the text-loss line naming them (``text_missing_reports``).
     """
-    with teed_stderr() as buffer:
+    debug = fidelity_harness().sidecar_debug_text() if debug_text else contextlib.nullcontext()
+    with teed_stderr() as buffer, debug:
         pptx, failures = _export_documents(
             documents,
             title=TEST_DECK_TITLE,
@@ -579,12 +584,26 @@ def summary_without_clock(summary: dict) -> dict:
 
 
 def text_missing_reports(stderr: str) -> list[list[str]]:
-    """The JSON array of every ``[html2pptx] text missing: <json array>`` line, in log order."""
-    return [
-        json.loads(line.removeprefix(TEXT_MISSING_PREFIX))
-        for line in _sidecar_lines(stderr)
-        if line.startswith(TEXT_MISSING_PREFIX)
-    ]
+    """The words of every ``[html2pptx] text missing: <json array>`` line, in log order.
+
+    The sidecar logs such a line, naming a slide's missing words, only with its
+    debug text on (``export_logged(..., debug_text=True)``); without it, each
+    slide that misses words logs ``{"slideIndex", "words"}``, their count, alone,
+    which fails this, so an export without the words never reads as missing
+    none. A slide that misses none logs neither.
+    """
+    reports = []
+    counted = []
+    for line in _sidecar_lines(stderr):
+        if not line.startswith(TEXT_MISSING_PREFIX):
+            continue
+        report = json.loads(line.removeprefix(TEXT_MISSING_PREFIX))
+        (reports if isinstance(report, list) else counted).append(report)
+    assert len(reports) == len(counted), (
+        f"{len(counted)} slide(s) miss words {counted}, and the sidecar named the words of "
+        f"{len(reports)}: export with debug_text=True to read them"
+    )
+    return reports
 
 
 # ---------------------------------------------------------------------------

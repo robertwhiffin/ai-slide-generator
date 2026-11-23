@@ -53,8 +53,11 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 // Every line printed here is one line as the Python wrapper reads it: a
-// failure's message can carry text the slide's page threw.
-const { logJson, oneLine } = require('./log_line.cjs');
+// failure's message can carry text the slide's page threw. The wrapper echoes
+// stderr into the app's log, so a line says such text by its length alone,
+// unless the debug text is on (log_line.cjs); the failure list, which goes to
+// the user who exported the deck, keeps each message whole.
+const { bounded, debugText, logJson, oneLine, pageText } = require('./log_line.cjs');
 
 // A SIGTERM (pptx_from_html_huashu.py run_sidecar_process, on a timeout) ends
 // node through its exit path, where Playwright's exit handler kills every
@@ -63,6 +66,10 @@ const { logJson, oneLine } = require('./log_line.cjs');
 // point: Playwright's own SIGTERM handler only closes the browsers gracefully
 // and leaves node running, which a hung slide can outlast.
 process.on('SIGTERM', () => process.exit(143));
+
+// The most of a message holding no page text (a launch failure, a slide past
+// its deadline) a line logs.
+const LOGGED_MESSAGE_LIMIT = 2000;
 
 async function readStdin() {
   const chunks = [];
@@ -81,7 +88,8 @@ async function main() {
   try {
     payload = JSON.parse(await readStdin());
   } catch (e) {
-    console.error('[huashu] invalid JSON on stdin:', oneLine(e.message));
+    // The parser quotes the input, which holds the deck.
+    console.error('[huashu] invalid JSON on stdin:', pageText(e.message));
     process.exit(2);
   }
 
@@ -157,7 +165,7 @@ async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBo
     try {
       await fs.writeFile(tmpHtml, slide.html, 'utf-8');
       // { slide } for the notes below; throws for a slide it rejects.
-      const result = await renderSlide(tmpHtml, pres, { bypassValidation, target, requestHosts });
+      const result = await renderSlide(tmpHtml, pres, { bypassValidation, target, requestHosts, slideIndex: i });
       if (slide.notes && result.slide && typeof result.slide.addNotes === 'function') {
         result.slide.addNotes(slide.notes);
       }
@@ -165,10 +173,14 @@ async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBo
       console.error(`[huashu] [${i + 1}/${slides.length}] OK`);
     } catch (e) {
       // renderSlide prefixes its message with the htmlFile path; strip the
-      // tmp prefix so the user sees a clean message.
+      // tmp prefix so the user sees a clean message. The log has the message
+      // whole only where renderSlide says it holds no page text (logMessage).
       const msg = String(e.message || e).replace(tmpHtml + ': ', '');
       failed.push({ slide_index: i, error: msg });
-      console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${oneLine(msg.split('\n')[0])}`);
+      const logged = debugText() || !e || typeof e.logMessage !== 'string'
+        ? pageText(msg.split('\n')[0])
+        : bounded(e.logMessage.split('\n')[0], LOGGED_MESSAGE_LIMIT);
+      console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${logged}`);
     }
   }
 
@@ -199,7 +211,7 @@ async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBo
 }
 
 main().catch((e) => {
-  console.error('[huashu] fatal:', oneLine(e && e.stack || e));
+  console.error('[huashu] fatal:', bounded(e && e.stack || e, LOGGED_MESSAGE_LIMIT));
   console.error('__HUASHU_RESULT__ ' + logJson({
     totalSlides: 0, succeeded: 0, failed: [{ slide_index: -1, error: String(e.message || e) }],
   }));

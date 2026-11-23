@@ -61,6 +61,7 @@ import sys
 import time
 import unicodedata
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
@@ -350,6 +351,33 @@ class _Tee(io.TextIOBase):
             stream.flush()
 
 
+@contextlib.contextmanager
+def sidecar_debug_text() -> Iterator[None]:
+    """For the block, this process's sidecars log each slide's words, which the harness reads.
+
+    By default the sidecar logs counts alone, since an app's log reaches readers
+    outside its decks' permissions: a slide summary's ``hiddenWords``, not its
+    ``hiddenText``; a text-loss line's count, not its words (``render_slide.cjs``).
+    ``check_text_loss`` needs each slide's hidden text, so the harness sets
+    ``SIDECAR_DEBUG_TEXT_ENV`` for its own sidecars: the variable is not in the
+    sidecar's env allowlist, which no app changes, so it is added to it here, for
+    the block alone.
+    """
+    flag = pptx_from_html_huashu.SIDECAR_DEBUG_TEXT_ENV
+    allowlist = pptx_from_html_huashu._SIDECAR_ENV_ALLOWLIST
+    had = os.environ.get(flag)
+    os.environ[flag] = "1"
+    pptx_from_html_huashu._SIDECAR_ENV_ALLOWLIST = (*allowlist, flag)
+    try:
+        yield
+    finally:
+        pptx_from_html_huashu._SIDECAR_ENV_ALLOWLIST = allowlist
+        if had is None:
+            os.environ.pop(flag, None)
+        else:
+            os.environ[flag] = had
+
+
 def _target_suffix(target: str) -> str:
     """What the files written for ``target`` add to their names: "" for PowerPoint."""
     return "" if target == "pptx" else f"-{target}"
@@ -407,7 +435,8 @@ def export_pptx(deck: dict, documents: list[Path], out_dir: Path, target: str = 
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
     slides_payload = [{"html": path.read_text(encoding="utf-8"), "notes": path.stem} for path in documents]
     echoed = io.StringIO()
-    with contextlib.redirect_stderr(_Tee(sys.stderr, echoed)):
+    # The summaries' hidden text, which check_text_loss reads (sidecar_debug_text).
+    with contextlib.redirect_stderr(_Tee(sys.stderr, echoed)), sidecar_debug_text():
         pptx_bytes, failures = pptx_from_html_huashu.build_pptx_huashu(
             deck.get("title", "slides"), slides_payload, bypass_validation=True, target=target
         )

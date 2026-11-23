@@ -51,7 +51,7 @@
 // in the picture. The settle (render_slide.cjs) has already finished the
 // slide's own animations, so this changes nothing else.
 
-const { oneLine } = require('./log_line.cjs');
+const { bounded, oneLine } = require('./log_line.cjs');
 
 // The attribute the snapshot names a target with, and the one it puts on
 // each descendant of a subtree target that the slide does not show.
@@ -63,6 +63,8 @@ const HIDDEN_ATTRIBUTE = 'data-tellr-capture-hidden';
 // wait per slide, not one per capture: after a capture times out, the slide's
 // remaining captures are not attempted.
 const CAPTURE_TIMEOUT_MS = 5000;
+// The most of a failed capture's reason its line says.
+const FAILURE_REASON_LIMIT = 300;
 
 // A computed value the snapshot read (a colour, a shadow list) is only ever
 // these characters ("/" separates an oklch() or color() alpha). Anything else
@@ -228,9 +230,10 @@ async function captureOne(page, capture, viewport) {
 }
 
 // Sequential and in capture-id order (DOM pre-order), so the same page gives
-// the same pictures in the same order every time. A capture's id and the
-// reason it failed come from the page, so each is printed on one line
-// (log_line.cjs oneLine).
+// the same pictures in the same order every time. A capture's id is one the
+// model check kept (c<n>), and the reason it failed is Playwright's, its
+// first line cut at FAILURE_REASON_LIMIT characters: neither is the slide's
+// text, and each is printed on one line (log_line.cjs oneLine).
 async function captureAll(page, captures, log = console) {
   const pictures = new Map();
   const ordered = (captures || []).slice().sort((a, b) => captureNumber(a) - captureNumber(b));
@@ -249,7 +252,7 @@ async function captureAll(page, captures, log = console) {
       pictures.set(capture.id, await captureOne(page, capture, viewport));
     } catch (error) {
       if (error && error.name === 'TimeoutError') timedOut = true;
-      const message = oneLine(String((error && error.message) || error).split('\n')[0]);
+      const message = bounded(String((error && error.message) || error).split('\n')[0], FAILURE_REASON_LIMIT);
       log.error(`[html2pptx] capture failed: ${oneLine(capture.id)} ${message}`);
     }
   }

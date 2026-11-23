@@ -37,14 +37,20 @@
 //     word written in items that are not neighbours (the letters of a lost
 //     chip that end and start the boxes either side of where it was) is not
 //     in this text (Task 15 H2, fix round 1).
+//   lostWords(reference, items, hidden) -> string[]
+//     The words missingWords finds in no item's text that are not in
+//     acrossText(items) either: the slide's lost words.
 //   textLossLine(reference, items, hidden) -> string | null
-//     '[html2pptx] text missing: <json array>' naming the words missingWords
-//     finds in no item's text that are not in acrossText(items) either, or
-//     null when none is missing. An item's text is every run of a text item
+//     '[html2pptx] text missing: <json array>' naming lostWords, or null when
+//     none is missing. It names a slide's own words, so render_slide.cjs logs
+//     it with the debug text on alone (log_line.cjs debugText), and their
+//     count and the slide otherwise. An item's text is every run of a text item
 //     (an outside list marker is a text item of its own; an inside one is a
 //     token of its line) or of a native table cell (a cell whose text is
 //     overlay items, paragraphs null, holds none of its own). No other item
 //     holds text.
+//   wordsOf(text) -> string[]
+//     The words of `text`: its runs of characters between white space.
 //   isWhiteSpace(character) -> boolean
 //   isDefaultIgnorable(character) -> boolean
 //     Whether one character is white space (a word ends at it, and it is
@@ -265,12 +271,17 @@ function acrossText(items) {
 }
 
 // The chains are read only when a word is in no item's own text.
-function textLossLine(reference, items, hidden) {
+function lostWords(reference, items, hidden) {
   let missing = missingWords(reference, emittedTexts(items), hidden);
   if (missing.length) {
     const across = acrossText(items);
     missing = missing.filter((word) => !across.includes(normalise(word)));
   }
+  return missing;
+}
+
+function textLossLine(reference, items, hidden) {
+  const missing = lostWords(reference, items, hidden);
   return missing.length ? TEXT_MISSING_PREFIX + logJson(missing) : null;
 }
 
@@ -285,7 +296,10 @@ function isDefaultIgnorable(character) {
 module.exports = {
   missingWords,
   acrossText,
+  lostWords,
   textLossLine,
+  wordsOf,
+  TEXT_MISSING_PREFIX,
   isWhiteSpace,
   isDefaultIgnorable,
   SLACK_FRACTION,

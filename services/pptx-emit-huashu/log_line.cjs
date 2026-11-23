@@ -18,6 +18,22 @@
 //
 // Every message the sidecar prints that holds text it did not write itself
 // goes through oneLine, and every JSON line through logJson.
+//
+// The wrapper echoes stderr into the app's log, which every manager of the app
+// reads, outside Tellr's per-deck permissions. So a line holds no text of a
+// slide's own (its words, a quote of it, a message its page made) unless
+// DEBUG_TEXT_ENV is 1, which no app sets (pptx_from_html_huashu.py keeps it
+// out of the sidecar's env; the export fidelity harness sets it for its own
+// runs, scripts/export_fidelity/run.py sidecar_debug_text):
+//
+//   debugText() -> boolean
+//     Whether DEBUG_TEXT_ENV is 1: a slide's own text may be logged.
+//   bounded(text, limit) -> string
+//     oneLine(text), cut at `limit` characters, the cut said with how many
+//     characters it left out.
+//   pageText(text, limit) -> string
+//     How a line says text that came from a slide's page: bounded(text,
+//     limit) with the flag, its length alone without it.
 
 // The characters str.splitlines() ends a line at: line feed, line tabulation,
 // form feed, carriage return, the file, group and record separators, next
@@ -38,4 +54,24 @@ function logJson(value) {
   return oneLine(JSON.stringify(value));
 }
 
-module.exports = { logJson, oneLine };
+const DEBUG_TEXT_ENV = 'TELLR_EXPORT_DEBUG_TEXT';
+// What a line quotes of a page's text at most: a message its page threw.
+const PAGE_TEXT_LIMIT = 300;
+
+function debugText() {
+  return process.env[DEBUG_TEXT_ENV] === '1';
+}
+
+function bounded(text, limit) {
+  const line = oneLine(text);
+  return line.length <= limit ? line : `${line.slice(0, limit)}… (${line.length - limit} more characters)`;
+}
+
+function pageText(text, limit = PAGE_TEXT_LIMIT) {
+  const value = String(text);
+  return debugText()
+    ? bounded(value, limit)
+    : `${value.length} characters, not logged (${DEBUG_TEXT_ENV}=1 logs them)`;
+}
+
+module.exports = { bounded, debugText, logJson, oneLine, pageText, DEBUG_TEXT_ENV, PAGE_TEXT_LIMIT };

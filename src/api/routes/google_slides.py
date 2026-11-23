@@ -708,9 +708,11 @@ def export_google_slides_from_huashu(
     if not pptx_bytes:
         # With bypass_validation=True the only way this happens is if every
         # slide hit a non-validation error (e.g. chromium failed to launch
-        # for all of them). Surface the failures so the user can debug.
+        # for all of them). Surface the failures so the user can debug. The log
+        # gets their count alone: a failure's message can quote the deck, and
+        # the app's log is read outside its permissions.
         logger.error(
-            "Huashu produced no output even with bypass; failures=%s", failures
+            "Huashu produced no output even with bypass: %d slide failure(s)", len(failures)
         )
         raise HTTPException(
             status_code=500,

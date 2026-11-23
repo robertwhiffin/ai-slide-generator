@@ -66,7 +66,7 @@
 //  */
 
 import { COLLECTION_ITEM_LIMIT, WALK_STEP_LIMIT } from './dom_access.mjs';
-import { oneLine } from './log_line.cjs';
+import { bounded } from './log_line.cjs';
 
 export const PSEUDO_HOST_ATTRIBUTE = 'data-tellr-pseudo-host';
 
@@ -82,6 +82,8 @@ const PSEUDO_TEXT_DEPTH_LIMIT = 16;
 // at a time, so a page full of pseudo-elements never has them all in flight.
 const PROTOCOL_BATCH = 256;
 const NO_PSEUDO_ELEMENTS = { hosts: [], count: 0, truncated: false };
+// The most of the protocol's reason for a read that failed its line says.
+const FAILURE_REASON_LIMIT = 300;
 
 function reportTruncation(what, log) {
   log.error(
@@ -366,7 +368,7 @@ export async function readPseudoElements(page, log = console) {
     session = await page.context().newCDPSession(page);
     return await readThrough(session, log);
   } catch (error) {
-    const message = oneLine(String((error && error.message) || error).split('\n')[0]);
+    const message = bounded(String((error && error.message) || error).split('\n')[0], FAILURE_REASON_LIMIT);
     log.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before, ::after and list markers`);
     return NO_PSEUDO_ELEMENTS;
   } finally {

@@ -39,14 +39,23 @@
 // unread at SLIDE_DEADLINE_MS (its page blocked by its own script): its browser
 // is closed, nothing it read is exported, and the deck goes on.
 //
-// renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts })
+// renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts, slideIndex })
 //   -> { slide, summary }
+// A slide it cannot export throws: the error's message for the slide's failure
+// entry, which goes to the user who exported the deck, and its `logMessage`,
+// when it has one, for the log; one without it may hold the page's text.
 // Each slide that renders logs
-//   [html2pptx] text missing: <json array>   when a word is missing, then
-//   [html2pptx] slide summary <json>         always, the summary on one line,
-// which pptx_from_html_huashu.py echoes and the export fidelity harness reads
-// (scripts/export_fidelity/run.py export_pptx). A slide that fails logs
-// neither.
+//   [html2pptx] text missing: {"slideIndex", "words"}   when a word is
+//                                         missing: the slide and how many,
+//   [html2pptx] slide summary <json>      always, the summary on one line,
+// which pptx_from_html_huashu.py echoes into the app's log and the export
+// fidelity harness reads (scripts/export_fidelity/run.py export_pptx). A slide
+// that fails logs neither. The app's log is read outside Tellr's per-deck
+// permissions, so no line holds a slide's own text: with the debug text on
+// (log_line.cjs debugText), which no app sets, the summary adds its
+// hiddenText and a second text-loss line names the words,
+//   [html2pptx] text missing: <json array>,
+// and every message below quotes what it is about.
 // target is the renderer the deck is written for, 'pptx' (the default) or
 // 'gslides': emit_model.cjs writes the few constructs the two draw apart
 // for it (emit_text.cjs writtenParagraphs; emit_typography.cjs fontSizePt,
@@ -61,10 +70,10 @@ const { pathToFileURL } = require('url');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
-const { logJson, oneLine } = require('./log_line.cjs');
+const { bounded, debugText, logJson, oneLine, pageText } = require('./log_line.cjs');
 const { checkModel, dropLine } = require('./model_check.cjs');
 const { guardContext } = require('./request_guard.cjs');
-const { textLossLine } = require('./text_check.cjs');
+const { lostWords, wordsOf, TEXT_MISSING_PREFIX } = require('./text_check.cjs');
 const { EMU_PER_IN, PT_PER_PX, PX_PER_IN } = require('./units.cjs');
 
 // The slide's own size in CSS px. Device scale 2 changes no layout; it makes
@@ -282,16 +291,46 @@ function launchOptions(tmpDir) {
 // Page chatter stays on stdout. Slide script can log anything, so each message
 // is written on one line (log_line.cjs oneLine), behind "Browser console:": no
 // line break in it can start a line of the sidecar's own (a slide summary, the
-// __HUASHU_RESULT__ failure list).
+// __HUASHU_RESULT__ failure list). The engine's own page-side lines name counts,
+// tags and their own text, none of a slide's; a slide's script could still log
+// its own words with the engine's prefix, so each message is cut at
+// PAGE_MESSAGE_LIMIT characters and a slide logs PAGE_MESSAGES_PER_SLIDE of
+// them at most to each stream: what a page logs costs the log a bounded part.
+// Measured over the engine's suites, its longest page-side line is 249
+// characters (a slide with no root, preprocess.mjs, which names each of the
+// body's section and article wrappers); a longer one keeps its first
+// PAGE_MESSAGE_LIMIT characters and says how many it left out.
+const PAGE_MESSAGE_LIMIT = 1000;
+const PAGE_MESSAGES_PER_SLIDE = 100;
+
+// Returns {report()}, which says on each stream how many of the page's
+// messages went past the bound, once the slide has been read.
 function forwardConsole(page) {
+  const streams = {
+    stderr: { write: (line) => console.error(line), left: PAGE_MESSAGES_PER_SLIDE, over: 0 },
+    stdout: { write: (line) => console.log(line), left: PAGE_MESSAGES_PER_SLIDE, over: 0 },
+  };
   page.on('console', (msg) => {
-    const text = oneLine(msg.text());
-    if (text.startsWith('[preprocess]') || text.startsWith('[html2pptx]')) {
-      console.error(`Browser console: ${text}`);
+    const text = String(msg.text());
+    const stream = text.startsWith('[preprocess]') || text.startsWith('[html2pptx]')
+      ? streams.stderr
+      : streams.stdout;
+    if (stream.left <= 0) {
+      stream.over += 1;
       return;
     }
-    console.log(`Browser console: ${text}`);
+    stream.left -= 1;
+    stream.write(`Browser console: ${bounded(text, PAGE_MESSAGE_LIMIT)}`);
   });
+  return {
+    report() {
+      for (const stream of Object.values(streams)) {
+        if (!stream.over) continue;
+        stream.write(`[html2pptx] page console: ${stream.over} more message(s) not logged: ` +
+          `a slide logs ${PAGE_MESSAGES_PER_SLIDE} at most`);
+      }
+    },
+  };
 }
 
 // ─── the slide's log ───────────────────────────────────────────────────
@@ -327,7 +366,7 @@ async function waitForFonts(page, sources, log) {
       log.error(`[html2pptx] the slide's fonts did not finish loading within ${FONTS_READY_TIMEOUT_MS} ms — continuing`);
     }
   } catch (e) {
-    log.error(`[html2pptx] document.fonts.ready failed: ${oneLine(e.message)} — continuing`);
+    log.error(`[html2pptx] document.fonts.ready failed: ${pageText(e.message)} — continuing`);
   } finally {
     clearTimeout(timer);
   }
@@ -346,7 +385,7 @@ async function finishAnimations(page, sources, log) {
   try {
     return await page.evaluate(sources.finishAnimations);
   } catch (e) {
-    log.error(`[html2pptx] finishing animations failed: ${oneLine(e.message)} — continuing`);
+    log.error(`[html2pptx] finishing animations failed: ${pageText(e.message)} — continuing`);
     return { finished: 0, cancelled: 0, unfinished: 0 };
   }
 }
@@ -376,7 +415,7 @@ async function runPreprocess(page, sources, log) {
     }
     return result;
   } catch (e) {
-    log.error(`[preprocess] failed: ${oneLine(e.message)} — continuing without`);
+    log.error(`[preprocess] failed: ${pageText(e.message)} — continuing without`);
     return null;
   }
 }
@@ -451,27 +490,38 @@ function validateTextBoxPosition(model, bodyDimensions) {
     if (fontSize > 12 && distanceFromBottom < MIN_BOTTOM_MARGIN_IN) {
       const text = runs.map((run) => run.text || '').join('');
       const textPrefix = text.substring(0, 50) + (text.length > 50 ? '...' : '');
-      errors.push(
-        `Text box "${textPrefix}" ends too close to bottom edge ` +
-        `(${distanceFromBottom.toFixed(2)}" from bottom, minimum ${MIN_BOTTOM_MARGIN_IN}" required)`
-      );
+      const where = `ends too close to bottom edge ` +
+        `(${distanceFromBottom.toFixed(2)}" from bottom, minimum ${MIN_BOTTOM_MARGIN_IN}" required)`;
+      errors.push({
+        message: `Text box "${textPrefix}" ${where}`,
+        logged: `Text box (${text.length} characters) ${where}`,
+      });
     }
   }
   return errors;
 }
 
-// An error can quote the slide's own text (a text box's first words), so each
-// is one line (log_line.cjs oneLine); the message's own line breaks part them.
+// A validation error is a message, or {message, logged}: what the slide's
+// failure says, and what the log says of it. The text box one quotes the box's
+// first words, which the log names by their length alone, but with the debug
+// text on (log_line.cjs debugText). Each is one line (log_line.cjs oneLine);
+// the message's own line breaks part them.
 function reportValidation(validationErrors, bypassValidation) {
   if (!validationErrors.length) return;
-  const errors = validationErrors.map(oneLine);
-  const errorMessage = errors.length === 1
-    ? errors[0]
-    : `Multiple validation errors found:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`;
+  const errors = validationErrors.map((error) => (
+    typeof error === 'string' ? { message: error, logged: error } : error
+  ));
+  const joined = (texts) => (texts.length === 1
+    ? texts[0]
+    : `Multiple validation errors found:\n${texts.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}`);
+  const errorMessage = joined(errors.map((error) => oneLine(error.message)));
+  const logged = debugText() ? errorMessage : joined(errors.map((error) => oneLine(error.logged)));
   if (bypassValidation) {
-    console.warn('[html2pptx] validation errors bypassed (slide will still emit):\n' + errorMessage);
+    console.warn('[html2pptx] validation errors bypassed (slide will still emit):\n' + logged);
   } else {
-    throw new Error(errorMessage);
+    const error = new Error(errorMessage);
+    error.logMessage = logged;
+    throw error;
   }
 }
 
@@ -483,7 +533,7 @@ async function readRenderedText(page, sources, log) {
     const text = await page.evaluate(sources.renderedText);
     return typeof text === 'string' ? text : null;
   } catch (e) {
-    log.error(`[html2pptx] reading the slide's rendered text failed: ${oneLine(e.message)} — its text is not checked for loss`);
+    log.error(`[html2pptx] reading the slide's rendered text failed: ${pageText(e.message)} — its text is not checked for loss`);
     return null;
   }
 }
@@ -501,9 +551,10 @@ function elapsedMs(start) {
 // as `kinds` does (`pictures` counts the images written, `skippedPictures`
 // those that had no picture). `captureMs` is the wall time of the slide's
 // captures, 0 when it has none: a clock reading, so it goes to the log alone,
-// never into the deck. `hiddenText` is the words the page reads that the
-// slide does not show (snapshot.mjs model.reference), which the text-loss
-// check leaves out, and `target` the renderer the deck is written for.
+// never into the deck. `hiddenWords` counts the words the page reads that the
+// slide does not show (snapshot.mjs model.reference.hiddenText), which the
+// text-loss check leaves out; with the debug text on (log_line.cjs debugText)
+// `hiddenText` is those words. `target` is the renderer the deck is written for.
 // `modelDrops` is how many captures, items and model fields Node could not
 // take from the page as the snapshot writes them (model_check.cjs), 0 for a
 // slide whose script shaped none of its model. `blockedRequests` is how many
@@ -540,7 +591,8 @@ function summarise(model, captures, readings) {
     lines: kinds.line || 0,
     tables: kinds.table || 0,
     captureMs,
-    hiddenText: model.reference.hiddenText,
+    hiddenWords: wordsOf(model.reference.hiddenText).length,
+    ...(debugText() ? { hiddenText: model.reference.hiddenText } : {}),
     target,
     modelDrops: dropped.items + dropped.captures + dropped.fields,
     blockedRequests: requests.blockedRequests,
@@ -548,24 +600,37 @@ function summarise(model, captures, readings) {
   };
 }
 
-// The slide's check lines on stderr (spec §6): what of the page's rendered
-// text the model lacks, when anything (text_check.cjs), then its summary.
-function reportChecks(summary, model, renderedText) {
+// The slide's check lines on stderr (spec §6): how many words of the page's
+// rendered text the model lacks, when any (text_check.cjs lostWords), and on
+// which slide (`slideIndex`, its index in the deck), the words themselves with
+// the debug text on; then its summary.
+function reportChecks(summary, model, renderedText, slideIndex) {
   if (renderedText !== null) {
-    const missing = textLossLine(renderedText, model.items, summary.hiddenText);
-    if (missing) console.error(missing);
+    const lost = lostWords(renderedText, model.items, model.reference.hiddenText);
+    if (lost.length) {
+      console.error(TEXT_MISSING_PREFIX + logJson({ slideIndex, words: lost.length }));
+      if (debugText()) console.error(TEXT_MISSING_PREFIX + logJson(lost));
+    }
   }
   console.error('[html2pptx] slide summary ' + logJson(summary));
 }
 
 // ─── the slide ─────────────────────────────────────────────────────────
+// An error whose message holds no text of the slide's own, so the log says it
+// whole (emit_deck.mjs, its FAIL line): `logMessage`. Any other error's
+// message may be the page's, and the log says it by its length alone.
+function loggedWhole(error) {
+  error.logMessage = error.message;
+  return error;
+}
+
 // The error a slide whose page navigated away from it fails with. The URL is
 // the page's, so only its scheme is said.
 function leftSlideError(scheme) {
-  return new Error(
+  return loggedWhole(new Error(
     `the slide's page navigated away from the slide (to a ${scheme}: URL), so it is not ` +
     'exported: an export reads nothing but its own slide'
-  );
+  ));
 }
 
 // Everything the render reads from the slide's page, in order.
@@ -601,10 +666,10 @@ async function readPage(page, slideUrl, sources, target, log) {
 
 // The error a slide past SLIDE_DEADLINE_MS fails with.
 function pastDeadlineError() {
-  return new Error(
+  return loggedWhole(new Error(
     `the slide did not finish within ${SLIDE_DEADLINE_MS / 1000} s, so it is not exported: ` +
     'its page may be blocked by its own script'
-  );
+  ));
 }
 
 // The slide's page read in a browser of its own, its requests guarded
@@ -629,15 +694,17 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
   const launching = chromium.launch(launchOptions(tmpDir));
   let browser = null;
   try {
-    browser = await Promise.race([launching, stopped]);
+    // A browser that cannot launch says so whole: no page has been loaded yet.
+    browser = await Promise.race([launching.catch((error) => { throw loggedWhole(error); }), stopped]);
     const context = await browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
     const guard = await guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme)));
     const page = await context.newPage();
     guard.watch(page);
-    forwardConsole(page);
+    const pageConsole = forwardConsole(page);
     const reading = readPage(page, slideUrl, sources, target, log);
     reading.catch(() => {});
     const readings = await Promise.race([reading, stopped]);
+    pageConsole.report();
     return { ...readings, requests: guard.counts() };
   } finally {
     clearTimeout(deadline);
@@ -653,10 +720,12 @@ async function renderSlide(htmlFile, pres, options = {}) {
     bypassValidation = false,
     target = 'pptx',
     requestHosts = new Map(),
+    slideIndex = null,
   } = options;
 
   try {
-    const sources = await loadPageSources();
+    // The engine's own modules, read from disk: their failure holds no page text.
+    const sources = await loadPageSources().catch((error) => { throw loggedWhole(error); });
     const filePath = path.isAbsolute(htmlFile) ? htmlFile : path.join(process.cwd(), htmlFile);
     const slideUrl = pathToFileURL(filePath).href;
     const readings = await readSlide(slideUrl, sources, { tmpDir, target, requestHosts });
@@ -670,19 +739,21 @@ async function renderSlide(htmlFile, pres, options = {}) {
 
     const slide = emitSlide(pres, model, captures, { target });
     const summary = summarise(model, captures, { ...readings, target });
-    reportChecks(summary, model, renderedText);
+    reportChecks(summary, model, renderedText, slideIndex);
     return { slide, summary };
   } catch (error) {
-    if (!error.message.startsWith(htmlFile)) {
-      throw new Error(`${htmlFile}: ${error.message}`);
-    }
-    throw error;
+    if (error.message.startsWith(htmlFile)) throw error;
+    const named = new Error(`${htmlFile}: ${error.message}`);
+    if (typeof error.logMessage === 'string') named.logMessage = error.logMessage;
+    throw named;
   }
 }
 
 module.exports = {
   launchOptions,
   renderSlide,
+  PAGE_MESSAGE_LIMIT,
+  PAGE_MESSAGES_PER_SLIDE,
   SLIDE_DEADLINE_MS,
   NETWORK_IDLE_TIMEOUT_MS,
   FONTS_READY_TIMEOUT_MS,
