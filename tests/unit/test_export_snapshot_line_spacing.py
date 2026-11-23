@@ -95,6 +95,7 @@ tests also need the deck's Google Fonts import, which serves DM Sans with its
 from __future__ import annotations
 
 import functools
+import json
 import math
 import re
 from collections.abc import Iterator
@@ -121,8 +122,10 @@ from tests.fixtures.export_snapshot_support import (
     cut_widths,
     export_corpus,
     export_slides,
+    node_json,
     powerpoint_tracking_px,
     requires_huashu_sidecar,
+    requires_node,
     slide_document,
     slide_shape_elements,
     slide_shapes,
@@ -1487,3 +1490,41 @@ class TestRenderCheckOutcomes:
             f"the justified box starts at {box.x:.2f} px; the paragraph's left edge is "
             f"{rect['x']:.2f} px"
         )
+
+
+# ---------------------------------------------------------------------------
+# A later paragraph's first line: half each paragraph's leading before it
+# ---------------------------------------------------------------------------
+
+EMIT_TEXT_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_text.cjs"
+
+
+def _loose_paragraph(text: str, size_px: float, line_height_px: float) -> dict:
+    """A paragraph of two lines of ``text`` at ``size_px``, spaced ``line_height_px`` apart."""
+    run = {"text": text, "family": "Arial", "weight": 400, "italic": False, "sizePx": size_px,
+           "color": "1B3139", "letterSpacingPx": 0, "underline": False, "strike": False,
+           "baseline": None, "opticalTrackingPx": 0, "unkernedTrackingPx": 0}
+    return {"sizePx": size_px, "lineHeightPx": line_height_px, "lines": [{"runs": [run]}, {"runs": [dict(run)]}]}
+
+
+@requires_node
+@pytest.mark.parametrize("target", ["pptx", "gslides"])
+def test_a_later_paragraphs_first_line_takes_half_of_each_paragraphs_leading(target: str) -> None:
+    """Between paragraphs of different leading, CSS sets each line in its own line height, the
+    leading split above and below it: the first line of the later paragraph has half the
+    earlier one's leading below it and half its own above it.
+
+    Two 20 px paragraphs of two lines each, at 40 px and at 30 px line height (the
+    renderers' single spacing is 24 px, so their leading is 16 px and 6 px): each later
+    line of a paragraph takes its own leading as space before (16 and 6 px), and the
+    later paragraph's first line (16 + 6) / 2 = 11 px. Taking either paragraph's whole
+    leading there puts the paragraph 5 px out.
+    """
+    item = {"paragraphs": [_loose_paragraph("Alpha", 20, 40), _loose_paragraph("Gamma", 20, 30)]}
+    objects = node_json(
+        f"const {{ textObjects }} = require({json.dumps(str(EMIT_TEXT_MODULE))});"
+        f"process.stdout.write(JSON.stringify(textObjects({json.dumps(item)}, {{}}, "
+        f"{{ target: {json.dumps(target)} }}).map((object) => object.options.paraSpaceBefore || 0)));"
+    )
+    points_per_px = 0.75
+    assert [round(value / points_per_px, 3) for value in objects] == [0, 16, 11, 6], objects

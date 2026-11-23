@@ -72,6 +72,18 @@ every solution stops at about 1.66 px, which is where PowerPoint and Google disa
 probes. Among those, these values have the lowest RMS of the ones checked (0.79 px). `C = -1`
 (so a pure "renderer baseline at B x size") reaches the same maximum with an RMS of 0.80 to 0.88.
 
+**The tie-break on the plateau, as a procedure.** `calibrate_text.py` reports the minimax fit
+(`minimax`) and the residuals of the constants in force (`current_constants`); it does not choose
+among the fits that share the plateau, which was done by hand. A re-calibration repeats it so:
+1. fit (A, B, C) by minimax over both renderers' probes; its largest residual is the plateau;
+2. take the fits whose largest residual is within 0.01 px of the plateau: Lawson's iterates and
+   the linear program's vertex, and C held at round values (−1, −1.5) with A and B refit by
+   minimax;
+3. keep the one with the lowest RMS residual over the same probes, rounding C to the value held.
+
+The constants above are that choice on the probe deck (`text_calibration.html`, four
+fonts): the C = −1.5 fit, RMS 0.79 px; C = −1 had 0.80 to 0.88.
+
 ## Residuals with these constants (the verification run)
 
 Google Slides: https://docs.google.com/presentation/d/1XS2dxYxfkzb0C9hEzaWOho8dwzPO4SZ1MJF1Pk6aGYw/edit
