@@ -42,7 +42,7 @@ SOURCE_GLOBS = (
 INVISIBLE_CATEGORIES = {"Cf", "Mn", "Me", "Cc", "Zl", "Zp"}
 VISIBLE_CONTROLS = {"\t"}
 # How a comment cites the plan rather than a measurement.
-PLAN_REFERENCE = re.compile(r"\bTask \d+|\bfix round\b|\bPhase [A-C]\b")
+PLAN_REFERENCE = re.compile(r"\bTask \d+|\bfix round\b|\bPhase [A-C]\b|\b[Ff]inal fix\b")
 
 
 def _sources() -> list[Path]:

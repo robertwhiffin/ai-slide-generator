@@ -131,6 +131,7 @@ const NETWORK_IDLE_TIMEOUT_MS = 4000;
 const FONTS_READY_TIMEOUT_MS = 5000;
 const CANVAS_READY_TIMEOUT_MS = 5000;
 const CANVAS_SETTLE_MS = 2000;
+const CANVAS_POLL_MS = 100;
 
 async function waitForFonts(page) {
   let timer;
@@ -155,12 +156,14 @@ async function settle(page) {
   await waitForFonts(page);
   const canvasCount = await page.evaluate(() => document.querySelectorAll('canvas').length);
   if (canvasCount > 0) {
-    // The options are waitForFunction's THIRD argument; the second is the page function's arg.
-    await page.waitForFunction(
+    // Polled with page.evaluate, as the engine polls it (render_slide.cjs
+    // waitForCanvases): page.waitForFunction runs its predicate inside the
+    // page, which the slide CSP (no 'unsafe-eval') refuses.
+    const ready = () => page.evaluate(
       () => Array.from(document.querySelectorAll('canvas')).every((canvas) => canvas.width > 0 && canvas.height > 0),
-      undefined,
-      { timeout: CANVAS_READY_TIMEOUT_MS },
-    ).catch(() => {});
+    );
+    const deadline = Date.now() + CANVAS_READY_TIMEOUT_MS;
+    while (!(await ready()) && Date.now() < deadline) await page.waitForTimeout(CANVAS_POLL_MS);
     await page.waitForTimeout(CANVAS_SETTLE_MS);
   }
   // The settled state: an entrance animation is measured where it ends. Each

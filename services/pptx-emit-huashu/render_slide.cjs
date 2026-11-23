@@ -91,11 +91,13 @@ const CANVAS_READY_TIMEOUT_MS = 5000;
 // Chart.js animates for 1000 ms by default, after the chart-init IIFE's own
 // setTimeout chain in build_slide_html; 2000 ms covers both.
 const CANVAS_SETTLE_MS = 2000;
+// How often the canvas wait reads the canvases again.
+const CANVAS_POLL_MS = 100;
 // How long one slide may take, from its browser's launch to its last read. A
 // slide whose script blocks its page (a busy loop) would hang every read after
 // it, and the deck with it until the sidecar's timeout (180 s), losing every
 // slide: at this it is stopped instead, its browser closed, and it fails
-// alone. Measured (Final fix A, a dev Mac): the slowest slide of both corpora
+// alone. Measured on a dev Mac: the slowest slide of both corpora
 // and of the long-off, dataviz-tpl18 and finance-off matrix decks takes 3.2 s
 // (a Chart.js slide, its 2 s canvas settle), the median 1.0 s, and Apps
 // renders a slide in about a Mac's time (25.3 s for the 28-slide long deck).
@@ -411,13 +413,33 @@ async function waitForFonts(page, sources, log) {
   }
 }
 
-async function waitForCanvases(page, sources) {
-  const canvasCount = await page.evaluate(sources.canvasCount);
-  if (canvasCount > 0) {
-    await page.waitForFunction(sources.canvasesReady, undefined, { timeout: CANVAS_READY_TIMEOUT_MS })
-      .catch(() => {});
-    await new Promise((resolve) => setTimeout(resolve, CANVAS_SETTLE_MS));
+// Every <canvas> given a drawing buffer (Chart.js sizes its canvas when it
+// first draws), bounded: a canvas that never gets one ends the wait at
+// CANVAS_READY_TIMEOUT_MS, and the slide is read with its canvases as they
+// are, which is said. The readiness is polled with page.evaluate, which the
+// DevTools protocol runs whatever the page's CSP: page.waitForFunction
+// evaluates its predicate inside the page, which the slide CSP (no
+// 'unsafe-eval') refuses at once, so the wait waited for nothing. A read that
+// fails (its page function threw) says its message by its length alone
+// (log_line.cjs pageText).
+async function waitForCanvases(page, sources, log) {
+  const canvasCount = Number(await page.evaluate(sources.canvasCount));
+  if (!(canvasCount > 0)) return;
+  const deadline = Date.now() + CANVAS_READY_TIMEOUT_MS;
+  try {
+    let ready = (await page.evaluate(sources.canvasesReady)) === true;
+    while (!ready && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, CANVAS_POLL_MS));
+      ready = (await page.evaluate(sources.canvasesReady)) === true;
+    }
+    if (!ready) {
+      log.error(`[html2pptx] canvases: ${canvasCount} canvas(es), not every one with a drawing buffer ` +
+        `within ${CANVAS_READY_TIMEOUT_MS} ms — continuing`);
+    }
+  } catch (error) {
+    log.error(`[html2pptx] the canvas wait failed: ${pageText(error && error.message)} — continuing`);
   }
+  await new Promise((resolve) => setTimeout(resolve, CANVAS_SETTLE_MS));
 }
 
 async function finishAnimations(page, sources, log) {
@@ -434,7 +456,7 @@ async function settle(page, sources, log) {
     await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS });
   } catch (e) { /* ignore — some slides legitimately keep a long-poll open */ }
   await waitForFonts(page, sources, log);
-  await waitForCanvases(page, sources);
+  await waitForCanvases(page, sources, log);
   return finishAnimations(page, sources, log);
 }
 

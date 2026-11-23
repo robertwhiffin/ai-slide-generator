@@ -294,6 +294,9 @@ async function snapshotPage(config, pseudoData, renderer) {
     return stops.length ? colourAt(stops, 0.5) : firstColourIn(layer);
   }
 
+  // A gradient whose reading throws gives no layer, which is said once a
+  // slide, without the error's message: a page that made the throw made that.
+  let gradientFailureReported = false;
   function gradientMiddle(value) {
     if (!value || value === 'none' || !/gradient\(/i.test(value)) return null;
     if (gradientCache.has(value)) return gradientCache.get(value);
@@ -307,6 +310,11 @@ async function snapshotPage(config, pseudoData, renderer) {
       }
     } catch (e) {
       middle = null;
+      if (!gradientFailureReported) {
+        gradientFailureReported = true;
+        console.warn('[html2pptx] a background gradient could not be read; the text over it is ' +
+          'blended without its colour (further ones on this slide are not said)');
+      }
     }
     gradientCache.set(value, middle);
     return middle;
