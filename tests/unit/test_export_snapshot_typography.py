@@ -1606,7 +1606,7 @@ class TestSnapshotFallbackFaces:
         and the nearest of those faces to the browser's (CALIBRATION.md D8).
         ↓ is DM Sans's own (guarded), so it is not taken out. ✓ is no WGL4
         character but one of the symbols MS PGothic draws alike in every app
-        (Task 15 B8), which DM Sans lacks (test_export_snapshot_drawn_faces.py
+        (CALIBRATION.md D8), which DM Sans lacks (test_export_snapshot_drawn_faces.py
         guards it): a run of its own in MS PGothic. The text reads as before.
         """
         document = _fallback_document()

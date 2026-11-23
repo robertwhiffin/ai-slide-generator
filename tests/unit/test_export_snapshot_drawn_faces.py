@@ -1,4 +1,4 @@
-"""The deck names the face the browser drew (Task 15 B8, N4), and symbols every app draws alike.
+"""The deck names the face the browser drew (CALIBRATION.md N4), and symbols every app draws alike.
 
 N4: for a run with no loaded webfont the snapshot wrote its stack's first family,
 "Inter" for ``Inter, "SF Pro Display", Helvetica, Arial, sans-serif``, while the

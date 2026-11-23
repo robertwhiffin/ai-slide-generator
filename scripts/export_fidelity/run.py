@@ -79,8 +79,8 @@ SLIDE_HEIGHT_PX = 720
 # 1280 px draws a picture's light rules dark (corpus slide 03's two rows of
 # EBEBEB gridline at B2B2B1 and B4B4B2) and a fringe round a mark in the
 # ground's own colour, which neither the UI nor Apple's Quartz drawing the same
-# PDF shows: an artefact of the harness's raster, not of the export (Task 14
-# Phase A, H1). Drawn at this many times the slide's size and box-filtered
+# PDF shows: an artefact of the harness's raster, not of the export
+# (CALIBRATION.md H1). Drawn at this many times the slide's size and box-filtered
 # down, each pixel the mean of the 16 it covers, the page comes out closer to
 # Quartz's (E9EAE9 and D0D1D0; CALIBRATION.md H1). The method is recorded in
 # each run's harness.json (HARNESS_RECORD), so a summary can tell a baseline
@@ -238,7 +238,7 @@ def build_documents(deck: dict, slides: list[tuple[str, str]], out_dir: Path) ->
 # UI's (the slide-host frame contract, which gives a template's <section>
 # wrapper the frame's area, is the UI's alone: export.py build_slide_html), and
 # a truth rendered from the export document showed a template deck's dark
-# html, body ground where the UI and both apps show the slide's (Task 15 H1).
+# html, body ground where the UI and both apps show the slide's.
 # So each slide's truth document is built by the UI's own code, never a copy
 # that can drift from it: ui_document.mjs bundles slideDocument.ts unchanged
 # with the frontend's esbuild and builds each slide as the viewer's stage
@@ -1051,8 +1051,8 @@ RENDERER_LABELS = {
 PDF_RENDERERS = ("powerpoint", "libreoffice")
 # The decks a run writes, in the order summary.md names them.
 TARGETS = ("pptx", "gslides")
-# A score this much above its baseline's is a slide gone worse (the Task 14
-# Phase B rule); summary.md lists every one.
+# A score this much above its baseline's is a slide gone worse; summary.md
+# lists every one.
 REGRESSION_THRESHOLD = 0.05
 # The lost words summary.md shows of one slide and deck before it counts the rest.
 LOST_WORDS_SHOWN = 8

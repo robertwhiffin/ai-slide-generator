@@ -3213,7 +3213,7 @@ class TestRotatedTextInAHostileRealm:
         )
 
 # ---------------------------------------------------------------------------
-# A flex-centred turned label (Task 15 N5)
+# A flex-centred turned label
 # ---------------------------------------------------------------------------
 
 # long-off 20's y-axis label, its CSS exactly (.dk-axis, .dk-axis--y), spanning

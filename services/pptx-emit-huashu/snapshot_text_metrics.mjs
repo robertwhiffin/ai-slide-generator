@@ -76,7 +76,7 @@ function createTextMetrics(layout) {
   const OPTICAL_SIZE_THRESHOLD = 0.005;
   // Characters a renderer spaces as one with the character before them: combining
   // marks, the zero-width joiners and the variation selectors.
-  const JOINS_PREVIOUS = /^[\p{M}‌‍︀-️\u{E0100}-\u{E01EF}]$/u;
+  const JOINS_PREVIOUS = /^[\p{M}\u200C\u200D\uFE00-\uFE0F\u{E0100}-\u{E01EF}]$/u;
   // A line the browser set at least this much further down than its spacing
   // grew (markLineGrowth); less is layout rounding.
   const LINE_GROWTH_MIN_PX = 0.5;
@@ -117,7 +117,7 @@ function createTextMetrics(layout) {
     [0x25d8, 0x25d9], [0x25e6, 0x25e6], [0x263a, 0x263c], [0x2640, 0x2640], [0x2642, 0x2642],
     [0x2660, 0x2660], [0x2663, 0x2663], [0x2665, 0x2666], [0x266a, 0x266b], [0xfb01, 0xfb02],
   ];
-  // Symbols outside WGL4 (Task 15 B8, CALIBRATION.md D8): the 982 that MS
+  // Symbols outside WGL4 (CALIBRATION.md D8): the 982 that MS
   // PGothic and MS Gothic both draw, glyph for glyph, in PowerPoint for Mac and
   // in Google Slides (measured through both apps' PDFs: superscript digits,
   // currency, letterlike symbols, number forms, arrows, mathematical operators,
@@ -449,7 +449,7 @@ function createTextMetrics(layout) {
   // resolveWrittenFaces(webfonts): the face each queued run, and each queued
   // table cell's own face, is written in where its family is no webfont the
   // page loaded (`webfonts`, model.fonts): the face the browser drew it in, by
-  // a name every app draws with its metrics (Task 15 B8, N4). Each family of
+  // a name every app draws with its metrics (CALIBRATION.md N4). Each family of
   // its stack is probed alone on the run's characters, the coverage probe font
   // after it (drawnCss): the first that draws any of them is the one the
   // browser's own font matching took for the run, as the browser falls back
@@ -814,8 +814,8 @@ function createTextMetrics(layout) {
       // advances, every glyph's, the last one's included: spread over all n
       // characters it puts each glyph where the browser has it, and only the
       // last glyph's ink ends its share wide. Kerning lies between characters
-      // alone, so it is spread over the gaps it closes (a review A/B with
-      // n - 1 for both made fixture 01's PowerPoint score 0.64 worse).
+      // alone, so it is spread over the gaps it closes (measured: n - 1 for
+      // both made fixture 01's PowerPoint score 0.64 worse).
       const gaps = pending.endsLine ? characters - 1 : characters;
       const kerning = unkernedCut > 0 && gaps > 0 ? (exportCut - unkernedCut) / gaps : 0;
       pending.run.unkernedTrackingPx = delta + kerning;

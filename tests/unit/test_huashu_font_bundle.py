@@ -1,4 +1,4 @@
-"""The export sidecar's font bundle (Task 15 B8, N3).
+"""The export sidecar's font bundle (CALIBRATION.md N3).
 
 On Databricks Apps the sidecar's Chromium laid out every font stack with no
 loaded webfont in the base image's DejaVu, 10-38 % wider than a desktop's faces,

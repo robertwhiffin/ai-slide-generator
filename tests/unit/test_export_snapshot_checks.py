@@ -16,8 +16,9 @@ the app log and in the export fidelity harness (spec §6):
   or null when nothing is missing. An atomic inline (an inline-block numeral,
   a chip) is an item of its own, so innerText's "1Financials" or "Iceberg," is
   written in two items, which are neighbours on the slide; a lost chip's two
-  sides are not, so its letters at their ends are no excuse (Task 15 H2, fix
-  round 1; *Words across neighbours* below). Both are pure, so they are
+  sides are not, and a word read across a join holds the words either side
+  of it whole, so its letters at their ends are no excuse (*Words across
+  neighbours* below). Both are pure, so they are
   tested here in Node over hand-built item arrays, with no browser, on the
   one table of cases the harness's twin reads as hand-built decks.
 * ``render_slide.cjs`` reads the reference after the captures (the body's
@@ -160,12 +161,12 @@ REPLACED_SUMMARY_KEY = "pseudo"
 # comparison must see through: the word joiner the PowerPoint deck writes after
 # a line-ending script run, and the invisible characters authored text carries.
 DEFAULT_IGNORABLE_CODE_POINTS = {
-    "word-joiner-U+2060": "⁠",
-    "zero-width-space-U+200B": "​",
-    "soft-hyphen-U+00AD": "­",
-    "zero-width-no-break-space-U+FEFF": "﻿",
+    "word-joiner-U+2060": "\u2060",
+    "zero-width-space-U+200B": "\u200b",
+    "soft-hyphen-U+00AD": "\u00ad",
+    "zero-width-no-break-space-U+FEFF": "\ufeff",
 }
-WORD_JOINER = "⁠"
+WORD_JOINER = "\u2060"
 
 # Every synthetic slide carries this paragraph, so an export that drops
 # everything cannot pass for one that drops only the hidden content.
@@ -340,7 +341,7 @@ JOINED_BODY = (
 JOINED_DOCUMENT = _case_document(JOINED_BODY)
 
 # Words the page runs across an atomic inline's edge, as real decks write them
-# (the Task 15 matrix): an inline-block numeral before its item's first word
+# (the matrix decks): an inline-block numeral before its item's first word
 # (long-off 02), and a chip followed by a comma (dense-tpl18 03). The export
 # writes each atomic inline as an item of its own, painted after the text
 # around it, so innerText's "1Financials" and "Iceberg," are written in two
@@ -363,7 +364,7 @@ ATOMIC_BODY = (
 ATOMIC_DOCUMENT = _case_document(ATOMIC_BODY)
 
 # ---------------------------------------------------------------------------
-# Words across neighbours (Task 15 H2, fix round 1)
+# Words across neighbours
 # ---------------------------------------------------------------------------
 # A word no item holds whole is still written when it lies across the joins of
 # a chain of neighbouring text items, each item's text run on into the next's.
@@ -380,7 +381,7 @@ ATOMIC_DOCUMENT = _case_document(ATOMIC_BODY)
 # Each case is one slide of boxes that both checks read: the sidecar's as text
 # items of a slide model (_model_item), the harness's as a deck's text boxes
 # (_deck_of_boxes). The real cases' boxes are the export's own, measured on
-# the Task 15 matrix decks (long-off 02, dense-tpl18 03) and on a slide laying
+# the matrix decks (long-off 02, dense-tpl18 03) and on a slide laying
 # out the review's probe (its seven boxes; the "AI", "ML" and "KPI" chips
 # between the boxes whose ends spell them), each read from the slide model the
 # sidecar wrote for it.
@@ -587,7 +588,7 @@ def _financials(start: float, **layout: object) -> Box:
 # Name -> (the slide's boxes, in the order it paints them; its reference; the
 # words both checks report missing).
 ACROSS_CASES: dict[str, tuple[tuple[Box, ...], str, list[str]]] = {
-    # The two patterns of the Task 15 matrix, on the export's own boxes.
+    # The two patterns of the matrix decks, on the export's own boxes.
     "an inline-block numeral and its word (long-off 02)": (NUMERAL_ROWS, NUMERAL_REFERENCE, []),
     "chips and the commas after them (dense-tpl18 03)": (CHIP_LINES, CHIP_REFERENCE, []),
     "the review's probe, its chips written": (_probe(PROBE_PAINT_ORDER), PROBE_REFERENCE, []),
@@ -1329,7 +1330,7 @@ class TestTextLossLine:
 
 @requires_node
 class TestWordsAcrossNeighbours:
-    """``textLossLine`` finds a word written across neighbours, and only there (Task 15 H2).
+    """``textLossLine`` finds a word written across neighbours, and only there.
 
     Each case of ACROSS_CASES is a slide of boxes, given as a slide model's
     text items; TestHarnessWordsAcrossNeighbours reads the same cases as decks.

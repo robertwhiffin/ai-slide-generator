@@ -20,8 +20,8 @@
 // PowerPoint and Google Slides draw all of them as CSS draws the box, within
 // their raster's own rounding, and keep a preset a preset (Drive:
 // ROUND_2_SAME_RECTANGLE, ROUND_2_DIAGONAL_RECTANGLE, ROUND_1_RECTANGLE), so it
-// resizes with circular corners and keeps its handles (Task 14 B4, D11,
-// measured in both apps; scripts/export_fidelity/CALIBRATION.md D11).
+// resizes with circular corners and keeps its handles (measured in both apps;
+// scripts/export_fidelity/CALIBRATION.md D11).
 
 const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
 const { emitTable } = require('./emit_table.cjs');

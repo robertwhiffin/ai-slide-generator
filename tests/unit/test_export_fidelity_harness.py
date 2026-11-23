@@ -7,7 +7,7 @@ rendering of it:
   size, with an alpha mask and ``/Interpolate true``. MuPDF drawing such a page
   at the slide's own 1280 px draws a picture's 1 px rules dark and a fringe
   round a mark in the ground's own colour, which neither the UI nor Apple's
-  Quartz drawing the same PDF shows (Task 14 Phase A, H1). So the harness
+  Quartz drawing the same PDF shows (CALIBRATION.md H1). So the harness
   draws every page at ``PDF_RASTER_SCALE`` (4) times the slide's size and
   box-filters it down to 1280x720, each pixel the mean of the 16 it covers
   (``rasterise_pdf``), and records that method in the run's ``harness.json``.
@@ -18,7 +18,7 @@ rendering of it:
   PDFs were rasterised another way is said to be so, because its PowerPoint
   scores do not compare with these; a baseline whose truth was rendered from
   another document, and each slide whose truth image changed, are named.
-* **The truth** (Task 15 H1) is the slide as the UI shows it: each slide's
+* **The truth** is the slide as the UI shows it: each slide's
   document built by the UI's own ``slideDocument.ts``, bundled with the
   frontend's esbuild (``build_ui_documents``). Without that esbuild the harness
   stops before it exports, naming what to install.
@@ -493,7 +493,7 @@ class TestMainSummary:
 
 
 # ---------------------------------------------------------------------------
-# The truth: the slide as the UI shows it (Task 15 H1)
+# The truth: the slide as the UI shows it
 # ---------------------------------------------------------------------------
 
 # A design-system template deck, as the matrix's template decks are made: the
@@ -696,7 +696,7 @@ def _failing_second_slide_frontend(tmp_path: Path) -> tuple[Path, Path]:
 
 @requires_node
 class TestUiDocumentsBroken:
-    """A frontend install that is there but broken (Task 15 B7 fix round 1): the harness stops
+    """A frontend install that is there but broken: the harness stops
     with one ``[export-fidelity]`` line naming the remedy, exit code 2, and has written nothing."""
 
     def test_main_stops_with_one_line_and_writes_nothing(

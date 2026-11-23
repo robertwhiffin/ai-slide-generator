@@ -98,8 +98,8 @@ const CANVAS_SETTLE_MS = 2000;
 // alone. Measured (Final fix A, a dev Mac): the slowest slide of both corpora
 // and of the long-off, dataviz-tpl18 and finance-off matrix decks takes 3.2 s
 // (a Chart.js slide, its 2 s canvas settle), the median 1.0 s, and Apps
-// renders a slide in about a Mac's time (25.3 s for the 28-slide long deck,
-// Task 15 B8). The engine's own bounded waits add up to 26 s (network idle,
+// renders a slide in about a Mac's time (25.3 s for the 28-slide long deck).
+// The engine's own bounded waits add up to 26 s (network idle,
 // the fonts before and after the animations, the canvases and their settle,
 // one capture), so the deadline fails no slide those waits let through, slow
 // and exported as far as it settled; and a deck with one blocked slide still

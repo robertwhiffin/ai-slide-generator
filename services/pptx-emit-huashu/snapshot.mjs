@@ -1098,7 +1098,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   // left first): a rect when none rounds (a corner with either radius 0 is
   // square); a roundRect carrying the radius when all four are one circle; and
   // else 'roundCorners', each corner its own radii, a square one {0, 0}
-  // (Task 14 B4, D11: one roundRect rounded all four by the largest).
+  // (CALIBRATION.md D11: one roundRect rounded all four by the largest).
   function cornerGeometry(corners) {
     let largest = 0;
     let sameCircle = true;

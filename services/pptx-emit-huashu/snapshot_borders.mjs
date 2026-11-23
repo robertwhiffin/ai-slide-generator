@@ -120,8 +120,7 @@ function createBorders(env) {
   // ─── border regions ──────────────────────────────────────────────────
   // A box whose corners round and whose border differs between sides paints
   // each solid side as CSS does (CSS Backgrounds 3 §5), not as a line along
-  // it, whose square ends would stand out past the cut-away corners (Task 15
-  // N7):
+  // it, whose square ends would stand out past the cut-away corners:
   // * the border area lies between the rounded border box and the rounded
   //   padding box, each inner radius the outer one less the border beside it,
   //   floored at 0 (a corner either of whose radii is then 0 is square), and
@@ -142,7 +141,7 @@ function createBorders(env) {
   //   polygon whose edge runs out along that line and back, no ring. Split in
   //   two regions meeting along the dividing lines, Google Slides drew an
   //   anti-aliased seam on each line, 19 to 64 levels lighter than the
-  //   border's colour (Task 15 B7, fix round 1).
+  //   border's colour.
   // Each region is one filled path, its arcs polygons within the snapshot's
   // arc tolerance (arcSteps), turned with the box and cut to the clip, its
   // rect and then any rounded padding box of it, as a side's triangle is.

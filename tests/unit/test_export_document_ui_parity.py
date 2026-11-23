@@ -1,4 +1,4 @@
-"""The export document gives a slide's inherited text what the UI's document gives it (Task 15, N2).
+"""The export document gives a slide's inherited text what the UI's document gives it.
 
 THE DEFECT. ``build_slide_html``'s first sheet set ``html, body { font-family:
 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif }``, and the UI's
@@ -15,7 +15,7 @@ WHAT IS PINNED.
   export's shell sheets read from the document ``build_slide_html`` writes, the
   UI's from the ``SLIDE_PREVIEW_RESET_STYLE`` literal of the TS source. Today
   neither declares one.
-* **The frontend's capture shells, from source** (Task 15 B7, fix round 1).
+* **The frontend's capture shells, from source**.
   ``pdf_client.ts``, ``pptx_client.ts`` and ``screenshotCapture.ts`` each
   build a slide document of their own around the deck's CSS (the PDF
   download, the client-side PPTX's chart captures, the chat's screenshots).
@@ -302,7 +302,7 @@ NO_FONT_SLIDE = (
     f'margin:0; font-size:24px; line-height:1.4; color:#1B3139">{NO_FONT_PARAGRAPH}</p>'
     "</div>"
 )
-# The font the export's shell gave body before Task 15 B7.
+# The font the export's shell once gave body, which the UI's never did.
 OLD_SHELL_FONT = "font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif"
 
 

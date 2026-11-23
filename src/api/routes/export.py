@@ -214,7 +214,7 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # the right colour, so the .pptx was immune here BY CONSTRUCTION.
     #
     # NO FONT ON THE SHELL, DELIBERATELY: inherited text gets exactly what the
-    # UI's document gives it (Task 15 N2). This sheet used to set `html, body {
+    # UI's document gives it. This sheet used to set `html, body {
     # font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif }`,
     # which buildSlideDocument (frontend/src/services/slideDocument.ts) never
     # set. Text that takes its font from `body` was then drawn in the browser's

@@ -7,7 +7,7 @@
 
   Chromium lays out a font stack with no loaded webfont in the faces fontconfig
   gives it. The base image has DejaVu alone, 10 to 38 % wider than a desktop's
-  faces (Task 15 matrix, N3), so this config gives it the open faces
+  faces (CALIBRATION.md N3), so this config gives it the open faces
   metric-compatible with the core fonts PowerPoint and Google Slides draw:
 
     Liberation Sans    for Arial and Helvetica, and sans-serif and system-ui;

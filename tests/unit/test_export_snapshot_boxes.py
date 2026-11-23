@@ -24,12 +24,12 @@ native shape:
   ``16px 16px 0 0``) keeps each corner's own: the ``round2SameRect`` preset
   when its top corners are one circle and its bottom ones another, each at
   most half the short side, and otherwise a custom path of one quarter arc per
-  rounded corner (Task 14 B4, D11: before, one ``roundRect`` rounded all four
-  by the largest);
+  rounded corner (CALIBRATION.md D11: one ``roundRect`` rounded all four by
+  the largest);
 * on a box whose corners round, a border that differs between sides paints
   each solid side as the region CSS paints for it, a filled custom shape that
-  follows the corners and tapers (Task 15 N7: before, a straight line along the
-  side, its square ends past the corners). Its pixels are held against Chrome's
+  follows the corners and tapers, where a line along the side would stand its
+  square ends past the corners. Its pixels are held against Chrome's
   own screenshot at every corner; a uniform border stays the shape's outline,
   and a square box, a dashed side and a sliced inline fragment keep a line.
 
@@ -1650,7 +1650,7 @@ class TestCornerEmitter:
 
 
 # ---------------------------------------------------------------------------
-# One-sided borders on rounded boxes (Task 15 N7)
+# One-sided borders on rounded boxes
 # ---------------------------------------------------------------------------
 
 # Each case: a 200 x 110 white box on the slide, its own style, the colours of

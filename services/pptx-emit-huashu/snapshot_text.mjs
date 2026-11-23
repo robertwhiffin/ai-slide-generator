@@ -249,15 +249,16 @@ function createTextLayout(env) {
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
   // A generic family keyword or a system alias names no face an importer can
-  // resolve. Where one draws a run, the run is written in the face the export's
-  // container draws for it, by its metric-compatible name (Task 15 B8, measured
-  // on Databricks Apps with the sidecar's font bundle): sans-serif and system-ui
-  // are Liberation Sans there, Arial; serif Liberation Serif, Times New Roman;
-  // monospace Liberation Mono, Courier New. cursive, fantasy, emoji and math draw
-  // nothing there, so their text is set in the standard face, Liberation Serif:
-  // Times New Roman. The first of them in a stack also names the face a
-  // character a webfont lacks is written in (fallbackFaceOf). A plain table,
-  // read with hasOwnProperty: page script can replace Map and Set.
+  // resolve. Where one draws a run, the run is written in the face the
+  // export's container draws for it, by its metric-compatible name
+  // (CALIBRATION.md N3, measured on Databricks Apps with the sidecar's font
+  // bundle): sans-serif and system-ui are Liberation Sans there, Arial; serif
+  // Liberation Serif, Times New Roman; monospace Liberation Mono, Courier New.
+  // cursive, fantasy, emoji and math draw nothing there, so their text is set
+  // in the standard face, Liberation Serif: Times New Roman. The first of them
+  // in a stack also names the face a character a webfont lacks is written in
+  // (fallbackFaceOf). A plain table, read with hasOwnProperty: page script can
+  // replace Map and Set.
   const GENERIC_FACES = {
     'serif': 'Times New Roman',
     'ui-serif': 'Times New Roman',

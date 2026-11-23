@@ -386,7 +386,7 @@ function createTurnedText(env, layout) {
   //   (line.anonymousItem, collectTextBlocks) are a block of their own,
   //   placed by their bounds: the container, not text-align, puts the item
   //   where it is, as a flex-centred axis label centres its word along the
-  //   axis (Task 15 N5).
+  //   axis.
   function turnedBlocks(turned) {
     const lines = turned.reversed ? turned.lines.slice().reverse() : turned.lines.slice();
     let first = 0;
