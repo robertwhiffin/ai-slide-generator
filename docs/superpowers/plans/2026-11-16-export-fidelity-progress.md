@@ -2119,3 +2119,112 @@ Google Slides decks kept for this batch (intermediate probe decks deleted by id)
   ("Tellr export revamp — fix B, in-repo corpus (pinned fonts, 1a4c0b52)")
 - Design-system corpus: https://docs.google.com/presentation/d/1nP3nPwLERMa8k-5ZW3VzqnI9t4qFiGyXPPgIziFRxFc/edit
   ("Tellr export revamp — fix B, design-system corpus (pinned fonts, 1a4c0b52)")
+
+printf "\n"
+
+cat /Users/tariq.yaaqba/.claude/jobs/937bacb3/tmp/fixC/ledger-draft.md
+
+## Final fix C: the residuals of the final fix round
+
+The combined re-review of Fix A and Fix B left two Important residuals (N1, N2) and three
+Minor ones (N3, N4, N5), and M11's gradient line. Commits `59f82310..2deb3323` and this ledger
+on `feat/export-revamp`, each pushed.
+
+- **N1, the deadline bounds every step of a slide** (`bc878ca7`). Only the launch and the
+  page's reads were raced against `SLIDE_DEADLINE_MS`; `newContext`, the request guard's
+  routing, `newPage` and the `finally`'s close were waited for unbounded, and `stop()` only
+  rejected a promise nobody awaited. Now every step is raced against the slide's stop, a
+  launch carries the deadline as its Playwright timeout, and the slide's browser is closed
+  within `BROWSER_CLOSE_TIMEOUT_MS` (5 s) or its process group killed (through the
+  in-process server's handle, `browser._connection.toImpl(browser).options.browserProcess`,
+  Playwright 1.59.1: the public API gives a launched browser no process; measured, a kill
+  takes 0.02 s), which one `[html2pptx]` line says. A slide stopped before its page opened
+  fails with "its browser stopped answering". A slide read whole whose browser will not close
+  is kept: its reads are done. Red first through the real engine: a preload hangs one step of
+  the middle slide of three (newContext, the guard's `context.route`, newPage, close) and
+  records every earlier browser's process group at each launch and at node's exit (before
+  Playwright's own exit handler). Red: each deck lost at the 90 s test timeout. Green: one
+  failure, two slides, about 35 s, for each setup step; the close case, all three slides in
+  about 10 s, the browser killed; no browser running at any launch or at exit. Six sabotages
+  red. Without the kill, a never-closing browser's pipes keep node alive to the timeout, so
+  the kill is what keeps the deck.
+- **N2, the engine's diagnostics on a channel the page cannot write to** (`c427dbb7`).
+  - Each pass says what it diagnoses with `diagnose(key, ...)` (`dom_access.mjs`): a key of
+    the engine's own wordings, numbers it counted, the page's text as its length and first
+    300 characters. 17 call sites in 7 modules, and the six "loss" texts the probes pass.
+  - The entries are one string built in the pass's closure with string concatenation,
+    `typeof`, comparison and a string's own length and characters, so it depends on no
+    built-in the page can replace and needs no pristine realm (which a hostile page can
+    deny, the very case the collection lines report). The brief named pristine-realm
+    primitives; measured, they would not have been enough: Playwright's own page-side
+    serializer calls the page's `Array.prototype.push` for every value an evaluate returns,
+    and a page owning it dropped and forged entries of an array however it was built.
+  - So Node reads each pass's result as a handle, its properties through the DevTools
+    protocol (`render_slide.cjs` evaluatePass, `JSHandle.getProperties`), which runs no page
+    script; a value that is an object is still serialized as `page.evaluate` does, so the
+    model and the decks are unchanged.
+  - `model_check.cjs` checkDiagnostics takes nothing but the engine's wordings
+    (`DIAGNOSTIC_LINES`, `DIAGNOSTIC_PARTS`, slots `{n}` `{p}` `{w}` `{l}`): an entry that is
+    none is dropped, on an `[html2pptx] model:` line, and counted in `modelDrops`.
+    `log_line.cjs` diagnosticLine writes each with its pass's prefix, wordings always, page
+    text by its length without the flag (`body children [<5 characters>]`, the line ending
+    "(page text not logged: …)"), whole with it.
+  - A pass keeps 100, a slide logs 100 lines, the rest counted on one
+    `[html2pptx] diagnostics:` line.
+  - Found on the way, fixed: the summary logged the background transfer's result and the
+    animations' counts as the page's serializer handed them; a page owning
+    `Array.prototype.push` wrote its own words into the summary without the flag (probed).
+    Both are checked now and a bad one dropped and counted.
+  - Residual, measured: a page that replaces `window.eval`, which Playwright's utility script
+    calls with every evaluate's source, decides what any pass returns. Its diagnostics then
+    still say nothing but the engine's wordings, page text in page slots by its length (a
+    test pins it), but it can drop them, as it can replace the model.
+  - Tests: every required string without the flag (`[preprocess] no slide root:`,
+    `wrapper candidates (none)`, `several element children`, `resolved NO root`,
+    `[preprocess] collection`, the last through a new wrapper-flood fixture); a page that
+    replaces its console and owns `Array.prototype.push` (drops and forges in the engine's
+    encoding); an error message holding the page's word; the `window.eval` takeover; the
+    rewritten pass results; the bounds; the checker. The seven call sites that read fixed
+    wordings through the flag (boxes, hostile realm, lists, tables ×2, slide root depth ×2,
+    failures announced) read them without it; the other thirteen read the page's own text
+    (hidden text, lost words, console forwarding) and keep it. 18 sabotages red; one went
+    green first (it left the half-read entry to be rejected anyway) and was strengthened.
+- **N3** (in `c427dbb7`): `dom_access.mjs`, `preprocess.mjs` and the wrapper's docstring said
+  page console lines reach stderr; corrected, with the log hygiene module's docstring and the
+  support helper's.
+- **N4, CI deselects the live-CDN test** (`59f82310`): `-m "not network"`, the marker
+  registered, the job's comment giving the hand-run command; a guard pins all three.
+- **N5, a failed slide counts its page console too** (`6fcb6ed0`): the count line is written
+  in the slide's `finally`, read or failed; once a slide is stopped its page's messages are
+  neither forwarded nor counted. Of the first four sabotages two went green: once the
+  slide's log stopped, the forwarding already returned early, so writing through the log as
+  well was a second, redundant layer; it was removed, and both remaining sabotages are red.
+- **M11's gradient line** reaches the log without the flag as a fixed wording (N2); its test
+  reads it so.
+
+- **Harness** (both corpora, `--pin-fonts --powerpoint --gslides`, at `2deb3323`, against Fix
+  B's final runs): both decks of both corpora equal Fix B's part for part (core.xml aside).
+  Every score is equal: in-repo corpus 1.95 → 1.95 (PowerPoint) and 2.44 → 2.44 (Google),
+  design-system corpus 1.62 → 1.62 and 1.52 → 1.52; nothing worse by more than 0.05. No text
+  lost in either deck of either corpus, no failures, 0 MODEL DROPS. No engine diagnostic is
+  logged for any corpus slide.
+
+- **Tests.** The gate (`-k "(export or huashu or google) and not timeout"`, the timeout file
+  ignored, run serially): 1834 passed, 0 failed, 13 skipped, in 38 min (Fix B: 1812 / 0 / 13,
+  at `-n 6`). Full suite (`-n 4`, the timeout file ignored): 18506 passed, 0 failed, 28
+  skipped (Fix B: 18484 / 0 / 28). Every behavioural test was red first; 29 sabotages red
+  (N1 6, N2 18, N4 3, N5 2), every file restored (`fixC/*sabotage-results.json`). A handle
+  read costs about 0.6 ms more per pass than `page.evaluate` (measured, 1.14 against 0.51 ms).
+
+- **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`. N1 changed the
+  launch (a `timeout` option) and the close; its stubs were read against both and need no
+  change: `BLOCKING_LAUNCH_PRELOAD` passes the options through and wraps the same
+  `newContext`/`newPage`/`goto`, and `HUNG_SLIDE` still reaches its 10 s sidecar timeout
+  before the 30 s deadline. One test seam elsewhere did need it: the log hygiene suite's
+  throwing-page preload stubs `page.evaluateHandle` beside `page.evaluate`.
+
+Google Slides decks kept for this batch (no other deck was made):
+- In-repo corpus: https://docs.google.com/presentation/d/1_eoGwKs9FJxJvGJVUoNyHVF26e0lOzNsx2RCknRSmLc/edit
+  ("Tellr export revamp — fix C, in-repo corpus (pinned fonts, 2deb3323)")
+- Design-system corpus: https://docs.google.com/presentation/d/1bwgWxX_SkOlAzYnahymJpoYUUYhasZMuZq20YJ7D-kE/edit
+  ("Tellr export revamp — fix C, design-system corpus (pinned fonts, 2deb3323)")
