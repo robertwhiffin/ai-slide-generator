@@ -1,6 +1,7 @@
 """Export endpoints for PDF and PPTX generation."""
 
 import asyncio
+import json
 import logging
 import re
 import tempfile
@@ -1082,6 +1083,65 @@ EXPORTS_BUSY_DETAIL = "Exports are busy right now. Please try again in a minute.
 EXPORTS_BUSY_RETRY_AFTER_SECONDS = 60
 
 
+# The PPTX route's X-Huashu-Failures header, which names a partly exported deck's
+# failed slides for the frontend's toast. Proxies refuse a response whose headers
+# are too large, and a failure's text can be long (measured: a browser that
+# crashed at its launch failed its slide with 14,424 characters of Chromium's
+# launch log). So each text is cut at HUASHU_FAILURE_TEXT_LIMIT characters, the
+# cut marked with HUASHU_FAILURE_TEXT_ELISION, and the whole header is at most
+# HUASHU_FAILURES_HEADER_LIMIT bytes of ASCII JSON (huashu_failures_header). A
+# failure list in a body, the 422's or the Google Slides route's, keeps each
+# message whole.
+HUASHU_FAILURE_TEXT_LIMIT = 300
+HUASHU_FAILURES_HEADER_LIMIT = 4096
+HUASHU_FAILURE_TEXT_ELISION = "…"
+
+
+def _failures_json(failures: list[dict], limit: int) -> str:
+    """``failures`` as compact ASCII JSON, each ``error`` cut at ``limit`` characters."""
+    cut = []
+    for failure in failures:
+        entry = dict(failure)
+        if "error" in entry:
+            text = str(entry["error"])
+            if len(text) > limit:
+                text = text[:limit] + HUASHU_FAILURE_TEXT_ELISION
+            entry["error"] = text
+        cut.append(entry)
+    return json.dumps(cut, ensure_ascii=True, separators=(",", ":"))
+
+
+def huashu_failures_header(failures: list[dict]) -> str:
+    """The ``X-Huashu-Failures`` value: ``failures`` as JSON, at most the header's bound in bytes.
+
+    Each entry keeps its keys, its ``error`` cut at ``HUASHU_FAILURE_TEXT_LIMIT``
+    characters. When the whole is still too long, every error is cut at the
+    longest length at which it fits (the length only grows with the cut, so it
+    is searched by halves); and when even errors of the elision alone do not
+    fit, the first entries that fit are kept. ASCII, so its length is its bytes.
+    """
+    header = _failures_json(failures, HUASHU_FAILURE_TEXT_LIMIT)
+    if len(header) <= HUASHU_FAILURES_HEADER_LIMIT:
+        return header
+    fitting = None
+    shortest, longest = 0, HUASHU_FAILURE_TEXT_LIMIT - 1
+    while shortest <= longest:
+        limit = (shortest + longest) // 2
+        candidate = _failures_json(failures, limit)
+        if len(candidate) <= HUASHU_FAILURES_HEADER_LIMIT:
+            fitting, shortest = candidate, limit + 1
+        else:
+            longest = limit - 1
+    if fitting is not None:
+        return fitting
+    kept: list[dict] = []
+    for failure in failures:
+        if len(_failures_json([*kept, failure], 0)) > HUASHU_FAILURES_HEADER_LIMIT:
+            break
+        kept.append(failure)
+    return _failures_json(kept, 0)
+
+
 def exports_busy(error: Exception, *, route: str) -> HTTPException:
     """The 429 a Chrome export route answers ``HuashuBusyError`` with; the reason is logged."""
     logger.warning("%s export refused, its worker busy: %s", route, error)
@@ -1387,10 +1447,9 @@ def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         "X-Huashu-Succeeded": str(len(slides_with_html) - len(failures)),
     }
     if failures:
-        # Compact JSON so it fits comfortably in a header. Frontend parses
-        # it for the "N slides failed" toast.
-        import json as _json
-        headers["X-Huashu-Failures"] = _json.dumps(failures, ensure_ascii=True)
+        # Bounded JSON, each failure's text cut (huashu_failures_header): the
+        # frontend parses it for the "N slides failed" toast.
+        headers["X-Huashu-Failures"] = huashu_failures_header(failures)
 
     from fastapi.responses import Response
     return Response(
