@@ -38,7 +38,7 @@ import pytest
 
 from tests.fixtures.export_snapshot_support import (
     CORPUS_DIR,
-    DECK_CSS,
+    CORPUS_DECK_CSS,
     PINNED_FONT_DIR,
     browser_loaded_faces,
     browser_probes,
@@ -112,7 +112,7 @@ def _design_system_css() -> str:
 
 class TestPinnedFontsCss:
     def test_the_corpus_deck_pins_to_the_faces_the_snapshot_tests_pin(self) -> None:
-        assert fidelity_harness().pinned_fonts_css(DECK_CSS) == pinned_font_css()
+        assert fidelity_harness().pinned_fonts_css(CORPUS_DECK_CSS) == pinned_font_css()
 
     @pytest.mark.parametrize("url", sorted(fidelity_harness().PINNED_FONT_IMPORTS), ids=_import_id)
     def test_each_pinned_import_becomes_its_faces_and_reaches_no_google_fonts(
@@ -153,7 +153,7 @@ class TestPinnedFontsCss:
 
     def test_an_import_it_has_no_faces_for_is_refused(self) -> None:
         with pytest.raises(ValueError, match="Inter:wght@400"):
-            fidelity_harness().pinned_fonts_css(_import_line(UNPINNED_IMPORT) + DECK_CSS)
+            fidelity_harness().pinned_fonts_css(_import_line(UNPINNED_IMPORT) + CORPUS_DECK_CSS)
 
     @pytest.mark.parametrize(
         "reference",
@@ -171,13 +171,13 @@ class TestPinnedFontsCss:
     def test_a_face_loaded_from_google_fonts_files_is_refused(self) -> None:
         reference = f"@font-face {{ font-family: 'Inter'; src: url({UNPINNED_FILE}); }}\n"
         with pytest.raises(ValueError, match=GOOGLE_FONT_FILES_HOST):
-            fidelity_harness().pinned_fonts_css(DECK_CSS + reference)
+            fidelity_harness().pinned_fonts_css(CORPUS_DECK_CSS + reference)
 
 
 class TestLoadFixtureDeck:
     def test_by_default_the_deck_loads_with_its_live_fonts(self) -> None:
         deck, slides = fidelity_harness().load_fixture_deck(CORPUS_DIR)
-        assert deck["css"] == DECK_CSS
+        assert deck["css"] == CORPUS_DECK_CSS
         assert len(slides) == len(list((CORPUS_DIR / "slides").glob("*.html")))
 
     def test_pinned_the_deck_loads_with_the_pinned_faces(self) -> None:
@@ -206,7 +206,7 @@ def _fixture_copy(tmp_path: Path) -> Path:
     fixture_dir = tmp_path / "fixture"
     slides_dir = fixture_dir / "slides"
     slides_dir.mkdir(parents=True)
-    (fixture_dir / "deck.css").write_text(DECK_CSS, encoding="utf-8")
+    (fixture_dir / "deck.css").write_text(CORPUS_DECK_CSS, encoding="utf-8")
     (fixture_dir / "deck.json").write_text(
         (CORPUS_DIR / "deck.json").read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -298,7 +298,7 @@ class TestPinnedFacesRender:
         only, so the two widths are equal: pinning it to the corpus's file would
         change how its slides look.
         """
-        css = DECK_CSS if corpus == "corpus" else _design_system_css()
+        css = CORPUS_DECK_CSS if corpus == "corpus" else _design_system_css()
         document = slide_document(
             '<div class="slide"><p>fixture</p></div>',
             css=fidelity_harness().pinned_fonts_css(css),

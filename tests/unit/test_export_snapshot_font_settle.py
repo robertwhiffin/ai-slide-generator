@@ -242,8 +242,10 @@ def _slide_lines(logged: LoggedExport, names: list[str], name: str) -> list[str]
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestFontsSettle:
-    def test_the_fixtures_bite(self, late_font_url: str) -> None:
-        documents = _documents(late_font_url)
+    def test_the_fixtures_bite(self) -> None:
+        # The face's source does not matter to the scripts read here; measure.cjs loads
+        # nothing from the network, so it is a data: URL.
+        documents = _documents("data:font/woff2;base64,")
         assert json.loads(browser_title(documents["animated-own-access"])) == {
             "deniesPristine": True
         }

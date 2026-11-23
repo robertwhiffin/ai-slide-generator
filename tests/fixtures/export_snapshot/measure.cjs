@@ -16,7 +16,8 @@
 //        node measure.cjs <document.html> <points-json> --mode=pixels
 //        node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
-// nothing matches.
+// nothing matches, and 3 when the document asks for anything from the network,
+// which the page aborts: a test's documents carry what they load.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
 //                getBoundingClientRect().
 //   --mode=each-rect prints [{"x":…,"y":…,"w":…,"h":…}, …], the
@@ -124,6 +125,8 @@ function launchOptions() {
 // The same settle as render_slide.cjs, step for step and with the same bounds,
 // so a test measures the state the engine exports. Written out here rather than
 // imported from the engine, so the measurement stays an independent oracle.
+// What a measured page may load: its own file, and data:, blob: and about: URLs.
+const LOCAL_URL = /^(?:file|data|blob|about):/i;
 const NETWORK_IDLE_TIMEOUT_MS = 4000;
 const FONTS_READY_TIMEOUT_MS = 5000;
 const CANVAS_READY_TIMEOUT_MS = 5000;
@@ -1373,9 +1376,23 @@ async function main() {
   const browser = await chromium.launch(launchOptions());
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2 });
+    // Hermetic, as the export the tests run is (tests/unit/conftest.py): the page
+    // loads nothing from the network, and a document that asks is refused.
+    const remote = [];
+    await page.route(() => true, (route) => {
+      const url = route.request().url();
+      if (LOCAL_URL.test(url)) return route.continue().catch(() => {});
+      remote.push(url);
+      return route.abort('aborted').catch(() => {});
+    });
     await page.goto('file://' + path.resolve(documentPath));
     await settle(page);
     const measured = await MODES[mode](page, selector, index);
+    if (remote.length) {
+      console.error(`the document loads from the network, which a test's never does: ${remote.join(' ')}`);
+      process.exitCode = 3;
+      return;
+    }
     if (measured.error) {
       console.error(measured.error);
       process.exitCode = 2;

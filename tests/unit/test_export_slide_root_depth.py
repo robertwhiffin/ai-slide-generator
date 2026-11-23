@@ -50,7 +50,7 @@ from src.api.routes.export import build_slide_html
 from src.domain.slide_deck import SlideDeck
 from src.services import pptx_from_html_huashu
 from src.utils.html_utils import find_slide_roots
-from tests.fixtures.export_snapshot_support import build_pptx_guarded
+from tests.fixtures.export_snapshot_support import build_pptx_guarded, hermetic_document
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
     GROUND,
@@ -259,7 +259,8 @@ class TestBackendSidecarDepthParity:
         """
         deck = SlideDeck.from_html_string(_chain_document(depth)).to_dict()
         assert len(deck["slides"]) == 1, f"depth={depth}: expected one slide"
-        slide_html = build_slide_html(deck["slides"][0], deck)
+        # The deck's Chart.js, which a parsed deck is given, from the vendored copy.
+        slide_html = hermetic_document(build_slide_html(deck["slides"][0], deck))
         pptx = _build_html(monkeypatch, slide_html)
         assert _slide_background(pptx) == GROUND, (
             f"depth={depth}: production path lost the slide-root ground"

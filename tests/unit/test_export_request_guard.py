@@ -62,6 +62,9 @@ from tests.fixtures.export_snapshot_support import (
 
 GUARD_MODULE = pptx_from_html_huashu.SIDECAR_DIR / "request_guard.cjs"
 
+# Every slide here but the ordinary ones reaches for what the guard aborts.
+pytestmark = pytest.mark.requests_blocked
+
 # What the slides try to read. A word or a colour no ordinary slide holds, so finding one
 # in the deck is finding what a slide read.
 FILE_SECRET = "QuokkaFileSecret"
@@ -503,8 +506,13 @@ class TestTheHostsAreTheCsps:
             html_safety.slide_csp_request_hosts(csp)
 
     def test_the_wrapper_gives_the_sidecar_the_csps_hosts(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        production_request_hosts: dict[str, tuple[str, ...]],
     ) -> None:
+        """An app's export gives the sidecar the wrapper's own hosts, which are the CSP's."""
+        assert production_request_hosts is html_safety.SLIDE_CSP_REQUEST_HOSTS
         payloads: list[dict] = []
 
         def run(command: list[str], *, input: bytes, timeout: float, **_: object):  # noqa: A002

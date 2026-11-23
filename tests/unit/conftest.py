@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import queue
+import re
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -1737,3 +1738,80 @@ def fake_queue():
     Assert: isinstance(fake_queue.items[0], StreamEvent)
     """
     return FakeQueue()
+
+
+# ---------------------------------------------------------------------------
+# The export suites load nothing from the network (I4).
+# ---------------------------------------------------------------------------
+# An export a unit test runs gives the sidecar no https host
+# (pptx_from_html_huashu.SIDECAR_REQUEST_HOSTS), so its request guard
+# (services/pptx-emit-huashu/request_guard.cjs) aborts every request a slide's page
+# makes but its own file, data: and blob:, and its results never move with the
+# network. The test documents carry what they load (tests/fixtures/
+# export_snapshot_support.py: DECK_CSS's embedded webfonts, VENDORED_SCRIPTS). A
+# real export whose slides asked for anything the guard aborted fails its test, at
+# the export, naming the count per slide: a test whose slides reach for what the
+# guard aborts, by design, is marked ``requests_blocked``. A test marked
+# ``network`` is given the slide CSP's hosts, as an app's export is, and so is one
+# that asks for ``production_request_hosts``.
+
+_SLIDE_SUMMARY_LINE = "[html2pptx] slide summary "
+_PHASE_SUFFIX = re.compile(r" \((?:setup|call|teardown)\)$")
+
+
+def _blocked_per_slide(stderr: bytes) -> list[int]:
+    """Each slide summary's blockedRequests, in slide order, from the sidecar's own stderr."""
+    counts = []
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
+        if line.startswith(_SLIDE_SUMMARY_LINE):
+            counts.append(int(json.loads(line.removeprefix(_SLIDE_SUMMARY_LINE)).get("blockedRequests", 0)))
+    return counts
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _exports_offline(request: pytest.FixtureRequest):
+    from src.services import pptx_from_html_huashu
+
+    items = {item.nodeid: item for item in request.session.items}
+    run = pptx_from_html_huashu.run_sidecar_process
+
+    def current_test() -> pytest.Item | None:
+        nodeid = _PHASE_SUFFIX.sub("", os.environ.get("PYTEST_CURRENT_TEST", ""))
+        return items.get(nodeid)
+
+    def run_offline(*args: Any, **kwargs: Any):
+        result = run(*args, **kwargs)
+        blocked = _blocked_per_slide(result.stderr or b"")
+        test = current_test()
+        if any(blocked) and not (test and test.get_closest_marker("requests_blocked")):
+            raise AssertionError(
+                "an export reached for the network, which the unit suites never do: the request "
+                f"guard aborted requests of its slides, {blocked} per slide. Build its documents "
+                "with what they load (DECK_CSS, slide_document's VENDORED_SCRIPTS), or mark a test "
+                "whose slides reach for what the guard aborts, by design, requests_blocked"
+            )
+        return result
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(pptx_from_html_huashu, "SIDECAR_REQUEST_HOSTS", {})
+    patch.setattr(pptx_from_html_huashu, "run_sidecar_process", run_offline)
+    try:
+        yield
+    finally:
+        patch.undo()
+
+
+@pytest.fixture
+def production_request_hosts(monkeypatch: pytest.MonkeyPatch):
+    """The slide CSP's hosts, which an app's export gives the sidecar, given for this test."""
+    from src.services import pptx_from_html_huashu
+    from src.utils.html_safety import SLIDE_CSP_REQUEST_HOSTS
+
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_REQUEST_HOSTS", SLIDE_CSP_REQUEST_HOSTS)
+    return SLIDE_CSP_REQUEST_HOSTS
+
+
+@pytest.fixture(autouse=True)
+def _network_tests_online(request: pytest.FixtureRequest):
+    if request.node.get_closest_marker("network"):
+        request.getfixturevalue("production_request_hosts")

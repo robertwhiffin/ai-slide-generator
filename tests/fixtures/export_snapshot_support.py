@@ -13,9 +13,13 @@ what the browser itself laid out for the same document.
   snapshot engine logs ``[html2pptx] model:``, its model check having dropped
   part of a slide's model (``assert_no_model_drops``, for an export a test
   runs itself); a test that means it passes ``allow_model_drops=True``.
-  ``pinned_font_css`` is the corpus deck's CSS with its Google Fonts
-  @import replaced by the same faces, embedded, for tests that compare
-  exports of one page whole.
+* Every test document loads nothing from the network, and no export a test
+  runs may (``tests/unit/conftest.py`` gives the sidecar no host, and fails
+  an export whose requests its guard aborted). ``DECK_CSS``, each document's
+  default CSS, is the corpus deck's with its Google Fonts @import replaced by
+  the same faces, embedded (``pinned_font_css``; ``CORPUS_DECK_CSS`` is the
+  deck's own), and ``slide_document`` writes each CDN script the tests vendor
+  inline (``VENDORED_SCRIPTS``, ``hermetic_document``).
 * ``ui_document`` is the document the UI's slide viewer builds for a slide
   body, by the frontend's own ``slideDocument.ts`` (the harness's truth
   document), the twin of the export's ``slide_document``; tests that build
@@ -127,11 +131,26 @@ SNAPSHOT_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_snapshot"
 MEASURE_SCRIPT = SNAPSHOT_FIXTURE_DIR / "measure.cjs"
 FIDELITY_HARNESS = REPO_ROOT / "scripts" / "export_fidelity" / "run.py"
 
-# The corpus deck's CSS as committed, its webfonts loaded from Google Fonts.
+# The corpus deck's CSS as committed, its webfonts loaded from Google Fonts. The
+# tests' DECK_CSS (below) is this with the webfonts embedded.
 CORPUS_DECK_CSS: str = (CORPUS_DIR / "deck.css").read_text(encoding="utf-8")
-DECK_CSS: str = CORPUS_DECK_CSS
 # deck.json carries the corpus deck's ``title``, ``scripts`` and ``external_scripts``.
 CORPUS_DECK: dict = json.loads((CORPUS_DIR / "deck.json").read_text(encoding="utf-8"))
+
+# The scripts test decks load from a CDN, each a test-only copy committed under
+# tests/fixtures/export_snapshot/vendor with its licence, which ``slide_document`` writes
+# inline in its place, so no export a test runs loads it from the network (I4). Chart.js
+# 4.4.1 is the npm package's dist/chart.umd.js, which jsdelivr serves for the corpus's
+# chart.umd.min.js behind a comment of its own (tests/unit/test_export_hermetic.py pins
+# its hash), and stands in too for the latest Chart.js 4 that the URL every parsed deck
+# is given (src/domain/slide_deck.py CHART_JS_URL) names. Not an npm dependency of the
+# sidecar or the frontend.
+VENDOR_DIR = SNAPSHOT_FIXTURE_DIR / "vendor"
+CHART_JS_4_4_1 = VENDOR_DIR / "chart.js-4.4.1" / "chart.umd.js"
+VENDORED_SCRIPTS: dict[str, Path] = {
+    "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js": CHART_JS_4_4_1,
+    "https://cdn.jsdelivr.net/npm/chart.js": CHART_JS_4_4_1,
+}
 
 # The corpus deck loads DM Sans and DM Mono from Google Fonts, which now and then
 # answers its @import with another stylesheet naming another DM Sans file, so
@@ -163,7 +182,7 @@ LATIN_UNICODE_RANGE = (
 @functools.cache
 def pinned_font_css() -> str:
     """The corpus deck's CSS with its Google Fonts @import replaced by the same faces, as data:."""
-    assert len(GOOGLE_FONTS_IMPORT.findall(DECK_CSS)) == 1, (
+    assert len(GOOGLE_FONTS_IMPORT.findall(CORPUS_DECK_CSS)) == 1, (
         "fixture drift: deck.css no longer has the one Google Fonts @import this pins"
     )
     faces = []
@@ -174,7 +193,31 @@ def pinned_font_css() -> str:
             f"font-display: swap; src: url(data:font/woff2;base64,{font}) format('woff2'); "
             f"unicode-range: {LATIN_UNICODE_RANGE}; }}"
         )
-    return "\n".join(faces) + "\n" + GOOGLE_FONTS_IMPORT.sub("", DECK_CSS, count=1)
+    return "\n".join(faces) + "\n" + GOOGLE_FONTS_IMPORT.sub("", CORPUS_DECK_CSS, count=1)
+
+
+# The deck CSS every test document defaults to: the corpus deck's, its webfonts
+# embedded, so no export a test runs loads a font from the network (I4).
+DECK_CSS: str = pinned_font_css()
+
+
+@functools.cache
+def _vendored_script(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def hermetic_document(document_html: str) -> str:
+    """``document_html`` with each script it loads from a CDN that the tests vendor written inline.
+
+    The ``<script src>`` of each of VENDORED_SCRIPTS, as ``build_slide_html`` and the UI's
+    document builder write it, becomes an inline script holding the vendored copy, in
+    the same place: the page runs the same code, loaded from the repository.
+    """
+    for url, path in VENDORED_SCRIPTS.items():
+        document_html = document_html.replace(
+            f'<script src="{url}"></script>', f"<script>{_vendored_script(path)}</script>"
+        )
+    return document_html
 
 
 TEST_DECK_TITLE = "export snapshot test"
@@ -259,20 +302,24 @@ def slide_document(
     title: str = TEST_DECK_TITLE,
     slide_id: str = "snapshot-1",
 ) -> str:
-    """The complete export document for one slide body, exactly as the export routes build it.
+    """The complete export document for one slide body, as the export routes build it.
 
     ``export_slides`` builds its documents with this function, so a test that
     measures ``slide_document(body)`` with ``browser_rect`` measures the very
-    page the sidecar rendered.
+    page the sidecar rendered. A script of ``external_scripts`` the tests vendor is
+    written inline (``hermetic_document``), so the document loads nothing from the
+    network.
     """
-    return build_slide_html(
-        {"slide_id": slide_id, "html": body},
-        {
-            "css": css,
-            "scripts": scripts,
-            "external_scripts": list(external_scripts),
-            "title": title,
-        },
+    return hermetic_document(
+        build_slide_html(
+            {"slide_id": slide_id, "html": body},
+            {
+                "css": css,
+                "scripts": scripts,
+                "external_scripts": list(external_scripts),
+                "title": title,
+            },
+        )
     )
 
 
@@ -295,7 +342,7 @@ def ui_document(
     deck = {"css": css, "scripts": scripts, "external_scripts": list(external_scripts)}
     with tempfile.TemporaryDirectory(prefix="tellr-ui-document-") as directory:
         (path,) = harness.build_ui_documents(deck, [(name, body)], Path(directory))
-        return path.read_text(encoding="utf-8")
+        return hermetic_document(path.read_text(encoding="utf-8"))
 
 
 # The line the snapshot engine logs when Node drops part of a slide's model

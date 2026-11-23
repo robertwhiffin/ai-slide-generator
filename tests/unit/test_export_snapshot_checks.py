@@ -92,6 +92,7 @@ from PIL import Image
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
+    CORPUS_DECK,
     CORPUS_DIR,
     DECK_CSS,
     EMU_PER_PX,
@@ -2107,7 +2108,10 @@ class TestHarnessRun:
         fixture_dir = tmp_path / "fixture"
         slides_dir = fixture_dir / "slides"
         slides_dir.mkdir(parents=True)
-        shutil.copyfile(CORPUS_DIR / "deck.json", fixture_dir / "deck.json")
+        # Hermetic: the corpus deck without its CDN Chart.js, which none of these
+        # slides draws with, and its webfonts pinned (--pin-fonts, below).
+        deck = {**CORPUS_DECK, "external_scripts": []}
+        (fixture_dir / "deck.json").write_text(json.dumps(deck), encoding="utf-8")
         shutil.copyfile(CORPUS_DIR / "deck.css", fixture_dir / "deck.css")
         bodies = {
             "01-screen-reader": corpus_slide("03"),
@@ -2119,7 +2123,9 @@ class TestHarnessRun:
         out_dir = tmp_path / "out"
         # main() sets it in os.environ; monkeypatch restores it.
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        monkeypatch.setattr(sys, "argv", ["run.py", str(fixture_dir), "--out", str(out_dir)])
+        monkeypatch.setattr(
+            sys, "argv", ["run.py", str(fixture_dir), "--out", str(out_dir), "--pin-fonts"]
+        )
 
         assert fidelity_harness().main() == 0
 
