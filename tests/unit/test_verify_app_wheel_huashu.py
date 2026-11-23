@@ -176,11 +176,25 @@ def test_main_wants_exactly_one_wheel(tmp_path: Path) -> None:
     assert main([str(tmp_path / "empty")]) == 1
 
 
+# Every workflow that builds the app wheel to publish it.
+PUBLISH_WORKFLOWS = ("publish.yml", "publish-dev.yml", "publish-testpypi.yml")
+
+
 def test_the_workflows_run_it_on_the_app_wheel() -> None:
-    """publish.yml and publish-dev.yml both run the guard on the built app wheel."""
-    for workflow in ("publish.yml", "publish-dev.yml"):
+    """Each publish workflow runs the guard on the built app wheel, and no check of its own."""
+    for workflow in PUBLISH_WORKFLOWS:
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
         assert "scripts/verify_app_wheel.py packages/databricks-tellr-app/dist" in text, workflow
+        assert "both huashu tarballs" not in text, workflow
+
+
+def test_the_workflows_build_the_wheel_with_the_sidecar() -> None:
+    """The bootstrap tarballs built, and the sidecar included in the wheel, before the guard."""
+    for workflow in PUBLISH_WORKFLOWS:
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+        built = text.index("bash services/pptx-emit-huashu/build-artifacts.sh")
+        included = text.index("TELLR_INCLUDE_HUASHU_SIDECAR=1 python -m build")
+        assert built < included < text.index("scripts/verify_app_wheel.py"), workflow
 
 
 def test_it_runs_as_a_script_on_the_standard_library_alone(tmp_path: Path) -> None:
