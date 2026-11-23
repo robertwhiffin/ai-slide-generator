@@ -42,7 +42,8 @@
 // so the Python wrapper can surface per-slide validation messages.
 //
 // The HTML arrives over a pipe, and each slide is still written to a tmp
-// .html file, because the browser loads it from a file:// URL (render_slide.cjs).
+// .html file, because the browser loads it from a file:// URL (render_slide.cjs),
+// in a huashu-deck-* directory removed however the deck ends.
 
 import pptxgen from 'pptxgenjs';
 import fs from 'node:fs/promises';
@@ -125,7 +126,24 @@ async function main() {
   pres.layout = 'LAYOUT_WIDE';  // 13.333" × 7.5", matches our 1280×720 px @ 96 dpi
   pres.title = payload.title || 'slides';
 
+  // Each slide is written to a file of this directory for the browser to load
+  // (render_slide.cjs). It holds the deck's content, so it is removed however
+  // the deck ends; a sidecar ended before its finally runs (a timeout) leaves
+  // it in the TMPDIR the wrapper made for this run, which the wrapper removes
+  // (pptx_from_html_huashu.py _export_deck).
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'huashu-deck-'));
+  try {
+    await writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBorders, bypassValidation, target, requestHosts });
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch((e) => {
+      console.error('[huashu] the slides\' temporary directory could not be removed: ' + oneLine((e && e.message) || e));
+    });
+  }
+}
+
+// Every slide rendered in turn, then the deck written (all but the slides
+// that failed), and the __HUASHU_RESULT__ line last.
+async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBorders, bypassValidation, target, requestHosts }) {
   const failed = [];
   let succeeded = 0;
 
@@ -154,13 +172,9 @@ async function main() {
     }
   }
 
-  // Don't dump the tmp dir on success — useful for post-mortem if a
-  // slide fails. Wrapper deletes it on success.
   if (failed.length === slides.length) {
     console.error('[huashu] all slides failed; not writing pptx');
-    console.error('__HUASHU_RESULT__ ' + logJson({
-      totalSlides: slides.length, succeeded: 0, failed, tmpDir,
-    }));
+    console.error('__HUASHU_RESULT__ ' + logJson({ totalSlides: slides.length, succeeded: 0, failed }));
     // Set the code and return rather than process.exit(): stderr to a pipe is
     // async, and exiting discards the undrained write, which truncates the
     // sentinel above mid-JSON. The wrapper then parses nothing and reports the
@@ -181,9 +195,7 @@ async function main() {
   }
   await fs.writeFile(fileName, written);
   console.error(`[huashu] wrote ${outArg} (${succeeded}/${slides.length} slides)`);
-  console.error('__HUASHU_RESULT__ ' + logJson({
-    totalSlides: slides.length, succeeded, failed, tmpDir,
-  }));
+  console.error('__HUASHU_RESULT__ ' + logJson({ totalSlides: slides.length, succeeded, failed }));
 }
 
 main().catch((e) => {

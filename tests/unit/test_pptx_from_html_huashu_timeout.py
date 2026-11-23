@@ -237,19 +237,24 @@ def _write_stub(path: Path, pids_path: Path, script: str = STUB_SCRIPT) -> None:
 
 
 def _playwright_browsers(scope: str) -> dict[int, int]:
-    """The running Playwright browsers launched with TMPDIR ``scope``: pid -> process group id.
+    """The running Playwright browsers launched under TMPDIR ``scope``: pid -> process group id.
 
-    Only those: a browser another run on the machine launched (another test run,
-    a developer's own) is not this run's to watch or kill.
+    Under it: an export runs its sidecar with a TMPDIR of its own, a directory it
+    makes inside the TMPDIR it is given (pptx_from_html_huashu._export_deck), so a
+    browser's profile is in ``scope`` or in a directory under it. Only those: a
+    browser another run on the machine launched (another test run, a developer's
+    own) is not this run's to watch or kill.
     """
-    profile = f"{scope}/{PLAYWRIGHT_PROFILE_PREFIX}"
+    profile = re.compile(
+        re.escape(f"{scope}/") + r"(?:[^/\s]+/)*" + re.escape(PLAYWRIGHT_PROFILE_PREFIX)
+    )
     listing = subprocess.run(
         ["ps", "-axo", "pid=,pgid=,command="], capture_output=True, text=True, check=True
     ).stdout
     browsers = {}
     for line in listing.splitlines():
         fields = line.split(None, 2)
-        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile in fields[2]:
+        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile.search(fields[2]):
             browsers[int(fields[0])] = int(fields[1])
     return browsers
 
@@ -269,8 +274,8 @@ def _group_members(groups: set[int]) -> list[int]:
 class _BrowserWatch:
     """The Playwright browsers of its run that start while it watches, with their process groups.
 
-    Its run is every node launched with TMPDIR ``scope`` (``browser_watch`` sets it
-    for the test).
+    Its run is every node launched with TMPDIR ``scope`` or a directory under it
+    (``browser_watch`` sets it for the test).
     """
 
     def __init__(self, scope: str) -> None:
@@ -317,7 +322,8 @@ class _BrowserWatch:
 def browser_watch(monkeypatch: pytest.MonkeyPatch) -> Iterator[_BrowserWatch]:
     """A watch over the browsers this test's nodes launch: each gets TMPDIR of the watch's own.
 
-    TMPDIR reaches every sidecar through ``sidecar_subprocess_env``. It is a short
+    TMPDIR reaches every sidecar through ``sidecar_subprocess_env``, and an export's
+    sidecar gets a directory the export makes under it. It is a short
     path under /tmp because Chrome makes its singleton socket under TMPDIR, and a
     socket path may not be much longer than 100 bytes.
     """

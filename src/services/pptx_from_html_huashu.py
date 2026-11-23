@@ -26,6 +26,14 @@ WebSockets) and closes popups. A slide whose page navigates away from it fails,
 its failure in the list ``build_pptx_huashu`` returns, and the rest of the deck
 is written.
 
+Temporary files. The sidecar writes each slide's HTML to a file for its browser
+to load, so what it leaves holds the deck's content. ``emit_deck.mjs`` removes
+its slides' directory however the deck ends, and the sidecar runs with a TMPDIR
+of its own: the export's ``TemporaryDirectory``, which also holds the written
+deck, made where the sidecar's TMPDIR would otherwise be (``_export_deck``). So
+whatever a sidecar ended at its timeout leaves there, its slides and its
+browsers' profiles, is removed with that directory.
+
 Timeout. A run past ``SIDECAR_TIMEOUT_SECONDS`` must end node and every
 Chromium it launched: killed alone, node would leave its browser running with
 no parent, holding its memory until the app restarts. Playwright launches each
@@ -1167,14 +1175,18 @@ RENDER_TARGETS: tuple[RenderTarget, ...] = ("pptx", "gslides")
 
 
 def _run_measured(
-    cmd: list[str], payload_bytes: bytes, summary: _ExportSummary
+    cmd: list[str], payload_bytes: bytes, summary: _ExportSummary, env: dict[str, str]
 ) -> subprocess.CompletedProcess:
-    """The sidecar's run, its wall time and its memory peaks recorded on ``summary``."""
+    """The sidecar's run in ``env``, its wall time and its memory peaks recorded on ``summary``."""
     sampler = _TreeMemorySampler()
     started = time.monotonic()
     try:
         return run_sidecar_process(
-            cmd, input=payload_bytes, timeout=SIDECAR_TIMEOUT_SECONDS, on_spawn=sampler.watch
+            cmd,
+            input=payload_bytes,
+            timeout=SIDECAR_TIMEOUT_SECONDS,
+            env=env,
+            on_spawn=sampler.watch,
         )
     except subprocess.TimeoutExpired as e:
         summary.outcome = "timeout"
@@ -1212,8 +1224,13 @@ def _export_deck(
     # A place among this worker's exports for the whole export, refused at once
     # when every one is taken, and a sidecar slot for the run, waited for before
     # it so the wait does not count against its timeout (module docstring,
-    # Concurrency). Past either bound: HuashuBusyError.
-    with _export_place(), tempfile.TemporaryDirectory() as td:
+    # Concurrency). Past either bound: HuashuBusyError. The sidecar runs with
+    # the deck's own temporary directory as its TMPDIR, made where the sidecar's
+    # TMPDIR would otherwise be, so all it leaves there goes with it (module
+    # docstring, Temporary files).
+    env = sidecar_subprocess_env()
+    with _export_place(), tempfile.TemporaryDirectory(prefix="huashu-", dir=env.get("TMPDIR")) as td:
+        env["TMPDIR"] = td
         out_path = Path(td) / "out.pptx"
         cmd = ["node", str(SIDECAR_SCRIPT), str(out_path)]
         asked_at = time.monotonic()
@@ -1224,7 +1241,7 @@ def _export_deck(
                     "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
                     " ".join(cmd), len(slides_html), len(payload_bytes),
                 )
-                result = _run_measured(cmd, payload_bytes, summary)
+                result = _run_measured(cmd, payload_bytes, summary, env)
         except HuashuBusyError:
             # Refused once its wait for a slot ran out: the wait was all of it.
             summary.wait_seconds = time.monotonic() - asked_at
