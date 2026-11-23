@@ -1933,3 +1933,106 @@ The one probe presentation this round created was deleted by id and confirmed go
 
 The probe and matrix presentations B8 created (5) were deleted by id and confirmed gone (404). The
 decks earlier phases kept, and the T15 decks, are untouched.
+
+## Final fix A: security, robustness and CI
+
+The final whole-branch review's security, robustness and CI findings (C1, S1, I1, I2, I3, I4, M1,
+M2, M4, M7, M8, M9, M12, M13). Fix B takes fidelity (I5 to I10, M3, M5, M6, M10, M11, the triage's
+FIX lines). Commits `7d427e44..68459255` on `feat/export-revamp`, each pushed.
+
+- **C1, the export page reads nothing but its slide and the CSP's hosts** (`7d427e44`).
+  - **The guard.** Each slide renders in a browser context of its own whose every request Node
+    decides (`request_guard.cjs`, Playwright routing). Allowed: the slide's own file URL exactly,
+    `data:`, `blob:`, and https to the hosts `SLIDE_CSP` allows for that kind of request (scripts
+    jsdelivr and Tailwind's, stylesheets Google Fonts, fonts jsdelivr and gstatic). Aborted with
+    `ERR_ABORTED`, which commits no error page (measured: `failed` commits Chrome's error page
+    naming the denied path): any other file, http, loopback and link-local, other hosts, frame
+    navigations, WebSockets. Popups are closed. A main-frame navigation away (a request, or a
+    `blob:` page, which is no request) stops the slide at once; it fails alone.
+  - **One source for the hosts.** `html_safety.slide_csp_request_hosts` derives them from
+    `SLIDE_CSP`, refusing a source it could not mirror; the wrapper passes them as
+    `allowedHosts` in the stdin payload (optional: without it no https host loads).
+  - **Measured first.** Routing intercepts `file:` for every request type; a redirect hop is not
+    re-routed (so frames, which could show a redirect's page, get no CSP host); a `blob:`
+    main-frame navigation is not routed (hence the main-frame URL watch); aborting a navigation
+    during load hangs `page.goto` for its 30 s (hence stopping the slide, not waiting on it).
+  - **Red first:** the unguarded engine leaked the file's text, the directory listing and the local
+    server's page into the deck, a local picture into a capture, and hit the probe server at
+    `/location`, `/popup`, `/fetch`, `/xhr`, `/socket`.
+- **I1, a per-slide deadline** (`e398e9b6`). `SLIDE_DEADLINE_MS` is 30 s, launch to last read. The
+  slowest slide of both corpora and the long-off, dataviz-tpl18 and finance-off matrix decks takes
+  3.2 s on the Mac (a Chart.js slide), the median 1.0 s; the engine's own bounded waits add up to
+  26 s, so the deadline fails no slide they let through. Red first: a blocked slide between two
+  others lost the whole deck at a 90 s deck timeout; green, 2 slides and 1 failure in about 33 s.
+- **I2, no temp files left behind** (`48c6c91f`). `emit_deck.mjs` removes its `huashu-deck-*`
+  directory in a `finally`; the sidecar's `TMPDIR` is the export's `TemporaryDirectory`, made
+  inside the `TMPDIR` it would otherwise get. The timeout file's browser watch matches a profile
+  at any depth under its scope (checked by hand on a real export; the file itself is the owner's).
+- **S1, deck content stays out of the app's logs** (`d92a6b56`). Counts by default: the summary's
+  `hiddenWords`, the text-loss line's `{"slideIndex", "words"}`, a validation quote by its length,
+  a page-made message by its length; errors that hold no page text carry `logMessage` and are
+  logged whole. Page console lines are cut at 1,000 characters (the engine's longest, measured over
+  its suites: 249), at most 100 a slide per stream. `TELLR_EXPORT_DEBUG_TEXT=1` adds the words; it
+  is not in the env allowlist, and the harness adds it for its own runs (`sidecar_debug_text`).
+  The Google Slides route logs an all-failed deck by its count.
+- **I4, the export suites load nothing from the network** (`0f1b2d7f`). `tests/unit/conftest.py`
+  gives every export no host and fails an export whose requests were aborted (the C1 module is
+  `requests_blocked`; a `network` test gets the CSP's hosts). `DECK_CSS` embeds the corpus fonts;
+  Chart.js 4.4.1 is vendored (npm's `chart.umd.js`, jsdelivr's hash pinned, MIT licence) and
+  written inline; `measure.cjs` refuses a document that loads remotely. Running offline found the
+  harness run, the depth-parity exports (a parsed deck's default Chart.js URL) and three
+  pinned-fonts comparisons.
+- **I3, CI runs the engine's suites** (`fdb20a10`). The `export-engine-tests` job (the unit job's
+  triggers, plus a `sidecar` paths filter for the sidecar, the harness and the font build) extracts
+  `node_modules.tar.gz`, installs Chromium with its system dependencies, runs `npm ci` in
+  `frontend/`, and runs `-k "export or huashu or google" -n auto`, the timeout file included.
+  Validated with the repo's workflow guards and the GitHub workflow JSON schema; actionlint is not
+  installed here, and CI cannot run from here. Reproduced locally in a clean worktree with a fresh
+  extract: without `frontend/node_modules` the UI-document tests skip (M7's gate verified by
+  removing it: the test fails asking for `npm ci`), with it 1532 passed in 9 min 46 s at `-n 6`.
+  Expected on a 4-vCPU runner: 25 to 35 minutes with setup (timeout 45). The suites have never run
+  on Linux before this job, so its first run may show platform differences.
+- **M1, M12** (`22047c47`): `HuashuUnavailableError` 503 (the only status the frontend falls back
+  on), `HuashuTimeoutError` 504, any other `HuashuExportError` 500, on both routes.
+- **M2** (`54e1b05a`): the model check keeps each number only in the range its XML attribute takes
+  (alpha 0..1, lengths from 0, a line's width at most 2112 px, a shadow angle under a turn, a
+  rotation a turn either way, a run's size 0 or 1 to 4000 pt, trackings 2000 pt either way,
+  spacing at most 1584 pt, path points within 100 in). Insets and cell margins stay any finite
+  number: they are signed (`ST_Coordinate32`), and a first version requiring 0 dropped real turned
+  labels, whose top inset is -0.00002 px.
+- **M4** (`ccf1e43f`): the Test PyPI build builds the artifacts, the wheel with the sidecar, and
+  runs `verify_app_wheel.py`. **M7, M8** (`494d39ee`). **M9, M13** (`1ab65d05`): the gzip header
+  pinned; a fresh `mktemp -d` staging directory per boot; the upgrade-boot window documented;
+  `HUASHU_SETUP_LOG`. **Docs** (`68459255`).
+- **Tests.** 162 new collected Python tests and 5 frontend: test_export_request_guard 62,
+  test_export_slide_deadline 3, test_export_temp_files 6, test_export_log_hygiene 13,
+  test_export_hermetic 7, test_ci_runs_the_export_engine_suites 4, test_export_route_statuses 6,
+  test_google_slides_routes 4, the model ranges 52, test_huashu_font_bundle 4,
+  test_verify_app_wheel_huashu 1. Each was red first, or is a guard.
+  - **Sabotages.** 58 red, every file restored. One went green: aborting with `ERR_FAILED` left a
+    captured frame's picture unchanged, because a capture never draws a frame's document; the test
+    was removed, and the abort code's reason rests on the measurement above. The M8 skip runs on
+    Linux alone.
+- **Byte-identity.** Both corpora with `--pin-fonts --powerpoint --gslides` at `68459255`:
+  `export.pptx` and `export-gslides.pptx` equal B8 r1's final runs part for part (core.xml aside),
+  every PowerPoint and Google score equal, no text lost, 0 MODEL DROPS. The three matrix decks
+  equal B8's `matrix/` runs, no text lost. Checked after each code commit as well.
+- **Gate** (serial, as written, timeout file deselected): 1593 passed, 0 failed, 13 skipped (B8 r1:
+  1435 / 0 / 13). **Full suite** (`-n auto`, without the timeout file): 18261 passed, 0 failed, 28
+  skipped (B8 r1: 18099 / 0 / 28). **Frontend unit:** 3757 passed.
+- **Not run as asked: the timeout file was run once by mistake** (a doc-reference sweep passed it
+  to pytest): 124 passed in 3 minutes; the owner's and the MCP's Chrome stayed up, nothing was left.
+  Its stubs and watch were updated for the new launch path and TMPDIR; the owner's run is still
+  the check of record.
+- **A local flake, not the code.** Three runs after this laptop's Chrome relaunched itself to apply
+  its 158 update (02:29, `--restart`) each had one `measure.cjs` call time out at 120 s, its
+  browser stuck before any page (no renderer) and left orphaned; none in the gates before or after.
+  The orphans were ended. CI uses Linux's headless shell, not the Mac's Chrome.
+
+Google Slides decks kept for this batch:
+- In-repo corpus: https://docs.google.com/presentation/d/1H3EQG99EbalE-mvGX2Wucmp1B0BJHhasjPI5U6hDyP0/edit
+  ("Tellr export revamp — fix A, in-repo corpus (pinned fonts, 68459255)")
+- Design-system corpus: https://docs.google.com/presentation/d/1oD5WRJ_WxvMvefjaIOqbbdQZUC1iMqyX-lSZIkPfPGk/edit
+  ("Tellr export revamp — fix A, design-system corpus (pinned fonts, 68459255)")
+
+No other presentation was created; the earlier decks and the T15 decks are untouched.
