@@ -14,8 +14,8 @@ through, slow and exported as far as it settled, is not failed by the deadline i
 It bounds every step of the slide, not only its page's reads: a browser that never hands
 out the slide's context or page, or never lets the request guard route it (a browser
 stalled under load), stops the slide at its deadline too. And a browser that does not
-close once its slide is done is killed: neither ever holds up the deck, and no slide's
-browser outlives it.
+close once its slide is done is killed, one that has disconnected while its process lives
+on too: neither ever holds up the deck, and no slide's browser outlives it.
 """
 
 from __future__ import annotations
@@ -152,9 +152,28 @@ const launch = chromium.launch.bind(chromium);
 chromium.launch = async (options) => {
   record('launch ' + (launched.length + 1));
   const browser = await launch(options);
-  launched.push(browser._connection.toImpl(browser).options.browserProcess.process.pid);
+  const browserProcess = browser._connection.toImpl(browser).options.browserProcess.process;
+  launched.push(browserProcess.pid);
   if (launched.length !== HUNG_LAUNCH) return browser;
   if (STEP === 'close') browser.close = never;
+  // Its process group stopped and node's ends of its pipes closed, as a pipe that
+  // broke: Playwright sees the browser disconnect, and its process lives on.
+  if (STEP === 'disconnect') {
+    browser.close = () => {
+      process.kill(-browserProcess.pid, 'SIGSTOP');
+      browserProcess.stdio[3].destroy();
+      browserProcess.stdio[4].destroy();
+      return never();
+    };
+  }
+  // The browser closes for real, and its close never answers.
+  if (STEP === 'closedUnanswered') {
+    const close = browser.close.bind(browser);
+    browser.close = () => {
+      close().catch(() => {});
+      return never();
+    };
+  }
   if (STEP === 'newContext') browser.newContext = never;
   if (STEP === 'newPage' || STEP === 'guard') {
     const newContext = browser.newContext.bind(browser);
@@ -174,8 +193,14 @@ chromium.launch = async (options) => {
 SETUP_STEPS = ("newContext", "guard", "newPage")
 # The slide of three whose step hangs.
 HUNG_SLIDE = 2
-# The line a slide whose browser would not close logs, once its process is killed.
+# The line a slide whose browser would not close logs, and how it ends: its process
+# killed, or found to have exited already (render_slide.cjs closeBrowser).
 KILLED_LINE = "[html2pptx] the slide's browser did not close within"
+KILLED = "its process was killed"
+ALREADY_EXITED = "its process had already exited"
+# A browser whose close never answers and whose process is still running: still
+# connected ("close"), or disconnected, its process outliving the disconnection.
+UNCLOSED_RUNNING = ("close", "disconnect")
 
 
 def _three_slides() -> list[str]:
@@ -265,17 +290,38 @@ class TestEveryStepOfASlideIsBounded:
         )
         _assert_no_browser_outlives_its_slide(export.browsers)
 
+    @pytest.mark.parametrize("step", UNCLOSED_RUNNING)
     def test_a_browser_that_never_closes_is_killed_and_its_slide_kept(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+        self, step: str, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The second slide is read whole, then its browser never closes: its process is killed.
 
-        The slide's reads are done, so it is exported; the close is bounded, so the deck
-        takes less than one slide's deadline, and the line saying so is logged.
+        So it is too when the browser has disconnected and its process lives on, which
+        Playwright no longer finds once disconnected: the process is the one held since
+        the browser launched.
         """
-        deadline_seconds = _deadline_ms() / 1000
-        export = _export_with_a_hung_step("close", tmp_path, monkeypatch)
+        export = _export_with_a_hung_step(step, tmp_path, monkeypatch)
 
+        self._assert_kept_with_its_close_bounded(export, KILLED)
+        _assert_no_browser_outlives_its_slide(export.browsers)
+
+    def test_a_browser_that_closed_without_answering_is_said_to_have_exited(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second slide's browser closes, and its close never answers: the line says so.
+
+        Not that its process could not be killed: it had exited already.
+        """
+        export = _export_with_a_hung_step("closedUnanswered", tmp_path, monkeypatch)
+
+        self._assert_kept_with_its_close_bounded(export, ALREADY_EXITED)
+        _assert_no_browser_outlives_its_slide(export.browsers)
+
+    @staticmethod
+    def _assert_kept_with_its_close_bounded(export: _HungStepExport, outcome: str) -> None:
+        """The slide's reads are done, so it is exported; its close is bounded, so the deck
+        takes less than one slide's deadline; and one line says how the browser ended."""
+        deadline_seconds = _deadline_ms() / 1000
         assert export.failures == [], export.failures
         texts = _deck_texts(export.pptx, 3)
         assert all(f"Slide {number}" in text for number, text in enumerate(texts, start=1)), texts
@@ -284,7 +330,7 @@ class TestEveryStepOfASlideIsBounded:
         )
         killed = [line for line in export.stderr.splitlines() if KILLED_LINE in line]
         assert len(killed) == 1, export.stderr[-3000:]
-        _assert_no_browser_outlives_its_slide(export.browsers)
+        assert outcome in killed[0], killed
 
 
 # The waits render_slide.cjs and capture.cjs bound themselves, each read from its module:

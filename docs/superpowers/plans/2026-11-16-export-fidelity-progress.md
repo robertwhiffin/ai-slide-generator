@@ -2228,3 +2228,55 @@ Google Slides decks kept for this batch (no other deck was made):
   ("Tellr export revamp — fix C, in-repo corpus (pinned fonts, 2deb3323)")
 - Design-system corpus: https://docs.google.com/presentation/d/1bwgWxX_SkOlAzYnahymJpoYUUYhasZMuZq20YJ7D-kE/edit
   ("Tellr export revamp — fix C, design-system corpus (pinned fonts, 2deb3323)")
+
+## Final fix D: the kill path's process, and the `window.eval` exception
+
+The scoped re-review of Fix C (`14ad61b3..6bac23fe`) left two Minor issues. One commit on
+`feat/export-revamp`, this ledger in it, pushed.
+
+- **Minor 1, the browser's process is found at its launch** (`render_slide.cjs` readSlide,
+  closeBrowser). The kill looked the process up (`toImpl(browser).options.browserProcess`)
+  only after the close attempt, and `toImpl` throws for a browser that has closed or
+  disconnected. So a close that ended the browser but never answered logged "its process
+  could not be killed" for a browser already gone, and a process that outlived its
+  browser's disconnection was not killed. Now the launch promise resolves to the browser
+  with its process, looked up in the launch's own `then` (both the awaited launch and a late
+  one), and closeBrowser kills that process. A process found exited by then ends the line
+  "its process had already exited". Without a handle the graceful fallback stays ("could not
+  be killed, so it is left to Playwright's close").
+  - Probed (`fixD/probes/disconnect_probe.cjs`). A browser whose process group is stopped
+    and whose pipes node closes is disconnected (`toImpl` throws, the client's
+    `disconnected` fires) while its group lives, and the launch's handle kills it in 21 ms.
+    After a real close, `toImpl` throws, the exit code is 0, and the handle's kill returns
+    at once.
+  - Red first, through the real engine. The hung-step preload got two close modes on the
+    middle slide of three:
+    - `disconnect`: the close stops the group, cuts the pipes and never answers. Red: the
+      whole deck was lost at the 90 s test timeout (`HuashuTimeoutError`), because the
+      un-killed browser's pipes held node.
+    - `closedUnanswered`: the real close runs and never answers. Red: "its process could not
+      be killed".
+    - Green: all three slides in about 10 s, the line ending "was killed" or "had already
+      exited", and no browser at any launch or at exit. The close test now asserts how the
+      line ends.
+  - Sabotages, both red, each file restored (`cmp`):
+    - The late lookup restored (`browserProcessOf(browser)` after the close): both new cases
+      red as above, and the connected close green.
+    - `hasExited` false: the exited case red ("was killed").
+  - **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`. Its stubs
+    (`BLOCKING_LAUNCH_PRELOAD`, `HANGING_LAUNCH_PRELOAD`) wrap `chromium.launch` and return
+    the real browser, whose process the engine's `then` finds as before. The launch call is
+    unchanged, so they need no change.
+- **Minor 2** (`export-features.md`, "What reaches the app's log"). The sentence that a slide
+  can neither silence nor forge a diagnostic now names its exception. A slide that replaces
+  `window.eval` decides what each pass returns, so it can drop the engine's diagnostics or
+  add entries made of the engine's wordings, but never its own text, which it can put only in
+  page slots. The deadline paragraph now says the process is found at the launch, and names
+  the line's third ending.
+- **Tests.** The gate (`-k "(export or huashu or google) and not timeout"`, serially): 1836
+  passed, 0 failed, 13 skipped, in 45 min. Fix C had 1834; the 2 more are the new close
+  cases.
+- **Byte identity.** Fix C's final in-repo corpus documents were re-exported through the
+  engine for both targets. 18/18 slide XML are equal to `fixC/final-corpus` for pptx and
+  gslides (slide 4 `6a259838…` / `8856e366…`). Every other part is equal but
+  `docProps/core.xml`, no kill line, no failures (`fixD/byte-identity/report.json`).

@@ -879,9 +879,12 @@ async function settlesWithin(promise, milliseconds) {
 // gives a launched browser no handle on its process, so it is read from the
 // server-side browser behind the client one, through the in-process
 // connection's toImpl (Playwright 1.59.1, which the committed
-// node_modules.tar.gz pins). A browser without one is left to Playwright's own
-// close, which kills it 30 s on; until it is gone its pipes keep node, and so
-// the deck, from ending.
+// node_modules.tar.gz pins). It is looked up as soon as the browser has
+// launched (readSlide): toImpl finds no browser that has closed or
+// disconnected (it throws), and a process can outlive its browser's
+// disconnection (measured: its pipes cut, its process group stopped). A
+// browser without one is left to Playwright's own close, which kills it 30 s
+// on; until it is gone its pipes keep node, and so the deck, from ending.
 function browserProcessOf(browser) {
   try {
     const launched = browser._connection.toImpl(browser).options.browserProcess;
@@ -891,17 +894,30 @@ function browserProcessOf(browser) {
   }
 }
 
+// Whether the browser's process has exited: node sets a child process's exit
+// code, or the signal that ended it, once it has.
+function hasExited(browserProcess) {
+  const launched = browserProcess.process;
+  return Boolean(launched) &&
+    (typeof launched.exitCode === 'number' || typeof launched.signalCode === 'string');
+}
+
 // The slide's browser closed, within BROWSER_CLOSE_TIMEOUT_MS, or else its
 // process killed, which is said: a browser stalled under load can take
 // Playwright's own close 30 s, and one that answers nothing, longer. Never
-// waits longer than both bounds.
-async function closeBrowser(browser) {
+// waits longer than both bounds. `browserProcess` is the one found at the
+// launch (browserProcessOf, or null). A close that ended the browser but never
+// answered leaves a process that has exited, which the line says rather than
+// that it was killed.
+async function closeBrowser({ browser, browserProcess }) {
   if (await settlesWithin(Promise.resolve().then(() => browser.close()), BROWSER_CLOSE_TIMEOUT_MS)) return;
-  const launched = browserProcessOf(browser);
-  const killed = launched !== null &&
-    await settlesWithin(Promise.resolve().then(() => launched.kill()), BROWSER_KILL_TIMEOUT_MS);
-  console.error(`[html2pptx] the slide's browser did not close within ${BROWSER_CLOSE_TIMEOUT_MS / 1000} s: ` +
-    (killed ? 'its process was killed' : "its process could not be killed, so it is left to Playwright's close"));
+  const exited = browserProcess !== null && hasExited(browserProcess);
+  const killed = browserProcess !== null &&
+    await settlesWithin(Promise.resolve().then(() => browserProcess.kill()), BROWSER_KILL_TIMEOUT_MS);
+  let outcome = "its process could not be killed, so it is left to Playwright's close";
+  if (exited) outcome = 'its process had already exited';
+  else if (killed) outcome = 'its process was killed';
+  console.error(`[html2pptx] the slide's browser did not close within ${BROWSER_CLOSE_TIMEOUT_MS / 1000} s: ${outcome}`);
 }
 
 // The slide's page read in a browser of its own, its requests guarded
@@ -931,12 +947,16 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     promise.catch(() => {});
     return Promise.race([promise, stopped]);
   };
-  const launching = chromium.launch({ ...launchOptions(tmpDir), timeout: SLIDE_DEADLINE_MS });
-  let browser = null;
+  // The browser and its process, found as soon as it has launched, before any
+  // step can close or disconnect it (browserProcessOf).
+  const launching = chromium.launch({ ...launchOptions(tmpDir), timeout: SLIDE_DEADLINE_MS })
+    .then((browser) => ({ browser, browserProcess: browserProcessOf(browser) }));
+  let launched = null;
   let pageConsole = null;
   try {
     // A browser that cannot launch says so whole: no page has been loaded yet.
-    browser = await step(launching.catch((error) => { throw loggedWhole(error); }));
+    launched = await step(launching.catch((error) => { throw loggedWhole(error); }));
+    const { browser } = launched;
     const context = await step(browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR }));
     const guard = await step(guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme))));
     const page = await step(context.newPage());
@@ -952,7 +972,7 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     if (pageConsole) pageConsole.report();
     log.report();
     log.stop();
-    if (browser) await closeBrowser(browser);
+    if (launched) await closeBrowser(launched);
     else launching.then((late) => closeBrowser(late), () => {});
   }
 }
