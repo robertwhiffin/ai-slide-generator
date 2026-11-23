@@ -3361,6 +3361,52 @@ class TestModelCheck:
         )
         assert written["named"] == 0 and written["shapes"] > 0, written
 
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_typeface_holding_xml_characters_is_written_escaped(self, target: str) -> None:
+        """A family named with ``&``, ``"`` and ``<`` reaches the slide part escaped, in runs
+        and in table cells, so the part parses and reads the name back as it is.
+
+        pptxgenjs writes a typeface into an XML attribute as it is given
+        (emit_typography.cjs xmlAttribute): unescaped, the part would not parse.
+        """
+        from lxml import etree
+
+        name = 'A&B "Q" <C>'
+        model = _valid_model()
+        for item in model["items"]:
+            if item["kind"] == "text":
+                for paragraph in item["paragraphs"]:
+                    for line in paragraph["lines"]:
+                        for run in line["runs"]:
+                            run["family"] = name
+            if item["kind"] == "table":
+                for cell in item["cells"]:
+                    cell["font"]["family"] = name
+                    for paragraph in cell.get("paragraphs") or []:
+                        for line in paragraph["lines"]:
+                            for run in line["runs"]:
+                                run["family"] = name
+        xml = node_json(
+            "const pptxgen = require('pptxgenjs');"
+            "const JSZip = require('jszip');"
+            f"const {{ checkModel }} = require({json.dumps(str(MODEL_CHECK_MODULE))});"
+            f"const {{ emitSlide }} = require({json.dumps(str(EMIT_MODEL_MODULE))});"
+            f"const {{ model }} = checkModel({json.dumps(model)});"
+            "const pres = new pptxgen(); pres.layout = 'LAYOUT_WIDE';"
+            f"emitSlide(pres, model, new Map(), {{ target: {json.dumps(target)} }});"
+            "pres.write({ outputType: 'nodebuffer' }).then((deck) => JSZip.loadAsync(deck))"
+            ".then((zip) => zip.file('ppt/slides/slide1.xml').async('string'))"
+            ".then((xml) => process.stdout.write(JSON.stringify(xml)));"
+        )
+        slide = etree.fromstring(xml.encode("utf-8"))
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        in_runs = [latin.get("typeface") for latin in slide.iter(f"{a}latin") if latin.getparent().tag == f"{a}rPr"]
+        in_cells = [
+            latin.get("typeface") for cell in slide.iter(f"{a}tc") for latin in cell.iter(f"{a}latin")
+        ]
+        assert in_runs and set(in_runs) == {name}, in_runs
+        assert in_cells and set(in_cells) == {name}, in_cells
+
     @pytest.mark.parametrize("field", ["items", "captures"])
     def test_a_list_that_is_not_one_is_empty(self, field: str) -> None:
         model = _valid_model()

@@ -373,6 +373,18 @@ HIDPI_CANVAS_BODY = (
     f"context.fillStyle = '#{BLUE}'; context.fillRect(240, 0, 80, 160);"
     "})();</script></div>"
 )
+# A canvas with no size attribute, drawn by slide script at its default 300 x 150
+# bitmap, which its CSS box is too: the chart initialisation sizes it to that box,
+# which it already is.
+OWN_SIZE_CANVAS_BODY = (
+    '<div class="slide">'
+    '<canvas id="own-size-canvas" style="display: block; margin-top: 60px;"></canvas>'
+    "<script>(function () {"
+    "var canvas = document.getElementById('own-size-canvas');"
+    "var context = canvas.getContext('2d');"
+    f"context.fillStyle = '#{GOOD}'; context.fillRect(0, 0, 300, 150);"
+    "})();</script></div>"
+)
 # Where the picture is sampled, as fractions of the canvas box across.
 HIDPI_GREEN_AT = 0.375
 HIDPI_BLUE_AT = 0.875
@@ -1640,6 +1652,41 @@ class TestSnapshotCorpusPictures:
         assert _is(green, GOOD) and _is(blue, BLUE), (
             f"the hi-DPI canvas shows {_show(green)} (want #{GOOD}) and {_show(blue)} "
             f"(want #{BLUE}): the export document cleared the canvas the slide drew"
+        )
+
+    def test_a_canvas_already_its_boxs_size_keeps_its_drawing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A canvas with no size attribute whose bitmap is its box's size keeps its drawing.
+
+        Exported with the corpus deck, the export document's chart
+        initialisation (``build_slide_html``) sizes every canvas without a size
+        attribute to its box, and assigning a canvas dimension clears its
+        bitmap even to the same value. So it assigns only a dimension that
+        differs: the 300 x 150 canvas the script filled, in a 300 x 150 box,
+        keeps its ``00A972``.
+        """
+        _assert_deck_rule("good")
+        scripts = CORPUS_DECK.get("scripts", "")
+        external_scripts = tuple(CORPUS_DECK.get("external_scripts", []))
+        document = slide_document(
+            OWN_SIZE_CANVAS_BODY, scripts=scripts, external_scripts=external_scripts
+        )
+        canvas = browser_rect(document, "#own-size-canvas")
+        assert (canvas["w"], canvas["h"]) == (300, 150), f"fixture drift: the canvas box is {canvas}"
+        pptx, failures = export_slides(
+            [OWN_SIZE_CANVAS_BODY],
+            scripts=scripts,
+            external_scripts=external_scripts,
+            monkeypatch=monkeypatch,
+        )
+        assert failures == [], f"the export rejected the slide: {failures}"
+        _, picture = _picture_at(slide_shapes(pptx), canvas, "the canvas")
+        image = _image(picture, "the canvas")
+        green = _count(image, lambda pixel: _is(pixel, GOOD))
+        assert green >= 0.9 * image.width * image.height, (
+            f"only {green} of {image.width * image.height} canvas pixels are #{GOOD}: "
+            "the export document cleared the canvas the slide drew"
         )
 
     def test_chartjs_canvas_is_a_picture_of_its_chart(
