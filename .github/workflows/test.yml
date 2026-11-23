@@ -36,6 +36,7 @@ jobs:
       config: ${{ steps.filter.outputs.config }}
       slides: ${{ steps.filter.outputs.slides }}
       genie: ${{ steps.filter.outputs.genie }}
+      sidecar: ${{ steps.filter.outputs.sidecar }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -103,6 +104,13 @@ jobs:
               - 'src/core/genie*.py'
               - 'src/tools/genie*.py'
               - 'tests/integration/test_genie*.py'
+            # The export engine: its Node sidecar, the fidelity harness its tests
+            # drive, and the font bundle's build. Outside `backend`, so a change to
+            # the sidecar alone still runs the export-engine job.
+            sidecar:
+              - 'services/pptx-emit-huashu/**'
+              - 'scripts/export_fidelity/**'
+              - 'scripts/sidecar_fonts/**'
 
   # Unit tests. Not a gate: the integration and E2E jobs start alongside this one
   # instead of waiting ~9 minutes for it. They run the same tests either way, and
@@ -170,6 +178,62 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  # The export engine's own suites: the snapshot engine and its request guard,
+  # the export routes, the fidelity harness's tests, the font bundle, and the
+  # sidecar's process tree and timeouts (tests/unit/test_pptx_from_html_huashu_timeout.py,
+  # whose browser watch is safe on a runner of its own). The unit job collects
+  # them too, but there every test that needs the sidecar skips: its
+  # node_modules and Chromium are not installed. This job installs them as the
+  # deployed app's boot does, extracting the committed node_modules.tar.gz and
+  # installing Playwright's Chromium with its system libraries, and the
+  # frontend's esbuild, which builds the UI's documents the harness tests
+  # compare against. The suites load nothing from the network
+  # (tests/unit/conftest.py), but for the one test marked `network`, which loads
+  # the slide CSP's CDNs and skips itself where they cannot be reached.
+  # On the unit job's triggers, and on a change to the sidecar alone.
+  export-engine-tests:
+    name: Export Engine Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.sidecar == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python environment
+        uses: ./.github/actions/setup-python-env
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the frontend's dependencies (its esbuild builds the UI documents)
+        working-directory: frontend
+        run: npm ci
+
+      - name: Extract the sidecar's node_modules
+        working-directory: services/pptx-emit-huashu
+        run: tar xzf node_modules.tar.gz
+
+      - name: Install Chromium with its system dependencies
+        working-directory: services/pptx-emit-huashu
+        run: node node_modules/playwright/cli.js install --with-deps chromium
+
+      - name: Run the export suites
+        run: |
+          pytest tests/unit -k "export or huashu or google" -n auto --tb=short \
+            --junitxml=test-results/export-engine-results.xml
+
+      - name: Upload export engine test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: export-engine-test-results
+          path: test-results/
 
   # Integration test: API Routes
   integration-api-routes:
@@ -1110,6 +1174,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - unit-tests
+      - export-engine-tests
       - frontend-build
       - frontend-unit-tests
       - wheel-build
@@ -1129,6 +1194,7 @@ jobs:
       - name: Check test results
         run: |
           echo "Unit Tests: ${{ needs.unit-tests.result }}"
+          echo "Export Engine Tests: ${{ needs.export-engine-tests.result }}"
           echo "Frontend Build: ${{ needs.frontend-build.result }}"
           echo "Frontend Unit Tests: ${{ needs.frontend-unit-tests.result }}"
           echo "Wheel Build: ${{ needs.wheel-build.result }}"
@@ -1147,6 +1213,7 @@ jobs:
           # Fail if any required job failed (not skipped)
           failed=false
           for result in "${{ needs.unit-tests.result }}" \
+                        "${{ needs.export-engine-tests.result }}" \
                         "${{ needs.frontend-build.result }}" \
                         "${{ needs.frontend-unit-tests.result }}" \
                         "${{ needs.wheel-build.result }}" \
