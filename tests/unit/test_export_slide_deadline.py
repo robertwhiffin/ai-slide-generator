@@ -233,7 +233,8 @@ def _export_with_a_hung_step(
 
 def _assert_no_browser_outlives_its_slide(browsers: list[dict]) -> None:
     """Before each launch every earlier slide's browser is gone, and at node's exit every one."""
-    assert [entry["at"] for entry in browsers] == ["launch 1", "launch 2", "launch 3", "exit"], browsers
+    moments = [entry["at"] for entry in browsers]
+    assert moments == ["launch 1", "launch 2", "launch 3", "exit"], browsers
     left = {entry["at"]: entry["running"] for entry in browsers if entry["running"]}
     assert not left, f"browser process groups still running: {left}"
 
@@ -277,7 +278,7 @@ class TestEveryStepOfASlideIsBounded:
 
         assert export.failures == [], export.failures
         texts = _deck_texts(export.pptx, 3)
-        assert all(f"Slide {position}" in text for position, text in enumerate(texts, start=1)), texts
+        assert all(f"Slide {number}" in text for number, text in enumerate(texts, start=1)), texts
         assert export.elapsed < deadline_seconds, (
             f"the deck took {export.elapsed:.1f}s: the close was waited for, not bounded"
         )
