@@ -64,7 +64,7 @@ Everything lands in `--out`:
 | `ui-documents/<slide>.html` | The UI's document of each slide, as the slide viewer builds it ([The truth document](#the-truth-document)). |
 | `truth/<slide>.png`, `truth/<slide>.txt` | The browser's rendering of the UI's document, and its rendered text: the reference. |
 | `export.pptx`, `export-gslides.pptx` | The decks written for PowerPoint and for Google Slides. |
-| `summaries.json`, `summaries-gslides.json` | Each slide's summary line, in slide order (`null` for a slide the export failed): item counts by kind, pictures and captures, `hiddenText`, `target`, `modelDrops`. |
+| `summaries.json`, `summaries-gslides.json` | Each slide's summary line, in slide order (`null` for a slide the export failed): item counts by kind, pictures and captures, `hiddenWords` and `hiddenText`, `target`, `modelDrops`, `blockedRequests`, `closedPopups`. The harness runs its sidecar with `TELLR_EXPORT_DEBUG_TEXT=1` (`sidecar_debug_text`) for `hiddenText`, the words its text-loss check leaves out; an app's summaries count them alone. |
 | `failures.json`, `failures-gslides.json` | The slides the export rejected, as the routes report them. |
 | `text_loss.json`, `text_loss-gslides.json` | Per slide, the words the browser renders that are in no item of that deck and are not hidden text. The run also prints them ("Text missing from the export: none" when there are none). |
 | `harness.json` | The run's fixture, its slide count, how its PDFs were rasterised (`pdfRaster`) and what its truth renders (`truth`), which `summary.md` checks a baseline against. |

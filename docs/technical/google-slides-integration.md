@@ -63,7 +63,7 @@ Frontend (SlidePanel → "Export to Google Slides")   ← the export
 1. **Admin** uploads `credentials.json` via the Google Slides tab on the `/admin` page.
 2. **Each user** opens **Configure → Settings** and clicks "Authorize with Google" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user (by `user_identity`). **Disconnect** on the same page deletes that token (`DELETE /api/export/google-slides/auth`). Users can also complete consent from the export popup if they are not yet authorized.
 3. **Export** (`exportToGoogleSlides` in `frontend/src/services/api.ts`) POSTs to `/from-huashu`. The backend builds the PPTX server-side and uploads it to Drive in a single synchronous round-trip — there is **no** job/poll cycle on this path.
-4. If the huashu pipeline is unavailable on the deployment (HTTP 503 — e.g. Chromium not bootstrapped), the frontend transparently falls back to `/from-records`, walking the deck DOM client-side and POSTing the extracted records. If the worker is busy (HTTP 429: its export slots and queue are full, or the wait for a slot ran out), the frontend shows the route's message, "Exports are busy right now. Please try again in a minute.", and does not fall back.
+4. If the huashu pipeline is unavailable on the deployment (HTTP 503 — e.g. Chromium not bootstrapped), the frontend transparently falls back to `/from-records`, walking the deck DOM client-side and POSTing the extracted records. If the worker is busy (HTTP 429: its export slots and queue are full, or the wait for a slot ran out), the frontend shows the route's message, "Exports are busy right now. Please try again in a minute.", and does not fall back. Nor does it on an export that ran and failed: the route answers 503 only where the pipeline cannot run, a timed-out export 504 and any other failure 500, and the frontend shows the route's message for each.
 
 ---
 
@@ -249,7 +249,8 @@ and the frontend falls back to `/from-records`.
 sidecars at once (default 1) and lets `TELLR_SIDECAR_QUEUE` more exports wait
 (default 15), each for up to `TELLR_SIDECAR_WAIT_SECONDS` (default 60 s); past
 either, the route answers 429 with `Retry-After: 60`. The run is bounded by
-`SIDECAR_TIMEOUT_SECONDS` (180 s), and every Drive request by
+`SIDECAR_TIMEOUT_SECONDS` (180 s), each slide by `SLIDE_DEADLINE_MS` (30 s, past
+which that slide alone fails), and every Drive request by
 `DRIVE_HTTP_TIMEOUT_SECONDS` (60 s without an answer, then a 502 "Drive upload
 failed"), so with the defaults the route answers within the ~300 s the
 Databricks Apps proxy allows a request.
