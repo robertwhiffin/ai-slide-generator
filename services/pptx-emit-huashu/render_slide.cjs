@@ -39,7 +39,9 @@
 // unread at SLIDE_DEADLINE_MS (its page blocked by its own script, or its
 // browser no longer answering): its browser is closed, nothing it read is
 // exported, and the deck goes on. A browser that does not close within
-// BROWSER_CLOSE_TIMEOUT_MS is killed.
+// BROWSER_CLOSE_TIMEOUT_MS is killed. A browser that exits (a crash, an exit
+// code) before the slide's page is opened is launched once more, inside the
+// same deadline, which one line says with how it exited (exitBeforeItsPage).
 //
 // renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts, slideIndex })
 //   -> { slide, summary }
@@ -902,6 +904,79 @@ function hasExited(browserProcess) {
     (typeof launched.exitCode === 'number' || typeof launched.signalCode === 'string');
 }
 
+// ─── a browser that exits before its page loads ────────────────────────
+// A slide's browser can crash before any page of the slide is loaded
+// (measured on Apps, under four exports at once: one Chromium of 420 died of
+// SIGSEGV at its launch, and its slide was lost). Nothing of the slide's own
+// made it fail, so its browser is launched once more, inside the slide's own
+// deadline (readSlide), and one line says how it exited. A slide that failed
+// for its own content is never relaunched: once its page is navigated, what
+// fails is the page's (a navigation away, a read its script broke) or the
+// deadline's.
+const LAUNCH_ATTEMPTS = 2;
+
+// Playwright's log line for a browser's exit (playwright-core 1.59.1,
+// server/utils/processLauncher.js), which a failed launch's message carries in
+// its browser logs; a browser that never started (its executable missing) has none.
+const PROCESS_EXIT_LOG = /<process did exit: exitCode=(-?\d+|null), signal=([A-Z][A-Z0-9]*|null)>/g;
+
+// How the slide's browser ended before its page was opened, {exitCode, signal}
+// (each null when not known), or null when it did not: its launch failed, its
+// log naming the exit; or a later step failed with the browser disconnected or
+// its process exited. Only for a slide not stopped: a launch's own timeout is
+// what is left of the slide's deadline, whose stop comes first (readSlide).
+function exitBeforeItsPage(error, launched) {
+  if (launched) {
+    const { browser, browserProcess } = launched;
+    const exited = browserProcess !== null && hasExited(browserProcess);
+    if (!exited && browser.isConnected()) return null;
+    const ended = exited ? browserProcess.process : {};
+    return {
+      exitCode: typeof ended.exitCode === 'number' ? ended.exitCode : null,
+      signal: typeof ended.signalCode === 'string' ? ended.signalCode : null,
+    };
+  }
+  let logged = null;
+  for (const found of String((error && error.message) || '').matchAll(PROCESS_EXIT_LOG)) logged = found;
+  if (!logged) return null;
+  return {
+    exitCode: logged[1] === 'null' ? null : Number(logged[1]),
+    signal: logged[2] === 'null' ? null : logged[2],
+  };
+}
+
+// The line a slide whose browser exited before its page loaded logs: the step
+// it exited at and how, its signal or its exit code. No page of the slide had
+// loaded, so it holds no text of the slide's.
+function exitLine(exit, opening, again) {
+  let how = 'its exit status unread';
+  if (exit.signal) how = `on signal ${exit.signal}`;
+  else if (exit.exitCode !== null) how = `with exit code ${exit.exitCode}`;
+  return `[html2pptx] the slide's browser exited before its page loaded (at its ${opening}, ${how}): ` +
+    (again ? 'it exited again once relaunched, so the slide fails' : 'relaunching it once');
+}
+
+// A browser that exited before its page loaded, ended for good before its
+// slide's browser is launched again: closed (closeBrowser, bounded), then its
+// process's kill awaited, within BROWSER_KILL_TIMEOUT_MS. A disconnected
+// browser's close answers at once, while its process can still be unreaped
+// (measured: a Chrome killed with SIGSEGV as its context opened); Playwright's
+// kill sends its process group SIGKILL unless it has closed, and resolves once
+// it has closed and its profile is removed.
+async function endExitedBrowser(exited) {
+  await closeBrowser(exited);
+  if (exited.browserProcess === null) return;
+  await settlesWithin(Promise.resolve().then(() => exited.browserProcess.kill()), BROWSER_KILL_TIMEOUT_MS);
+}
+
+// The browser launched for a slide, with its process (browserProcessOf, looked
+// up as soon as it has launched), bounded by `timeout`: Playwright kills what it
+// started past it.
+function launchBrowser(tmpDir, timeout) {
+  return chromium.launch({ ...launchOptions(tmpDir), timeout })
+    .then((browser) => ({ browser, browserProcess: browserProcessOf(browser) }));
+}
+
 // The slide's browser closed, within BROWSER_CLOSE_TIMEOUT_MS, or else its
 // process killed, which is said: a browser stalled under load can take
 // Playwright's own close 30 s, and one that answers nothing, longer. Never
@@ -927,7 +1002,11 @@ async function closeBrowser({ browser, browserProcess }) {
 // it at once: the slide fails, and what was still under way is abandoned with
 // the browser, closed then (closeBrowser, bounded). A browser that launches
 // only once the slide has stopped is closed as soon as it has; a launch is
-// itself bounded by the deadline, past which Playwright kills what it started.
+// itself bounded by what is left of the deadline, past which Playwright kills
+// what it started. A browser that exits before the slide's page is opened (its
+// launch, its context, the request guard's routing or its page) is closed and
+// launched once more, inside the same deadline (exitBeforeItsPage); a second
+// exit fails the slide with its own failure.
 async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
   const log = slideLog();
   let stopSlide;
@@ -941,25 +1020,48 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     stopSlide(error);
   };
   let reading = false;
+  const startedAt = Date.now();
   const deadline = setTimeout(() => stop(pastDeadlineError(reading)), SLIDE_DEADLINE_MS);
   // A step that loses the race goes on unawaited, so its failure is no one's.
   const step = (promise) => {
     promise.catch(() => {});
     return Promise.race([promise, stopped]);
   };
-  // The browser and its process, found as soon as it has launched, before any
-  // step can close or disconnect it (browserProcessOf).
-  const launching = chromium.launch({ ...launchOptions(tmpDir), timeout: SLIDE_DEADLINE_MS })
-    .then((browser) => ({ browser, browserProcess: browserProcessOf(browser) }));
+  // The launch under way, and the browser it launched with its process, found
+  // as soon as it has launched, before any step can close or disconnect it
+  // (browserProcessOf): a relaunch's in the place of the first.
+  let launching = null;
   let launched = null;
   let pageConsole = null;
   try {
-    // A browser that cannot launch says so whole: no page has been loaded yet.
-    launched = await step(launching.catch((error) => { throw loggedWhole(error); }));
-    const { browser } = launched;
-    const context = await step(browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR }));
-    const guard = await step(guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme))));
-    const page = await step(context.newPage());
+    let guard;
+    let page;
+    for (let attempt = 1; ; attempt += 1) {
+      let opening = 'launch';
+      launching = launchBrowser(tmpDir, Math.max(1, SLIDE_DEADLINE_MS - (Date.now() - startedAt)));
+      try {
+        // A browser that cannot launch says so whole: no page has been loaded yet.
+        launched = await step(launching.catch((error) => { throw loggedWhole(error); }));
+        const { browser } = launched;
+        opening = 'context';
+        const context = await step(browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR }));
+        opening = 'request guard';
+        guard = await step(guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme))));
+        opening = 'page';
+        page = await step(context.newPage());
+        break;
+      } catch (error) {
+        const exit = isStopped ? null : exitBeforeItsPage(error, launched);
+        if (exit === null) throw error;
+        const again = attempt >= LAUNCH_ATTEMPTS;
+        log.error(exitLine(exit, opening, again));
+        if (again) throw error;
+        const exited = launched;
+        launched = null;
+        launching = null;
+        if (exited) await step(endExitedBrowser(exited));
+      }
+    }
     guard.watch(page);
     pageConsole = forwardConsole(page, log);
     reading = true;
@@ -973,7 +1075,7 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     log.report();
     log.stop();
     if (launched) await closeBrowser(launched);
-    else launching.then((late) => closeBrowser(late), () => {});
+    else if (launching) launching.then((late) => closeBrowser(late), () => {});
   }
 }
 
