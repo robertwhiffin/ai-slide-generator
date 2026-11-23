@@ -356,6 +356,93 @@ class TestWhatAPageLogsIsCounted:
         assert [line for line in logged.stderr.splitlines() if PAGE_CONSOLE_LINE in line] == []
 
 
+# A slide whose script logs its words, then, once they are logged, leaves itself: the
+# request guard stops it, and it fails (request_guard.cjs).
+LEAVING_BODY = (
+    '<div class="slide"><h1>Leaving</h1><script>'
+    f"console.warn('[html2pptx] {CONSOLE_WORD} warned');"
+    f"console.log('{CONSOLE_WORD} logged');"
+    "setTimeout(() => { location.href = 'file:///etc/hosts'; }, 500);"
+    "</script></div>"
+)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestAFailedSlidesConsoleIsCounted:
+    def test_a_slide_that_fails_counts_what_its_page_logged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The slide that leaves itself fails, and still says how much its page logged.
+
+        Its count line comes after the first slide's OK and before its own FAIL, and
+        holds none of its words.
+        """
+        logged = _export(
+            [slide_document(ORDINARY_BODY, slide_id="kept"), slide_document(LEAVING_BODY, slide_id="leaves")],
+            monkeypatch,
+            debug_text=False,
+        )
+        assert [failure["slide_index"] for failure in logged.failures] == [1], logged.failures
+        assert CONSOLE_WORD not in logged.everything, logged.everything[-3000:]
+        lines = logged.stderr.splitlines()
+        kept = next(index for index, line in enumerate(lines) if "[1/2] OK" in line)
+        failed = next(index for index, line in enumerate(lines) if "[2/2] FAIL:" in line)
+        counted = [line for line in lines[kept + 1 : failed] if PAGE_CONSOLE_LINE in line]
+        assert len(counted) == 1, lines[kept:failed + 1]
+        match = PAGE_CONSOLE_COUNTS.search(counted[0])
+        assert match and int(match.group("messages")) >= 2 and int(match.group("engine")) == 1, (
+            counted[0]
+        )
+
+
+# Node, as the sidecar runs with the flag on: what forwardConsole writes for a page's
+# messages before its slide's log stops and after.
+STOPPED_FORWARDING_SCRIPT = """
+process.env[%(flag)s] = '1';
+const { EventEmitter } = require('node:events');
+const { forwardConsole, slideLog } = require(%(render_slide)s);
+const written = [];
+console.error = (line) => written.push(['stderr', String(line)]);
+console.log = (line) => written.push(['stdout', String(line)]);
+const page = new EventEmitter();
+const message = (text) => ({ text: () => text, type: () => 'warning' });
+const log = slideLog();
+const forwarding = forwardConsole(page, log);
+page.emit('console', message('[html2pptx] before the stop'));
+page.emit('console', message('chatter before the stop'));
+log.stop();
+for (let index = 0; index <= %(per_slide)s; index++) {
+  page.emit('console', message('[html2pptx] after the stop'));
+  page.emit('console', message('chatter after the stop'));
+}
+forwarding.report();
+process.stdout.write(JSON.stringify(written));
+"""
+
+
+@requires_node
+def test_with_the_flag_nothing_a_page_logs_once_its_slide_stopped_is_forwarded() -> None:
+    """A slide stopped (its page left it, or its deadline) is about no page any more.
+
+    Its reads' lines are dropped from then on (render_slide.cjs slideLog), and so is what
+    its page logs: none of it can land among the lines after its failure, and none of it
+    is counted as past the slide's bound, though more than the bound arrive.
+    """
+    written = node_json(
+        STOPPED_FORWARDING_SCRIPT
+        % {
+            "flag": json.dumps(pptx_from_html_huashu.SIDECAR_DEBUG_TEXT_ENV),
+            "render_slide": json.dumps(str(RENDER_SLIDE)),
+            "per_slide": json.dumps(_page_limits()["count"]),
+        }
+    )
+    assert written == [
+        ["stderr", f"{BROWSER_CONSOLE}[html2pptx] before the stop"],
+        ["stdout", f"{BROWSER_CONSOLE}chatter before the stop"],
+    ], written
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestWhatAPageLogsIsBounded:

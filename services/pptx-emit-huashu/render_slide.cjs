@@ -320,7 +320,7 @@ function launchOptions(tmpDir) {
 // words, under the engine's own prefix too, and the engine's page-side passes
 // run in the page's realm, which builds what they say. So it reaches no log
 // unless the debug text is on (log_line.cjs debugText), which no app sets:
-// without it, once the slide has been read, one [html2pptx] page console line
+// without it, once the slide is done, read or failed, one [html2pptx] page console line
 // counts its messages by level (Playwright's console message type) and says
 // how many carry the engine's prefix ([preprocess] or [html2pptx]); a slide
 // that logged nothing says nothing.
@@ -341,10 +341,14 @@ const PAGE_MESSAGE_LIMIT = 1000;
 const PAGE_MESSAGES_PER_SLIDE = 100;
 const ENGINE_PREFIXES = ['[preprocess]', '[html2pptx]'];
 
-// Returns {report()}, which, once the slide has been read, logs its count line
-// (debug text off), or says on each stream how many of the page's messages
-// went past the bound (debug text on).
-function forwardConsole(page) {
+// Once the slide's log (slideLog) has stopped, the slide stopped, what its page
+// logs is neither forwarded nor counted: it is about no page any more, and
+// would land among the lines after the slide's failure.
+//
+// Returns {report()}, which, once the slide is done, read or failed, logs its
+// count line (debug text off), or says on each stream how many of the page's
+// messages went past the bound (debug text on).
+function forwardConsole(page, log) {
   const forwarding = debugText();
   const streams = {
     stderr: { write: (line) => console.error(line), left: PAGE_MESSAGES_PER_SLIDE, over: 0 },
@@ -354,6 +358,7 @@ function forwardConsole(page) {
   let messages = 0;
   let engine = 0;
   page.on('console', (msg) => {
+    if (!log.live()) return;
     const text = String(msg.text());
     const engineLine = ENGINE_PREFIXES.some((prefix) => text.startsWith(prefix));
     if (!forwarding) {
@@ -391,14 +396,18 @@ function forwardConsole(page) {
 
 // ─── the slide's log ───────────────────────────────────────────────────
 // What the reads of one slide say on stderr. A slide that is stopped (its page
-// left the slide) has its browser closed under reads still under way, and
-// what those say once it is gone is about no page at all, so it is dropped:
-// none of it lands among the next slide's lines.
+// left the slide, or its deadline passed) has its browser closed under reads
+// still under way, and what those say once it is gone is about no page at all,
+// so it is dropped, as is what its page logs from then on (forwardConsole):
+// none of it lands among its failure's lines or the next slide's.
 function slideLog() {
   let live = true;
   return {
     error(line) {
       if (live) console.error(line);
+    },
+    live() {
+      return live;
     },
     stop() {
       live = false;
@@ -821,6 +830,7 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
   };
   const launching = chromium.launch({ ...launchOptions(tmpDir), timeout: SLIDE_DEADLINE_MS });
   let browser = null;
+  let pageConsole = null;
   try {
     // A browser that cannot launch says so whole: no page has been loaded yet.
     browser = await step(launching.catch((error) => { throw loggedWhole(error); }));
@@ -828,13 +838,14 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     const guard = await step(guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme))));
     const page = await step(context.newPage());
     guard.watch(page);
-    const pageConsole = forwardConsole(page);
+    pageConsole = forwardConsole(page, log);
     reading = true;
     const readings = await step(readPage(page, slideUrl, sources, target, log));
-    pageConsole.report();
     return { ...readings, requests: guard.counts() };
   } finally {
     clearTimeout(deadline);
+    // Read or failed, the slide says what its page logged.
+    if (pageConsole) pageConsole.report();
     log.stop();
     if (browser) await closeBrowser(browser);
     else launching.then((late) => closeBrowser(late), () => {});
@@ -877,8 +888,10 @@ async function renderSlide(htmlFile, pres, options = {}) {
 }
 
 module.exports = {
+  forwardConsole,
   launchOptions,
   renderSlide,
+  slideLog,
   PAGE_MESSAGE_LIMIT,
   PAGE_MESSAGES_PER_SLIDE,
   SLIDE_DEADLINE_MS,
