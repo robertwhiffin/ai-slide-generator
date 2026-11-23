@@ -31,6 +31,16 @@
 // denied. WebSockets are closed before they connect, and a popup
 // (window.open) is closed as it opens.
 //
+// WebRTC is no request routing sees: a peer connection's ICE gathering sends
+// STUN over UDP and opens TURN over TCP to whatever its servers name, a
+// loopback or internal address included (measured: both reach local
+// listeners from Chrome and from Playwright's Chromium). So every realm of the
+// context (the page's, each frame's and each popup's) has its peer-connection
+// constructors taken away by an init script, which runs in it before any of
+// its own script (NO_PEER_CONNECTIONS); and render_slide.cjs launches the
+// browser with an IP-handling policy that sends no UDP but through a proxy,
+// which it has none of, should a realm ever keep one.
+//
 // Playwright's routing sees the first request of a redirect chain only, so a
 // redirect a host the CSP allows answers with is followed unchecked. The hosts
 // are the slide CDNs (jsdelivr, Tailwind's, Google Fonts), and what a slide
@@ -53,6 +63,16 @@
 //     without a request (a blob: URL, a history entry) is a leave too, and
 //     each popup opened from now on is closed.
 //   Guard.counts()     {blockedRequests, closedPopups}, for the slide summary.
+
+// The init script that takes a realm's peer-connection constructors away
+// (measured: gone in the page's realm, a fresh about:blank iframe's, a srcdoc
+// iframe's, an <object>'s and a popup's). Each is a configurable property of
+// the realm's global, so delete takes it.
+const NO_PEER_CONNECTIONS = `(() => {
+  for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection']) {
+    try { delete globalThis[name]; } catch (error) { /* a realm without it: nothing to take */ }
+  }
+})();`;
 
 // Playwright's request types (Request.resourceType()).
 const REQUEST_TYPES = new Set([
@@ -147,6 +167,7 @@ async function guardContext(context, slideUrl, hosts, onLeave) {
   let closedPopups = 0;
   // Each settles once the page or the browser is gone too: never wait on it.
   const settle = (promise) => promise.catch(() => {});
+  await context.addInitScript(NO_PEER_CONNECTIONS);
   await context.route(() => true, (route) => {
     const request = route.request();
     const verdict = requestVerdict({

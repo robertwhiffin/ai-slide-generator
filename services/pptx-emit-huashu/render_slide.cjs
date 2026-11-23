@@ -270,9 +270,22 @@ ${helpers.map((helper) => helper.toString()).join('\n')}
 // Chromium there hints outlines fully, which rounds every glyph's advance, and
 // measured on Apps' Chromium a webfont line came out 0.95 to 1.08 of its width
 // on a Mac; unhinted it is within 0.0004. Chrome on a Mac lays text out with
-// CoreText, which the flag does not change (Task 15 B8, N3).
+// CoreText, which the flag does not change (CALIBRATION.md N3).
+// WebRTC sends no UDP but through a proxy, which the browser has none of
+// (request_guard.cjs, WebRTC): Chrome takes the policy from
+// --webrtc-ip-handling-policy, Playwright's Chromium from
+// --force-webrtc-ip-handling-policy, each measured to send a local STUN
+// listener nothing and ignoring the other flag, so both are passed.
+const WEBRTC_POLICY = 'disable_non_proxied_udp';
 function launchOptions(tmpDir) {
-  const options = { env: { ...process.env, TMPDIR: tmpDir }, args: ['--disable-gpu'] };
+  const options = {
+    env: { ...process.env, TMPDIR: tmpDir },
+    args: [
+      '--disable-gpu',
+      `--webrtc-ip-handling-policy=${WEBRTC_POLICY}`,
+      `--force-webrtc-ip-handling-policy=${WEBRTC_POLICY}`,
+    ],
+  };
   if (process.platform === 'darwin') {
     options.channel = 'chrome';
   } else {

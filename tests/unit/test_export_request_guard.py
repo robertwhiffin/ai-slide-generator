@@ -536,6 +536,149 @@ class TestTheHostsAreTheCsps:
 # The verdicts, read from request_guard.cjs itself
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# WebRTC: no peer connection reaches the network
+# ---------------------------------------------------------------------------
+
+# Playwright's routing sees no WebRTC traffic: a peer connection's ICE gathering
+# sends STUN over UDP and opens TURN over TCP to whatever its servers name, a
+# loopback or internal address included. A slide that tries one, in its own realm,
+# under the prefixed name, in a fresh iframe's realm and in a popup's.
+PEER_HEADING = "Peer slide"
+PEER_REALMS = ("main", "prefixed", "iframe", "popup")
+
+
+def _peer_body(udp_port: int, tcp_port: int) -> str:
+    servers = json.dumps(
+        [
+            {"urls": f"stun:127.0.0.1:{udp_port}"},
+            {"urls": f"turn:127.0.0.1:{tcp_port}?transport=tcp", "username": "u", "credential": "c"},
+        ]
+    )
+    return (
+        f'<div class="slide"><h1>{PEER_HEADING}</h1><script>(async function () {{'
+        "  async function attempt(Ctor) {"
+        "    if (typeof Ctor !== 'function') return;"
+        f"    const pc = new Ctor({{ iceServers: {servers} }});"
+        "    pc.createDataChannel('x');"
+        "    await pc.setLocalDescription(await pc.createOffer());"
+        "  }"
+        "  const frame = document.createElement('iframe');"
+        "  document.body.appendChild(frame);"
+        "  const popup = window.open('about:blank');"
+        "  const realms = [window.RTCPeerConnection, window.webkitRTCPeerConnection,"
+        "    frame.contentWindow.RTCPeerConnection, popup && popup.RTCPeerConnection];"
+        "  for (const Ctor of realms) { try { await attempt(Ctor); } catch (error) {} }"
+        "})();</script></div>"
+    )
+
+
+@dataclass
+class _PeerListeners:
+    """A local UDP socket (a STUN server's) and TCP listener (a TURN server's), counting what reaches them."""
+
+    udp_port: int
+    tcp_port: int
+    datagrams: int = 0
+    connections: int = 0
+
+
+@contextlib.contextmanager
+def _peer_listeners() -> Iterator[_PeerListeners]:
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    udp.settimeout(0.2)
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(16)
+    tcp.settimeout(0.2)
+    record = _PeerListeners(udp.getsockname()[1], tcp.getsockname()[1])
+    stopping = threading.Event()
+
+    def receive() -> None:
+        while not stopping.is_set():
+            with contextlib.suppress(OSError):
+                udp.recvfrom(4096)
+                record.datagrams += 1
+
+    def accept() -> None:
+        while not stopping.is_set():
+            with contextlib.suppress(OSError):
+                connection, _ = tcp.accept()
+                record.connections += 1
+                connection.close()
+
+    threads = [threading.Thread(target=target, daemon=True) for target in (receive, accept)]
+    for thread in threads:
+        thread.start()
+    try:
+        yield record
+    finally:
+        stopping.set()
+        for thread in threads:
+            thread.join(timeout=5)
+        udp.close()
+        tcp.close()
+
+
+# The same document in a plain browser of the sidecar's own build and channel, with
+# none of the export's settings: what a page reaches there (a fixture-drift guard).
+PLAIN_PAGE_SCRIPT = """
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch(process.platform === 'darwin' ? { channel: 'chrome' } : {});
+  try {
+    const page = await browser.newPage();
+    await page.goto(%(url)s);
+    await page.waitForTimeout(2000);
+  } finally {
+    await browser.close();
+  }
+  console.log('null');
+})();
+"""
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestNoPeerConnectionReachesTheNetwork:
+    def test_a_slide_that_opens_peer_connections_reaches_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Peer connections to a local STUN (UDP) and TURN (TCP) listener reach neither.
+
+        In a plain browser the slide's peer connections reach both listeners
+        (checked first). Exported, the slide's every realm (its own, a fresh
+        iframe's, a popup's) has no peer-connection constructor, which an init
+        script takes away before any of the page's own script runs, and the
+        browser sends no UDP but through a proxy, which it has none of (the
+        launch's IP-handling policy, for Chrome and Chromium alike). Neither
+        listener is reached, and the slide exports.
+        """
+        with _peer_listeners() as plain:
+            document = tmp_path / "peer.html"
+            document.write_text(
+                slide_document(_peer_body(plain.udp_port, plain.tcp_port)), encoding="utf-8"
+            )
+            node_json(PLAIN_PAGE_SCRIPT % {"url": json.dumps(document.as_uri())})
+        assert plain.datagrams > 0 and plain.connections > 0, (
+            f"fixture drift: in a plain browser the slide reaches {plain.datagrams} datagram(s) "
+            f"and {plain.connections} connection(s)"
+        )
+
+        with _peer_listeners() as exported:
+            logged = export_logged(
+                [slide_document(_peer_body(exported.udp_port, exported.tcp_port))],
+                monkeypatch=monkeypatch,
+            )
+        assert logged.failures == [], logged.failures
+        assert PEER_HEADING in "".join(slide_xml(logged.pptx, 0).itertext())
+        assert (exported.datagrams, exported.connections) == (0, 0), (
+            f"the exported slide reached {exported.datagrams} datagram(s) and "
+            f"{exported.connections} connection(s)"
+        )
+
+
 SLIDE_URL = "file:///tmp/huashu-deck-x/slide-000.html"
 CSP_HOSTS = {
     "script": ["cdn.jsdelivr.net", "cdn.tailwindcss.com"],
