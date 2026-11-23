@@ -47,11 +47,13 @@ EXPORT_TITLE = "snapshot hostile realm"
 
 TEXT_NODES = "hostile_text_nodes"
 RANGE_RECTS = "hostile_range_rects"
+RECT_LISTS = "hostile_rect_lists"
 
 # Each hostile fixture and the benign twin it must export identically to: this
 # module's text-node fixture, then the collection-iteration suite's twins.
 SNAPSHOT_TWINS = {
     TEXT_NODES: "collection_passes",
+    RECT_LISTS: "collection_passes",
     "hostile_collection_passes": "collection_passes",
     "hostile_wrapper_iterator": "wrapped_nested_bare_slide",
 }
@@ -76,6 +78,7 @@ POISONED = {
         "CharacterData.data",
     ),
     RANGE_RECTS: ("Range.getClientRects",),
+    RECT_LISTS: ("DOMRectList.length", "DOMRectList.item"),
 }
 
 # The line reportCollectionLoss prints when a bound is met, as the sidecar echoes it.

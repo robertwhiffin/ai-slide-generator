@@ -1082,25 +1082,35 @@ function createTextLayout(env) {
   // The token's painted rects. A word paints when a rect has any extent. A
   // space paints only when a rect has width: Chrome reports a collapsed space
   // as a zero-width rect, and the space at a wrap point as a zero-width rect
-  // on each line, never as no rect at all.
+  // on each line, never as no rect at all. The DOMRectList and its DOMRects
+  // are read through the pristine realm (dom_access.mjs), as an element's
+  // fragments are: page script can replace DOMRectList's length and item and
+  // DOMRect's getters. A list that is no DOMRectList (a realm that replaced
+  // Range's getClientRects) holds no rect that can be read: its own length
+  // spends from the budget, which bounds a lie, and nothing paints.
   function paintedRects(range, space) {
     const rects = range.getClientRects();
-    const reported = Number(rects && rects.length) || 0;
+    let pristine = true;
+    let reported;
+    try {
+      reported = Number(dom.rectListLength(rects)) || 0;
+    } catch (e) {
+      pristine = false;
+      reported = Number(rects && rects.length) || 0;
+    }
     const length = Math.min(Math.max(reported, 0), COLLECTION_ITEM_LIMIT);
-    if (!spend(length)) return [];
+    if (!spend(length) || !pristine) return [];
     const painted = [];
     for (let index = 0; index < length; index++) {
-      const rect = rects[index];
+      const rect = dom.rectAt(rects, index);
       if (!rect) continue;
-      const width = Number(rect.width);
-      const height = Number(rect.height);
+      const bounds = dom.rectBounds(rect);
+      const width = Number(bounds.width);
+      const height = Number(bounds.height);
       if (space ? width > 0 : width > 0 || height > 0) {
-        painted.push({
-          left: Number(rect.left),
-          top: Number(rect.top),
-          right: Number(rect.right),
-          bottom: Number(rect.bottom),
-        });
+        const left = Number(bounds.left);
+        const top = Number(bounds.top);
+        painted.push({ left, top, right: left + width, bottom: top + height });
       }
     }
     return painted;
