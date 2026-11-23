@@ -149,6 +149,9 @@ class TestTheBundle:
         )
 
         assert gzip.decompress(rebuilt) == gzip.decompress(BUNDLE.read_bytes())
+        # And the script's own gzip header (magic, method, flags, time, extra flags, OS),
+        # which no zlib writes otherwise: what the build sets, it sets as committed.
+        assert rebuilt[:10] == BUNDLE.read_bytes()[:10]
 
     def test_its_headers_carry_no_build_time_or_builder(self) -> None:
         for member in _bundle_members().values():
@@ -183,6 +186,20 @@ def _sidecar_copy(directory: Path) -> Path:
     return directory
 
 
+# The stamp setup.sh puts on a whole bundle, and a staging directory's name as mktemp -d
+# makes it, one per boot.
+FONTS_STAMP = Path("fonts") / ".bundle-complete"
+STAGING_EXAMPLE = "fonts-staging.a1B2c3"
+# Where setup.sh logs (HUASHU_SETUP_LOG); /tmp/huashu-setup.log when it is not set.
+SETUP_LOG_ENV = "HUASHU_SETUP_LOG"
+DEFAULT_SETUP_LOG = Path("/tmp/huashu-setup.log")
+
+
+def _setup_log(directory: Path) -> Path:
+    """Where ``_run_setup`` has a sidecar copy's setup.sh log: beside it, never the machine's."""
+    return directory.parent / f"{directory.name}-setup.log"
+
+
 def _run_setup(directory: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     # No node_modules here: the Chromium step is skipped, nothing is downloaded.
     return subprocess.run(
@@ -191,7 +208,7 @@ def _run_setup(directory: Path, env: dict[str, str] | None = None) -> subprocess
         text=True,
         timeout=120,
         check=False,
-        env=env,
+        env={**(os.environ if env is None else env), SETUP_LOG_ENV: str(_setup_log(directory))},
     )
 
 
@@ -284,6 +301,49 @@ class TestSetupScript:
         assert _run_setup(sidecar).returncode == 0
 
         assert _dirs(_written_config(sidecar))[0] == str(sidecar.resolve() / "fonts" / "liberation")
+
+    def test_its_log_goes_where_huashu_setup_log_says(self, tmp_path: Path) -> None:
+        """So a test's setup.sh, or a second app on one machine, writes its own log, and leaves
+        the deployed app's /tmp/huashu-setup.log, which /huashu/available reads, alone."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        before = DEFAULT_SETUP_LOG.stat().st_mtime_ns if DEFAULT_SETUP_LOG.exists() else None
+
+        assert _run_setup(sidecar).returncode == 0
+
+        log = _setup_log(sidecar).read_text(encoding="utf-8")
+        assert log.startswith("=== huashu setup at") and "[setup] fonts ready" in log, log
+        after = DEFAULT_SETUP_LOG.stat().st_mtime_ns if DEFAULT_SETUP_LOG.exists() else None
+        assert after == before, "setup.sh wrote /tmp/huashu-setup.log, not the log it was given"
+
+    def test_a_staging_directory_an_earlier_boot_could_not_remove_blocks_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """Each boot stages its extraction in a directory of its own (mktemp -d): an old staging
+        directory that cannot be removed (a file in it its owner cannot delete) is left alone,
+        and the bundle still extracts whole."""
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+        locked = sidecar / "fonts-staging" / "locked"
+        locked.mkdir(parents=True)
+        (locked / "stale").write_text("left by an interrupted boot")
+        locked.chmod(0o500)
+        try:
+            if _removable(locked / "stale"):
+                pytest.skip("this user can remove the file anyway (root): nothing to block")
+
+            assert _run_setup(sidecar).returncode == 0
+
+            assert _face_digests(sidecar) == _RELEASE_FACES
+            assert (sidecar / "fonts" / "fonts.conf").is_file()
+        finally:
+            locked.chmod(0o700)
+
+    def test_a_boot_removes_its_staging_directory(self, tmp_path: Path) -> None:
+        sidecar = _sidecar_copy(tmp_path / "sidecar")
+
+        assert _run_setup(sidecar).returncode == 0
+
+        assert (sidecar / FONTS_STAMP).is_file()
+        assert [path.name for path in sidecar.glob("fonts-staging*")] == []
 
     def test_an_interrupted_extraction_is_completed_on_the_next_boot(self, tmp_path: Path) -> None:
         """A boot whose extraction failed part way (the bundle cut off halfway) leaves no config
@@ -689,6 +749,32 @@ class TestOperatorsSeeTheBundle:
             "fixture drift: the tail holds the font lines"
         )
 
+    def test_the_diagnostics_read_the_log_huashu_setup_log_names(
+        self,
+        client: TestClient,
+        installed_bundle: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The setup log is where setup.sh was told to write it (HUASHU_SETUP_LOG), read there."""
+        from src.api.routes import export
+
+        log = tmp_path / "elsewhere" / "setup.log"
+        log.parent.mkdir()
+        log.write_text("\n".join(["=== huashu setup at 2026-11-23T00:00:00Z ===", *SETUP_FONT_LINES]) + "\n")
+        monkeypatch.setenv("HUASHU_SETUP_LOG", str(log))
+        caplog.set_level(logging.INFO, logger=export.logger.name)
+
+        assert client.get(AVAILABLE_ROUTE).status_code == 200
+
+        (logged,) = [
+            record.args
+            for record in caplog.records
+            if record.getMessage().startswith("huashu availability diagnostics:")
+        ]
+        assert logged["setup_log_font_lines"] == SETUP_FONT_LINES, logged
+
     def test_the_bundle_does_not_decide_availability(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -737,13 +823,13 @@ class TestTheWheel:
         patterns = _sidecar_ignore_patterns()
 
         assert not any(fnmatch.fnmatch(BUNDLE.name, pattern) for pattern in patterns)
-        for extracted in ("fonts", "fonts-staging"):
+        for extracted in ("fonts", "fonts-staging", STAGING_EXAMPLE):
             assert any(fnmatch.fnmatch(extracted, pattern) for pattern in patterns), extracted
 
     def test_the_extracted_fonts_are_never_committed_or_uploaded(self) -> None:
         for ignore_file in (".gitignore", ".databricksignore"):
             lines = (REPO_ROOT / ignore_file).read_text().splitlines()
-            for extracted in ("fonts", "fonts-staging"):
+            for extracted in ("fonts", "fonts-staging", "fonts-staging.*"):
                 assert f"services/pptx-emit-huashu/{extracted}/" in lines, (ignore_file, extracted)
 
     def test_the_publish_check_verifies_the_bundle(self) -> None:

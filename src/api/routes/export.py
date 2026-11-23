@@ -1092,7 +1092,9 @@ def exports_busy(error: Exception, *, route: str) -> HTTPException:
     )
 
 
-# Where the sidecar's setup.sh logs its bootstrap (services/pptx-emit-huashu/setup.sh).
+# Where the sidecar's setup.sh logs its bootstrap (services/pptx-emit-huashu/setup.sh):
+# HUASHU_SETUP_LOG when the app's environment sets it, as setup.sh reads it, else this.
+HUASHU_SETUP_LOG_ENV = "HUASHU_SETUP_LOG"
 HUASHU_SETUP_LOG = Path("/tmp/huashu-setup.log")
 # How many of the setup log's last lines the diagnostics carry.
 HUASHU_SETUP_LOG_TAIL_LINES = 40
@@ -1125,7 +1127,7 @@ async def export_pptx_huashu_available() -> dict:
         )
         if p.exists()
     ]
-    setup_log_path = HUASHU_SETUP_LOG
+    setup_log_path = Path(os.environ.get(HUASHU_SETUP_LOG_ENV) or HUASHU_SETUP_LOG)
     setup_log_tail = None
     setup_log_size = None
     setup_log_font_lines: list[str] = []

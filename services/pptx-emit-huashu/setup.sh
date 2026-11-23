@@ -17,14 +17,15 @@
 #      download the Chromium binary (Playwright caches under
 #      ~/.cache/ms-playwright/ so subsequent boots skip it).
 #
-# Logs to /tmp/huashu-setup.log so the diagnostic /huashu/available
-# endpoint can surface progress to ops.
+# Logs to $HUASHU_SETUP_LOG, /tmp/huashu-setup.log when it is not set, which
+# the diagnostic /huashu/available endpoint reads (src/api/routes/export.py)
+# to surface progress to ops.
 
 set -e
 SIDECAR_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SIDECAR_DIR"
 
-LOG=/tmp/huashu-setup.log
+LOG=${HUASHU_SETUP_LOG:-/tmp/huashu-setup.log}
 echo "=== huashu setup at $(date -u +%FT%TZ) ===" > "$LOG"
 echo "sidecar dir: $SIDECAR_DIR" >> "$LOG"
 
@@ -93,8 +94,11 @@ fi
 # with no loaded webfont in the base image's DejaVu, 10-38 % wider than a
 # desktop's faces.
 # Unlike steps 1 and 2, fonts/ is a whole bundle or none: the bundle is
-# extracted into fonts-staging/, moved into place only once tar has succeeded,
-# and then stamped (fonts/.bundle-complete). The up-to-date check keys on that
+# extracted into a staging directory made fresh for this boot (mktemp -d,
+# fonts-staging.XXXXXX, beside fonts/ so the moves stay on one filesystem),
+# moved into place only once tar has succeeded, and then stamped
+# (fonts/.bundle-complete). A staging directory an earlier boot left and could
+# not remove (one cut off, a file it could not delete) blocks no later boot. The up-to-date check keys on that
 # stamp, not on fonts/, whose mtime every boot's fonts.conf moves, so an
 # extraction cut off part way is done again on the next boot; one that fails
 # leaves the bundle already in place as it was.
@@ -102,16 +106,17 @@ fi
 # before the bundle. Every command that can fail runs in an if or && list,
 # where set -e does not end the script, so the Chromium step still runs.
 FONTS_STAMP=fonts/.bundle-complete
+FONTS_STAGING=
 
-# Extracts the bundle into fonts-staging/, then puts its fonts/ in place of
-# the old one (moved aside into fonts-staging/previous) and stamps it.
+# Extracts the bundle into this boot's staging directory, then puts its fonts/
+# in place of the old one (moved aside into the staging directory's previous/)
+# and stamps it.
 extract_fonts() {
-  rm -rf fonts-staging &&
-    mkdir fonts-staging &&
-    tar xzf fonts-liberation.tar.gz -C fonts-staging >> "$LOG" 2>&1 &&
-    [ -f fonts-staging/fonts/fonts.conf.in ] &&
-    { [ ! -e fonts ] || mv fonts fonts-staging/previous; } &&
-    mv fonts-staging/fonts fonts &&
+  FONTS_STAGING=$(mktemp -d "$SIDECAR_DIR/fonts-staging.XXXXXX") &&
+    tar xzf fonts-liberation.tar.gz -C "$FONTS_STAGING" >> "$LOG" 2>&1 &&
+    [ -f "$FONTS_STAGING/fonts/fonts.conf.in" ] &&
+    { [ ! -e fonts ] || mv fonts "$FONTS_STAGING/previous"; } &&
+    mv "$FONTS_STAGING/fonts" fonts &&
     touch "$FONTS_STAMP"
 }
 
@@ -132,8 +137,8 @@ if [ "$needs_extract_fonts" = "true" ]; then
     else
       echo "[setup] WARN: fonts-liberation.tar.gz did not extract whole; fonts/ is as it was" >> "$LOG"
     fi
-    if ! rm -rf fonts-staging 2>> "$LOG"; then
-      echo "[setup] WARN: fonts-staging could not be removed" >> "$LOG"
+    if [ -n "$FONTS_STAGING" ] && ! rm -rf "$FONTS_STAGING" 2>> "$LOG"; then
+      echo "[setup] WARN: $FONTS_STAGING could not be removed" >> "$LOG"
     fi
   fi
 fi
