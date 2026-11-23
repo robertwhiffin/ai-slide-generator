@@ -1075,10 +1075,15 @@ phases, along a column line and a row line (the worst seam, levels):
 At 0 px the PDF's figures are what two native cells meeting on a fractional line show there (on
 `slide-data-table` the piece's edges equal the native comparator's in the PDF), so 1 px clears
 the native cells' bar everywhere it was measured, and leaves a moved table's corner pieces 1 px
-over their cell. As built (`snapshot.mjs` pushTable and `CORNER_RUN_UNDER_PX`, the deck for
-Google alone; `snapshot_table.mjs` runUnderPolygon, over the table's own slot grid): each side whose every slot across is an opaque native cell moves out by 1 px, or half that
-row's or column's size where that is less; the corner square between two such sides only where
-the slot across the corner is opaque too; never under another corner cell. On `slide-data-table`
+over their cell. The probe's lines are interior ones, a column line and a row line between two
+cells: where a strip meets the table's outer edge, Google's PDF shows 17–19 levels at 1× and
+40–47 at 2× at the junction (*Ending the run-under short of the outer edges*, below).
+
+As built (`snapshot.mjs` pushTable and `CORNER_RUN_UNDER_PX`, the deck for Google alone;
+`snapshot_table.mjs` runUnderPolygon, over the table's own slot grid): each side whose every slot
+across is an opaque native cell moves out by 1 px, or half that row's or column's size where that
+is less; the corner square between two such sides only where the slot across the corner is
+opaque too; never under another corner cell. On `slide-data-table`
 the seam at x = 356.5 is then 0 levels in the thumbnail (73 before), its other edges are as they
 were there, and in Google's PDF its inner edges match the UI (0) where native cell boundaries
 still show MuPDF's 9 to 45 levels.

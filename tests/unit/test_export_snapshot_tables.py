@@ -829,12 +829,49 @@ SPAN_NEIGHBOUR_BODY = (
     "</thead><tbody><tr><td>UC 1</td><td>Batch</td><td>4 TB</td><td>$184</td></tr>"
     "<tr><td>UC 2</td><td>DLT</td><td>1 TB</td><td>$142</td></tr></tbody></table></div></div>"
 )
+# The rounded data table with a short first body row: two cells, its last slot
+# covered by no cell, which paints nothing. The slide model's cells hold such a
+# slot after every cell the page has (snapshot_table.mjs), so the cells the
+# corner pieces' neighbours are read from are in another order than the
+# table's, which is sorted by row and column: the top right corner cell's
+# neighbour below is that empty slot, and runs under nothing there.
+SHORT_ROW_BODY = (
+    '<div class="slide"><div id="short-row-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table"><thead><tr><th>Use case</th><th>Measurement</th>'
+    "<th>Cost</th></tr></thead><tbody><tr><td>UC 1</td><td>Batch load</td></tr>"
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
+# The rounded data table laid out right to left: each row's first cell is its
+# rightmost, so its cells are read in the reverse of the table's order. The first
+# body row paints nothing of its own, its cells white but the last, at the
+# table's left, translucent: the top left corner cell's neighbour below.
+RTL_BODY = (
+    '<div class="slide"><div id="rtl-wrapper" style="position: absolute; left: 88px; '
+    'top: 160px; width: 900px; border-radius: 8px; overflow: hidden;">'
+    '<table class="rounded-table" style="direction: rtl;"><thead><tr><th>Use case</th>'
+    "<th>Measurement</th><th>Cost</th></tr></thead><tbody>"
+    '<tr style="background: none;"><td style="background: #FFFFFF;">UC 1</td>'
+    '<td style="background: #FFFFFF;">Batch load</td>'
+    '<td style="background: rgba(27, 49, 57, 0.1);">$184</td></tr>'
+    "<tr><td>UC 2</td><td>DLT run</td><td>$142</td></tr></tbody></table></div></div>"
+)
 # The slots each body paints translucent.
 TRANSLUCENT_SLOTS_OF = {
     "translucent": TRANSLUCENT_SLOTS,
     "span-corner": ((1, 1),),
     "span-neighbour": ((1, 1),),
     "fixed-span": ((1, 1),),
+    "rtl": ((1, 0),),
+}
+# The slots a short row leaves no cell in, which the table writes unfilled.
+EMPTY_SLOTS_OF = {"short-row": ((1, 2),)}
+# The spanning cells of the span bodies, (row, col) -> (grid_span, row_span): a
+# fixture-drift guard, since a body whose cells no longer span tests nothing of it.
+SPANS_OF = {
+    "span-corner": {(0, 0): (2, 1)},
+    "span-neighbour": {(0, 0): (1, 2), (0, 1): (2, 1)},
+    "fixed-span": {(0, 0): (1, 2), (0, 1): (2, 1)},
 }
 # Each Google-deck corner body's corner slots and the fill its piece paints.
 CORNER_PIECE_FILLS = {
@@ -846,6 +883,8 @@ CORNER_PIECE_FILLS = {
     "span-neighbour": {(0, 0): "FF5F46", (0, 3): "FF5F46", (3, 0): "F3F3F3", (3, 3): "F3F3F3"},
     "fixed": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
     "fixed-span": {(0, 0): "FF5F46", (0, 3): "FF5F46", (3, 0): "F3F3F3", (3, 3): "F3F3F3"},
+    "short-row": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
+    "rtl": {(0, 0): "FF5F46", (0, 2): "FF5F46", (2, 0): "F3F3F3", (2, 2): "F3F3F3"},
 }
 # The rounded data table on a grid no font moves (``table-layout: fixed``, ``<col>``
 # widths, rows 50 px tall): its lines are 88 / 388 / 688 / 988 and 160 / 210 / 260 / 310.
@@ -990,6 +1029,8 @@ INLINE_BODIES = {
     "span-neighbour": SPAN_NEIGHBOUR_BODY,
     "fixed": FIXED_BODY,
     "fixed-span": FIXED_SPAN_BODY,
+    "short-row": SHORT_ROW_BODY,
+    "rtl": RTL_BODY,
     "precedence": PRECEDENCE_BODY,
     "doubled": DOUBLED_BODY,
     "dots": DOTS_BODY,
@@ -3675,6 +3716,8 @@ class TestRoundedWrapper:
             "span-neighbour",
             "fixed",
             "fixed-span",
+            "short-row",
+            "rtl",
         ],
     )
     def test_in_the_deck_for_google_a_corner_piece_runs_under_its_opaque_neighbours(
@@ -3707,6 +3750,11 @@ class TestRoundedWrapper:
           spanning two columns over a translucent slot (``span-neighbour``),
           runs under neither; the spanning neighbour is opaque by both its
           slots, so the other corner runs under it;
+        * the neighbours are the table's own slots, whatever order the page's
+          cells are read in: a short row's empty slot (``short-row``: the top
+          right corner runs under no slot below it) and a right-to-left row
+          (``rtl``: the top left corner runs under no slot below it, the
+          translucent one at the table's left);
         * the outer corner is still cut to the wrapper's 8 px arc, and the
           corner cell's own a:tc is unfilled.
         """
@@ -3725,6 +3773,17 @@ class TestRoundedWrapper:
             }
             assert all(alpha is not None and alpha < 1 for alpha in alphas.values()), (
                 f"fixture drift: the translucent slots' fill alphas are {alphas}"
+            )
+        for slot in EMPTY_SLOTS_OF.get(name, ()):
+            assert frame.table.rows[slot[0]][slot[1]].fill is None, (
+                f"fixture drift: the empty slot {slot} is filled "
+                f"{frame.table.rows[slot[0]][slot[1]].fill}"
+            )
+        for (row, col), span in SPANS_OF.get(name, {}).items():
+            cell = frame.table.rows[row][col]
+            assert (cell.grid_span, cell.row_span) == span, (
+                f"fixture drift: slot ({row}, {col}) spans {(cell.grid_span, cell.row_span)} "
+                f"(columns, rows), not {span}"
             )
         if name == "thin":
             assert abs(heights[1] - 1) < 0.05 and _opaque_slot(frame, 1, 0), (
@@ -3832,15 +3891,16 @@ class TestRoundedWrapper:
     ) -> None:
         """D13 in literal px: the top left corner piece's box in the deck for Google Slides.
 
-        On grids no font moves (``table-layout: fixed``, ``<col>`` widths, 50 px
-        rows), each box is worked out by hand from the lines, not from the
-        engine's rule: ``fixed``'s piece runs 1 px past its right line (388) and
-        its bottom line (210); ``fixed-span``'s, the cell spanning two rows,
-        stays on its right line (313), a header cell spanning two columns above
-        a translucent slot across that side, and runs 1 px past its bottom line
-        (260). Each side within 0.01 px. (The auto-laid bodies' lines move with
-        the live webfont DECK_CSS loads, by up to 0.08 px between runs, so
-        their boxes are checked against the deck's own grid instead.)
+        On grids no font moves (``table-layout: fixed`` and 50 px rows; ``fixed``
+        sets its widths on ``<col>``, ``fixed-span`` on its header cells), each
+        box is worked out by hand from the lines, not from the engine's rule:
+        ``fixed``'s piece runs 1 px past its right line (388) and its bottom
+        line (210); ``fixed-span``'s, the cell spanning two rows, stays on its
+        right line (313), a header cell spanning two columns above a
+        translucent slot across that side, and runs 1 px past its bottom line
+        (260). Each side within 0.01 px. (The auto-laid bodies' lines fall
+        where their text's widths put them, between whole px, so their boxes
+        are checked against the deck's own grid instead.)
         """
         document = _inline_document(name)
         (table,) = browser_tables(document, "table")
