@@ -50,11 +50,11 @@ Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 from __future__ import annotations
 
 import json
-import subprocess
 
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import run_node
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
     GROUND,
@@ -106,12 +106,9 @@ def _probe_bounded(*fixtures: str) -> dict[str, dict]:
     """
     env = pptx_from_html_huashu.sidecar_subprocess_env()
     env["PROBE_EVALUATE_TIMEOUT_MS"] = str(EVALUATE_TIMEOUT_MS)
-    proc = subprocess.run(
-        ["node", str(PROBE_SCRIPT), *[str(FIXTURE_DIR / f"{f}.html") for f in fixtures]],
-        cwd=pptx_from_html_huashu.SIDECAR_DIR,
+    proc = run_node(
+        [str(PROBE_SCRIPT), *[str(FIXTURE_DIR / f"{f}.html") for f in fixtures]],
         env=env,
-        capture_output=True,
-        text=True,
         # Generous relative to the per-document bound: enough for browser startup
         # plus every document, so this timeout never front-runs the in-page bound
         # the test is actually measuring.

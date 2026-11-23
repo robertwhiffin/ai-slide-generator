@@ -52,6 +52,13 @@ if (
     os.environ["TELLR_TESTS_DATABASE_URL_DEFAULTED"] = "1"
 
 from src.core.databricks_client import reset_client, reset_user_client
+from tests.fixtures import browser_leak_check
+
+# The session's child processes get a TMPDIR of its own, and no Playwright browser they start
+# outlives the session (tests/fixtures/browser_leak_check.py): a fixture bound here is on.
+no_playwright_browser_outlives_the_suite = (
+    browser_leak_check.no_playwright_browser_outlives_the_suite
+)
 
 
 @pytest.fixture(scope="session", autouse=True)

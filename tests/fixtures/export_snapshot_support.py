@@ -664,6 +664,45 @@ def text_missing_reports(stderr: str) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Node helpers: each ended with every browser it launched
+# ---------------------------------------------------------------------------
+
+
+def run_node(
+    arguments: list[str],
+    *,
+    timeout: float,
+    input: bytes = b"",
+    env: dict[str, str] | None = None,
+    cwd: Path | None = pptx_from_html_huashu.SIDECAR_DIR,
+) -> subprocess.CompletedProcess[str]:
+    """``node *arguments`` in a process group of its own, ended with every browser it launched.
+
+    Through the wrapper's ``run_sidecar_process``, as the export runs its sidecar: Playwright
+    launches each browser detached, in a group of its own, and kills it from node's exit
+    handler, which a SIGKILL of node (``subprocess.run``'s timeout) never runs, leaving a
+    browser whose page is blocked running with no parent. So a run past ``timeout`` is told
+    to stop (SIGTERM), its browsers' groups are killed if it does not, then its own group,
+    and ``subprocess.TimeoutExpired`` is raised; after any exit its group is swept. ``env``
+    defaults to the sidecar's, with this session's TMPDIR (``browser_leak_check``). The
+    output is decoded as UTF-8.
+    """
+    completed = pptx_from_html_huashu.run_sidecar_process(
+        ["node", *arguments],
+        input=input,
+        timeout=timeout,
+        cwd=None if cwd is None else str(cwd),
+        env=pptx_from_html_huashu.sidecar_subprocess_env() if env is None else env,
+    )
+    return subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        completed.stdout.decode("utf-8", "replace"),
+        completed.stderr.decode("utf-8", "replace"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Browser measurement: measure.cjs on the sidecar's own Playwright
 # ---------------------------------------------------------------------------
 
@@ -672,14 +711,9 @@ def _run_measure(document_html: str, *arguments: str) -> str:
     with tempfile.TemporaryDirectory(prefix="tellr-measure-") as directory:
         document_path = Path(directory) / "document.html"
         document_path.write_text(document_html, encoding="utf-8")
-        process = subprocess.run(
-            ["node", str(MEASURE_SCRIPT), str(document_path), *arguments],
-            cwd=pptx_from_html_huashu.SIDECAR_DIR,
-            env=pptx_from_html_huashu.sidecar_subprocess_env(),
-            capture_output=True,
-            text=True,
+        process = run_node(
+            [str(MEASURE_SCRIPT), str(document_path), *arguments],
             timeout=MEASURE_TIMEOUT_SECONDS,
-            check=False,
         )
     assert process.returncode == 0, (
         f"measure.cjs {' '.join(arguments)} exited {process.returncode}: {process.stderr.strip()}"
@@ -1697,15 +1731,7 @@ def node_json(script: str) -> object:
     environment, so it can ``require`` a sidecar module by absolute path and
     print ``JSON.stringify`` of what that module returns.
     """
-    process = subprocess.run(
-        ["node", "-e", script],
-        cwd=pptx_from_html_huashu.SIDECAR_DIR,
-        env=pptx_from_html_huashu.sidecar_subprocess_env(),
-        capture_output=True,
-        text=True,
-        timeout=NODE_TIMEOUT_SECONDS,
-        check=False,
-    )
+    process = run_node(["-e", script], timeout=NODE_TIMEOUT_SECONDS)
     assert process.returncode == 0, (
         f"node -e exited {process.returncode}: {process.stderr.strip()}\nscript: {script}"
     )

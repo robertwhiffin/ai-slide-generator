@@ -39,7 +39,6 @@ import base64
 import dataclasses
 import json
 import re
-import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -54,6 +53,7 @@ from tests.fixtures.export_snapshot_support import (
     build_pptx_guarded,
     export_logged,
     export_slides,
+    run_node,
     slide_background,
     slide_background_picture,
     slide_document,
@@ -116,12 +116,8 @@ def _slide_background(pptx: bytes) -> str:
 
 def _probe(*fixtures: str) -> list[dict]:
     """Run the real PREPROCESS_SOURCE and report the branch it took."""
-    proc = subprocess.run(
-        ["node", str(PROBE_SCRIPT), *[str(FIXTURE_DIR / f) for f in fixtures]],
-        cwd=pptx_from_html_huashu.SIDECAR_DIR,
-        env=pptx_from_html_huashu.sidecar_subprocess_env(),
-        capture_output=True,
-        text=True,
+    proc = run_node(
+        [str(PROBE_SCRIPT), *[str(FIXTURE_DIR / f) for f in fixtures]],
         timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS,
     )
     assert proc.returncode == 0, f"probe failed: {proc.stderr}"

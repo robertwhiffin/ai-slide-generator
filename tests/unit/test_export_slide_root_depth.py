@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -53,6 +52,7 @@ from src.utils.html_utils import find_slide_roots
 from tests.fixtures.export_snapshot_support import (
     build_pptx_guarded,
     hermetic_document,
+    run_node,
 )
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
@@ -175,12 +175,8 @@ def _probe(tmp_path: Path, documents: dict[str, str]) -> dict[str, dict]:
         path = tmp_path / f"{name}.html"
         path.write_text(html, encoding="utf-8")
         paths.append(path)
-    proc = subprocess.run(
-        ["node", str(PROBE_SCRIPT), *[str(path) for path in paths]],
-        cwd=pptx_from_html_huashu.SIDECAR_DIR,
-        env=pptx_from_html_huashu.sidecar_subprocess_env(),
-        capture_output=True,
-        text=True,
+    proc = run_node(
+        [str(PROBE_SCRIPT), *[str(path) for path in paths]],
         timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS,
     )
     assert proc.returncode == 0, f"probe failed: {proc.stderr}"

@@ -32,6 +32,7 @@ from src.services.pptx_from_html_huashu import HuashuExportError
 from tests.fixtures.export_snapshot_support import (
     export_documents,
     requires_huashu_sidecar,
+    run_node,
     slide_document,
 )
 
@@ -120,13 +121,12 @@ def test_the_sidecars_tmpdir_is_the_decks_own_directory_inside_the_one_it_is_giv
 def _run_sidecar(tmpdir: Path, out: Path, slides: list[dict]) -> subprocess.CompletedProcess:
     env = {**pptx_from_html_huashu.sidecar_subprocess_env(), "TMPDIR": str(tmpdir)}
     payload = json.dumps({"title": "deck", "slides": slides, "bypassValidation": True})
-    return subprocess.run(
-        ["node", str(pptx_from_html_huashu.SIDECAR_SCRIPT), str(out)],
+    return run_node(
+        [str(pptx_from_html_huashu.SIDECAR_SCRIPT), str(out)],
         input=payload.encode("utf-8"),
         env=env,
-        capture_output=True,
         timeout=SIDECAR_RUN_TIMEOUT_SECONDS,
-        check=False,
+        cwd=None,
     )
 
 
@@ -150,6 +150,6 @@ class TestTheSidecarRemovesItsOwnDirectory:
 
         process = _run_sidecar(tmpdir, out, slides)
 
-        assert out.exists() is written, process.stderr.decode("utf-8", "replace")[-2000:]
+        assert out.exists() is written, process.stderr[-2000:]
         leftovers = [name for name in os.listdir(tmpdir) if name.startswith("huashu-deck-")]
         assert leftovers == [], leftovers
