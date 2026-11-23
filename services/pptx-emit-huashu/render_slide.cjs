@@ -35,8 +35,9 @@
 // request the request guard decides (request_guard.cjs): the page reads its
 // slide's own file, data: and blob: URLs and the hosts the slide CSP allows
 // (`requestHosts`, emit_deck.mjs), and nothing else. A slide whose page
-// navigates away from it is stopped at once and fails: its browser is closed
-// and nothing it read is exported.
+// navigates away from it is stopped at once and fails, and so is a slide still
+// unread at SLIDE_DEADLINE_MS (its page blocked by its own script): its browser
+// is closed, nothing it read is exported, and the deck goes on.
 //
 // renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts })
 //   -> { slide, summary }
@@ -81,6 +82,20 @@ const CANVAS_READY_TIMEOUT_MS = 5000;
 // Chart.js animates for 1000 ms by default, after the chart-init IIFE's own
 // setTimeout chain in build_slide_html; 2000 ms covers both.
 const CANVAS_SETTLE_MS = 2000;
+// How long one slide may take, from its browser's launch to its last read. A
+// slide whose script blocks its page (a busy loop) would hang every read after
+// it, and the deck with it until the sidecar's timeout (180 s), losing every
+// slide: at this it is stopped instead, its browser closed, and it fails
+// alone. Measured (Final fix A, a dev Mac): the slowest slide of both corpora
+// and of the long-off, dataviz-tpl18 and finance-off matrix decks takes 3.2 s
+// (a Chart.js slide, its 2 s canvas settle), the median 1.0 s, and Apps
+// renders a slide in about a Mac's time (25.3 s for the 28-slide long deck,
+// Task 15 B8). The engine's own bounded waits add up to 26 s (network idle,
+// the fonts before and after the animations, the canvases and their settle,
+// one capture), so the deadline fails no slide those waits let through, slow
+// and exported as far as it settled; and a deck with one blocked slide still
+// has 150 s of the sidecar's 180 s for the rest.
+const SLIDE_DEADLINE_MS = 30000;
 // Tellr decks overflow body by ~80 px (a footer or one extra section), clipped
 // by overflow: hidden. Only a dramatic overflow is an authoring error.
 const TELLR_OVERFLOW_TOLERANCE_PX = 100;
@@ -584,26 +599,39 @@ async function readPage(page, slideUrl, sources, target, log) {
   };
 }
 
+// The error a slide past SLIDE_DEADLINE_MS fails with.
+function pastDeadlineError() {
+  return new Error(
+    `the slide did not finish within ${SLIDE_DEADLINE_MS / 1000} s, so it is not exported: ` +
+    'its page may be blocked by its own script'
+  );
+}
+
 // The slide's page read in a browser of its own, its requests guarded
 // (request_guard.cjs), and the browser closed whatever happens. A page that
-// leaves the slide stops the read at once: the slide fails, and what the read
-// still had under way is abandoned with the browser.
+// leaves the slide, or a slide still unread at SLIDE_DEADLINE_MS, stops the
+// read at once: the slide fails, and what the read still had under way is
+// abandoned with the browser. A browser that launches only once the slide has
+// stopped is closed as soon as it has.
 async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
   const log = slideLog();
   let stopSlide;
   const stopped = new Promise((resolve, reject) => { stopSlide = reject; });
   stopped.catch(() => {});
-  let left = false;
-  const leave = (scheme) => {
-    if (left) return;
-    left = true;
+  let isStopped = false;
+  const stop = (error) => {
+    if (isStopped) return;
+    isStopped = true;
     log.stop();
-    stopSlide(leftSlideError(scheme));
+    stopSlide(error);
   };
-  const browser = await chromium.launch(launchOptions(tmpDir));
+  const deadline = setTimeout(() => stop(pastDeadlineError()), SLIDE_DEADLINE_MS);
+  const launching = chromium.launch(launchOptions(tmpDir));
+  let browser = null;
   try {
+    browser = await Promise.race([launching, stopped]);
     const context = await browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
-    const guard = await guardContext(context, slideUrl, requestHosts, leave);
+    const guard = await guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme)));
     const page = await context.newPage();
     guard.watch(page);
     forwardConsole(page);
@@ -612,8 +640,10 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     const readings = await Promise.race([reading, stopped]);
     return { ...readings, requests: guard.counts() };
   } finally {
+    clearTimeout(deadline);
     log.stop();
-    await browser.close();
+    if (browser) await browser.close();
+    else launching.then((late) => late.close(), () => {});
   }
 }
 
@@ -650,4 +680,12 @@ async function renderSlide(htmlFile, pres, options = {}) {
   }
 }
 
-module.exports = { launchOptions, renderSlide };
+module.exports = {
+  launchOptions,
+  renderSlide,
+  SLIDE_DEADLINE_MS,
+  NETWORK_IDLE_TIMEOUT_MS,
+  FONTS_READY_TIMEOUT_MS,
+  CANVAS_READY_TIMEOUT_MS,
+  CANVAS_SETTLE_MS,
+};

@@ -256,4 +256,4 @@ async function captureAll(page, captures, log = console) {
   return pictures;
 }
 
-module.exports = { captureAll, isolationCss, CAPTURE_ATTRIBUTE, HIDDEN_ATTRIBUTE };
+module.exports = { captureAll, isolationCss, CAPTURE_ATTRIBUTE, CAPTURE_TIMEOUT_MS, HIDDEN_ATTRIBUTE };
