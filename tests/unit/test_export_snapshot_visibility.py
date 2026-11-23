@@ -277,6 +277,18 @@ PARTIAL_CLIP = (
     "</div></div>"
 )
 CLIPPING_OVERFLOWS = ("hidden", "clip")
+# The overflows that scroll clip as hidden does: to the padding box.
+SCROLLING_OVERFLOWS = ("auto", "scroll")
+# The same frame, its box spilling out past its padding box's left and top.
+PARTIAL_CLIP_LEFT_UP = (
+    '<div class="slide">'
+    '<div id="frame" style="position: absolute; left: 300px; top: 260px; width: 300px; '
+    f"height: 160px; border: {FRAME_BORDER_PX:g}px solid #1B3139; padding: 10px; "
+    'overflow: {overflow}; background: #F9F7F4;">'
+    '<div id="spill" style="width: 200px; height: 100px; margin-left: -60px; margin-top: -50px; '
+    f'background: #{SPILL_FILL};"></div>'
+    "</div></div>"
+)
 
 # A paragraph taller than its fixed-height window: the window shows two lines.
 CLIPPED_LINES = (
@@ -360,12 +372,13 @@ DISC = (
 CARD_FILL = "F2E8D5"
 CARD_LINE = "5A2D82"
 CARD_BORDER_PX = 4.0
+CARD_RADIUS_PX = 16.0
 CUT_CARD = (
     '<div class="slide">'
     '<div id="window" style="position: absolute; left: 120px; top: 140px; width: 420px; '
     'height: 220px; overflow: hidden;">'
     '<div id="card" style="width: 300px; height: 260px; margin: 20px 0 0 30px; '
-    f"border: {CARD_BORDER_PX:g}px solid #{CARD_LINE}; border-radius: 16px; "
+    f"border: {CARD_BORDER_PX:g}px solid #{CARD_LINE}; border-radius: {CARD_RADIUS_PX:g}px; "
     f'background: #{CARD_FILL};"></div>'
     "</div></div>"
 )
@@ -959,12 +972,13 @@ class TestSnapshotOverflowClipping:
         _assert_no_pictures(shapes, case)
         _assert_lead_kept(shapes)
 
-    @pytest.mark.parametrize("overflow", CLIPPING_OVERFLOWS)
+    @pytest.mark.parametrize("overflow", CLIPPING_OVERFLOWS + SCROLLING_OVERFLOWS)
     def test_a_partly_clipped_box_is_cut_to_its_parents_padding_box(
         self, monkeypatch: pytest.MonkeyPatch, overflow: str
     ) -> None:
-        """A box (fill ``FF3621``) spilling out of a frame with ``overflow: hidden``
-        or ``overflow: clip`` to the right and at the bottom.
+        """A box (fill ``FF3621``) spilling out of a frame with ``overflow: hidden``,
+        ``clip``, ``auto`` or ``scroll`` to the right and at the bottom (a
+        scrolling overflow clips as hidden does, its scroll position at 0).
 
         The frame has a 6 px border and 10 px padding, and an overflow clips to
         the padding box, inside the border (CSS Overflow 3, the overflow clip
@@ -1007,6 +1021,36 @@ class TestSnapshotOverflowClipping:
             _filled(shapes, SPILL_FILL, f"the spilling box ({overflow})"),
             visible,
             (f"the box spilling out of an overflow: {overflow} frame"),
+        )
+
+    @pytest.mark.parametrize("overflow", CLIPPING_OVERFLOWS + SCROLLING_OVERFLOWS)
+    def test_a_box_spilling_left_and_up_is_cut_to_its_parents_padding_box(
+        self, monkeypatch: pytest.MonkeyPatch, overflow: str
+    ) -> None:
+        """The same frame, the box (negative margins) spilling out past the padding box's left
+        and top edges, into and past the 6 px border: one ``FF3621`` shape whose box is the
+        box's browser rect intersected with the frame's padding box, within 0.5 px."""
+        body = PARTIAL_CLIP_LEFT_UP.format(overflow=overflow)
+        document = _document(body)
+        spill = browser_rect(document, "#spill")
+        frame = browser_rect(document, "#frame")
+        padding = browser_padding_box(document, "#frame")
+        visible = _intersection(spill, padding)
+        assert spill["x"] < frame["x"] and spill["y"] < frame["y"], (
+            f"fixture drift: #spill {spill} must spill past the frame {frame} left and above"
+        )
+        assert visible is not None and visible["x"] == padding["x"] and visible["y"] == padding["y"], (
+            f"fixture drift: #spill {spill} must reach into the padding box {padding} from its corner"
+        )
+        assert browser_hit_id(document, *_centre(visible)) == "spill", (
+            "fixture drift: the browser does not show the spilling box inside the frame"
+        )
+
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+        _assert_at(
+            _filled(shapes, SPILL_FILL, f"the box spilling left and up ({overflow})"),
+            visible,
+            f"the box spilling left and up out of an overflow: {overflow} frame",
         )
 
     def test_lines_a_box_cuts_off_are_not_exported(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1254,6 +1298,25 @@ class TestSnapshotClippedShapeGeometry:
         assert any(abs(x - SLIDE_RECT["w"]) <= RECT_TOLERANCE_PX for x, _ in points), (
             "the disc's path never reaches the slide edge that cuts it"
         )
+        # The arc is drawn finely enough to be the circle: between two points on it, the
+        # chord's midpoint lies within the tolerance of the radius too. A coarse polygon
+        # (a diamond's four points are all on the circle) has its chords well inside it.
+        on_circle = [
+            abs(math.hypot(x - centre_x, y - centre_y) - radius) <= RECT_TOLERANCE_PX
+            and abs(x - SLIDE_RECT["w"]) > RECT_TOLERANCE_PX
+            for x, y in points
+        ]
+        sagging = [
+            round(radius - math.hypot((a[0] + b[0]) / 2 - centre_x, (a[1] + b[1]) / 2 - centre_y), 3)
+            for a, b, on_a, on_b in zip(points, points[1:], on_circle, on_circle[1:])
+            if on_a and on_b
+            and radius - math.hypot((a[0] + b[0]) / 2 - centre_x, (a[1] + b[1]) / 2 - centre_y)
+            > RECT_TOLERANCE_PX
+        ]
+        assert sum(on_circle) >= 8 and sagging == [], (
+            f"the disc's arc is a coarse polygon: {sum(on_circle)} points on the circle, chords "
+            f"{sagging[:8]} px inside it"
+        )
 
     def test_a_cut_bordered_card_keeps_its_border_off_the_cut(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1336,6 +1399,35 @@ class TestSnapshotClippedShapeGeometry:
         assert along_the_cut == [], (
             f"the cut card's outline runs along the cut at y={cut:.2f} over x {along_the_cut}"
         )
+        # Its top corners round: the outline passes along each corner's arc (the outline
+        # box's corner circle, radius CARD_RADIUS_PX less half the border), points on it
+        # inside the corner square, and through no square corner.
+        arc_radius = CARD_RADIUS_PX - CARD_BORDER_PX / 2
+        for corner, (corner_x, sign) in {
+            "top-left": (outline_box["x"], 1),
+            "top-right": (outline_box["x"] + outline_box["w"], -1),
+        }.items():
+            centre = (corner_x + sign * arc_radius, outline_box["y"] + arc_radius)
+            in_square = [
+                (x, y)
+                for x, y in points
+                if 0 < sign * (x - corner_x) < arc_radius - RECT_TOLERANCE_PX
+                and 0 <= y - outline_box["y"] < arc_radius - RECT_TOLERANCE_PX
+            ]
+            off_arc = [
+                (round(x, 2), round(y, 2))
+                for x, y in in_square
+                if abs(math.hypot(x - centre[0], y - centre[1]) - arc_radius) > RECT_TOLERANCE_PX
+            ]
+            square = [
+                (x, y)
+                for x, y in points
+                if abs(x - corner_x) <= RECT_TOLERANCE_PX and abs(y - outline_box["y"]) <= RECT_TOLERANCE_PX
+            ]
+            assert in_square and not off_arc and not square, (
+                f"the cut card's {corner} corner: {len(in_square)} points inside its square, "
+                f"off the arc {off_arc[:4]}, at the square corner {square}"
+            )
 
     @pytest.mark.parametrize("case", sorted(CUT_PLAIN_RECTS))
     def test_a_cut_plain_rect_stays_a_preset_rect(
