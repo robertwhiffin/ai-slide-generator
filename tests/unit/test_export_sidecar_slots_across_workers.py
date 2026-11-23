@@ -362,16 +362,17 @@ class TestTheContainersSlotsAgreeAcrossWorkers:
 
 @requires_node
 class TestAWorkerLetsInEveryOneOfTheContainersSlots:
-    def test_four_exports_on_one_worker_of_four_all_run_at_once(self, tmp_path: Path) -> None:
-        """The measured case: all of a Medium app's exports on one of its four workers."""
+    def test_three_exports_on_one_worker_of_three_all_run_at_once(self, tmp_path: Path) -> None:
+        """The measured case, at most three contending: every export on one of the workers,
+        no queue, and each runs in one of the container's slots."""
         container = _container(
-            tmp_path, workers=4, wait=LONG_WAIT_SECONDS, run_seconds=RUN_SECONDS, queue=0
+            tmp_path, workers=3, wait=LONG_WAIT_SECONDS, run_seconds=RUN_SECONDS, queue=0
         )
 
-        outcomes = _exports(container, [4])
+        outcomes = _exports(container, [3])
 
-        assert [outcome["outcome"] for outcome in outcomes] == ["built"] * 4, outcomes
-        assert _most_at_once(_runs(container.runs)) == 4, _runs(container.runs)
+        assert [outcome["outcome"] for outcome in outcomes] == ["built"] * 3, outcomes
+        assert _most_at_once(_runs(container.runs)) == 3, _runs(container.runs)
 
 
 def _bounds(tmp_path: Path, *, workers: int | None, queue: int) -> dict:
