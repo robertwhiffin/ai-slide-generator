@@ -234,6 +234,8 @@ uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
 
 Set the `UVICORN_WORKERS` environment variable to override the default. Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
 
+`run.py` also sets `UVICORN_WORKERS` in the environment its workers inherit, with one slot directory (`TELLR_SIDECAR_SLOTS_DIR`), which it removes after them. The export sidecars' slots are the container's, `UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY`, files of that directory held with `fcntl.flock`, so any worker runs an export in any free slot however requests land (`src/services/sidecar_slots.py`; see [Export Features](export-features.md), *Time and limits*).
+
 ### Chat Job Runners
 
 A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 1, at most 16, and an unusable value falls back to 1. With the default 4 workers, the app runs up to 4 turns at once. A turn waits only when all runners on its worker are busy.
