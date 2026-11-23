@@ -1,4 +1,4 @@
-"""The export sidecars' slots are the container's, not each worker's (final fix E, D2).
+"""The export sidecars' slots are the container's, not each worker's.
 
 The app runs several uvicorn worker processes in one container
 (``packages/databricks-tellr-app/databricks_tellr_app/run.py``, ``UVICORN_WORKERS``), and the
