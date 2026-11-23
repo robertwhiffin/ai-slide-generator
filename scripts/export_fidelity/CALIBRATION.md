@@ -652,7 +652,8 @@ itself draws them from two faces on a Mac (○● in Times New Roman, ◔◑◕ 
 Chromium in Liberation, all at about 0.60 em.
 
 **The choice.** MS PGothic (MS Gothic in a monospace run) is the one face PowerPoint and Google
-both draw these characters in, glyph for glyph, so each is a run of its own in it wherever the run's
+both draw these characters in, glyph for glyph, so each is a run of its own (in it, or, per
+target, in the face its app draws nearer the UI's size: *D8, per target*, below) wherever the run's
 written face lacks it: for Arial, Times New Roman and Courier New, every one but the few that face
 draws itself (`TABLE_FACE_SYMBOLS`); for a webfont, the ones the coverage probe says it lacks, a
 symbol its fallback face draws itself going to that face. The set is `SYMBOL_COVERAGE` in
