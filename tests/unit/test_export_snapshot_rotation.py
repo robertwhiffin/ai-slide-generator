@@ -342,15 +342,32 @@ RELATIVE_LINES = {
         "Revenue",
         None,
     ),
+    "whole-line-two-spans-down": (
+        "",
+        '<span id="moved" style="position:relative; top:4px"><span id="lead">Revenue</span>'
+        '</span> <span style="position:relative; top:4px">grew</span>',
+        "Revenue",
+        None,
+    ),
 }
 # The nudged lines placed from their text: one ▲ moved among plain words, and
 # a whole line moved up and down, by one span or by one span per word.
-NUDGED_LINES = ("nudge", "whole-line-up", "whole-line-down", "whole-line-two-spans")
+NUDGED_LINES = (
+    "nudge",
+    "whole-line-up",
+    "whole-line-down",
+    "whole-line-two-spans",
+    "whole-line-two-spans-down",
+)
 # The relative moves of the nudge cases below.
 NUDGE_DOWN = "position:relative; top:4px"
 NUDGE_UP = "position:relative; top:-3px"
-# A 150 px line cut by its ellipsis, all of its text in one nudged span.
+# A 150 px line cut by its ellipsis, all of its text in one nudged span; and
+# a 144 px one whose nudged span holds the words its cut keeps ("Revenue gre"),
+# its unmoved "a" inside its clip but past where the "…" starts, so the cut
+# takes it away, and the rest past its clip.
 NUDGED_ELLIPSIS_MOVES = {"down": NUDGE_DOWN, "up": NUDGE_UP}
+NUDGED_ELLIPSIS_KEPT_MOVES = {"kept-down": NUDGE_DOWN, "kept-up": NUDGE_UP}
 # Three 20 px lines at line-height 29 px: the move of each line (None:
 # unmoved), or ALL_LINES for one span holding every line.
 ALL_LINES = "all"
@@ -710,6 +727,15 @@ SLIDES: dict[str, str] = {
             '<span id="lead">Revenue</span> grew strongly this year</span></p></div>'
         )
         for name, move in NUDGED_ELLIPSIS_MOVES.items()
+    },
+    **{
+        f"nudged-ellipsis-{name}": (
+            '<div class="slide"><p id="target" style="position:absolute; left:100px; '
+            "top:150px; margin:0; font-size:20px; white-space:nowrap; width:144px; "
+            f'overflow:hidden; text-overflow:ellipsis;"><span style="{move}">'
+            '<span id="lead">Revenue</span> grew</span> a lot more</p></div>'
+        )
+        for name, move in NUDGED_ELLIPSIS_KEPT_MOVES.items()
     },
     **{f"nudged-block-{name}": _nudged_block(moves) for name, moves in NUDGED_BLOCKS.items()},
 }
@@ -2507,7 +2533,7 @@ class TestRelativeInlines:
 
         _assert_placed_from_its_text(item, _document(slide), f"the {name} line")
 
-    @pytest.mark.parametrize("name", list(NUDGED_ELLIPSIS_MOVES))
+    @pytest.mark.parametrize("name", [*NUDGED_ELLIPSIS_MOVES, *NUDGED_ELLIPSIS_KEPT_MOVES])
     def test_a_nudged_line_cut_by_an_ellipsis_is_placed_from_its_moved_text(
         self, rotation_pptx: bytes, name: str
     ) -> None:
@@ -2518,10 +2544,18 @@ class TestRelativeInlines:
         line is still all moved and is placed from its moved text: the box top
         is the first-line offset above the moved "Revenue"'s glyph top, within
         1 px. Taken as unmoved text, the "…" would settle the line, 4 px high.
+        The "kept" lines move only the words the cut keeps: their unmoved "a",
+        inside the clip, is cut away. The "…" takes the move the kept words
+        share, so the line the export draws is still all moved. Taking the
+        move of the line before the cut (none it shares) settles it, 4 px high
+        or 3 px low.
         """
         slide = f"nudged-ellipsis-{name}"
         _, item = _text_item(_shapes(rotation_pptx, slide), "Revenue", slide)
         assert item.text.endswith(ELLIPSIS), f"fixture drift: the line is not cut: {item.text!r}"
+        assert not item.text[: -len(ELLIPSIS)].rstrip().endswith(" a"), (
+            f"fixture drift: the cut keeps the unmoved word: {item.text!r}"
+        )
 
         _assert_placed_from_its_text(item, _document(slide), f"the {name} ellipsis line")
 

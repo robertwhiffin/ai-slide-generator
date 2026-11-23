@@ -170,18 +170,19 @@ function createEllipsis(env, layout) {
     }
     const style = runStyle(ellipsis.context, scale);
     // The "…" stands on the line's own baseline, in the block's style: across,
-    // it spans the line's body, the text no super- or subscript moves
-    // (assembleLine body), the whole line where all of it is moved. Chrome
-    // paints it unmoved, but the renderers draw it with its line, so where
-    // every word of the line shares one move it shares that move too (its
-    // nudge, at the moved body): it then neither settles a moved box nor,
-    // settled, moves a mixed one.
-    const shared = sharedNudgeOf(tokens, 0, tokens.length - 1);
+    // it spans the body of the words the cut keeps, the text no super- or
+    // subscript moves (assembleLine body), all of it where all of it is
+    // moved. Chrome paints it unmoved, but the renderers draw it with its
+    // line, so where every word the cut keeps shares one move it shares that
+    // move too (its nudge, at the moved body): it then neither settles a moved
+    // box nor, settled, moves a mixed one. The words cut away are not drawn,
+    // so their moves count for nothing, and spaces paint nothing.
+    const shared = sharedNudgeOf(kept, 0, kept.length - 1);
     const nudge = shared ? shared : 0;
     let body = null;
-    for (let index = 0; index < tokens.length; index++) {
-      const token = tokens[index];
-      if (token.kind !== 'text' || token.style.baseline) continue;
+    for (let index = 0; index < kept.length; index++) {
+      const token = kept[index];
+      if (token.kind !== 'text' || token.style.baseline || !/\S/.test(token.text)) continue;
       body = unionBounds(body, nudge ? token.rect : settledBounds(token));
     }
     const top = body ? body.top : line.top;

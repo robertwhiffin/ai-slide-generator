@@ -1574,8 +1574,9 @@ function createTextLayout(env) {
   // baseline, every run but a superscript or subscript, whose raise or drop
   // moves its rect off the line (null for a line of script runs alone), each
   // settled on that baseline (settledBounds: a nudged token unmoved), which is
-  // where the line is placed and its growth read; `movedBody` the same tokens
-  // where the browser moved them, and `nudge` the move they all share
+  // where the line is placed and its growth read; `movedBody` the words of
+  // them where the browser moved them (a space paints nothing, and one
+  // between two moved spans is unmoved), and `nudge` the move they all share
   // (sharedNudgeOf), which places a box all of whose text one move shares
   // (textBlock). The script run carries its shift itself.
   function assembleLine(line, lineHeight) {
@@ -1627,7 +1628,7 @@ function createTextLayout(env) {
       rect = unionBounds(rect, bounds);
       if (!token.style.baseline) {
         body = unionBounds(body, settledBounds(token));
-        movedBody = unionBounds(movedBody, bounds);
+        if (/\S/.test(token.text)) movedBody = unionBounds(movedBody, bounds);
       }
     }
     if (tokens.length && !runs.length) return null;
