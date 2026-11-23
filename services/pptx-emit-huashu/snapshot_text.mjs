@@ -215,7 +215,10 @@ import { TURNED_TEXT_SOURCE } from './snapshot_text_turned.mjs';
 //   pseudoOf        element -> {before, after}, its pseudo-elements, or null;
 //   rectOf          element -> its border box bounds, {left, top, width, height};
 //   coverageFont    {family, advanceEm, bytes}: the coverage probe font
-//                   (coverage_font.mjs), which tells the characters a webfont lacks.
+//                   (coverage_font.mjs), which tells the characters a webfont lacks;
+//   target          the renderer the deck is written for, 'pptx' or 'gslides',
+//                   which picks the face a symbol is written in
+//                   (snapshot_text_metrics.mjs symbolFaceOf).
 // Wherever this layout takes an element, a pseudo-element will do.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
@@ -381,6 +384,7 @@ function createTextLayout(env) {
     pendingRuns,
     pendingFonts,
     coverageFont: env.coverageFont,
+    target: env.target,
   });
   const { joinMarkers, markerBlock, markerGlyphLine, readMarkerTokens } = createListMarkers(env, {
     SLACK_FRACTION,

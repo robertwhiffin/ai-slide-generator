@@ -649,6 +649,114 @@ Windows MS Gothic and MS PGothic come with the optional Japanese Supplemental Fo
 them PowerPoint falls back per glyph, as it does for these characters in any other face. A
 character outside both sets (a letter of a script Liberation lacks, CJK, emoji) stays in its run.
 
+### D8, per target: the face a symbol is drawn at the UI's size in (2026-11-23)
+
+MS PGothic drew the Harvey quarters ◔◑◕ at about half the UI's size in both apps (corpus slide 18:
+0.67 of the UI's ink in PowerPoint, 0.68 in Google). The UI draws them from Menlo on a Mac. So the
+face is chosen per target, measured.
+
+**The probe** (`fixB/i5`, `i5b`, `i5d`): 24 symbols (◔◑◕◐ ✓✔✗ ★☆ ◆◇ ▶◀ ① ⇒ ∀ ⊂ ☐☑ ⚠ ➜ ✚ ♪ ☀), each set
+alone at 15 and 40 px, regular and bold, written in each candidate face and rendered in PowerPoint
+for Mac (its PDF) and through Drive (its PDF export); the UI is the same grid in the corpus's
+sans stack in Chrome on this Mac. Each glyph's ink (the box of its pixels under 128) is read at 1×
+and 2×, in CSS px. Candidates: in PowerPoint MS PGothic, Segoe UI Symbol, Cambria Math, Menlo, and
+the run left in Arial for PowerPoint's own fallback (which takes Segoe UI Symbol and Cambria
+Math); through Drive the faces Google hosts that cover the set, Noto Sans Symbols 2, Noto Sans
+Symbols, Noto Sans Math, Noto Sans, Noto Sans Mono, Noto Sans JP, KR and SC, M PLUS 1p, Sawarabi
+Gothic, BIZ UDPGothic, JetBrains Mono, Fira Code, Source Code Pro and Ubuntu Mono, beside MS
+PGothic and MS Gothic (Google draws Segoe UI Symbol, Menlo, Noto Sans Math and Noto Sans from MS
+PGothic, and Noto Sans Symbols 2 as Noto Sans Symbols). Ink, h×w px, at 1× / 2×:
+
+| glyph, size, weight | UI (Menlo) | PowerPoint: MS PGothic | PowerPoint: Segoe UI Symbol | Google: MS PGothic | Google: JetBrains Mono | Google: Noto Sans JP | Google: Noto Sans Symbols 2 |
+|---|---|---|---|---|---|---|---|
+| ◔ 15 px regular | 10×9 / 9×9 | 3×3 / 6.5×6.5 | 10×11 / 10.5×10.5 | 4×3 / 6.5×6.5 | 9×9 / 9×9 | 4×3 / 6.5×6.5 | 7×7 / 7×6.5 |
+| ◔ 15 px bold | 10×9 / 9×9 | 7×7 / 7×7 | 11×11 / 11×11 | 7×7 / 7×7.5 | 9×9 / 9×9 | 7×7 / 7×7.5 | 7×7 / 7×7 |
+| ◔ 40 px regular | 25×24 / 24×24 | 17×18 / 18×18 | 28×29 / 29×29 | 17×18 / 18×18 | 25×24 / 25×25 | 17×18 / 18×18 | 18×18 / 18×17.5 |
+| ◔ 40 px bold | 25×24 / 24×24 | 18×18 / 18.5×19 | 29×30 / 29.5×29.5 | 19×20 / 19.5×19 | 25×24 / 25×25 | 19×20 / 19.5×19 | 20×20 / 19×19 |
+| ◑ 15 px regular | 13×13 / 12.5×13 | 6×4 / 6.5×6.5 | 10×11 / 10.5×10.5 | 7×4 / 6.5×6.5 | 7×4 / 6.5×6.5 | 13×12 / 13.5×13 | 7×7 / 7×6.5 |
+| ◑ 15 px bold | 13×13 / 12.5×13 | 7×7 / 7×7 | 11×11 / 11×11 | 7×7 / 7×7.5 | 7×7 / 7×7.5 | 13×13 / 13.5×13 | 7×7 / 7×7 |
+| ◑ 40 px regular | 34×34 / 34×34 | 17×18 / 18×18 | 28×29 / 29×29 | 17×18 / 18×18 | 17×18 / 18×18 | 35×36 / 35.5×35 | 18×18 / 18×17.5 |
+| ◑ 40 px bold | 34×34 / 34×34 | 18×18 / 18.5×19 | 29×30 / 29.5×29.5 | 19×20 / 19.5×19 | 19×20 / 19.5×19 | 35×36 / 35.5×35 | 20×20 / 19×19 |
+| ◕ 15 px regular | 10×9 / 9×9 | 6×6 / 6.5×6.5 | 10×11 / 10.5×10.5 | 7×6 / 6.5×6.5 | 9×9 / 9×9 | 7×6 / 6.5×6.5 | 7×7 / 7×6.5 |
+| ◕ 15 px bold | 10×9 / 9×9 | 7×7 / 7×7 | 11×11 / 11×11 | 7×7 / 7×7.5 | 9×9 / 9×9 | 7×7 / 7×7.5 | 7×7 / 7×7 |
+| ◕ 40 px regular | 25×24 / 24×24 | 17×18 / 18×18 | 28×29 / 29×29 | 17×18 / 18×18 | 25×24 / 25×25 | 17×18 / 18×18 | 18×18 / 18×17.5 |
+| ◕ 40 px bold | 25×24 / 24×24 | 18×18 / 18.5×19 | 29×30 / 29.5×29.5 | 19×20 / 19.5×19 | 25×24 / 25×25 | 19×20 / 19.5×19 | 20×20 / 19×19 |
+| ✓ 15 px regular | 11×9 / 11×9.5 | 11×10 / 10.5×9.5 | 11×9 / 11×9 | 11×9 / 11×10 | 11×9 / 11×10 | 11×10 / 12×10 | 12×10 / 11.5×10.5 |
+| ✓ 15 px bold | 11×12 / 11×11.5 | 11×10 / 11×10.5 | 11×9 / 11.5×10 | 11×11 / 11.5×11 | 11×11 / 11.5×11 | 11×11 / 12×10.5 | 13×12 / 13.5×11.5 |
+| ✓ 40 px regular | 29×26 / 29.5×25.5 | 29×27 / 29×27 | 30×26 / 29.5×26 | 29×27 / 29×27 | 29×27 / 29×27 | 31×27 / 31.5×27.5 | 30×29 / 30.5×29 |
+| ✓ 40 px bold | 29×31 / 29.5×31.5 | 30×28 / 29.5×28 | 30×28 / 30×27 | 31×28 / 31×29 | 31×28 / 31×29 | 32×29 / 32×28.5 | 35×31 / 37.5×31 |
+
+Over all 24 glyphs (ratio to the UI's ink, height and width, both sizes and scales):
+
+| app: face, weight | median ratio to the UI (all 24 glyphs, h and w, 15 and 40 px, 1× and 2×) | median abs log | range | ◔◑◕ median |
+|---|---|---|---|---|
+| PowerPoint: MS PGothic, regular | 0.99 | 0.23 | 0.08–1.64 | 0.67 |
+| PowerPoint: MS PGothic, bold | 1.00 | 0.23 | 0.08–1.86 | 0.73 |
+| PowerPoint: Segoe UI Symbol, regular | 1.00 | 0.16 | 0.57–1.31 | 1.14 |
+| PowerPoint: Segoe UI Symbol, bold | 1.00 | 0.17 | 0.67–1.43 | 1.19 |
+| PowerPoint: Arial (PowerPoint's own fallback), regular | 1.03 | 0.17 | 0.08–1.88 | 1.14 |
+| PowerPoint: Arial (PowerPoint's own fallback), bold | 1.08 | 0.17 | 0.08–1.88 | 1.19 |
+| PowerPoint: Cambria Math, regular | 1.03 | 0.17 | 0.08–1.88 | 1.14 |
+| PowerPoint: Cambria Math, bold | 1.08 | 0.17 | 0.08–1.88 | 1.19 |
+| Google: MS PGothic, regular | 1.00 | 0.22 | 0.31–1.71 | 0.68 |
+| Google: MS PGothic, bold | 1.04 | 0.20 | 0.50–1.86 | 0.77 |
+| Google: JetBrains Mono, regular | 1.00 | 0.11 | 0.31–1.62 | 1.00 |
+| Google: JetBrains Mono, bold | 1.00 | 0.09 | 0.54–1.67 | 1.00 |
+| Google: Noto Sans JP, regular | 1.06 | 0.12 | 0.33–2.14 | 0.75 |
+| Google: Noto Sans JP, bold | 1.08 | 0.12 | 0.70–2.14 | 0.82 |
+| Google: Noto Sans Symbols 2, regular | 0.92 | 0.21 | 0.50–1.38 | 0.72 |
+| Google: Noto Sans Symbols 2, bold | 1.00 | 0.18 | 0.54–1.50 | 0.78 |
+| Google: Noto Sans Math, regular | 1.00 | 0.18 | 0.31–1.71 | 0.68 |
+| Google: Noto Sans Math, bold | 1.03 | 0.18 | 0.50–1.86 | 0.77 |
+| Google: Noto Sans, regular | 1.00 | 0.18 | 0.31–1.71 | 0.68 |
+| Google: Noto Sans, bold | 1.03 | 0.18 | 0.50–1.86 | 0.77 |
+| Google: Sawarabi Gothic, regular | 1.00 | 0.11 | 0.78–1.86 | 1.25 |
+| Google: Sawarabi Gothic, bold | 1.05 | 0.08 | 0.78–1.86 | 1.38 |
+
+No face Google hosts draws all of ◔◑◕◐ at the UI's size: JetBrains Mono draws ◔◕ at it and lacks ◑◐
+(MS Gothic's then), Noto Sans JP draws ◑◐ at it and lacks ◔◕, Sawarabi Gothic draws all four at
+32.5 px against the UI's 24 and 34. Arial left to PowerPoint's fallback draws the quarters as Segoe
+UI Symbol does but some others tiny (0.08: ① from Cambria Math).
+
+**Per symbol** (`fixB/i5d`): each of the 982 set alone at 24 px in the same stack in Chrome, and
+written spaced at 18 pt in each kept candidate (PowerPoint: Segoe UI Symbol, MS PGothic; Google:
+JetBrains Mono, Noto Sans JP, MS PGothic), every glyph's ink read at 2× beside its PDF face. A
+symbol is written in a candidate other than MS PGothic only where its app drew it in that face
+itself and its error (the sum of the |log| ratios of height and width to the UI's) is lower than
+MS PGothic's by more than 0.05:
+
+| target | Segoe UI Symbol | JetBrains Mono | Noto Sans JP | MS PGothic | median gain over MS PGothic |
+|---|---|---|---|---|---|
+| PowerPoint | 381 | – | – | 601 | 0.31 |
+| Google Slides | – | 47 | 142 | 793 | 0.43 |
+
+Among them: ◐◑◒◓◔◕ Segoe UI Symbol in PowerPoint (17.5 px at 24 against the UI's 14.5 to 20.5,
+MS PGothic's 10.5); in Google ◔◕ JetBrains Mono (15 px, the UI's 14.5) and ◐◑ Noto Sans JP (21, the
+UI's 20.5); ✓ ✗ ① MS PGothic in both (within 0.06), ★☆ MS PGothic in PowerPoint and Noto Sans JP in
+Google. `TARGET_SYMBOL_FACES` in `snapshot_text_metrics.mjs` holds the ranges (140, 24 and 62). A
+monospace run's symbols stay MS Gothic in both: it keeps the cells even, and nothing else was
+measured for them.
+
+**Coverage, per target** (the 982 written in each adopted face): PowerPoint drew 959 in Segoe UI
+Symbol itself, regular and bold alike (14 currency signs from Arial, 8 vulgar fractions from Cambria
+Math, ⅟ from Roboto); Google drew 179 in JetBrains Mono itself, regular and bold alike (the rest from
+MS Gothic, 791, and Noto Color Emoji, 12, the zodiac signs U+2648–U+2653), and 444 in Noto Sans JP
+(the rest from MS PGothic or MS Gothic, Arial and Noto Color Emoji). Since a face is written only for the symbols its app drew in
+it itself, no written symbol falls back or draws as a box in either app. Segoe UI Symbol comes with
+Windows and Office for Mac; Windows PowerPoint was not probed.
+
+**The context the UI is read in.** Chrome on a Mac picks a symbol's fallback face for the run it is
+in: alone (a table cell) ◑ is 0.85 em of ink and ◔◕ 0.6; inside a line of other symbols, as on the
+legend under slide 18's table, ◑ is 0.6 too. The faces follow the glyph alone, the Harvey table's
+case: on slide 18's legend Google's ◑ is the larger.
+
+**Width.** Segoe UI Symbol's quarters advance 0.861 em, the UI's Menlo 0.602 and MS PGothic's 0.5:
+slide 18's legend line ends about 10 px further right in PowerPoint than in the UI, inside its
+box's slack (6% + 4 px), so it does not wrap; JetBrains Mono's advance is 0.6 em.
+
+**Result** (slide 18, `fixB/run18`): PowerPoint 2.93 → 2.93, Google 2.48 → 2.47; the crops
+(`fixB/crop-18-table.png`, `crop-18-legend.png`) show the quarters at about the UI's size in both.
+
 ## N3: the faces of the export's container (Task 15 B8, 2026-11-22)
 
 Measured on a throwaway app on the dev workspace running the sidecar's own `setup.sh`, tarballs and

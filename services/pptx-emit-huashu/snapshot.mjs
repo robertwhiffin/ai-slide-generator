@@ -2168,6 +2168,9 @@ async function snapshotPage(config, pseudoData, renderer) {
     pseudoOf: (element) => pseudoHosts.get(element) || null,
     rectOf,
     coverageFont: config.coverageFont,
+    // The renderer the deck is written for, which picks a symbol's face
+    // (snapshot_text_metrics.mjs symbolFaceOf).
+    target: renderer && renderer.target === 'gslides' ? 'gslides' : 'pptx',
   });
   // follows element -> its waiting {group, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).

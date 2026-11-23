@@ -31,7 +31,9 @@
 //   pendingParagraphs, pendingRuns, pendingFonts   what the walk queued for
 //                     applyMetrics (a table cell's own face among the fonts);
 //   coverageFont      {family, advanceEm, bytes}, the coverage probe font
-//                     (coverage_font.mjs).
+//                     (coverage_font.mjs);
+//   target            the renderer the deck is written for, 'pptx' or 'gslides',
+//                     which picks the face a symbol is written in (symbolFaceOf).
 // It gives back applyMetrics, browserCutCss, contentHeightOf, measureMarkers
 // and measureProbes.
 
@@ -47,6 +49,7 @@ function createTextMetrics(layout) {
     pendingRuns,
     pendingFonts,
     coverageFont,
+    target,
   } = layout;
 
   // Metric probes: a <div> on documentElement, offscreen and hidden, so it
@@ -128,8 +131,8 @@ function createTextMetrics(layout) {
   // Segoe UI Symbol, Cambria Math, MS Gothic or Apple Color Emoji at 0.72 to
   // 1.12 em, and Google from MS PGothic; Courier New draws none of them in
   // either app. So such a character the run's written face lacks is a run of
-  // its own in MS PGothic, or MS Gothic for a monospace run (SYMBOL_FACES),
-  // which every app draws alike. Inclusive ranges, in order.
+  // its own in a face its target draws it in (symbolFaceOf). Inclusive ranges,
+  // in order.
   const SYMBOL_COVERAGE = [
     [0x2070, 0x2070], [0x2074, 0x207c], [0x2080, 0x208c], [0x20a0, 0x20a2], [0x20a5, 0x20a6], [0x20a8, 0x20ab],
     [0x20ad, 0x20b1], [0x2100, 0x2101], [0x2103, 0x2104], [0x2106, 0x2106], [0x2108, 0x2109], [0x2114, 0x2114],
@@ -162,13 +165,89 @@ function createTextMetrics(layout) {
     ],
     'Courier New': [],
   };
-  // The face a symbol is written in, by the face of the run's generic family:
-  // MS Gothic keeps a monospace run's cells even, MS PGothic is proportional.
-  // Both ship with Office for Mac and Google Slides draws both; on Windows they
-  // come with the Japanese fonts, and where a machine lacks them PowerPoint
-  // falls back per glyph, as it does for these characters in any other face.
-  const SYMBOL_FACES = { 'Courier New': 'MS Gothic' };
+  // The face a symbol is written in (symbolFaceOf), by the face of the run's
+  // generic family and the target: MS Gothic keeps a monospace run's cells
+  // even, in both targets. A proportional run's symbol is written, per target,
+  // in the face its app draws it in nearest the UI's ink, height and width, where
+  // that face draws it itself (TARGET_SYMBOL_FACES; CALIBRATION.md D8, per
+  // target: each of the 982 set alone at 24 px in Chrome on a Mac, whose
+  // fallback is Menlo, against each app's PDF at 2x, a face taken where it
+  // beats MS PGothic by more than 0.05 in the sum of the two |log| ratios):
+  // * PowerPoint: Segoe UI Symbol for 381 of them, among them the Harvey balls
+  //   ◐◑◒◓◔◕ (17.5 px of ink at 24 px, the UI's 14.5 to 20.5; MS PGothic's
+  //   10.5); Segoe UI Symbol comes with Windows and with Office for Mac;
+  // * Google Slides, which hosts neither Segoe UI Symbol nor Menlo: JetBrains
+  //   Mono for 47 (◔◕ 15 px, the UI's 14.5) and Noto Sans JP for 142 (◐◑ 21 px,
+  //   the UI's 20.5): no face it hosts draws all four;
+  // * MS PGothic, which ships with Office for Mac and which Google Slides
+  //   draws, for the rest (✓ ✗ ① in both, ★ in PowerPoint, and every other
+  //   symbol nothing measured nearer);
+  //   on Windows it comes with the Japanese fonts, and where a machine lacks
+  //   it PowerPoint falls back per glyph, as it does for these characters in
+  //   any other face.
+  // Each face is taken only for the characters its app drew in it itself, so
+  // none falls back to another, and none draws as a box.
+  const MONOSPACE_SYMBOL_FACE = 'MS Gothic';
   const DEFAULT_SYMBOL_FACE = 'MS PGothic';
+  const TARGET_SYMBOL_FACES = {
+    pptx: [
+      { face: 'Segoe UI Symbol', ranges: [
+        [0x2075, 0x2075], [0x2077, 0x2077], [0x207a, 0x207b], [0x2081, 0x2081], [0x2083, 0x2083],
+        [0x2085, 0x2085], [0x2087, 0x2087], [0x208a, 0x208a], [0x208c, 0x208c], [0x2100, 0x2101],
+        [0x2106, 0x2106], [0x2108, 0x2109], [0x2117, 0x2118], [0x2121, 0x2121], [0x2125, 0x2125],
+        [0x2127, 0x2127], [0x2129, 0x2129], [0x219a, 0x219b], [0x21a3, 0x21a3], [0x21a9, 0x21aa],
+        [0x21ae, 0x21af], [0x21b2, 0x21b2], [0x21ba, 0x21bc], [0x21c0, 0x21c0], [0x21c4, 0x21c6],
+        [0x21cb, 0x21cc], [0x21ce, 0x21ce], [0x21d5, 0x21d9], [0x21de, 0x21e9], [0x2200, 0x2201],
+        [0x2203, 0x2203], [0x2205, 0x2205], [0x2207, 0x220b], [0x220d, 0x220e], [0x2210, 0x2210],
+        [0x2213, 0x2213], [0x2216, 0x2217], [0x221b, 0x221d], [0x2220, 0x2228], [0x222a, 0x222a],
+        [0x222d, 0x222d], [0x222f, 0x2230], [0x2233, 0x2236], [0x223b, 0x223b], [0x223d, 0x2241],
+        [0x2243, 0x2243], [0x2249, 0x224a], [0x224c, 0x224c], [0x224e, 0x2250], [0x2252, 0x2252],
+        [0x2254, 0x2255], [0x2257, 0x2257], [0x2259, 0x2259], [0x2262, 0x2262], [0x2266, 0x2267],
+        [0x226a, 0x226d], [0x227a, 0x227d], [0x2280, 0x2280], [0x2282, 0x2283], [0x2286, 0x2287],
+        [0x228f, 0x2290], [0x2292, 0x2293], [0x2295, 0x22b1], [0x22b6, 0x22b8], [0x22bb, 0x22bd],
+        [0x22bf, 0x22bf], [0x22c5, 0x22c6], [0x22c8, 0x22cc], [0x22d6, 0x22d9], [0x22de, 0x22df],
+        [0x22e2, 0x22e3], [0x22ec, 0x22f1], [0x2305, 0x2305], [0x24c5, 0x24c5], [0x2504, 0x2505],
+        [0x2507, 0x2509], [0x250b, 0x250b], [0x254c, 0x254c], [0x254e, 0x254f], [0x2571, 0x2572],
+        [0x2574, 0x2577], [0x2579, 0x257b], [0x257d, 0x257d], [0x257f, 0x257f], [0x2581, 0x2583],
+        [0x2585, 0x2587], [0x2589, 0x258b], [0x258d, 0x258f], [0x2594, 0x2595], [0x25a2, 0x25a9],
+        [0x25ad, 0x25ad], [0x25b1, 0x25b1], [0x25b4, 0x25b4], [0x25b6, 0x25b7], [0x25bb, 0x25bb],
+        [0x25c0, 0x25c1], [0x25c5, 0x25c9], [0x25cd, 0x25cd], [0x25d0, 0x25d7], [0x25da, 0x25e5],
+        [0x25e7, 0x25ee], [0x2608, 0x260c], [0x2610, 0x2613], [0x261d, 0x261d], [0x2621, 0x2621],
+        [0x2623, 0x2624], [0x2627, 0x2627], [0x262a, 0x262d], [0x262f, 0x2639], [0x263d, 0x263f],
+        [0x2641, 0x2641], [0x2643, 0x2645], [0x2647, 0x264f], [0x2651, 0x2652], [0x2654, 0x2655],
+        [0x2657, 0x265b], [0x265e, 0x265f], [0x2664, 0x2664], [0x2667, 0x2667], [0x2669, 0x2669],
+        [0x266c, 0x266c], [0x266f, 0x266f], [0x270e, 0x270e], [0x2719, 0x2719], [0x271e, 0x271e],
+        [0x272a, 0x272b], [0x2732, 0x2732], [0x2734, 0x2734], [0x2736, 0x2736], [0x2738, 0x2738],
+        [0x273d, 0x273d], [0x2745, 0x2745], [0x2751, 0x2751], [0x2758, 0x2758], [0x2765, 0x2765],
+        [0x2767, 0x2767], [0x2776, 0x2793], [0x279f, 0x279f], [0x27a4, 0x27a4], [0x29bf, 0x29bf],
+      ] },
+    ],
+    gslides: [
+      { face: 'JetBrains Mono', ranges: [
+        [0x207a, 0x207a], [0x2083, 0x2084], [0x2087, 0x2087], [0x20ab, 0x20ab], [0x20ae, 0x20ae],
+        [0x2203, 0x2203], [0x2208, 0x2208], [0x220b, 0x220b], [0x2210, 0x2210], [0x2218, 0x2218],
+        [0x2225, 0x2225], [0x2227, 0x2228], [0x2249, 0x2249], [0x2282, 0x2283], [0x2286, 0x2287],
+        [0x254c, 0x254c], [0x254e, 0x254f], [0x2574, 0x257f], [0x25b4, 0x25b4], [0x25bb, 0x25bb],
+        [0x25c1, 0x25c1], [0x25c5, 0x25c7], [0x25d4, 0x25d5], [0x25e7, 0x25eb],
+      ] },
+      { face: 'Noto Sans JP', ranges: [
+        [0x2100, 0x2100], [0x2109, 0x2109], [0x2127, 0x2127], [0x2196, 0x2199], [0x21c4, 0x21c6],
+        [0x21cb, 0x21cc], [0x21d0, 0x21d0], [0x21e6, 0x21e9], [0x2207, 0x2207], [0x2223, 0x2223],
+        [0x222d, 0x222d], [0x2234, 0x2235], [0x2262, 0x2262], [0x226e, 0x226f], [0x2295, 0x2299],
+        [0x22bf, 0x22bf], [0x2305, 0x2305], [0x2312, 0x2312], [0x24c5, 0x24c5], [0x2504, 0x250b],
+        [0x250d, 0x250e], [0x2511, 0x2512], [0x2515, 0x2516], [0x2519, 0x251a], [0x251e, 0x251f],
+        [0x2521, 0x2522], [0x2526, 0x2527], [0x2529, 0x252a], [0x252d, 0x252e], [0x2531, 0x2532],
+        [0x2535, 0x2536], [0x2539, 0x253a], [0x253d, 0x253e], [0x2540, 0x2541], [0x2543, 0x254a],
+        [0x254d, 0x254d], [0x256d, 0x2572], [0x2581, 0x2583], [0x2585, 0x2587], [0x2589, 0x258b],
+        [0x258d, 0x258f], [0x2594, 0x2595], [0x25a2, 0x25a9], [0x25b1, 0x25b1], [0x25b3, 0x25b3],
+        [0x25b6, 0x25b7], [0x25bd, 0x25bd], [0x25c0, 0x25c0], [0x25c9, 0x25c9], [0x25ce, 0x25ce],
+        [0x25d0, 0x25d3], [0x25e2, 0x25e5], [0x2601, 0x2601], [0x2605, 0x2606], [0x2609, 0x2609],
+        [0x261c, 0x261c], [0x261e, 0x261f], [0x2661, 0x2662], [0x2664, 0x2664], [0x2667, 0x2669],
+        [0x266c, 0x266f], [0x2934, 0x2935],
+      ] },
+    ],
+  };
+  const SYMBOL_FACES = TARGET_SYMBOL_FACES[target === 'gslides' ? 'gslides' : 'pptx'];
   // What a coverage probe never asks about: white space, and the marks and
   // format characters that join or space the text around them.
   const COVERAGE_SKIP = /[\s\p{M}\p{Cf}]/u;
@@ -356,10 +435,14 @@ function createTextMetrics(layout) {
     return TABLE_FACE_SYMBOLS[family].indexOf(codePoint) >= 0;
   }
 
-  // The face a symbol is written in, by the face of the run's generic family
-  // (SYMBOL_FACES).
-  function symbolFaceOf(family) {
-    return Object.prototype.hasOwnProperty.call(SYMBOL_FACES, family) ? SYMBOL_FACES[family] : DEFAULT_SYMBOL_FACE;
+  // The face symbol `codePoint` is written in, by the face of the run's generic
+  // family (`family`) and the target (SYMBOL_FACES).
+  function symbolFaceOf(family, codePoint) {
+    if (family === 'Courier New') return MONOSPACE_SYMBOL_FACE;
+    for (let index = 0; index < SYMBOL_FACES.length; index++) {
+      if (inRanges(SYMBOL_FACES[index].ranges, codePoint)) return SYMBOL_FACES[index].face;
+    }
+    return DEFAULT_SYMBOL_FACE;
   }
 
   // `family` as one entry of a font-family list.
@@ -581,7 +664,7 @@ function createTextMetrics(layout) {
   // symbol (SYMBOL_FACES).
   function lackingFaceOf(face, codePoint) {
     if (inRanges(FALLBACK_COVERAGE, codePoint) || drawsSymbol(face.fallback, codePoint)) return face.fallback;
-    return symbolFaceOf(face.fallback);
+    return symbolFaceOf(face.fallback, codePoint);
   }
 
   // Puts `pieces` (runs) where `run` is in `runs`, a line's runs.
@@ -642,7 +725,7 @@ function createTextMetrics(layout) {
       if (isWebfont(webfonts, family) || !Object.prototype.hasOwnProperty.call(TABLE_FACE_SYMBOLS, family)) continue;
       const lacking = characterOffsets(pendingRuns[index].run.text,
         (codePoint) => inRanges(SYMBOL_COVERAGE, codePoint) && !drawsSymbol(family, codePoint))
-        .map((found) => ({ at: found.at, family: symbolFaceOf(family) }));
+        .map((found) => ({ at: found.at, family: symbolFaceOf(family, found.codePoint) }));
       if (lacking.length) {
         lackingOf[index] = lacking;
         splits += 1;

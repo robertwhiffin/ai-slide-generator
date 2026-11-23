@@ -30,11 +30,13 @@ The global Review Focus 3 holds: ``system-ui, Arial`` at 600 is ``Arial`` plus b
 
 Symbols (D8, extended): the characters outside WGL4 that MS PGothic and MS Gothic
 draw in both PowerPoint and Google Slides (982 measured, CALIBRATION.md D8) are
-written in MS PGothic (MS Gothic for monospace) where the run's written face
-lacks them in the apps: always for Arial, Times New Roman and Courier New (bar
-the few each draws itself), and for a webfont where the coverage probe says it
-lacks them. PowerPoint for Mac otherwise draws them from Segoe UI Symbol, Cambria
-Math or Apple Color Emoji at 0.72 to 1.12 em, Google from MS PGothic.
+written, where the run's written face lacks them in the apps (always for Arial,
+Times New Roman and Courier New, bar the few each draws itself; for a webfont
+where the coverage probe says it lacks them), in MS Gothic for a monospace run,
+and otherwise in the face the target's app draws them in nearest the UI's size
+(CALIBRATION.md D8, per target): Segoe UI Symbol in PowerPoint for the Harvey
+balls and 375 others, JetBrains Mono and Noto Sans JP in Google Slides for 189,
+and MS PGothic for the rest, nothing measuring nearer.
 
 Every expectation that depends on the machine reads the face the browser drew
 from the DevTools protocol (``CSS.getPlatformFontsForNode``), independently of
@@ -55,6 +57,7 @@ from tests.fixtures.export_snapshot_support import (
     Shape,
     browser_face_families,
     browser_loaded_weights,
+    export_corpus,
     export_slides,
     requires_huashu_sidecar,
     slide_document,
@@ -346,7 +349,8 @@ class TestTheWrittenFaceIsTheFaceDrawn:
         and on Apps, and the face the layout was measured in: it is written by its own name,
         first in its stack or later, as any loaded webfont is. A run of characters it lacks
         alone keeps it too, as every webfont's run does: ½ (WGL4) is written in the run's
-        fallback face, Arial, and ◔ in MS PGothic (D8). Only the container's own DejaVu, a face
+        fallback face, Arial, and ◔ in its target's symbol face (D8, SYMBOL_FACE_OF). Only the
+        container's own DejaVu, a face
         the page did not load, is never written; the sidecar's fontconfig keeps it from every
         stack (test_huashu_font_bundle.py)."""
         assert "DejaVu Sans" in browser_loaded_weights(document), (
@@ -363,7 +367,7 @@ class TestTheWrittenFaceIsTheFaceDrawn:
             assert _runs(_box(shapes, DEJAVU_LACKS)) == [
                 ("½", "Arial", False),
                 (" ", "DejaVu Sans", False),
-                ("◔", "MS PGothic", False),
+                ("◔", SYMBOL_FACE_OF[target]["◔"], False),
             ], target
 
     def test_a_loaded_webfont_named_dejavu_is_written_as_one_of_any_other_name(
@@ -426,23 +430,40 @@ class TestTheWrittenFaceIsTheFaceDrawn:
         assert _faces(_box(slide_shapes(deck, 0), "Georgia stack")) == {"Georgia"}
 
 
-class TestSymbolsAreWrittenInAFaceEveryAppDraws:
-    def test_harvey_quarters_in_a_serif_run_are_ms_pgothic(self, decks: dict[str, bytes]) -> None:
+# The face each target writes a symbol in that the run's face lacks, as measured against
+# the UI (CALIBRATION.md D8, per target): PowerPoint draws ◔◑◕ and ◆ from Segoe UI Symbol
+# at the UI's size; Google draws ◔◕ and ◆ from JetBrains Mono and ◑ from Noto Sans JP, as
+# no face it hosts draws all three. ✓ is MS PGothic's in both, nothing measuring nearer.
+SYMBOL_FACE_OF = {
+    "pptx": {"◔": "Segoe UI Symbol", "◑": "Segoe UI Symbol", "◕": "Segoe UI Symbol", "◆": "Segoe UI Symbol",
+             "✓": "MS PGothic"},
+    "gslides": {"◔": "JetBrains Mono", "◑": "Noto Sans JP", "◕": "JetBrains Mono", "◆": "JetBrains Mono",
+                "✓": "MS PGothic"},
+}
+
+
+class TestSymbolsAreWrittenInTheFaceEachAppDrawsAtTheUisSize:
+    def test_harvey_quarters_in_a_serif_run_take_each_targets_face(
+        self, decks: dict[str, bytes]
+    ) -> None:
         """Fontless text (Times New Roman): ○ and ● are WGL4, which Times New Roman draws in
-        every app; ◔◑◕ are not, so each is an MS PGothic run of its own."""
-        expected = [
-            ("Legend: ○ lowest · ", "Times New Roman", False),
-            ("◔", "MS PGothic", False),
-            (" low · ", "Times New Roman", False),
-            ("◑", "MS PGothic", False),
-            (" medium · ", "Times New Roman", False),
-            ("◕", "MS PGothic", False),
-            (" high · ● highest", "Times New Roman", False),
-        ]
+        every app; ◔◑◕ are not, so each is a run of its own in the face its target draws it
+        at the UI's size (SYMBOL_FACE_OF). Written in MS PGothic, both apps drew them at
+        about half the UI's size."""
         for target, deck in decks.items():
-            assert _runs(_box(slide_shapes(deck, 0), "Legend")) == expected, target
+            faces = SYMBOL_FACE_OF[target]
+            assert _runs(_box(slide_shapes(deck, 0), "Legend")) == [
+                ("Legend: ○ lowest · ", "Times New Roman", False),
+                ("◔", faces["◔"], False),
+                (" low · ", "Times New Roman", False),
+                ("◑", faces["◑"], False),
+                (" medium · ", "Times New Roman", False),
+                ("◕", faces["◕"], False),
+                (" high · ● highest", "Times New Roman", False),
+            ], target
 
     def test_a_monospace_runs_symbols_are_ms_gothic(self, decks: dict[str, bytes]) -> None:
+        """MS Gothic keeps a monospace run's cells even, in both targets."""
         for target, deck in decks.items():
             assert _runs(_box(slide_shapes(deck, 0), "Mono ○")) == [
                 ("Mono ○", "Courier New", False),
@@ -450,18 +471,45 @@ class TestSymbolsAreWrittenInAFaceEveryAppDraws:
                 (" ● end", "Courier New", False),
             ], target
 
-    def test_symbols_a_webfont_lacks_are_ms_pgothic(self, decks: dict[str, bytes]) -> None:
-        """DM Sans lacks ◆ and ✓ (guarded): each is an MS PGothic run, the rest DM Sans."""
+    def test_symbols_a_webfont_lacks_take_each_targets_face(self, decks: dict[str, bytes]) -> None:
+        """DM Sans lacks ◆ and ✓ (guarded): each is a run of its own in its target's face, the
+        rest DM Sans."""
         for character in "◆✓":
             assert _webfont_lacks(character), f"fixture drift: DM Sans has {character}"
         for target, deck in decks.items():
+            faces = SYMBOL_FACE_OF[target]
             assert _runs(_box(slide_shapes(deck, 0), "Status")) == [
                 ("Status ", "DM Sans", False),
-                ("◆", "MS PGothic", False),
+                ("◆", faces["◆"], False),
                 (" done ", "DM Sans", False),
-                ("✓", "MS PGothic", False),
+                ("✓", faces["✓"], False),
                 (" ok", "DM Sans", False),
             ], target
+
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_corpus_slide_18s_harvey_balls_and_ticks_take_each_targets_face(
+        self, monkeypatch: pytest.MonkeyPatch, target: str
+    ) -> None:
+        """Corpus slide 18 (no webfont: its text is written Arial): the Health column's ◕◑◔
+        and the On target column's ✓ are runs of their own in their target's face, in the
+        table's cells and in the legend under it, the rest of each in Arial."""
+        deck, failures = export_corpus(["18"], monkeypatch=monkeypatch, target=target)
+        assert failures == [] and deck, f"the export rejected slide 18: {failures}"
+        faces = SYMBOL_FACE_OF[target]
+        shapes = slide_shapes(deck, 0)
+        (table,) = [shape.table for shape in shapes if shape.table is not None]
+        cells = {
+            cell.text: [(run.text, run.typeface) for para in cell.paras for run in para.runs if run.text]
+            for row in table.rows
+            for cell in row
+            if cell.text in ("◕", "◑", "◔", "✓")
+        }
+        assert cells == {symbol: [(symbol, faces[symbol])] for symbol in ("◕", "◑", "◔", "✓")}, cells
+        legend = [(text, face) for text, face, _ in _runs(_box(shapes, "Legend"))]
+        assert [(text, face) for text, face in legend if text in "◔◑◕✓"] == [
+            (symbol, faces[symbol]) for symbol in "◔◑◕✓"
+        ], legend
+        assert {face for text, face in legend if text not in "◔◑◕✓"} == {"Arial"}, legend
 
     def test_a_symbol_the_table_face_draws_itself_stays_in_its_run(
         self, decks: dict[str, bytes]
