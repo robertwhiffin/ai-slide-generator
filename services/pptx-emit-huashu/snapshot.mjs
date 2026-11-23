@@ -109,8 +109,9 @@ import { TEXT_SOURCE } from './snapshot_text.mjs';
 
 // Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
 // GRADIENT_SOURCE, BORDERS_SOURCE, TEXT_SOURCE, TABLE_SOURCE and blendOver:
-// queryOne, queryAll, elementChildrenOf, domAccess, reportCollectionLoss, the
-// two limits, splitTopLevelCommas, parseLinearGradient, createBorders,
+// queryOne, queryAll, elementChildrenOf, domAccess, reportCollectionLoss,
+// diagnose, diagnosticTokens, diagnosticPageText, thrownMessage, the two
+// limits, splitTopLevelCommas, parseLinearGradient, createBorders,
 // createTextLayout, createTableLayout and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
 // from here arrives in `config`, what pseudo.mjs read of the page's
@@ -312,8 +313,7 @@ async function snapshotPage(config, pseudoData, renderer) {
       middle = null;
       if (!gradientFailureReported) {
         gradientFailureReported = true;
-        console.warn('[html2pptx] a background gradient could not be read; the text over it is ' +
-          'blended without its colour (further ones on this slide are not said)');
+        diagnose('gradientUnread');
       }
     }
     gradientCache.set(value, middle);
@@ -402,13 +402,13 @@ async function snapshotPage(config, pseudoData, renderer) {
   function backgroundImageOf(value) {
     if (!value || value === 'none') return null;
     if (/gradient\(/i.test(value)) {
-      console.warn('[html2pptx] gradient on the slide body: the slide background uses its colour instead');
+      diagnose('bodyGradient');
       return null;
     }
     const match = /url\(["']?([^"')]+)["']?\)/.exec(value);
     if (!match) return null;
     if (RASTER_DATA_URI.test(match[1])) return match[1];
-    console.warn('[html2pptx] skipped a non-data: background image');
+    diagnose('nonDataBackground');
     return null;
   }
 
@@ -1769,7 +1769,8 @@ async function snapshotPage(config, pseudoData, renderer) {
   // clip. Its pixels already carry the target's cumulative opacity, so
   // its alpha is 1. Its rect is axis-aligned, so a turned target is drawn
   // turned in it, with no rotation.
-  //   captureTargets: {element, capture, hidden: Element[]}, in capture order.
+  //   captureTargets: {element, capture, hidden: Element[], seq}, in capture order
+  //   (seq the capture id's number).
   const captureTargets = [];
   let nextCaptureSeq = 0;
 
@@ -1867,13 +1868,13 @@ async function snapshotPage(config, pseudoData, renderer) {
     while (pending.length) {
       const next = pending.pop();
       if (next.depth >= WALK_STEP_LIMIT) {
-        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot capture targets');
+        reportCollectionLoss(diagnosticTokens('cutAtDepth', WALK_STEP_LIMIT), 'captureTargets');
         continue;
       }
       const children = elementChildrenOf(next.element);
       for (let index = children.length - 1; index >= 0; index--) {
         if (++read > COLLECTION_ITEM_LIMIT) {
-          reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' elements', 'the snapshot capture targets');
+          reportCollectionLoss(diagnosticTokens('truncatedElements', COLLECTION_ITEM_LIMIT), 'captureTargets');
           return hidden;
         }
         if (window.getComputedStyle(children[index]).visibility !== 'visible') hidden.push(children[index]);
@@ -1915,7 +1916,8 @@ async function snapshotPage(config, pseudoData, renderer) {
     const generated = isPseudo(element);
     const shown = shownPart(paintedBounds(element, bounds), clip);
     if (!shown) return null;
-    const id = 'c' + nextCaptureSeq++;
+    const seq = nextCaptureSeq++;
+    const id = 'c' + seq;
     const x = shown.left;
     const y = shown.top;
     const w = shown.right - shown.left;
@@ -1941,7 +1943,7 @@ async function snapshotPage(config, pseudoData, renderer) {
     };
     captures.push(capture);
     // A pseudo-element's host is named already; every other target is named once the reads are done.
-    if (!generated) captureTargets.push({ element, capture, hidden });
+    if (!generated) captureTargets.push({ element, capture, hidden, seq });
     items.push({ kind: 'image', id: nextItemId++, order, x, y, w, h, src: null, captureId: id, alpha: 1, rotate: null });
     stats.images++;
     return capture;
@@ -1964,7 +1966,8 @@ async function snapshotPage(config, pseudoData, renderer) {
   }
 
   function pushGroundCapture(element, s) {
-    const id = 'c' + nextCaptureSeq++;
+    const seq = nextCaptureSeq++;
+    const id = 'c' + seq;
     groundCapture = {
       id,
       x: 0,
@@ -1979,7 +1982,7 @@ async function snapshotPage(config, pseudoData, renderer) {
       bordersHidden: true,
     };
     captures.push(groundCapture);
-    captureTargets.push({ element, capture: groundCapture, hidden: [] });
+    captureTargets.push({ element, capture: groundCapture, hidden: [], seq });
   }
 
   // The snapshot's one lasting write, made once every read is done (the metric
@@ -2007,8 +2010,7 @@ async function snapshotPage(config, pseudoData, renderer) {
         }
       } catch (e) {
         target.capture.failed = true;
-        console.error('[html2pptx] capture failed: ' + target.capture.id + ' the target could not be named (' +
-          (e && e.message) + ')');
+        diagnose('captureUnnamed', target.seq, diagnosticPageText(thrownMessage(e)));
       }
     }
   }
@@ -2535,7 +2537,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   function pushEntry(element, state) {
     if (pushed >= COLLECTION_ITEM_LIMIT) {
       stats.truncated = true;
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' elements', 'the snapshot walk');
+      reportCollectionLoss(diagnosticTokens('truncatedElements', COLLECTION_ITEM_LIMIT), 'walk');
       return false;
     }
     stack.push({ element, state });
@@ -2548,7 +2550,7 @@ async function snapshotPage(config, pseudoData, renderer) {
   function pushChildren(element, state) {
     if (state.depth > WALK_STEP_LIMIT) {
       stats.truncated = true;
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot walk');
+      reportCollectionLoss(diagnosticTokens('cutAtDepth', WALK_STEP_LIMIT), 'walk');
       return;
     }
     if (isPseudo(element)) return;
@@ -2745,22 +2747,22 @@ async function snapshotPage(config, pseudoData, renderer) {
 
 // A page function of two arguments, the PseudoData pseudo.mjs read and the
 // renderer the deck is written for ({target}): render_slide.cjs evaluates it
-// applied to them.
+// applied to them. It resolves to passResult(model) (dom_access.mjs), the
+// model and what the snapshot diagnosed.
 export const SNAPSHOT_SOURCE = `
 (async function (pseudoData, renderer) {
-  const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
 ${BORDERS_SOURCE}
 ${TEXT_SOURCE}
 ${TABLE_SOURCE}
 ${blendOver.toString()}
-  return await (${snapshotPage.toString()})(${JSON.stringify({
+  return passResult(await (${snapshotPage.toString()})(${JSON.stringify({
     slideRootMarker: SLIDE_ROOT_MARKER,
     captureAttribute: CAPTURE_ATTRIBUTE,
     hiddenAttribute: HIDDEN_ATTRIBUTE,
     pseudoHostAttribute: PSEUDO_HOST_ATTRIBUTE,
     coverageFont: { family: COVERAGE_FONT_FAMILY, advanceEm: COVERAGE_ADVANCE_EM, bytes: COVERAGE_FONT_BYTES },
-  })}, pseudoData, renderer);
+  })}, pseudoData, renderer));
 })
 `;

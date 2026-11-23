@@ -60,9 +60,11 @@ class PassFailed {
   }
 }
 
+// The pass's value, { bgTransferred } (its diagnostics, which the export logs,
+// are not this probe's).
 async function evaluatePreprocess(page) {
   try {
-    return await page.evaluate(PREPROCESS_SOURCE);
+    return (await page.evaluate(PREPROCESS_SOURCE)).value;
   } catch (error) {
     // First line only: the stack names this file's own frames, which would make
     // the reported message move whenever the sidecar is edited.

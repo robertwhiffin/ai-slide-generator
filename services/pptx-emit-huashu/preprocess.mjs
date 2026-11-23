@@ -84,11 +84,18 @@ const ROOT_AND_BACKGROUND_SRC = `
   // can never both count as roots.
   const SLIDE_WRAPPER_TAGS = new Set(['SECTION', 'ARTICLE']);
 
+  // How many of the candidates the walk stopped at the no-root diagnostic names.
+  const CANDIDATES_NAMED = 8;
+
   function findSlideRoot() {
     const direct = queryOne('body > [class*="slide"]');
     if (direct) return direct;
     const wrappers = queryAll('body > section, body > article');
-    const walks = [];
+    // Each candidate the walk stopped at, as the no-root diagnostic's list
+    // names it (diagnosticTokens), the first CANDIDATES_NAMED of them, and how
+    // many there were.
+    let candidates = '';
+    let candidateCount = 0;
     // Still gated on there being a chain to walk — not to avoid the capture, which
     // the snapshot above has already made, but because a null dom is how
     // reportNoSlideRoot is told no wrapper was ever read. A deck with no wrappers
@@ -97,10 +104,16 @@ const ROOT_AND_BACKGROUND_SRC = `
     for (let index = 0; index < wrappers.length; index++) {
       const walk = walkToSlideBody(wrappers[index], dom);
       if (walk.matched) return wrappers[index];
-      walks.push(walk);
+      if (candidateCount < CANDIDATES_NAMED) {
+        const named = walk.stoppedAt === null
+          ? diagnosticTokens('unreadCandidate', walk.steps, walk.reason)
+          : diagnosticTokens('wrapperCandidate', diagnosticPageText(walk.stoppedAt), walk.steps, walk.reason);
+        candidates = candidates + named.diagnosticTokens;
+      }
+      candidateCount += 1;
     }
     const fallback = queryOne('body > div');
-    if (!fallback) reportNoSlideRoot(walks, dom);
+    if (!fallback) reportNoSlideRoot(candidates, candidateCount, dom);
     return fallback;
   }
 
@@ -124,28 +137,31 @@ const ROOT_AND_BACKGROUND_SRC = `
   // What it must never do is fail SILENTLY, since a rootless deck and a broken
   // locator both export white. The line below is what tells those apart: it
   // names the shape the walk actually saw, so "the deck was pathological" is
-  // distinguishable from "our locator regressed". render_slide.cjs routes
-  // [preprocess] console lines to stderr, which is the stream
-  // pptx_from_html_huashu.py echoes into the app log.
-  function reportNoSlideRoot(walks, dom) {
+  // distinguishable from "our locator regressed". It is the preprocess pass's
+  // own diagnostic (dom_access.mjs diagnose), which render_slide.cjs logs on
+  // stderr, the stream pptx_from_html_huashu.py echoes into the app log, with
+  // body's child tags and each candidate's, which are the page's (a custom
+  // element can be named for the deck), by their length alone unless the
+  // debug text is on.
+  function reportNoSlideRoot(candidates, candidateCount, dom) {
     const access = dom || OWN_DOM_ACCESS;
-    const bodyTags = [];
+    let bodyTags = '';
+    let tagCount = 0;
     // Bounded: in a hostile realm the sibling accessor is itself a loop risk.
     const body = queryOne('body');
     let sibling = body ? access.firstElementChild(body) : null;
-    while (sibling && bodyTags.length < 8) {
-      bodyTags.push(access.tagName(sibling));
+    while (sibling && tagCount < 8) {
+      bodyTags = bodyTags + (tagCount ? ', ' : '') + pageString(access.tagName(sibling));
+      tagCount += 1;
       sibling = access.nextElementSibling(sibling);
     }
-    const candidates = walks.map(
-      (walk) => walk.stoppedAt + ' after ' + walk.steps + ' level(s): ' + walk.reason
-    );
-    console.warn(
-      '[preprocess] no slide root: body children [' + bodyTags.join(', ') + ']' +
-      '; wrapper candidates ' + (candidates.length ? candidates.join(' | ') : '(none)') +
-      '; tree reads ' + (access.pristine ? 'pristine' : 'this-realm') +
-      '. A chain over 509 levels deep is reparsed by Chromium into siblings and ' +
-      'is not resolvable here by design.'
+    diagnose(
+      'noSlideRoot',
+      diagnosticPageText(bodyTags),
+      candidateCount,
+      candidateCount < CANDIDATES_NAMED ? candidateCount : CANDIDATES_NAMED,
+      { diagnosticTokens: candidates },
+      access.pristine ? 'pristineTree' : 'thisRealmTree'
     );
   }
 
@@ -168,24 +184,26 @@ const ROOT_AND_BACKGROUND_SRC = `
   // it.
   //
   // Returns the walk as data rather than a boolean so the no-root diagnostic can
-  // report where each candidate stopped without walking anything twice.
+  // report where each candidate stopped without walking anything twice: the
+  // tag it stopped at (null when the walk read no more), and why, as the
+  // diagnostic's part names it (model_check.cjs DIAGNOSTIC_PARTS).
   function walkToSlideBody(wrapper, dom) {
     let node = wrapper;
     for (let steps = 0; steps < WALK_STEP_LIMIT; steps++) {
       const child = dom.firstElementChild(node);
       if (!child) {
-        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'no element children' };
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'noElementChildren' };
       }
       if (dom.nextElementSibling(child)) {
-        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'several element children' };
+        return { matched: false, steps, stoppedAt: dom.tagName(node), reason: 'severalElementChildren' };
       }
       if (dom.matches(child, '[class*="slide"]')) return { matched: true, steps: steps + 1 };
       if (!SLIDE_WRAPPER_TAGS.has(dom.tagName(child))) {
-        return { matched: false, steps: steps + 1, stoppedAt: dom.tagName(child), reason: 'not a promotable wrapper' };
+        return { matched: false, steps: steps + 1, stoppedAt: dom.tagName(child), reason: 'notPromotable' };
       }
       node = child;
     }
-    return { matched: false, steps: WALK_STEP_LIMIT, stoppedAt: '(unread)', reason: 'iteration limit reached' };
+    return { matched: false, steps: WALK_STEP_LIMIT, stoppedAt: null, reason: 'iterationLimit' };
   }
 
   // A ground layer the export embeds: a data: image (SDR-4437). The slide's
@@ -242,25 +260,26 @@ const ROOT_AND_BACKGROUND_SRC = `
     try {
       root.setAttribute('${SLIDE_ROOT_MARKER}', '');
     } catch (e) {
-      console.warn('[preprocess] could not mark the slide root: ' + (e && e.message));
+      diagnose('rootUnmarked', diagnosticPageText(thrownMessage(e)));
     }
   }
 `;
 
 // Evaluated into the slide's page by render_slide.cjs before the snapshot, and
 // by probe_bg_transfer.mjs, which reports the branch it took. Returns
-// { bgTransferred }: 'image', 'gradient-raster', 'gradient-firststop',
-// 'solid' or 'unchanged' for a slide root, 'no-root' when the locator
-// resolves none.
+// passResult({ bgTransferred }) (dom_access.mjs), bgTransferred 'image',
+// 'gradient-raster', 'gradient-firststop', 'solid' or 'unchanged' for a slide
+// root, 'no-root' when the locator resolves none; render_slide.cjs logs its
+// diagnostics with PREPROCESS_LOG_PREFIX.
+export const PREPROCESS_LOG_PREFIX = '[preprocess]';
 export const PREPROCESS_SOURCE = `
 (function () {
-  const DOM_ACCESS_LOG_PREFIX = '[preprocess]';
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
 ${ROOT_AND_BACKGROUND_SRC}
   const root = findSlideRoot();
   markSlideRoot(root);
   const bgTransferred = transferSlideRootBackground(root);
-  return { bgTransferred };
+  return passResult({ bgTransferred });
 })();
 `;

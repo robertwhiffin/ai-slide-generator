@@ -15,7 +15,8 @@
 //   browser sets it (browserCutCss, for the ellipsis advance).
 //
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE:
-// domAccess, queryOne and COLLECTION_ITEM_LIMIT are its free names. It is
+// domAccess, queryOne, diagnose, diagnosticPageText, thrownMessage and
+// COLLECTION_ITEM_LIMIT are its free names. It is
 // stringified, so it closes over nothing on the Node side; what it needs from
 // the text layout arrives in `layout`, documented in snapshot_text.mjs:
 //   codePointLength   (text, index) -> the length of the code point there;
@@ -282,7 +283,8 @@ function createTextMetrics(layout) {
   // reports `ascent`: from its text's top (the glyph top the walk reads with a
   // Range) down to that baseline; and `content`, how tall its text's Range
   // rect is, the face's content area. Null when the page would not take them,
-  // which is announced with `loss`, what the slide then exports without. The
+  // which is announced with `loss`, what the slide then exports without (the
+  // key of its part, model_check.cjs DIAGNOSTIC_PARTS). The
   // text goes in as a text node: page script can take away the textContent
   // setter (hostile_text_nodes). Every probe is made, put in and taken off
   // through the pristine realm (dom_access.mjs): page script can make the
@@ -333,7 +335,7 @@ function createTextMetrics(layout) {
         sizes.push(size);
       }
     } catch (e) {
-      console.warn('[html2pptx] the text metric probes could not be read (' + (e && e.message) + '); ' + loss);
+      diagnose('probesUnread', diagnosticPageText(thrownMessage(e)), loss);
       sizes = null;
     } finally {
       for (let index = 0; index < elements.length; index++) {
@@ -341,8 +343,7 @@ function createTextMetrics(layout) {
       }
     }
     if (sizes && unmeasured) {
-      console.warn('[html2pptx] text metric probes: ' + unmeasured + ' of ' + probes.length +
-        ' measured no width, as the page hid or emptied them; where they are read, ' + loss);
+      diagnose('probesUnmeasured', unmeasured, probes.length, loss);
     }
     return sizes;
   }
@@ -504,7 +505,7 @@ function createTextMetrics(layout) {
       face = null;
     }
     if (!face) {
-      console.warn('[html2pptx] the coverage probe font could not be added; ' + loss);
+      diagnose('coverageFontNotAdded', loss);
       return null;
     }
     try {
@@ -513,7 +514,7 @@ function createTextMetrics(layout) {
       try {
         dom.deleteFontFace(face);
       } catch (e) {
-        console.warn('[html2pptx] the coverage probe font could not be deleted (' + (e && e.message) + ')');
+        diagnose('coverageFontNotDeleted', diagnosticPageText(thrownMessage(e)));
       }
     }
   }
@@ -569,7 +570,7 @@ function createTextMetrics(layout) {
     }
     if (!asked.length) return;
     const sizes = list.probes.length
-      ? measureWithCoverageFont(list.probes, "this slide's text with no loaded webfont is written in each stack's first family")
+      ? measureWithCoverageFont(list.probes, 'lossFirstFamily')
       : [];
     if (!sizes) return;
     const advance = coverageFont.advanceEm * COVERAGE_PROBE_PX;
@@ -702,8 +703,7 @@ function createTextMetrics(layout) {
     const lackingOf = [];
     let splits = 0;
     if (questions.length) {
-      const sizes = measureWithCoverageFont(list.probes,
-        'this slide exports the characters its webfonts lack in its own fonts, as each app falls back');
+      const sizes = measureWithCoverageFont(list.probes, 'lossLackingCharacters');
       const lackingAt = COVERAGE_SHARE * coverageFont.advanceEm * COVERAGE_PROBE_PX;
       for (let index = 0; sizes && index < questions.length; index++) {
         const { pending, asked } = questions[index];
@@ -804,8 +804,7 @@ function createTextMetrics(layout) {
       });
     }
     if (!wanted.length) return;
-    const sizes = measureProbes(list.probes, 'this slide exports its list markers at their boxes, ' +
-      'trailing space included, and joins each inside one to its line as the browser laid it out');
+    const sizes = measureProbes(list.probes, 'lossMarkers');
     if (!sizes) return;
     let unmeasured = 0;
     for (let index = 0; index < wanted.length; index++) {
@@ -818,9 +817,7 @@ function createTextMetrics(layout) {
       }
     }
     if (unmeasured) {
-      console.warn('[html2pptx] list markers: ' + unmeasured + ' of ' + wanted.length + ' marker width(s) ' +
-        'measured no finite size; those markers are placed at their boxes, trailing space included, ' +
-        'and an inside one joins its line as the browser laid it out');
+      diagnose('markersUnmeasured', unmeasured, wanted.length);
     }
   }
 
@@ -867,7 +864,7 @@ function createTextMetrics(layout) {
       });
     }
     const sizes = probes.length
-      ? measureProbes(probes, 'this slide exports without line spacing, optical-size and kerning tracking')
+      ? measureProbes(probes, 'lossLineSpacing')
       : [];
     if (!sizes) return;
 
@@ -972,8 +969,7 @@ function createTextMetrics(layout) {
   function contentHeightOf(face, sizePx) {
     const css = lineProbeCss(face);
     if (contentHeights[css] === undefined) {
-      const sizes = measureProbes([{ css, text: LINE_PROBE_TEXT, baseline: true }],
-        'turned text is placed across its lines by its font size, not by its face');
+      const sizes = measureProbes([{ css, text: LINE_PROBE_TEXT, baseline: true }], 'lossTurnedLines');
       const content = sizes && sizes[0] ? Number(sizes[0].content) : NaN;
       contentHeights[css] = Number.isFinite(content) && content > 0 ? content : null;
     }

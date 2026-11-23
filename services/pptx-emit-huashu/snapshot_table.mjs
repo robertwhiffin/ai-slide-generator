@@ -118,8 +118,8 @@
 //  */
 
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE:
-// domAccess, elementChildrenOf, childNodesOf, queryAllWithin and the two limits
-// are its free names. It is stringified, so it closes over nothing on the Node
+// domAccess, elementChildrenOf, childNodesOf, queryAllWithin, diagnose,
+// diagnosticTokens and the two limits are its free names. It is stringified, so it closes over nothing on the Node
 // side; what it needs from the snapshot arrives in `env`:
 //   parseColour      css colour -> {color, alpha, r, g, b} | null;
 //   paintedColour    (css colour, opacity) -> {color, alpha} | null, as painted;
@@ -384,9 +384,9 @@ function createTableLayout(env) {
   }
 
   function addColumns(columns, span, style, groupStyle) {
-    if (span === null) return positioned('a column\'s span could not be read');
+    if (span === null) return positioned(diagnosticTokens('columnSpanUnread'));
     const count = Number.isInteger(span) && span > 0 ? span : 1;
-    if (columns.length + count > WALK_STEP_LIMIT) return positioned('its columns pass ' + WALK_STEP_LIMIT);
+    if (columns.length + count > WALK_STEP_LIMIT) return positioned(diagnosticTokens('columnsPass', WALK_STEP_LIMIT));
     for (let index = 0; index < count; index++) columns.push({ style, groupStyle });
     return true;
   }
@@ -403,10 +403,11 @@ function createTableLayout(env) {
     }
   }
 
-  // Announces why a table whose structure is plain still cannot be an a:tbl,
-  // and gives the positioned-items answer, null (falsy for addColumns' callers).
+  // Announces why a table whose structure is plain still cannot be an a:tbl
+  // (`reason`, a part, diagnosticTokens), and gives the positioned-items
+  // answer, null (falsy for addColumns' callers).
   function positioned(reason) {
-    console.warn('[html2pptx] native table: ' + reason + '; it exports as positioned items');
+    diagnose('nativeTable', reason);
     return null;
   }
 
@@ -430,7 +431,7 @@ function createTableLayout(env) {
       }
     }
     if (!rows.length) return null;
-    if (rows.length > WALK_STEP_LIMIT) return positioned('its ' + rows.length + ' rows pass ' + WALK_STEP_LIMIT);
+    if (rows.length > WALK_STEP_LIMIT) return positioned(diagnosticTokens('rowsPass', rows.length, WALK_STEP_LIMIT));
     const slots = [];
     for (let row = 0; row < rows.length; row++) slots.push([]);
     const cells = [];
@@ -444,19 +445,19 @@ function createTableLayout(env) {
         const reach = groupEnd[row] - row;
         const rowSpanRead = spanOf(dom.rowSpan, read.element);
         const colSpanRead = spanOf(dom.colSpan, read.element);
-        if (rowSpanRead === null || colSpanRead === null) return positioned('a cell\'s spans could not be read');
+        if (rowSpanRead === null || colSpanRead === null) return positioned(diagnosticTokens('cellSpansUnread'));
         const rowspan = rowSpanRead === 0 ? reach : Math.min(Math.max(1, rowSpanRead || 1), reach);
         const colspan = Math.max(1, colSpanRead || 1);
-        if (column + colspan > WALK_STEP_LIMIT) return positioned('its columns pass ' + WALK_STEP_LIMIT);
+        if (column + colspan > WALK_STEP_LIMIT) return positioned(diagnosticTokens('columnsPass', WALK_STEP_LIMIT));
         covered += rowspan * colspan;
-        if (covered > COLLECTION_ITEM_LIMIT) return positioned('its cells cover more than ' + COLLECTION_ITEM_LIMIT + ' grid slots');
+        if (covered > COLLECTION_ITEM_LIMIT) return positioned(diagnosticTokens('cellsCover', COLLECTION_ITEM_LIMIT));
         for (let down = 0; down < rowspan; down++) {
           for (let across = 0; across < colspan; across++) {
             // Spans the HTML table model lets overlap (a row span reaching a
             // later row's column span): the browser draws both, an a:tbl
             // holds one cell per slot.
             if (slots[row + down][column + across] !== undefined) {
-              return positioned('two of its cells cover one grid slot');
+              return positioned(diagnosticTokens('slotCoveredTwice'));
             }
             slots[row + down][column + across] = cells.length;
           }
@@ -468,8 +469,7 @@ function createTableLayout(env) {
     }
     // Every slot of the grid is a cell of the a:tbl, those no cell covers included.
     if (rows.length * columns > COLLECTION_ITEM_LIMIT) {
-      return positioned('its grid of ' + rows.length + ' rows by ' + columns + ' columns passes ' +
-        COLLECTION_ITEM_LIMIT + ' slots');
+      return positioned(diagnosticTokens('gridPasses', rows.length, columns, COLLECTION_ITEM_LIMIT));
     }
     return columns > 0 ? { rows, cells, slots, columns } : null;
   }

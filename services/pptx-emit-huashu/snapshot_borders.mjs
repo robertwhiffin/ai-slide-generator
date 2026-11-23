@@ -13,9 +13,9 @@
 // whether a box paints anything of that, and the walk and the text layout ask
 // it.
 //
-// Runs in the page, inside the snapshot IIFE, after GRADIENT_SOURCE:
-// splitTopLevelCommas is its free name. It is stringified, so it closes over
-// nothing on the Node side;
+// Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE and
+// GRADIENT_SOURCE: splitTopLevelCommas and diagnose are its free names. It is
+// stringified, so it closes over nothing on the Node side;
 // what it needs from the snapshot arrives in `env`, functions of snapshotPage
 // documented there:
 //   paintedColour     (css colour, opacity) -> {color, alpha} | null, as painted;
@@ -463,8 +463,7 @@ function createBorders(env) {
   // One [html2pptx] line counting the boxes past the fit budget, when any are.
   function reportShadowFits() {
     if (!pastFitBudget) return;
-    console.warn('[html2pptx] box-shadow fits: ' + pastFitBudget + ' box(es) past the ' + FIT_BUDGET +
-      ' fits a slide makes carry their first shadow layer');
+    diagnose('boxShadowFits', pastFitBudget, FIT_BUDGET);
   }
 
   // The complementary error function, within 1.2e-7 of it (Numerical Recipes, erfcc).

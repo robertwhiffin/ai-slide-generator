@@ -34,8 +34,32 @@
 //       string, and stats.elements and stats.pseudoElements are counts.
 //   dropLine(dropped) -> '[html2pptx] model: …' | null
 //     The one log line that says what was dropped; null when nothing was.
+//
+// The page-side passes return more than the model (dom_access.mjs passResult),
+// and Node checks that too:
+//
+//   checkDiagnostics(stream, over) -> {entries, over, dropped}
+//     What one pass diagnosed: `stream`, its entries in the encoding
+//     dom_access.mjs diagnose writes, each read against the engine's own
+//     wordings, DIAGNOSTIC_LINES and DIAGNOSTIC_PARTS (below), and taken as
+//     the parts log_line.cjs diagnosticLine writes: a wording's text and a
+//     number as Node holds them, a page's text as {pageText, length}. So a
+//     line says nothing but the engine's wordings, numbers and the page text
+//     its slots hold, whatever the page made of the stream. An entry that is
+//     no wording of the engine's is dropped and counted; `over`, how many the
+//     pass did not keep, is a count or 0.
+//   checkBackgroundTransfer(value) -> {value, dropped}
+//     The background transfer's result (preprocess.mjs), {bgTransferred} one
+//     of BACKGROUND_TRANSFERS, or null, dropped, as the summary logs it.
+//   checkAnimations(value) -> {value, dropped}
+//     The animations finished (render_slide.cjs pageFinishAnimations),
+//     {finished, cancelled, unfinished} three counts, or all 0, dropped.
+//   passDropLine(dropped, what) -> '[html2pptx] model: …' | null
+//     The log line that says how many of a pass's diagnostics or results
+//     (`what`) were dropped; null when none was.
 
 const { PPTXGENJS_INCH_LIMIT, RASTER_DATA_URI } = require('./emit_model.cjs');
+const { DIAGNOSTICS_PER_PASS, PAGE_TEXT_LIMIT } = require('./log_line.cjs');
 const { PT_PER_PX, PX_PER_IN } = require('./units.cjs');
 
 // RANGES. pptxgenjs writes a number it is given as it is, so one past the range
@@ -394,4 +418,244 @@ function dropLine(dropped) {
     `and were dropped${fields}`;
 }
 
-module.exports = { checkModel, dropLine };
+// ─── the passes' diagnostics ──────────────────────────────────────────
+// The wordings of the engine's page-side diagnostics, by the key the page code
+// names each with (dom_access.mjs diagnose): DIAGNOSTIC_LINES a whole line's,
+// after the pass's prefix ([preprocess] or [html2pptx], render_slide.cjs),
+// DIAGNOSTIC_PARTS the parts a line's slots hold. A slot takes what follows
+// the key in the entry, in order:
+//   {n}  a number the engine counted, written as JavaScript writes a number;
+//   {p}  a page's text: its length, then the first PAGE_TEXT_LIMIT characters
+//        of it at most, which log_line.cjs diagnosticLine says with the debug
+//        text on and by its length alone without it;
+//   {w}  a part: its key, then what its own slots take;
+//   {l}  a list of parts: how many there were, how many of them follow (at
+//        most DIAGNOSTIC_LIST_LIMIT), then each, said one after the other
+//        with ' | ' between, '(none)' for none, and how many more there were.
+const DIAGNOSTIC_LINES = {
+  // dom_access.mjs reportCollectionLoss: what the collection lost, then where.
+  collection: 'collection {w} in {w}: content past that point is NOT in the exported deck. This bound is ' +
+    'unreachable for real slide content, so meeting it means the document presented an implausible ' +
+    'collection or the realm is lying about one.',
+  // preprocess.mjs
+  noSlideRoot: 'no slide root: body children [{p}]; wrapper candidates {l}; tree reads {w}. A chain over ' +
+    '509 levels deep is reparsed by Chromium into siblings and is not resolvable here by design.',
+  rootUnmarked: 'could not mark the slide root: {p}',
+  // snapshot.mjs
+  gradientUnread: 'a background gradient could not be read; the text over it is blended without its ' +
+    'colour (further ones on this slide are not said)',
+  bodyGradient: 'gradient on the slide body: the slide background uses its colour instead',
+  nonDataBackground: 'skipped a non-data: background image',
+  captureUnnamed: 'capture failed: c{n} the target could not be named ({p})',
+  // snapshot_text.mjs
+  fontsUnread: 'document.fonts could not be read ({p}); a family whose faces were not read exports ' +
+    'without weight-named faces',
+  fragmentsUnread: 'the box fragments of an inline element could not be read ({p}); its box is not in ' +
+    'the exported deck',
+  fragmentsFailed: 'reading the box fragments of an inline element failed ({p}); the fragments past ' +
+    'that point are not in the exported deck',
+  // snapshot_text_metrics.mjs: what a probe could not read, then what the slide exports without.
+  probesUnread: 'the text metric probes could not be read ({p}); {w}',
+  probesUnmeasured: 'text metric probes: {n} of {n} measured no width, as the page hid or emptied them; ' +
+    'where they are read, {w}',
+  coverageFontNotAdded: 'the coverage probe font could not be added; {w}',
+  coverageFontNotDeleted: 'the coverage probe font could not be deleted ({p})',
+  markersUnmeasured: 'list markers: {n} of {n} marker width(s) measured no finite size; those markers ' +
+    'are placed at their boxes, trailing space included, and an inside one joins its line as the ' +
+    'browser laid it out',
+  // snapshot_table.mjs positioned: why.
+  nativeTable: 'native table: {w}; it exports as positioned items',
+  // snapshot_borders.mjs
+  boxShadowFits: 'box-shadow fits: {n} box(es) past the {n} fits a slide makes carry their first shadow layer',
+};
+const DIAGNOSTIC_PARTS = {
+  // What a collection lost (dom_access.mjs reportCollectionLoss).
+  truncatedItems: 'truncated at {n} items',
+  truncatedOfItems: 'truncated at {n} of {n} items',
+  droppedLength: 'dropped entirely, length read as {p}',
+  cutAtDepth: 'cut at depth {n}',
+  truncatedTextReads: 'truncated at {n} text reads',
+  truncatedElements: 'truncated at {n} elements',
+  truncatedFontFaces: 'truncated at {n} font faces',
+  truncatedOfFragments: 'truncated at {n} of {n} box fragments',
+  // Where.
+  childNodesOf: 'childNodesOf',
+  elementChildrenOf: 'elementChildrenOf',
+  nodeListToArray: 'nodeListToArray',
+  textLayout: 'the snapshot text layout',
+  webfontRead: 'the snapshot webfont read',
+  inlineFragments: 'the snapshot inline fragments',
+  captureTargets: 'the snapshot capture targets',
+  walk: 'the snapshot walk',
+  // A slide-root candidate the walk stopped at (preprocess.mjs walkToSlideBody): its tag, then why.
+  wrapperCandidate: '{p} after {n} level(s): {w}',
+  unreadCandidate: '(unread) after {n} level(s): {w}',
+  noElementChildren: 'no element children',
+  severalElementChildren: 'several element children',
+  notPromotable: 'not a promotable wrapper',
+  iterationLimit: 'iteration limit reached',
+  pristineTree: 'pristine',
+  thisRealmTree: 'this-realm',
+  // What a slide exports without where its probes are not read (snapshot_text_metrics.mjs measureProbes).
+  lossFirstFamily: "this slide's text with no loaded webfont is written in each stack's first family",
+  lossLackingCharacters: 'this slide exports the characters its webfonts lack in its own fonts, as each ' +
+    'app falls back',
+  lossMarkers: 'this slide exports its list markers at their boxes, trailing space included, and joins ' +
+    'each inside one to its line as the browser laid it out',
+  lossLineSpacing: 'this slide exports without line spacing, optical-size and kerning tracking',
+  lossTurnedLines: 'turned text is placed across its lines by its font size, not by its face',
+  lossEllipsis: 'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"',
+  // Why a table is no a:tbl (snapshot_table.mjs).
+  columnSpanUnread: "a column's span could not be read",
+  columnsPass: 'its columns pass {n}',
+  rowsPass: 'its {n} rows pass {n}',
+  cellSpansUnread: "a cell's spans could not be read",
+  cellsCover: 'its cells cover more than {n} grid slots',
+  slotCoveredTwice: 'two of its cells cover one grid slot',
+  gridPasses: 'its grid of {n} rows by {n} columns passes {n} slots',
+};
+// The most characters one entry holds: its tokens, each after its length. The
+// longest the engine writes is a slide with no root naming its body's children
+// and DIAGNOSTIC_LIST_LIMIT candidates, under 3,500.
+const DIAGNOSTIC_ENTRY_LIMIT = 8192;
+const DIAGNOSTIC_TOKEN_LIMIT = 128;
+// The parts a list holds (preprocess.mjs: the slide-root candidates it names).
+const DIAGNOSTIC_LIST_LIMIT = 8;
+// How deep parts hold parts: a list's candidate holds its reason.
+const DIAGNOSTIC_DEPTH_LIMIT = 3;
+const NUMBER_TEXT = /^(?:-?(?:\d+(?:\.\d+)?(?:e[+-]\d+)?|Infinity)|NaN)$/;
+const COUNT_TEXT = /^\d{1,9}$/;
+
+// Each wording as its pieces: its text, and each slot by its letter.
+function compiled(wordings) {
+  const pieces = new Map();
+  for (const [key, wording] of Object.entries(wordings)) {
+    pieces.set(key, wording.split(/\{([npwl])\}/).map((piece, index) => (index % 2 ? { slot: piece } : piece))
+      .filter((piece) => piece !== ''));
+  }
+  return pieces;
+}
+const LINE_PIECES = compiled(DIAGNOSTIC_LINES);
+const PART_PIECES = compiled(DIAGNOSTIC_PARTS);
+
+// The string `<length>:<string>` at `at` of `text`, and where it ends, or null.
+function lengthPrefixed(text, at) {
+  const colon = text.indexOf(':', at);
+  if (colon < 0 || !COUNT_TEXT.test(text.slice(at, colon))) return null;
+  const end = colon + 1 + Number(text.slice(at, colon));
+  return end <= text.length ? { value: text.slice(colon + 1, end), end } : null;
+}
+
+// The next token's count, or null.
+function countOf(reading) {
+  const token = reading.tokens[reading.next++];
+  return typeof token === 'string' && COUNT_TEXT.test(token) ? Number(token) : null;
+}
+
+// Reads the wording whose key is the next token, of `wordings`, onto `parts`:
+// whether the tokens are one the engine writes.
+function readWording(wordings, reading, parts, depth) {
+  if (depth > DIAGNOSTIC_DEPTH_LIMIT) return false;
+  const pieces = wordings.get(reading.tokens[reading.next++]);
+  if (!pieces) return false;
+  for (const piece of pieces) {
+    if (typeof piece === 'string') {
+      parts.push(piece);
+    } else if (piece.slot === 'n') {
+      const token = reading.tokens[reading.next++];
+      if (typeof token !== 'string' || !NUMBER_TEXT.test(token)) return false;
+      parts.push(token);
+    } else if (piece.slot === 'p') {
+      const length = countOf(reading);
+      const text = reading.tokens[reading.next++];
+      if (length === null || typeof text !== 'string' || text.length > PAGE_TEXT_LIMIT || text.length > length) {
+        return false;
+      }
+      parts.push({ pageText: text, length });
+    } else if (piece.slot === 'w') {
+      if (!readWording(PART_PIECES, reading, parts, depth + 1)) return false;
+    } else {
+      const total = countOf(reading);
+      const listed = countOf(reading);
+      if (total === null || listed === null || listed > total || listed > DIAGNOSTIC_LIST_LIMIT ||
+          (listed === 0) !== (total === 0)) return false;
+      if (total === 0) parts.push('(none)');
+      for (let index = 0; index < listed; index++) {
+        if (index) parts.push(' | ');
+        if (!readWording(PART_PIECES, reading, parts, depth + 1)) return false;
+      }
+      if (total > listed) parts.push(` | and ${total - listed} more`);
+    }
+  }
+  return true;
+}
+
+// One entry's parts, or null when it is no line the engine writes.
+function entryParts(entry) {
+  if (entry.length > DIAGNOSTIC_ENTRY_LIMIT) return null;
+  const tokens = [];
+  for (let at = 0; at < entry.length;) {
+    const token = lengthPrefixed(entry, at);
+    if (token === null || tokens.length >= DIAGNOSTIC_TOKEN_LIMIT) return null;
+    tokens.push(token.value);
+    at = token.end;
+  }
+  const reading = { tokens, next: 0 };
+  const parts = [];
+  return readWording(LINE_PIECES, reading, parts, 0) && reading.next === tokens.length ? parts : null;
+}
+
+function checkDiagnostics(stream, over) {
+  const kept = isCount(over) ? over : 0;
+  let dropped = isCount(over) ? 0 : 1;
+  if (typeof stream !== 'string') return { entries: [], over: kept, dropped: dropped + 1 };
+  const entries = [];
+  for (let at = 0; at < stream.length;) {
+    const entry = entries.length + dropped < DIAGNOSTICS_PER_PASS ? lengthPrefixed(stream, at) : null;
+    if (entry === null) {
+      // What follows is no entry the page side writes: the rest of the stream counts as one.
+      dropped += 1;
+      break;
+    }
+    const parts = entryParts(entry.value);
+    if (parts) entries.push(parts);
+    else dropped += 1;
+    at = entry.end;
+  }
+  return { entries, over: kept, dropped };
+}
+
+// What preprocess.mjs transferSlideRootBackground returns.
+const BACKGROUND_TRANSFERS = new Set(['image', 'gradient-raster', 'gradient-firststop', 'solid', 'unchanged', 'no-root']);
+
+function checkBackgroundTransfer(value) {
+  if (isObject(value) && BACKGROUND_TRANSFERS.has(value.bgTransferred)) {
+    return { value: { bgTransferred: value.bgTransferred }, dropped: 0 };
+  }
+  return { value: null, dropped: 1 };
+}
+
+const NO_ANIMATIONS = { finished: 0, cancelled: 0, unfinished: 0 };
+
+function checkAnimations(value) {
+  if (isObject(value) && isCount(value.finished) && isCount(value.cancelled) && isCount(value.unfinished)) {
+    return { value: { finished: value.finished, cancelled: value.cancelled, unfinished: value.unfinished }, dropped: 0 };
+  }
+  return { value: { ...NO_ANIMATIONS }, dropped: 1 };
+}
+
+function passDropLine(dropped, what) {
+  if (!dropped) return null;
+  return `[html2pptx] model: ${dropped} ${what} failed validation and were dropped`;
+}
+
+module.exports = {
+  checkAnimations,
+  checkBackgroundTransfer,
+  checkDiagnostics,
+  checkModel,
+  dropLine,
+  passDropLine,
+  DIAGNOSTIC_LINES,
+  DIAGNOSTIC_PARTS,
+};

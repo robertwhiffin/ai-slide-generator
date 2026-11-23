@@ -9,8 +9,9 @@
   nothing.
 * A background gradient's middle colour (``snapshot.mjs`` gradientMiddle), the
   layer text over it is blended with: a gradient whose reading throws leaves the
-  layer out, and the page-side line says so once a slide, which, as everything
-  the page logs, is quoted with the debug text on and counted without it.
+  layer out, and the snapshot says so once a slide, a diagnostic of its own that
+  reaches the log without the debug text (``dom_access.mjs`` diagnose), with no
+  word of the error the page made.
 """
 
 from __future__ import annotations
@@ -99,9 +100,7 @@ def test_a_canvas_that_cannot_be_read_is_said_by_its_length(
 def test_a_gradient_that_cannot_be_read_is_said_once_without_its_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    logged = export_logged(
-        [slide_document(THROWING_GRADIENT_BODY)], monkeypatch=monkeypatch, debug_text=True
-    )
+    logged = export_logged([slide_document(THROWING_GRADIENT_BODY)], monkeypatch=monkeypatch)
     assert logged.failures == [], logged.failures
 
     lines = [line for line in logged.stderr.splitlines() if GRADIENT_LINE in line]

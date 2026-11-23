@@ -398,8 +398,9 @@ def _export_documents(
     that means to drop part of a model (a slide script that forges one) says so
     with ``allow_model_drops=True``. With ``debug_text`` the sidecar logs a
     slide's own text too, as the fidelity harness runs it (its
-    ``sidecar_debug_text``): what each page logs among it, the engine's own
-    page-side lines included, which without it are only counted.
+    ``sidecar_debug_text``): what each page logs itself, which without it is
+    only counted, and the page's text in the engine's own diagnostics, which
+    without it are logged with that text's length alone.
     """
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
     targets = {} if target is None else {"target": target}

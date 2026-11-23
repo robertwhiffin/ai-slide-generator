@@ -16,7 +16,7 @@
 //                        ::marker, read from Node through the DevTools
 //                        protocol, read-only; nothing is inserted into the
 //                        page for them;
-//   5. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate of what
+//   5. snapshot          SNAPSHOT_SOURCE: one read-only evaluation of what
 //                        step 4 read, which returns the slide model (snapshot.mjs),
 //                        checked in Node before any use (model_check.cjs): the
 //                        slide's realm built it, so what slide script made of it
@@ -72,8 +72,12 @@ const { pathToFileURL } = require('url');
 const { chromium } = require('playwright');
 const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
-const { bounded, debugText, logJson, oneLine, pageText, DEBUG_TEXT_ENV } = require('./log_line.cjs');
-const { checkModel, dropLine } = require('./model_check.cjs');
+const {
+  bounded, debugText, diagnosticLine, logJson, oneLine, pageText, DEBUG_TEXT_ENV, DIAGNOSTICS_PER_PASS,
+} = require('./log_line.cjs');
+const {
+  checkAnimations, checkBackgroundTransfer, checkDiagnostics, checkModel, dropLine, passDropLine,
+} = require('./model_check.cjs');
 const { guardContext } = require('./request_guard.cjs');
 const { lostWords, wordsOf, TEXT_MISSING_PREFIX } = require('./text_check.cjs');
 const { EMU_PER_IN, PT_PER_PX, PX_PER_IN } = require('./units.cjs');
@@ -130,9 +134,10 @@ const MIN_BOTTOM_MARGIN_IN = 0.5;
 // ─── page-side reads ───────────────────────────────────────────────────
 // Each runs in the page after DOM_ACCESS_SOURCE, whose helpers (queryAll,
 // queryOne) and limits are their free names, and after the constants it is
-// composed with. They are stringified, so they close over nothing here. Slide
-// script has already run in this page by the time any of them fires, so none
-// of them walks the DOM any other way.
+// composed with; what it returns is the pass's value (dom_access.mjs
+// passResult, evaluatePass). They are stringified, so they close over nothing
+// here. Slide script has already run in this page by the time any of them
+// fires, so none of them walks the DOM any other way.
 
 function pageCanvasCount() {
   return queryAll('canvas').length;
@@ -247,13 +252,17 @@ function loadPageSources() {
       .then(([access, preprocess, snapshot, pseudo]) => {
         // `helpers` are the page functions `pageFunction` calls by name, and
         // `constants` the values it reads by name, each written as a const.
-        const withDomAccess = (pageFunction, helpers = [], constants = {}) => `(() => {
-  const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
+        // The pass returns passResult of what `pageFunction` returns, awaited
+        // when it is async (and only then: an await yields to slide script).
+        const withDomAccess = (pageFunction, helpers = [], constants = {}) => {
+          const awaited = pageFunction.constructor.name === 'AsyncFunction';
+          return `(${awaited ? 'async ' : ''}() => {
 ${access.DOM_ACCESS_SOURCE}
 ${Object.entries(constants).map(([name, value]) => `  const ${name} = ${JSON.stringify(value)};`).join('\n')}
 ${helpers.map((helper) => helper.toString()).join('\n')}
-  return (${pageFunction.toString()})();
+  return passResult(${awaited ? 'await ' : ''}(${pageFunction.toString()})());
 })()`;
+        };
         return {
           canvasCount: withDomAccess(pageCanvasCount),
           canvasesReady: withDomAccess(pageCanvasesReady),
@@ -262,6 +271,7 @@ ${helpers.map((helper) => helper.toString()).join('\n')}
           bodyDimensions: withDomAccess(pageBodyDimensions),
           renderedText: withDomAccess(pageRenderedText, [pageFinishAnimations]),
           preprocess: preprocess.PREPROCESS_SOURCE,
+          preprocessPrefix: preprocess.PREPROCESS_LOG_PREFIX,
           // The snapshot page function applied to what pseudo.mjs read and to
           // the renderer the deck is written for: JSON is a JavaScript
           // expression, so each is an argument of the call.
@@ -317,26 +327,25 @@ function launchOptions(tmpDir) {
 }
 
 // What a slide's page logs is its own text: the slide's script can log its
-// words, under the engine's own prefix too, and the engine's page-side passes
-// run in the page's realm, which builds what they say. So it reaches no log
-// unless the debug text is on (log_line.cjs debugText), which no app sets:
-// without it, once the slide is done, read or failed, one [html2pptx] page console line
-// counts its messages by level (Playwright's console message type) and says
-// how many carry the engine's prefix ([preprocess] or [html2pptx]); a slide
-// that logged nothing says nothing.
+// words, under the engine's own prefixes too. The engine's page-side passes
+// log nothing there: they return what they diagnose with their results
+// (evaluatePass). So what a page logs reaches no log unless the debug text is
+// on (log_line.cjs debugText), which no app sets: without it, once the slide
+// is done, read or failed, one [html2pptx] page console line counts its
+// messages by level (Playwright's console message type) and says how many
+// carry the engine's prefix ([preprocess] or [html2pptx]), which only a page
+// imitating the engine writes; a slide that logged nothing says nothing.
 //
-// With the debug text on, [preprocess] and [html2pptx] lines, which report
-// content leaving the deck, go to stderr, the only stream
-// pptx_from_html_huashu.py echoes into the app log, and the rest of a page's
-// chatter to stdout. Slide script can log anything, so each message is written
-// on one line (log_line.cjs oneLine), behind "Browser console:": no line break
-// in it can start a line of the sidecar's own (a slide summary, the
+// With the debug text on, a page's lines with the engine's prefixes go to
+// stderr, the only stream pptx_from_html_huashu.py echoes into the app log,
+// and the rest of its chatter to stdout. Slide script can log anything, so
+// each message is written on one line (log_line.cjs oneLine), behind "Browser
+// console:", which tells it from the engine's own lines: no line break in it
+// can start a line of the sidecar's own (a slide summary, the
 // __HUASHU_RESULT__ failure list). Each is cut at PAGE_MESSAGE_LIMIT
-// characters, and a slide logs PAGE_MESSAGES_PER_SLIDE of them at most to
-// each stream. Measured over the engine's suites, its longest page-side line
-// is 249 characters (a slide with no root, preprocess.mjs, which names each of
-// the body's section and article wrappers); a longer one keeps its first
-// PAGE_MESSAGE_LIMIT characters and says how many it left out.
+// characters, keeping its first PAGE_MESSAGE_LIMIT and saying how many it
+// left out, and a slide logs PAGE_MESSAGES_PER_SLIDE of them at most to each
+// stream.
 const PAGE_MESSAGE_LIMIT = 1000;
 const PAGE_MESSAGES_PER_SLIDE = 100;
 const ENGINE_PREFIXES = ['[preprocess]', '[html2pptx]'];
@@ -400,11 +409,48 @@ function forwardConsole(page, log) {
 // still under way, and what those say once it is gone is about no page at all,
 // so it is dropped, as is what its page logs from then on (forwardConsole):
 // none of it lands among its failure's lines or the next slide's.
+//
+// It also logs what the slide's passes diagnosed (evaluatePass), each entry
+// with its pass's prefix, DIAGNOSTIC_LINES_PER_SLIDE of them at most (each
+// pass keeps DIAGNOSTICS_PER_PASS, and the canvas wait alone may read fifty
+// times), the rest counted on one line once the slide is done (report); and
+// it counts what of the passes' results and diagnostics Node dropped, which
+// the summary's modelDrops adds (drops).
+const DIAGNOSTIC_LINES_PER_SLIDE = 100;
+
 function slideLog() {
   let live = true;
+  let linesLeft = DIAGNOSTIC_LINES_PER_SLIDE;
+  let linesOver = 0;
+  let dropped = 0;
+  const error = (line) => {
+    if (live) console.error(line);
+  };
+  // `count` of the passes' results or diagnostics (`what`) failed their check.
+  const drop = (count, what) => {
+    if (!count) return;
+    dropped += count;
+    error(passDropLine(count, what));
+  };
   return {
-    error(line) {
-      if (live) console.error(line);
+    error,
+    drop,
+    // A pass's diagnostics, as model_check.cjs checkDiagnostics took them.
+    diagnostics(prefix, checked) {
+      if (!live) return;
+      for (const parts of checked.entries) {
+        if (linesLeft > 0) {
+          linesLeft -= 1;
+          console.error(diagnosticLine(prefix, parts));
+        } else {
+          linesOver += 1;
+        }
+      }
+      linesOver += checked.over;
+      drop(checked.dropped, 'diagnostic(s)');
+    },
+    drops() {
+      return dropped;
     },
     live() {
       return live;
@@ -412,7 +458,45 @@ function slideLog() {
     stop() {
       live = false;
     },
+    report() {
+      if (!linesOver) return;
+      console.error(`[html2pptx] diagnostics: ${linesOver} more not logged: a slide logs ` +
+        `${DIAGNOSTIC_LINES_PER_SLIDE} at most, and a pass keeps ${DIAGNOSTICS_PER_PASS}`);
+    },
   };
+}
+
+// ─── the engine's passes ───────────────────────────────────────────────
+// Every page-side pass (each read above, the preprocess, the snapshot) returns
+// passResult(value) (dom_access.mjs): {value, diagnostics, diagnosticsOver},
+// what it read and what it diagnosed. A pass runs in the slide's realm, whose
+// script can replace what Playwright's own page-side serializer calls
+// (measured: a page that owns Array.prototype.push drops and adds what
+// page.evaluate returns, and rewrites its values). So the result is held as a
+// handle and its properties read through the DevTools protocol
+// (JSHandle.getProperties), which runs no script of the page's: the
+// diagnostics, a string, and a value that is a number, a boolean or a string
+// arrive as the pass made them; a value that is an object is serialized as
+// page.evaluate serializes one, and its reader checks it (model_check.cjs).
+// The diagnostics are checked (model_check.cjs checkDiagnostics) and logged on
+// the slide's log with the pass's prefix. A page that takes over the
+// evaluation itself (its window.eval, which Playwright's utility script calls)
+// decides what any pass returns; its diagnostics still say nothing but the
+// engine's wordings, with page text only in their page slots.
+const ENGINE_LOG_PREFIX = '[html2pptx]';
+
+async function evaluatePass(page, source, log, prefix = ENGINE_LOG_PREFIX) {
+  const result = await page.evaluateHandle(source);
+  let properties = new Map();
+  try {
+    properties = await result.getProperties();
+    const read = (name) => (properties.has(name) ? properties.get(name).jsonValue() : undefined);
+    const value = await read('value');
+    log.diagnostics(prefix, checkDiagnostics(await read('diagnostics'), await read('diagnosticsOver')));
+    return value;
+  } finally {
+    for (const handle of [result, ...properties.values()]) handle.dispose().catch(() => {});
+  }
 }
 
 // ─── settle ────────────────────────────────────────────────────────────
@@ -424,7 +508,7 @@ async function waitForFonts(page, sources, log) {
   let timer;
   try {
     const settled = await Promise.race([
-      page.evaluate(sources.fontsSettled),
+      evaluatePass(page, sources.fontsSettled, log),
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), FONTS_READY_TIMEOUT_MS); }),
     ]);
     if (settled !== true) {
@@ -440,21 +524,21 @@ async function waitForFonts(page, sources, log) {
 // Every <canvas> given a drawing buffer (Chart.js sizes its canvas when it
 // first draws), bounded: a canvas that never gets one ends the wait at
 // CANVAS_READY_TIMEOUT_MS, and the slide is read with its canvases as they
-// are, which is said. The readiness is polled with page.evaluate, which the
+// are, which is said. The readiness is polled with evaluatePass, which the
 // DevTools protocol runs whatever the page's CSP: page.waitForFunction
 // evaluates its predicate inside the page, which the slide CSP (no
 // 'unsafe-eval') refuses at once, so the wait waited for nothing. A read that
 // fails (its page function threw) says its message by its length alone
 // (log_line.cjs pageText).
 async function waitForCanvases(page, sources, log) {
-  const canvasCount = Number(await page.evaluate(sources.canvasCount));
+  const canvasCount = Number(await evaluatePass(page, sources.canvasCount, log));
   if (!(canvasCount > 0)) return;
   const deadline = Date.now() + CANVAS_READY_TIMEOUT_MS;
   try {
-    let ready = (await page.evaluate(sources.canvasesReady)) === true;
+    let ready = (await evaluatePass(page, sources.canvasesReady, log)) === true;
     while (!ready && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, CANVAS_POLL_MS));
-      ready = (await page.evaluate(sources.canvasesReady)) === true;
+      ready = (await evaluatePass(page, sources.canvasesReady, log)) === true;
     }
     if (!ready) {
       log.error(`[html2pptx] canvases: ${canvasCount} canvas(es), not every one with a drawing buffer ` +
@@ -466,9 +550,13 @@ async function waitForCanvases(page, sources, log) {
   await new Promise((resolve) => setTimeout(resolve, CANVAS_SETTLE_MS));
 }
 
+// The animations' counts, which the summary logs: checked, as the page's
+// realm built them (model_check.cjs checkAnimations).
 async function finishAnimations(page, sources, log) {
   try {
-    return await page.evaluate(sources.finishAnimations);
+    const checked = checkAnimations(await evaluatePass(page, sources.finishAnimations, log));
+    log.drop(checked.dropped, 'animation result(s)');
+    return checked.value;
   } catch (e) {
     log.error(`[html2pptx] finishing animations failed: ${pageText(e.message)} — continuing`);
     return { finished: 0, cancelled: 0, unfinished: 0 };
@@ -485,14 +573,19 @@ async function settle(page, sources, log) {
 }
 
 // ─── preprocess ────────────────────────────────────────────────────────
+// The background transfer's result, which the summary logs: checked, as the
+// page's realm built it (model_check.cjs checkBackgroundTransfer).
 async function runPreprocess(page, sources, log) {
   try {
-    const result = await page.evaluate(sources.preprocess);
-    if (result && typeof result === 'object') {
+    const checked = checkBackgroundTransfer(
+      await evaluatePass(page, sources.preprocess, log, sources.preprocessPrefix));
+    log.drop(checked.dropped, 'background transfer result(s)');
+    const result = checked.value;
+    if (result) {
       // No slide root means no background transfer, so this slide exports on the
       // untouched body default (white): indistinguishable in the .pptx from a
-      // locator regression. The page-side '[preprocess] no slide root' line
-      // carries the shape that was actually seen.
+      // locator regression. The pass's own '[preprocess] no slide root' line,
+      // logged just before (evaluatePass), carries the shape actually seen.
       if (result.bgTransferred === 'no-root') {
         log.error('[preprocess] slide-root locator resolved NO root: this slide ' +
                   'exports with the untouched body background (white).');
@@ -509,8 +602,8 @@ async function runPreprocess(page, sources, log) {
 // Three authoring checks, with the message texts the export has always given:
 // body overflowing by more than TELLR_OVERFLOW_TOLERANCE_PX, a body whose size
 // is not the presentation layout's, and text over 12 pt too near the bottom.
-async function readBodyDimensions(page, sources) {
-  const bodyDimensions = await page.evaluate(sources.bodyDimensions);
+async function readBodyDimensions(page, sources, log) {
+  const bodyDimensions = await evaluatePass(page, sources.bodyDimensions, log);
   const errors = [];
   const widthOverflowPx = Math.max(0, bodyDimensions.scrollWidth - bodyDimensions.width - TELLR_OVERFLOW_TOLERANCE_PX);
   const heightOverflowPx = Math.max(0, bodyDimensions.scrollHeight - bodyDimensions.height - TELLR_OVERFLOW_TOLERANCE_PX);
@@ -615,7 +708,7 @@ function reportValidation(validationErrors, bypassValidation) {
 // read: the slide still exports, unchecked, and the log says so.
 async function readRenderedText(page, sources, log) {
   try {
-    const text = await page.evaluate(sources.renderedText);
+    const text = await evaluatePass(page, sources.renderedText, log);
     return typeof text === 'string' ? text : null;
   } catch (e) {
     log.error(`[html2pptx] reading the slide's rendered text failed: ${pageText(e.message)} — its text is not checked for loss`);
@@ -641,8 +734,9 @@ function elapsedMs(start) {
 // text-loss check leaves out; with the debug text on (log_line.cjs debugText)
 // `hiddenText` is those words. `target` is the renderer the deck is written for.
 // `modelDrops` is how many captures, items and model fields Node could not
-// take from the page as the snapshot writes them (model_check.cjs), 0 for a
-// slide whose script shaped none of its model. `blockedRequests` is how many
+// take from the page as the snapshot writes them (model_check.cjs), and how
+// many of the other passes' results and diagnostics (evaluatePass), 0 for a
+// slide whose script shaped none of them. `blockedRequests` is how many
 // requests and WebSockets of the slide's page the request guard aborted, and
 // `closedPopups` how many popups it closed (request_guard.cjs): 0 and 0 for a
 // slide that asks for nothing but its own file and the CSP's hosts.
@@ -679,7 +773,7 @@ function summarise(model, captures, readings) {
     hiddenWords: wordsOf(model.reference.hiddenText).length,
     ...(debugText() ? { hiddenText: model.reference.hiddenText } : {}),
     target,
-    modelDrops: dropped.items + dropped.captures + dropped.fields,
+    modelDrops: dropped.items + dropped.captures + dropped.fields + dropped.passes,
     blockedRequests: requests.blockedRequests,
     closedPopups: requests.closedPopups,
   };
@@ -729,11 +823,11 @@ async function readPage(page, slideUrl, sources, target, log) {
   // A finished animation can set text in a face nothing had asked for yet
   // (its end state's font-family or weight), which loads only now.
   await waitForFonts(page, sources, log);
-  const bodyDimensions = await readBodyDimensions(page, sources);
+  const bodyDimensions = await readBodyDimensions(page, sources, log);
   // Read from the settled page the snapshot reads, just before it.
   const pseudoData = await sources.readPseudoElements(page, log);
   // Checked before the captures and everything after use any of it.
-  const { model, dropped } = checkModel(await page.evaluate(sources.snapshotOf(pseudoData, { target })));
+  const { model, dropped } = checkModel(await evaluatePass(page, sources.snapshotOf(pseudoData, { target }), log));
   const drops = dropLine(dropped);
   if (drops) log.error(drops);
   // Capture id -> data: PNG for the targets the model names in model.captures,
@@ -745,7 +839,16 @@ async function readPage(page, slideUrl, sources, target, log) {
   // Last, once every picture is taken: the read hides the graphics.
   const renderedText = await readRenderedText(page, sources, log);
   return {
-    animations, preprocessResult, bodyDimensions, pseudoData, model, dropped, captures, captureMs, renderedText,
+    animations,
+    preprocessResult,
+    bodyDimensions,
+    pseudoData,
+    model,
+    // With what of the passes' results and diagnostics Node dropped.
+    dropped: { ...dropped, passes: log.drops() },
+    captures,
+    captureMs,
+    renderedText,
   };
 }
 
@@ -844,8 +947,10 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     return { ...readings, requests: guard.counts() };
   } finally {
     clearTimeout(deadline);
-    // Read or failed, the slide says what its page logged.
+    // Read or failed, the slide says what its page logged, and how much of
+    // what its passes diagnosed it left out.
     if (pageConsole) pageConsole.report();
+    log.report();
     log.stop();
     if (browser) await closeBrowser(browser);
     else launching.then((late) => closeBrowser(late), () => {});
@@ -897,6 +1002,7 @@ module.exports = {
   SLIDE_DEADLINE_MS,
   BROWSER_CLOSE_TIMEOUT_MS,
   BROWSER_KILL_TIMEOUT_MS,
+  DIAGNOSTIC_LINES_PER_SLIDE,
   NETWORK_IDLE_TIMEOUT_MS,
   FONTS_READY_TIMEOUT_MS,
   CANVAS_READY_TIMEOUT_MS,

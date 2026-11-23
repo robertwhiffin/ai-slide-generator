@@ -14,26 +14,46 @@
 // under a bound. Correctness in a hostile realm is best effort (the means of
 // reaching a pristine realm are themselves replaceable); TERMINATION is not,
 // because every read is bounded by WALK_STEP_LIMIT or COLLECTION_ITEM_LIMIT.
-// Reaching a bound is announced on stderr, never silent: the items past it are
-// missing from the exported deck.
+// Reaching a bound is announced, never silent: the items past it are missing
+// from the exported deck.
+//
+// The engine's diagnostics. What a pass says about the slide (a bound met, a
+// slide with no root, a read the page made fail) reaches the app's log, whose
+// readers must learn of content leaving the deck. The page's console is no way
+// to say it: slide script can replace it (a console.warn that does nothing)
+// and write to it (a line with the engine's prefix), and what a page logs is
+// counted, not logged, without the debug text (render_slide.cjs
+// forwardConsole). So a pass says it with diagnose(key, ...), the key one of
+// the engine's own wordings (model_check.cjs DIAGNOSTIC_LINES and
+// DIAGNOSTIC_PARTS, which hold their text), each argument a part's key, a
+// number it counted, or a page's text (diagnosticPageText); diagnosticTokens
+// builds a part the caller names before it says the line. What it says is
+// collected in the pass's own closure, a string built with nothing the page's
+// realm can replace (string concatenation, typeof, comparison and a string's
+// own length and characters: no Array, String or JSON built-in, no console),
+// and returned with the pass's result, passResult(value) ->
+// {value, diagnostics, diagnosticsOver}, which Node reads through the
+// DevTools protocol (render_slide.cjs evaluatePass), checks against the
+// engine's wordings and logs with the pass's prefix. At most
+// DIAGNOSTICS_PER_PASS a pass; the rest are counted. Encoding: each entry,
+// and each token of an entry (a key, a number as JavaScript writes it, a
+// page's text as its length, then at most PAGE_TEXT_LIMIT of its characters),
+// is written after its length and a colon.
 //
 // Composition contract. DOM_ACCESS_SOURCE is pasted into the composing pass's
-// own IIFE, after that pass declares the prefix its collection-loss line carries:
+// own IIFE, which returns what the pass read through passResult:
 //
-//   (async function () {
-//     const DOM_ACCESS_LOG_PREFIX = '[preprocess]';   // or '[html2pptx]'
+//   (function () {
 //     ${DOM_ACCESS_SOURCE}
 //     ...the pass...
+//     return passResult(value);
 //   })()
-//
-// Both prefixes are routed to stderr by the page console handler, which is the
-// only stream pptx_from_html_huashu.py echoes into the app log. The guard at the
-// top fails the pass immediately when the prefix is missing, rather than at the
-// first bound that is met.
 //
 // The two bounds are exported as well, for Node-side readers of the same page
 // (pseudo.mjs reads its pseudo-elements through the DevTools protocol), so a
 // tree read from either side stops at the same depth and breadth.
+
+import { DIAGNOSTICS_PER_PASS, PAGE_TEXT_LIMIT } from './log_line.cjs';
 
 // Hard stop on any descent: eight times Chromium's parsed-depth ceiling (512), so only a lying realm reaches it.
 export const WALK_STEP_LIMIT = 4096;
@@ -42,12 +62,90 @@ export const WALK_STEP_LIMIT = 4096;
 export const COLLECTION_ITEM_LIMIT = 1000000;
 
 export const DOM_ACCESS_SOURCE = `
-  if (typeof DOM_ACCESS_LOG_PREFIX !== 'string') {
-    throw new Error('DOM_ACCESS_SOURCE needs DOM_ACCESS_LOG_PREFIX declared before it');
-  }
-
   const WALK_STEP_LIMIT = ${WALK_STEP_LIMIT};
   const COLLECTION_ITEM_LIMIT = ${COLLECTION_ITEM_LIMIT};
+
+  // ─── the engine's diagnostics ────────────────────────────────────────
+  const DIAGNOSTICS_PER_PASS = ${DIAGNOSTICS_PER_PASS};
+  const DIAGNOSTIC_PAGE_TEXT_LIMIT = ${PAGE_TEXT_LIMIT};
+  let diagnosticStream = '';
+  let diagnosticsKept = 0;
+  let diagnosticsOver = 0;
+
+  function lengthPrefixed(text) {
+    return text.length + ':' + text;
+  }
+
+  // A value of the page's as text, through its own conversion, which may throw.
+  function pageString(value) {
+    if (typeof value === 'string') return value;
+    try {
+      return '' + value;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // A number the page side read, which a lying realm can make anything: NaN
+  // for what is no number.
+  function pageNumber(value) {
+    return typeof value === 'number' ? value : NaN;
+  }
+
+  // The message of what a page's read threw, which may be the page's own
+  // throw and its message a getter of the page's.
+  function thrownMessage(error) {
+    try {
+      return error && error.message;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  // A page's text for a diagnostic: its length, and its first
+  // DIAGNOSTIC_PAGE_TEXT_LIMIT characters.
+  function diagnosticPageText(value) {
+    const text = pageString(value);
+    let kept = '';
+    for (let index = 0; index < text.length && index < DIAGNOSTIC_PAGE_TEXT_LIMIT; index++) kept = kept + text[index];
+    return { diagnosticPageText: kept, length: text.length };
+  }
+
+  function diagnosticToken(value) {
+    if (typeof value === 'string') return lengthPrefixed(value);
+    if (typeof value === 'number') return lengthPrefixed('' + value);
+    if (value !== null && typeof value === 'object') {
+      if (typeof value.diagnosticTokens === 'string') return value.diagnosticTokens;
+      if (typeof value.diagnosticPageText === 'string') {
+        return lengthPrefixed('' + value.length) + lengthPrefixed(value.diagnosticPageText);
+      }
+    }
+    return lengthPrefixed('');
+  }
+
+  // A part's key and what its slots take, as one argument of diagnose. Its
+  // arguments are read by index: a spread or for...of would iterate through
+  // the page's Array.prototype.
+  function diagnosticTokens() {
+    let tokens = '';
+    for (let index = 0; index < arguments.length; index++) tokens = tokens + diagnosticToken(arguments[index]);
+    return { diagnosticTokens: tokens };
+  }
+
+  function diagnose() {
+    if (diagnosticsKept >= DIAGNOSTICS_PER_PASS) {
+      diagnosticsOver += 1;
+      return;
+    }
+    let tokens = '';
+    for (let index = 0; index < arguments.length; index++) tokens = tokens + diagnosticToken(arguments[index]);
+    diagnosticStream = diagnosticStream + lengthPrefixed(tokens);
+    diagnosticsKept += 1;
+  }
+
+  function passResult(value) {
+    return { value: value, diagnostics: diagnosticStream, diagnosticsOver: diagnosticsOver };
+  }
 
   // DOM reads through primitives from a src-less iframe's realm, which no page script has run in.
   function capturePristineDomAccess() {
@@ -316,17 +414,14 @@ export const DOM_ACCESS_SOURCE = `
     return domAccessCache;
   }
 
-  // A bound that is reached is a bug, so it is announced on stderr, once per pass, never per item.
+  // A bound that is reached is a bug, so it is announced, once per pass, never
+  // per item: what the collection lost (a part, diagnosticTokens), then where
+  // (a part's key).
   let collectionLossReported = false;
-  function reportCollectionLoss(prefix, what, where) {
+  function reportCollectionLoss(what, where) {
     if (collectionLossReported) return;
     collectionLossReported = true;
-    console.warn(
-      prefix + ' collection ' + what + ' in ' + where + ': content past that ' +
-      'point is NOT in the exported deck. This bound is unreachable for real slide ' +
-      'content, so meeting it means the document presented an implausible ' +
-      'collection or the realm is lying about one.'
-    );
+    diagnose('collection', what, where);
   }
 
   // Every child NODE, in order, over the sibling chain: the Array.from(node.childNodes) replacement.
@@ -339,7 +434,7 @@ export const DOM_ACCESS_SOURCE = `
       child = dom.nextSibling(child);
     }
     // A surviving child is exactly the bound being met: the loop's other exit is a falsy one.
-    if (child) reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'childNodesOf');
+    if (child) reportCollectionLoss(diagnosticTokens('truncatedItems', COLLECTION_ITEM_LIMIT), 'childNodesOf');
     return nodes;
   }
 
@@ -352,7 +447,7 @@ export const DOM_ACCESS_SOURCE = `
       elements.push(child);
       child = dom.nextElementSibling(child);
     }
-    if (child) reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' items', 'elementChildrenOf');
+    if (child) reportCollectionLoss(diagnosticTokens('truncatedItems', COLLECTION_ITEM_LIMIT), 'elementChildrenOf');
     return elements;
   }
 
@@ -363,10 +458,11 @@ export const DOM_ACCESS_SOURCE = `
     const nodes = [];
     for (let index = 0; index < length; index++) nodes.push(list[index]);
     if (reported > COLLECTION_ITEM_LIMIT) {
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' of ' + reported + ' items', 'nodeListToArray');
+      reportCollectionLoss(
+        diagnosticTokens('truncatedOfItems', COLLECTION_ITEM_LIMIT, pageNumber(reported)), 'nodeListToArray');
     } else if (!(reported >= 0)) {
       // A length that is not a number empties the loop: terminating, but content loss all the same.
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'dropped entirely, length read as ' + String(reported), 'nodeListToArray');
+      reportCollectionLoss(diagnosticTokens('droppedLength', diagnosticPageText(reported)), 'nodeListToArray');
     }
     return nodes;
   }

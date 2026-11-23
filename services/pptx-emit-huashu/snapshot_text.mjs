@@ -191,8 +191,9 @@ import { TEXT_METRICS_SOURCE } from './snapshot_text_metrics.mjs';
 import { TURNED_TEXT_SOURCE } from './snapshot_text_turned.mjs';
 
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE: domAccess,
-// childNodesOf, queryOne, reportCollectionLoss, DOM_ACCESS_LOG_PREFIX and the two
-// limits are its free names. It is stringified, so it closes over nothing on the
+// childNodesOf, queryOne, reportCollectionLoss, diagnose, diagnosticTokens,
+// diagnosticPageText, pageNumber, thrownMessage and the two limits are its free
+// names. It is stringified, so it closes over nothing on the
 // Node side; what it needs from the snapshot arrives in `env`:
 //   replaced        the Set of tag names whose content is drawn, not laid out as text;
 //   opacityOf       computed style -> its own opacity;
@@ -435,7 +436,7 @@ function createTextLayout(env) {
       budget = 0;
       if (!truncated) {
         truncated = true;
-        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' text reads', 'the snapshot text layout');
+        reportCollectionLoss(diagnosticTokens('truncatedTextReads', COLLECTION_ITEM_LIMIT), 'textLayout');
       }
       return false;
     }
@@ -482,7 +483,7 @@ function createTextLayout(env) {
     if (depth > WALK_STEP_LIMIT) {
       if (!truncated) {
         truncated = true;
-        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot text layout');
+        reportCollectionLoss(diagnosticTokens('cutAtDepth', WALK_STEP_LIMIT), 'textLayout');
       }
       return false;
     }
@@ -1029,11 +1030,10 @@ function createTextLayout(env) {
       }
       if (read >= COLLECTION_ITEM_LIMIT) {
         truncated = true;
-        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' font faces', 'the snapshot webfont read');
+        reportCollectionLoss(diagnosticTokens('truncatedFontFaces', COLLECTION_ITEM_LIMIT), 'webfontRead');
       }
     } catch (e) {
-      console.warn('[html2pptx] document.fonts could not be read (' + (e && e.message) +
-        '); a family whose faces were not read exports without weight-named faces');
+      diagnose('fontsUnread', diagnosticPageText(thrownMessage(e)));
     }
     const maps = [fonts, italicFonts];
     for (let map = 0; map < maps.length; map++) {
@@ -1140,18 +1140,18 @@ function createTextLayout(env) {
       list = dom.clientRects(element);
       reported = Number(dom.rectListLength(list));
     } catch (e) {
-      console.warn('[html2pptx] the box fragments of an inline element could not be read (' +
-        (e && e.message) + '); its box is not in the exported deck');
+      diagnose('fragmentsUnread', diagnosticPageText(thrownMessage(e)));
       return fragments;
     }
     if (!(reported >= 0)) {
       truncated = true;
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'dropped entirely, length read as ' + String(reported), 'the snapshot inline fragments');
+      reportCollectionLoss(diagnosticTokens('droppedLength', diagnosticPageText(reported)), 'inlineFragments');
       return fragments;
     }
     if (reported > WALK_STEP_LIMIT) {
       truncated = true;
-      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + WALK_STEP_LIMIT + ' of ' + reported + ' box fragments', 'the snapshot inline fragments');
+      reportCollectionLoss(
+        diagnosticTokens('truncatedOfFragments', WALK_STEP_LIMIT, pageNumber(reported)), 'inlineFragments');
     }
     const length = Math.min(reported, WALK_STEP_LIMIT);
     if (!spend(length)) return fragments;
@@ -1172,8 +1172,7 @@ function createTextLayout(env) {
         }
       }
     } catch (e) {
-      console.warn('[html2pptx] reading the box fragments of an inline element failed (' +
-        (e && e.message) + '); the fragments past that point are not in the exported deck');
+      diagnose('fragmentsFailed', diagnosticPageText(thrownMessage(e)));
     }
     return fragments;
   }

@@ -88,8 +88,7 @@ function createEllipsis(env, layout) {
   function ellipsisAdvance(ps, scale) {
     const css = browserCutCss(probeFaceOf(ps, familyOf(ps.fontFamily), 1));
     if (ellipsisAdvances[css] === undefined) {
-      const sizes = measureProbes([{ css, text: ELLIPSIS, baseline: false }],
-        'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"');
+      const sizes = measureProbes([{ css, text: ELLIPSIS, baseline: false }], 'lossEllipsis');
       const width = sizes && sizes[0] ? Number(sizes[0].w) : NaN;
       ellipsisAdvances[css] = Number.isFinite(width) && width >= 0 ? width : null;
     }

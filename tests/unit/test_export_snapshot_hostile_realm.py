@@ -87,23 +87,18 @@ COLLECTION_LOSS_LINE = "[html2pptx] collection"
 TEXT_LAYOUT_BUDGET = "in the snapshot text layout"
 
 
-def _export_snapshot(
-    monkeypatch: pytest.MonkeyPatch, fixture: str, *, debug_text: bool = False
-) -> tuple[bytes, list[dict]]:
+def _export_snapshot(monkeypatch: pytest.MonkeyPatch, fixture: str) -> tuple[bytes, list[dict]]:
     """Export one fixture slide, bounded so a hang fails in seconds, its model whole.
 
     A sidecar that does not finish within ``HOSTILE_EXPORT_TIMEOUT_SECONDS`` raises
     ``HuashuExportError``; a slide model the model check dropped part of fails
-    the export (``export_documents``). ``debug_text`` logs what the page logs,
-    the engine's own page-side lines among it.
+    the export (``export_documents``).
     """
     monkeypatch.setattr(
         pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
     )
     html = (FIXTURE_DIR / f"{fixture}.html").read_text(encoding="utf-8")
-    return export_documents(
-        [html], monkeypatch=monkeypatch, title=EXPORT_TITLE, debug_text=debug_text
-    )
+    return export_documents([html], monkeypatch=monkeypatch, title=EXPORT_TITLE)
 
 
 def test_every_other_hostile_fixture_is_covered() -> None:
@@ -184,7 +179,7 @@ class TestTheSnapshotEngineTerminates:
         The export returns within the bound, and the loss is announced on stderr,
         because the text past the bound is missing from the deck.
         """
-        pptx, failures = _export_snapshot(monkeypatch, RANGE_RECTS, debug_text=True)
+        pptx, failures = _export_snapshot(monkeypatch, RANGE_RECTS)
 
         assert pptx and failures == [], f"the export did not complete: {failures}"
         stderr = capsys.readouterr().err

@@ -34,6 +34,18 @@
 //   pageText(text, limit) -> string
 //     How a line says text that came from a slide's page: bounded(text,
 //     limit) with the flag, its length alone without it.
+//   diagnosticLine(prefix, parts) -> string
+//     One of the engine's page-side diagnostics (dom_access.mjs diagnose) as
+//     its line, once Node has checked it against the engine's own wordings
+//     (model_check.cjs checkDiagnostics): `prefix`, then each part, a string
+//     the engine wrote (a wording, a number) as it is, and a page's text,
+//     {pageText, length} (what the page side kept of it, at most
+//     PAGE_TEXT_LIMIT characters, and how long it was), as bounded() says it
+//     with the flag, and as its length alone without it, the line then saying
+//     it left page text out.
+//   DIAGNOSTICS_PER_PASS
+//     How many diagnostics one page-side pass keeps at most; the rest it
+//     counts (dom_access.mjs diagnose).
 
 // The characters str.splitlines() ends a line at: line feed, line tabulation,
 // form feed, carriage return, the file, group and record separators, next
@@ -74,4 +86,31 @@ function pageText(text, limit = PAGE_TEXT_LIMIT) {
     : `${value.length} characters, not logged (${DEBUG_TEXT_ENV}=1 logs them)`;
 }
 
-module.exports = { bounded, debugText, logJson, oneLine, pageText, DEBUG_TEXT_ENV, PAGE_TEXT_LIMIT };
+const DIAGNOSTICS_PER_PASS = 100;
+
+function diagnosticLine(prefix, parts) {
+  const quoted = debugText();
+  let withheld = false;
+  const text = parts.map((part) => {
+    if (typeof part === 'string') return oneLine(part);
+    if (!quoted) {
+      withheld = true;
+      return `<${part.length} characters>`;
+    }
+    const left = part.length - part.pageText.length;
+    return oneLine(part.pageText) + (left > 0 ? `… (${left} more characters)` : '');
+  }).join('');
+  return `${prefix} ${text}` + (withheld ? ` (page text not logged: ${DEBUG_TEXT_ENV}=1 logs it)` : '');
+}
+
+module.exports = {
+  bounded,
+  debugText,
+  diagnosticLine,
+  logJson,
+  oneLine,
+  pageText,
+  DEBUG_TEXT_ENV,
+  DIAGNOSTICS_PER_PASS,
+  PAGE_TEXT_LIMIT,
+};

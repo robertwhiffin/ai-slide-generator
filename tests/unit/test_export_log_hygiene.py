@@ -14,9 +14,10 @@ sidecar prints counts and fixed text only:
 * a message a page's failure carried is said by its length (a Node or browser failure
   that carries no page text, a slide past its deadline or one that left itself, is said
   whole);
-* what a page logs itself (its console, the slide's script and the engine's page-side
-  passes alike, since the page's realm builds both) is counted, by level, in one
-  ``[html2pptx] page console:`` line a slide.
+* what a page logs itself (its console, which only the slide's script writes: the
+  engine's page-side passes return what they diagnose with their results,
+  ``test_export_engine_diagnostics.py``) is counted, by level, in one
+  ``[html2pptx] page console:`` line a slide, failed slides' included.
 
 ``TELLR_EXPORT_DEBUG_TEXT=1`` adds the words: the summary's ``hiddenText``, a text-loss
 line naming them, the quotes and the messages, and what a page logs, bounded: each
@@ -210,7 +211,9 @@ class TestAFailedSlideIsLoggedWithoutItsText:
 
 
 # Loaded into the sidecar (NODE_OPTIONS --import): every read of a slide's page fails with
-# a message holding THROWN_WORD, as a page that throws its own text would make it fail.
+# a message holding THROWN_WORD, as a page that throws its own text would make it fail. The
+# engine's passes are evaluated as handles (render_slide.cjs evaluatePass), so both ways in
+# throw.
 THROWING_PAGE_PRELOAD = """
 import { createRequire } from 'node:module';
 const require = createRequire(%(sidecar)s);
@@ -225,6 +228,7 @@ chromium.launch = async (options) => {
     context.newPage = async (...pageArguments) => {
       const page = await newPage(...pageArguments);
       page.evaluate = async () => { throw new Error(%(message)s); };
+      page.evaluateHandle = async () => { throw new Error(%(message)s); };
       return page;
     };
     return context;
@@ -378,11 +382,11 @@ class TestAFailedSlidesConsoleIsCounted:
         Its count line comes after the first slide's OK and before its own FAIL, and
         holds none of its words.
         """
-        logged = _export(
-            [slide_document(ORDINARY_BODY, slide_id="kept"), slide_document(LEAVING_BODY, slide_id="leaves")],
-            monkeypatch,
-            debug_text=False,
-        )
+        documents = [
+            slide_document(ORDINARY_BODY, slide_id="kept"),
+            slide_document(LEAVING_BODY, slide_id="leaves"),
+        ]
+        logged = _export(documents, monkeypatch, debug_text=False)
         assert [failure["slide_index"] for failure in logged.failures] == [1], logged.failures
         assert CONSOLE_WORD not in logged.everything, logged.everything[-3000:]
         lines = logged.stderr.splitlines()

@@ -1823,7 +1823,6 @@ class TestMarkerReadFailures:
             [_with_script(UNMEASURED_BODY, script)],
             css=css,
             monkeypatch=monkeypatch,
-            debug_text=True,
         )
         stderr = capsys.readouterr().err
         assert failures == [] and pptx, f"the lying page did not export: {failures}"

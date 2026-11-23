@@ -4489,9 +4489,7 @@ class TestTablesInAHostileRealm:
             pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
         )
         capsys.readouterr()
-        pptx, failures = export_slides(
-            [FOREIGN_BODY], css=TABLES_CSS, monkeypatch=monkeypatch, debug_text=True
-        )
+        pptx, failures = export_slides([FOREIGN_BODY], css=TABLES_CSS, monkeypatch=monkeypatch)
         stderr = capsys.readouterr().err
         assert pptx and failures == [], f"the slide did not export: {failures}"
         shapes = slide_shapes(pptx)
@@ -4522,9 +4520,7 @@ class TestTablesInAHostileRealm:
             pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
         )
         capsys.readouterr()
-        pptx, failures = export_slides(
-            [AREA_BODY], css=TABLES_CSS, monkeypatch=monkeypatch, debug_text=True
-        )
+        pptx, failures = export_slides([AREA_BODY], css=TABLES_CSS, monkeypatch=monkeypatch)
         stderr = capsys.readouterr().err
         assert pptx and failures == [], f"the slide did not export: {failures}"
         shapes = slide_shapes(pptx)

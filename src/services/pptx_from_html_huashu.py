@@ -42,7 +42,11 @@ per-deck permissions. So the sidecar prints no text of a slide's own: a slide
 summary counts its hidden words (``hiddenWords``), the text-loss line names its
 slide and how many words it lost, a validation message names the text box it
 quotes by its length, a message a slide's page made (a failure's, a read's) is
-said by its length, and what a page logs itself is cut and bounded per slide.
+said by its length, and what a page logs itself is counted, by level, and not
+logged. The engine's own page-side diagnostics (a slide with no root, a
+collection cut at its bound) never pass through the page's console: each pass
+returns them with its result, and they are logged whole, the page's text in
+them (an error's message, a tag name) by its length.
 ``SIDECAR_DEBUG_TEXT_ENV`` adds the words, and no app passes it: it is not in
 ``_SIDECAR_ENV_ALLOWLIST``, and the export fidelity harness adds it for its own
 runs alone. A failure's whole message stays in the list ``build_pptx_huashu``
