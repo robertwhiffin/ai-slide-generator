@@ -110,6 +110,7 @@ from tests.fixtures.export_snapshot_support import (
     reference_text_loss,
     requires_huashu_sidecar,
     requires_node,
+    requires_ui_documents,
     slide_background,
     slide_document,
     slide_shapes,
@@ -2091,6 +2092,7 @@ class TestHarnessExport:
 
 @pytest.mark.slow
 @requires_huashu_sidecar
+@requires_ui_documents
 class TestHarnessRun:
     def test_the_harness_reports_no_hidden_or_joined_word_missing(
         self,
