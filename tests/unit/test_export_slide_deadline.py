@@ -10,18 +10,27 @@ slide.
 
 The deadline is above every wait the engine bounds itself: a slide that those waits let
 through, slow and exported as far as it settled, is not failed by the deadline instead.
+
+It bounds every step of the slide, not only its page's reads: a browser that never hands
+out the slide's context or page, or never lets the request guard route it (a browser
+stalled under load), stops the slide at its deadline too. And a browser that does not
+close once its slide is done is killed: neither ever holds up the deck, and no slide's
+browser outlives it.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     export_documents,
+    export_logged,
     node_json,
     requires_huashu_sidecar,
     requires_node,
@@ -110,6 +119,171 @@ class TestABlockedSlideFailsAlone:
         assert elapsed > blocked_ms / 1000, (
             f"fixture drift: the slide took {elapsed:.1f}s, not the {blocked_ms / 1000:g}s it blocks"
         )
+
+
+# Loaded into the real sidecar (NODE_OPTIONS --import): one step of one slide's browser
+# never answers, the way a browser that stalls under load leaves it, and the process
+# group of every browser launched before each launch, and at node's exit, is recorded.
+# The exit handler is registered before Playwright's (which kills the browsers it
+# launched), so a browser the engine left running is still seen at exit.
+HUNG_STEP_PRELOAD = """
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+const require = createRequire(%(sidecar)s);
+const { chromium } = require('playwright-core');
+const RECORD = %(record)s;
+const HUNG_LAUNCH = %(hung_launch)s;
+const STEP = %(step)s;
+const launched = [];
+const never = () => new Promise(() => {});
+function running(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+function record(at) {
+  fs.appendFileSync(RECORD, JSON.stringify({ at, running: launched.filter(running) }) + '\\n');
+}
+process.on('exit', () => record('exit'));
+const launch = chromium.launch.bind(chromium);
+chromium.launch = async (options) => {
+  record('launch ' + (launched.length + 1));
+  const browser = await launch(options);
+  launched.push(browser._connection.toImpl(browser).options.browserProcess.process.pid);
+  if (launched.length !== HUNG_LAUNCH) return browser;
+  if (STEP === 'close') browser.close = never;
+  if (STEP === 'newContext') browser.newContext = never;
+  if (STEP === 'newPage' || STEP === 'guard') {
+    const newContext = browser.newContext.bind(browser);
+    browser.newContext = async (...contextArguments) => {
+      const context = await newContext(...contextArguments);
+      if (STEP === 'newPage') context.newPage = never;
+      if (STEP === 'guard') context.route = never;
+      return context;
+    };
+  }
+  return browser;
+};
+"""
+
+# The steps of a slide's browser before its page is read: its context, the request
+# guard's routing of it (request_guard.cjs guardContext) and its page.
+SETUP_STEPS = ("newContext", "guard", "newPage")
+# The slide of three whose step hangs.
+HUNG_SLIDE = 2
+# The line a slide whose browser would not close logs, once its process is killed.
+KILLED_LINE = "[html2pptx] the slide's browser did not close within"
+
+
+def _three_slides() -> list[str]:
+    return [
+        slide_document(_slide(f"Slide {position}"), slide_id=f"hung-step-{position}")
+        for position in range(1, 4)
+    ]
+
+
+@dataclass(frozen=True)
+class _HungStepExport:
+    """The three slides exported with one step of the second slide's browser hung."""
+
+    pptx: bytes
+    failures: list[dict]
+    elapsed: float  # seconds
+    stderr: str
+    # The process groups of the browsers found running before each launch and at node's exit.
+    browsers: list[dict]
+
+
+def _export_with_a_hung_step(
+    step: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _HungStepExport:
+    record = tmp_path / "browsers.jsonl"
+    preload = tmp_path / "hung_step.mjs"
+    preload.write_text(
+        HUNG_STEP_PRELOAD
+        % {
+            "sidecar": json.dumps(str(pptx_from_html_huashu.SIDECAR_SCRIPT)),
+            "record": json.dumps(str(record)),
+            "hung_launch": json.dumps(HUNG_SLIDE),
+            "step": json.dumps(step),
+        },
+        encoding="utf-8",
+    )
+    sidecar_env = pptx_from_html_huashu.sidecar_subprocess_env
+    monkeypatch.setattr(
+        pptx_from_html_huashu,
+        "sidecar_subprocess_env",
+        lambda: {**sidecar_env(), "NODE_OPTIONS": f"--import={preload.as_uri()}"},
+    )
+    monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", DECK_TIMEOUT_SECONDS)
+    started = time.monotonic()
+    logged = export_logged(_three_slides(), monkeypatch=monkeypatch)
+    elapsed = time.monotonic() - started
+    return _HungStepExport(
+        pptx=logged.pptx,
+        failures=logged.failures,
+        elapsed=elapsed,
+        stderr=logged.stderr,
+        browsers=[json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()],
+    )
+
+
+def _assert_no_browser_outlives_its_slide(browsers: list[dict]) -> None:
+    """Before each launch every earlier slide's browser is gone, and at node's exit every one."""
+    assert [entry["at"] for entry in browsers] == ["launch 1", "launch 2", "launch 3", "exit"], browsers
+    left = {entry["at"]: entry["running"] for entry in browsers if entry["running"]}
+    assert not left, f"browser process groups still running: {left}"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestEveryStepOfASlideIsBounded:
+    @pytest.mark.parametrize("step", SETUP_STEPS)
+    def test_a_slide_whose_browser_never_answers_a_setup_step_fails_alone(
+        self, step: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second slide's browser never answers ``step``: that slide fails at its deadline.
+
+        Its browser is closed then, before the third slide's launches, and the deck is
+        written with the other two, well inside the deck's timeout.
+        """
+        deadline_seconds = _deadline_ms() / 1000
+        export = _export_with_a_hung_step(step, tmp_path, monkeypatch)
+
+        assert [failure["slide_index"] for failure in export.failures] == [HUNG_SLIDE - 1], (
+            export.failures
+        )
+        assert PAST_ITS_DEADLINE in export.failures[0]["error"], export.failures
+        texts = _deck_texts(export.pptx, 2)
+        assert "Slide 1" in texts[0] and "Slide 3" in texts[1], texts
+        assert export.elapsed < deadline_seconds + 20, (
+            f"the deck took {export.elapsed:.1f}s with a {deadline_seconds:g}s deadline"
+        )
+        _assert_no_browser_outlives_its_slide(export.browsers)
+
+    def test_a_browser_that_never_closes_is_killed_and_its_slide_kept(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second slide is read whole, then its browser never closes: its process is killed.
+
+        The slide's reads are done, so it is exported; the close is bounded, so the deck
+        takes less than one slide's deadline, and the line saying so is logged.
+        """
+        deadline_seconds = _deadline_ms() / 1000
+        export = _export_with_a_hung_step("close", tmp_path, monkeypatch)
+
+        assert export.failures == [], export.failures
+        texts = _deck_texts(export.pptx, 3)
+        assert all(f"Slide {position}" in text for position, text in enumerate(texts, start=1)), texts
+        assert export.elapsed < deadline_seconds, (
+            f"the deck took {export.elapsed:.1f}s: the close was waited for, not bounded"
+        )
+        killed = [line for line in export.stderr.splitlines() if KILLED_LINE in line]
+        assert len(killed) == 1, export.stderr[-3000:]
+        _assert_no_browser_outlives_its_slide(export.browsers)
 
 
 # The waits render_slide.cjs and capture.cjs bound themselves, each read from its module:

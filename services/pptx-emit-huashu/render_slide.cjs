@@ -36,8 +36,10 @@
 // slide's own file, data: and blob: URLs and the hosts the slide CSP allows
 // (`requestHosts`, emit_deck.mjs), and nothing else. A slide whose page
 // navigates away from it is stopped at once and fails, and so is a slide still
-// unread at SLIDE_DEADLINE_MS (its page blocked by its own script): its browser
-// is closed, nothing it read is exported, and the deck goes on.
+// unread at SLIDE_DEADLINE_MS (its page blocked by its own script, or its
+// browser no longer answering): its browser is closed, nothing it read is
+// exported, and the deck goes on. A browser that does not close within
+// BROWSER_CLOSE_TIMEOUT_MS is killed.
 //
 // renderSlide(htmlFile, pres, { bypassValidation, target, tmpDir, requestHosts, slideIndex })
 //   -> { slide, summary }
@@ -93,20 +95,33 @@ const CANVAS_READY_TIMEOUT_MS = 5000;
 const CANVAS_SETTLE_MS = 2000;
 // How often the canvas wait reads the canvases again.
 const CANVAS_POLL_MS = 100;
-// How long one slide may take, from its browser's launch to its last read. A
-// slide whose script blocks its page (a busy loop) would hang every read after
-// it, and the deck with it until the sidecar's timeout (180 s), losing every
-// slide: at this it is stopped instead, its browser closed, and it fails
-// alone. Measured on a dev Mac: the slowest slide of both corpora
+// How long one slide may take, from its browser's launch to its last read:
+// every step of it, the launch, the browser context, the request guard's
+// routing of it, the page and each read. A slide whose script blocks its page
+// (a busy loop), or whose browser stops answering (seen of Chrome under the
+// test suites' parallel load: a 12-slide deck sat after its third slide until
+// the timeout), would hang every step after it, and the deck
+// with it until the sidecar's timeout (180 s), losing every slide: at this it
+// is stopped instead, its browser closed, and it fails alone. Measured on a
+// dev Mac: the slowest slide of both corpora
 // and of the long-off, dataviz-tpl18 and finance-off matrix decks takes 3.2 s
 // (a Chart.js slide, its 2 s canvas settle), the median 1.0 s, and Apps
 // renders a slide in about a Mac's time (25.3 s for the 28-slide long deck).
 // The engine's own bounded waits add up to 26 s (network idle,
 // the fonts before and after the animations, the canvases and their settle,
 // one capture), so the deadline fails no slide those waits let through, slow
-// and exported as far as it settled; and a deck with one blocked slide still
-// has 150 s of the sidecar's 180 s for the rest.
+// and exported as far as it settled; and a deck with one blocked slide, its
+// browser closed or killed within BROWSER_CLOSE_TIMEOUT_MS and
+// BROWSER_KILL_TIMEOUT_MS after it, still has 140 s of the sidecar's 180 s
+// for the rest.
 const SLIDE_DEADLINE_MS = 30000;
+// How long a slide's browser has to close once the slide is read or stopped,
+// and its process then to end once killed. Measured on a dev Mac: a close
+// takes 0.1 to 0.3 s, a kill 0.02 s. A browser that does not close in time
+// (one stalled under load) is killed, so no slide's browser outlives it and no
+// close holds up the deck (closeBrowser).
+const BROWSER_CLOSE_TIMEOUT_MS = 5000;
+const BROWSER_KILL_TIMEOUT_MS = 5000;
 // Tellr decks overflow body by ~80 px (a footer or one extra section), clipped
 // by overflow: hidden. Only a dramatic overflow is an authoring error.
 const TELLR_OVERFLOW_TOLERANCE_PX = 100;
@@ -725,20 +740,66 @@ async function readPage(page, slideUrl, sources, target, log) {
   };
 }
 
-// The error a slide past SLIDE_DEADLINE_MS fails with.
-function pastDeadlineError() {
+// The error a slide past SLIDE_DEADLINE_MS fails with: what it was waiting for,
+// its page's reads (`reading`) or its browser, which had not yet opened its page.
+function pastDeadlineError(reading) {
   return loggedWhole(new Error(
     `the slide did not finish within ${SLIDE_DEADLINE_MS / 1000} s, so it is not exported: ` +
-    'its page may be blocked by its own script'
+    (reading ? 'its page may be blocked by its own script' : 'its browser stopped answering')
   ));
 }
 
+// Whether `promise` settles, either way, within `milliseconds`.
+async function settlesWithin(promise, milliseconds) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), milliseconds); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The process Playwright launched for `browser`, {kill()} (which kills its
+// process group and resolves once it has exited), or null. Playwright's API
+// gives a launched browser no handle on its process, so it is read from the
+// server-side browser behind the client one, through the in-process
+// connection's toImpl (Playwright 1.59.1, which the committed
+// node_modules.tar.gz pins). A browser without one is left to Playwright's own
+// close, which kills it 30 s on; until it is gone its pipes keep node, and so
+// the deck, from ending.
+function browserProcessOf(browser) {
+  try {
+    const launched = browser._connection.toImpl(browser).options.browserProcess;
+    return launched && typeof launched.kill === 'function' ? launched : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// The slide's browser closed, within BROWSER_CLOSE_TIMEOUT_MS, or else its
+// process killed, which is said: a browser stalled under load can take
+// Playwright's own close 30 s, and one that answers nothing, longer. Never
+// waits longer than both bounds.
+async function closeBrowser(browser) {
+  if (await settlesWithin(Promise.resolve().then(() => browser.close()), BROWSER_CLOSE_TIMEOUT_MS)) return;
+  const launched = browserProcessOf(browser);
+  const killed = launched !== null &&
+    await settlesWithin(Promise.resolve().then(() => launched.kill()), BROWSER_KILL_TIMEOUT_MS);
+  console.error(`[html2pptx] the slide's browser did not close within ${BROWSER_CLOSE_TIMEOUT_MS / 1000} s: ` +
+    (killed ? 'its process was killed' : "its process could not be killed, so it is left to Playwright's close"));
+}
+
 // The slide's page read in a browser of its own, its requests guarded
-// (request_guard.cjs), and the browser closed whatever happens. A page that
-// leaves the slide, or a slide still unread at SLIDE_DEADLINE_MS, stops the
-// read at once: the slide fails, and what the read still had under way is
-// abandoned with the browser. A browser that launches only once the slide has
-// stopped is closed as soon as it has.
+// (request_guard.cjs), and the browser closed whatever happens. Each step of
+// it is raced against the slide's stop: a page that leaves the slide, or a
+// slide not done at SLIDE_DEADLINE_MS, whatever step it is waiting on, stops
+// it at once: the slide fails, and what was still under way is abandoned with
+// the browser, closed then (closeBrowser, bounded). A browser that launches
+// only once the slide has stopped is closed as soon as it has; a launch is
+// itself bounded by the deadline, past which Playwright kills what it started.
 async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
   const log = slideLog();
   let stopSlide;
@@ -751,27 +812,32 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
     log.stop();
     stopSlide(error);
   };
-  const deadline = setTimeout(() => stop(pastDeadlineError()), SLIDE_DEADLINE_MS);
-  const launching = chromium.launch(launchOptions(tmpDir));
+  let reading = false;
+  const deadline = setTimeout(() => stop(pastDeadlineError(reading)), SLIDE_DEADLINE_MS);
+  // A step that loses the race goes on unawaited, so its failure is no one's.
+  const step = (promise) => {
+    promise.catch(() => {});
+    return Promise.race([promise, stopped]);
+  };
+  const launching = chromium.launch({ ...launchOptions(tmpDir), timeout: SLIDE_DEADLINE_MS });
   let browser = null;
   try {
     // A browser that cannot launch says so whole: no page has been loaded yet.
-    browser = await Promise.race([launching.catch((error) => { throw loggedWhole(error); }), stopped]);
-    const context = await browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
-    const guard = await guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme)));
-    const page = await context.newPage();
+    browser = await step(launching.catch((error) => { throw loggedWhole(error); }));
+    const context = await step(browser.newContext({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR }));
+    const guard = await step(guardContext(context, slideUrl, requestHosts, (scheme) => stop(leftSlideError(scheme))));
+    const page = await step(context.newPage());
     guard.watch(page);
     const pageConsole = forwardConsole(page);
-    const reading = readPage(page, slideUrl, sources, target, log);
-    reading.catch(() => {});
-    const readings = await Promise.race([reading, stopped]);
+    reading = true;
+    const readings = await step(readPage(page, slideUrl, sources, target, log));
     pageConsole.report();
     return { ...readings, requests: guard.counts() };
   } finally {
     clearTimeout(deadline);
     log.stop();
-    if (browser) await browser.close();
-    else launching.then((late) => late.close(), () => {});
+    if (browser) await closeBrowser(browser);
+    else launching.then((late) => closeBrowser(late), () => {});
   }
 }
 
@@ -816,6 +882,8 @@ module.exports = {
   PAGE_MESSAGE_LIMIT,
   PAGE_MESSAGES_PER_SLIDE,
   SLIDE_DEADLINE_MS,
+  BROWSER_CLOSE_TIMEOUT_MS,
+  BROWSER_KILL_TIMEOUT_MS,
   NETWORK_IDLE_TIMEOUT_MS,
   FONTS_READY_TIMEOUT_MS,
   CANVAS_READY_TIMEOUT_MS,
