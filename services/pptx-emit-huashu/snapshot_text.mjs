@@ -311,9 +311,24 @@ function createTextLayout(env) {
   const HEAVIEST_WEIGHT = 900;
   const WEIGHT_STEP = 100;
   const NO_DECORATION = { underline: false, strike: false };
-  // What continues a word for capitalize: the browser upper-cases a lowercase
-  // letter after any other character.
-  const INSIDE_A_WORD = /[\p{L}\p{N}\p{M}'’]/u;
+  // capitalize's word boundaries, as Chrome draws them (UAX #29 word
+  // boundaries, measured): the browser upper-cases a lowercase letter that
+  // starts a word (casedText). A letter after one of these continues the word:
+  // a letter of a script that spaces its words (after Han, kana or Hangul a
+  // Latin word starts), a decimal digit or a letter-like numeral (Ⅷ; a
+  // superscript digit, ², starts one), or a connector punctuation (total_q3).
+  const INSIDE_A_WORD = /^(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}])[\p{L}\p{Nd}\p{Nl}\p{Pc}]$/u;
+  // The letters these join (INSIDE_A_WORD less the digits and connectors).
+  const WORD_LETTER = /^(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}])[\p{L}\p{Nl}]$/u;
+  // What continues a word between two letters alone: an apostrophe (o’neil,
+  // but 'quoted' and 1’b start one) and a middle dot (col·lecció). A full stop
+  // and a colon start a word even there (E.G.).
+  const BETWEEN_LETTERS = /^['\u2018\u2019\u00B7\u0387\u055F\u05F4\u2024\u2027\uFE13\uFE52\uFF07]$/u;
+  // What the browser looks past, so that the letter after it follows what is
+  // before it: combining marks and the format characters (a soft hyphen, a
+  // word joiner, the joiners and direction marks), the zero-width space
+  // aside, which starts a word.
+  const LOOKED_PAST = /^(?!\u200B)[\p{M}\p{Cf}]$/u;
   const LOWERCASE_LETTER = /^\p{Ll}$/u;
   // A relatively positioned inline moved off its line by at least this many
   // of its own ems can be a superscript or subscript (Preflight moves its sub
@@ -375,7 +390,7 @@ function createTextLayout(env) {
     dropToken,
     generatedSource,
     generatedText,
-    lastCodePoint,
+    followingContext,
     paragraphsOf,
     preservedSpaces,
     pushTextToken,
@@ -893,33 +908,63 @@ function createTextLayout(env) {
     };
   }
 
-  // A word's text as text-transform paints it. `previous` is the character just
-  // before it in the inline content, '' at a start, after a break or after an
-  // atomic inline. capitalize upper-cases each lowercase letter that follows
-  // anything but a letter, a digit, a combining mark or an apostrophe, which
-  // are the browser's word boundaries: "well-known (hello) 1st o’neil e.g." is
-  // "Well-Known (Hello) 1st O’neil E.G.".
+  // A word's text as text-transform paints it. `previous` is what it follows in
+  // the inline content (followingContext), '' at a start, after a break or
+  // after an atomic inline. capitalize upper-cases each lowercase letter that
+  // starts a word (startsAWord): "well-known (hello) 1st o’neil e.g.
+  // total_q3" is "Well-Known (Hello) 1st O’neil E.G. Total_q3".
   function casedText(text, transform, previous) {
     if (transform === 'uppercase') return text.toUpperCase();
     if (transform === 'lowercase') return text.toLowerCase();
     if (transform !== 'capitalize') return text;
     let result = '';
-    let before = previous;
+    let context = previous;
     let index = 0;
     while (index < text.length) {
       const character = text.slice(index, index + codePointLength(text, index));
       index += character.length;
-      result += LOWERCASE_LETTER.test(character) && !INSIDE_A_WORD.test(before) ? character.toUpperCase() : character;
-      before = character;
+      result += LOWERCASE_LETTER.test(character) && startsAWord(context) ? character.toUpperCase() : character;
+      context = followingContext(context, character, 0, character.length);
     }
     return result;
   }
 
-  // The last code point of data[start, end), the character the next token follows.
-  function lastCodePoint(data, start, end) {
-    const pairStart = end - 2;
-    if (pairStart >= start && codePointLength(data, pairStart) === 2) return data.slice(pairStart, end);
-    return data.slice(end - 1, end);
+  // Whether a letter after `context` (followingContext) starts a word: after
+  // nothing, or after anything INSIDE_A_WORD does not hold, but for a
+  // BETWEEN_LETTERS character with a letter before it.
+  function startsAWord(context) {
+    if (!context) return true;
+    const last = lastCodePointOf(context, 0, context.length);
+    if (INSIDE_A_WORD.test(last)) return false;
+    if (!BETWEEN_LETTERS.test(last)) return true;
+    return !WORD_LETTER.test(context.slice(0, context.length - last.length));
+  }
+
+  // The last code point of data[start, end), '' where that is empty.
+  function lastCodePointOf(data, start, end) {
+    if (end - 2 >= start && codePointLength(data, end - 2) === 2) return data.slice(end - 2, end);
+    return data.slice(Math.max(start, end - 1), end);
+  }
+
+  // What a character after `context` then data[start, end) follows, for
+  // casedText: the last two characters of them the browser does not look
+  // past (LOOKED_PAST), the one a letter follows and the one before it,
+  // which decides a BETWEEN_LETTERS character. Where data[start, end) is all
+  // looked past, `context` again.
+  function followingContext(context, data, start, end) {
+    let kept = '';
+    let count = 0;
+    let at = end;
+    while (at > start && count < 2) {
+      const character = lastCodePointOf(data, start, at);
+      at -= character.length;
+      if (LOOKED_PAST.test(character)) continue;
+      kept = character + kept;
+      count += 1;
+    }
+    if (count === 0) return context;
+    if (count === 2 || !context) return kept;
+    return lastCodePointOf(context, 0, context.length) + kept;
   }
 
   // ─── webfonts ────────────────────────────────────────────────────────
@@ -1181,7 +1226,7 @@ function createTextLayout(env) {
   // second line keeps its first, and is hidden text whole.
   //   source    one text node's {node, data, mode, style, tabSize, transform,
   //             segment, hidden, recordsHidden, clip} (readTokens);
-  //   previous  the character before the token (casedText);
+  //   previous  what the token follows (followingContext);
   //   word      the word the token is part of (wordAt), or null.
   function splitToken(source, start, end, space, previous, range, tokens, word) {
     const pieces = paintedCodePoints(source, start, end, space, previous, range);
@@ -1203,8 +1248,8 @@ function createTextLayout(env) {
   // travels with its neighbour, the one before it or, at the start, the one
   // after, so no character is lost. Each is cased after the one before it, so
   // a word that wraps at its hyphen capitalises as it would on one line; a
-  // space is written as preserved spaces. `previous` is the character before
-  // data[start] (casedText); each piece's `previous` is the one before it.
+  // space is written as preserved spaces. `previous` is what data[start] follows
+  // (followingContext); each piece's `previous` is what it follows.
   function paintedCodePoints(source, start, end, space, previous, range) {
     const pieces = [];
     let pending = '';
@@ -1217,7 +1262,7 @@ function createTextLayout(env) {
       const raw = source.data.slice(index, index + length);
       const text = space ? preservedSpaces(raw) : casedText(raw, source.transform, before);
       const characterBefore = before;
-      before = raw;
+      before = followingContext(before, raw, 0, raw.length);
       range.setStart(source.node, index);
       range.setEnd(source.node, index + length);
       const characterStart = index;
@@ -1277,8 +1322,8 @@ function createTextLayout(env) {
 
   // `origin` is where a word of a text node lies in it, so an ellipsis cut can
   // measure it character by character (truncateAtEllipsis): {source, start,
-  // end, previous}, readTokens' source, the word's offsets in its data and the
-  // character before it (casedText). Null for generated text and for spaces.
+  // end, previous}, readTokens' source, the word's offsets in its data and what
+  // it follows (followingContext). Null for generated text and for spaces.
   // `nudge` is how far down, in slide px, a relative position that is no
   // script moves the token off its line (context nudgePx).
   // `word` is the word of the page's text the token is part of (wordAt), or
@@ -1345,9 +1390,9 @@ function createTextLayout(env) {
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
-  // newline. `words.previous` is the character the next token follows
-  // (casedText); it carries over from one text node to the next, hidden ones
-  // included, because they are still in the text. `words.segment` counts the
+  // newline. `words.previous` is what the next token follows (followingContext);
+  // it carries over from one text node to the next, hidden ones included,
+  // because they are still in the text. `words.segment` counts the
   // inline edges crossed so far: every token carries it, and a line is cut
   // where it changes (segmentsOf). `words.current` is the word of the page's
   // text being read (wordAt): white space and a break the page reads end it;
@@ -1392,7 +1437,7 @@ function createTextLayout(env) {
       if (space && source.recordsHidden) words.current = null;
       const word = !space && source.recordsHidden ? wordAt(words) : null;
       measureToken(source, start, end, space, words.previous, range, tokens, word);
-      words.previous = space ? ' ' : lastCodePoint(data, start, end);
+      words.previous = space ? ' ' : followingContext(words.previous, data, start, end);
       start = end;
     }
   }
@@ -1446,7 +1491,7 @@ function createTextLayout(env) {
       } else {
         pushTextToken(source, text, rect, text === ' ' && !mode.spaces, tokens);
       }
-      words.previous = lastCodePoint(text, 0, text.length);
+      words.previous = followingContext(words.previous, text, 0, text.length);
     }
   }
 

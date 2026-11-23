@@ -326,19 +326,27 @@ LENGTH_STOPS_SLIDE = (
     + "</div>"
 )
 
-# text-transform: capitalize at the browser's word boundaries: a letter after
-# anything but a letter, a digit or an apostrophe starts a word. The second
-# paragraph is too narrow for "x-ray", so the browser breaks it after the hyphen.
+# text-transform: capitalize at the browser's word boundaries (snapshot_text.mjs
+# casedText). The second paragraph is too narrow for "x-ray", so the browser
+# breaks it after the hyphen. The third holds the connectors a word runs on
+# across: a connector punctuation ("_"), a middle dot between letters, a soft
+# hyphen and a word joiner, which the browser looks past; and characters a
+# word starts after: an apostrophe with no letter before it, a superscript
+# digit, and Han text.
 CAPITALIZE_SOURCE = "well-known (hello) 1st o’neil x-ray e.g. foo"
 CAPITALIZE_RENDERED = "Well-Known (Hello) 1st O’neil X-Ray E.G. Foo"
 CAPITALIZE_WRAPPED_SOURCE = "x-ray"
 CAPITALIZE_WRAPPED_RENDERED = "X-Ray"
+CAPITALIZE_JOINED_SOURCE = "total_revenue_q3 col·lecció co\u00adop data\u2060set 'quoted' x²nd 東京tower"
+CAPITALIZE_JOINED_RENDERED = "Total_revenue_q3 Col·lecció Co\u00adop Data\u2060set 'Quoted' X²Nd 東京Tower"
 CAPITALIZE_SLIDE = (
     '<div class="slide">'
     '<p id="capitalized" style="font-size: 24px; text-transform: capitalize;">'
     f"{CAPITALIZE_SOURCE}</p>"
     '<p id="capitalized-wrap" style="font-size: 24px; text-transform: capitalize; width: 1.6em;">'
     f"{CAPITALIZE_WRAPPED_SOURCE}</p>"
+    '<p id="capitalized-joined" style="font-size: 24px; text-transform: capitalize;">'
+    f"{CAPITALIZE_JOINED_SOURCE}</p>"
     "</div>"
 )
 
@@ -1106,10 +1114,12 @@ class TestSnapshotRunStyle:
     def test_capitalize_follows_the_browsers_word_boundaries(self, typography_pptx: bytes) -> None:
         """``text-transform: capitalize`` on "well-known (hello) 1st o’neil x-ray e.g. foo".
 
-        The browser upper-cases a letter that follows anything other than a
-        letter, a digit or an apostrophe, so it renders "Well-Known (Hello) 1st
-        O’neil X-Ray E.G. Foo" (``innerText``). The box reads exactly that.
-        Upper-casing only a letter after a space gives "Well-known … X-ray E.g.".
+        The browser upper-cases a letter that starts a word: one after a
+        hyphen, a bracket, a full stop or a space, but not one after a letter,
+        a digit, or an apostrophe between two letters. So it renders
+        "Well-Known (Hello) 1st O’neil X-Ray E.G. Foo" (``innerText``). The box
+        reads exactly that. Upper-casing only a letter after a space gives
+        "Well-known … X-ray E.g.".
         """
         document = _document("capitalize")
         _guard_style(document, "#capitalized", textTransform="capitalize")
@@ -1146,6 +1156,31 @@ class TestSnapshotRunStyle:
         assert boxes[0].text.replace("\n", "") == rendered, (
             f"the wrapped word's box reads {boxes[0].text!r}; the browser {rendered!r}"
         )
+
+    def test_capitalize_runs_a_word_on_across_its_connectors(self, typography_pptx: bytes) -> None:
+        """``capitalize`` on words joined by connectors, and after characters a word starts after.
+
+        The browser's word boundaries (CSS Text, UAX #29 as Chrome draws them):
+        "total_revenue_q3" is one word, since a connector punctuation joins
+        what is either side of it; a middle dot joins two letters, as an
+        apostrophe does; a soft hyphen and a word joiner are looked past, so
+        the letter after one continues the word before it. A word starts after
+        an apostrophe no letter precedes, a superscript digit (no decimal
+        digit), and Han text. So the browser renders
+        ``CAPITALIZE_JOINED_RENDERED`` ("Total_revenue_q3 Col·lecció Co|op
+        Data|set 'Quoted' X²Nd 東京Tower", with "|" for the soft hyphen and the
+        word joiner), and the box reads exactly that. Reading "_", "·", U+00AD
+        and U+2060 as word breaks gives "Total_Revenue_Q3 Col·Lecció Co|Op
+        Data|Set"; reading every apostrophe, number and letter as inside a word
+        gives "'quoted' X²nd 東京tower".
+        """
+        document = _document("capitalize")
+        _guard_style(document, "#capitalized-joined", textTransform="capitalize")
+        rendered = browser_text(document, "#capitalized-joined")
+        assert rendered == CAPITALIZE_JOINED_RENDERED, f"fixture drift: the paragraph renders {rendered!r}"
+        box = _box(_shapes(typography_pptx, "capitalize"), "revenue_q3")
+
+        assert box.text == rendered, f"the box reads {box.text!r}; the browser {rendered!r}"
 
     def test_footnote_marker_is_a_superscript_run(self, corpus_pptx: bytes) -> None:
         """Fixture 09: "gross profit<sup>1</sup>".

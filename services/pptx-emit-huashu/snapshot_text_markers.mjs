@@ -10,7 +10,7 @@
 // over nothing on the Node side. It reads the text layout's `env` (shows), and
 // what it needs from the layout itself arrives in `layout`, documented in
 // snapshot_text.mjs: SLACK_FRACTION, SLACK_PX, anyShown, assembleLine,
-// decorationOf, dropToken, generatedSource, generatedText, lastCodePoint,
+// decorationOf, dropToken, generatedSource, generatedText, followingContext,
 // paragraphsOf, preservedSpaces, pushTextToken and queueRuns. It gives back
 // joinMarkers, markerBlock, markerGlyphLine (for turned text) and
 // readMarkerTokens.
@@ -25,7 +25,7 @@ function createListMarkers(env, layout) {
     dropToken,
     generatedSource,
     generatedText,
-    lastCodePoint,
+    followingContext,
     paragraphsOf,
     preservedSpaces,
     pushTextToken,
@@ -124,7 +124,7 @@ function createListMarkers(env, layout) {
         tokens[tokens.length - 1].joining = joining;
       }
     }
-    words.previous = trailing ? ' ' : lastCodePoint(glyphs, 0, glyphs.length);
+    words.previous = trailing ? ' ' : followingContext(words.previous, glyphs, 0, glyphs.length);
     words.segment++;
   }
 
