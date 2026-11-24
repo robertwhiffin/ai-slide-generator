@@ -214,6 +214,8 @@ import { TURNED_TEXT_SOURCE } from './snapshot_text_turned.mjs';
 //   inlineClip      (clip, element, style, frame) -> the clip of an inline element's
 //                   content, given the clip of the text around it;
 //   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom};
+//   shownPart       (bounds, clip) -> what the clip shows of them, {left, top, right,
+//                   bottom, cut} (cut: it takes some away), or null;
 //   isPseudo        node -> whether it is a pseudo-element (a PseudoRecord), read
 //                   without touching a DOM node's own properties;
 //   pseudoOf        element -> {before, after}, its pseudo-elements, or null;
@@ -345,6 +347,11 @@ function createTextLayout(env) {
   const SCRIPT_MOVE_EM = 0.1;
   // The elements such a move makes a script at any size (baselineShiftOf).
   const SCRIPT_TAGS = new Set(['sub', 'sup']);
+  // A character of generated text a clip cuts is drawn when the clip shows at
+  // least this share of it, across and up and down: drawn whole, it paints the
+  // rest where the browser shows nothing, so drawing it is the nearer from half
+  // up (pushShownGenerated).
+  const CLIPPED_GENERATED_SHOWN = 0.5;
 
   const dom = domAccess();
   // Text layout is bounded on its own: every child node listed and every rect
@@ -1496,8 +1503,9 @@ function createTextLayout(env) {
   // (pseudo.mjs), with its text as painted (text-transform applied, counters
   // and quotes evaluated) at the box's rect, so it clusters into lines with
   // the words around it. Text that paints nothing (hidden, transparent, or
-  // shown under 2 px by its clip) is a gap that keeps its room. Generated text
-  // is no part of the page's innerText, so it is never hidden text.
+  // shown under 2 px by its clip) is a gap that keeps its room, and a box its
+  // clip cuts keeps the characters the clip shows half of (pushShownGenerated).
+  // Generated text is no part of the page's innerText, so it is never hidden text.
   function readGeneratedTokens(piece, scale, tokens, words) {
     const ps = piece.context.style;
     const source = generatedSource(piece.context, scale, words.segment);
@@ -1513,10 +1521,98 @@ function createTextLayout(env) {
       if (!paints || !anyShown([rect], source.clip)) {
         dropToken(source, text, [rect], tokens);
       } else {
-        pushTextToken(source, text, rect, text === ' ' && !mode.spaces, tokens);
+        pushShownGenerated(source, text, rect, ps.direction === 'rtl', tokens);
       }
       words.previous = followingContext(words.previous, text, 0, text.length);
     }
+  }
+
+  // Generated text a clip cuts (an `overflow: hidden` lane cutting its
+  // ::after "→" set at right: -13px to a tip). A text box cannot clip its
+  // glyphs, so each character is drawn whole or not at all: drawn whole it
+  // paints what the clip hides of it, left out it loses what the clip shows of
+  // it, so it is drawn where the clip shows at least half of it, across and up
+  // and down (CLIPPED_GENERATED_SHOWN), and the rest of the box is a gap that
+  // keeps its room. A character's place in the box is read by probing the
+  // widths of the box's text up to it in its own face, scaled to the box
+  // (characterEdges); a box of one character, or whose probes are not read, is
+  // judged whole. Generated text is no word of the page's text, so nothing a
+  // reader reads is left out; a word of the page's text keeps the 2 px rule.
+  // `rtl` says the box's characters run from its right.
+  function pushShownGenerated(source, text, rect, rtl, tokens) {
+    const shown = env.shownPart(rect, source.clip);
+    const collapsible = text === ' ' && !source.mode.spaces;
+    if (!shown || !shown.cut) {
+      pushTextToken(source, text, rect, collapsible, tokens);
+      return;
+    }
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    const upright = height > 0 ? (shown.bottom - shown.top) / height : 1;
+    const characters = charactersOf(text);
+    const edges = characters.length > 1 ? characterEdges(source, characters, width) : null;
+    const spans = edges || [0, width];
+    const units = edges ? characters : [text];
+    let kept = '';
+    let keptFrom = -1;
+    let keptTo = -1;
+    for (let index = 0; index < units.length; index++) {
+      const from = rtl ? rect.right - spans[index + 1] : rect.left + spans[index];
+      const to = rtl ? rect.right - spans[index] : rect.left + spans[index + 1];
+      const across = to > from ? (Math.min(to, shown.right) - Math.max(from, shown.left)) / (to - from) : 0;
+      if (across >= CLIPPED_GENERATED_SHOWN && upright >= CLIPPED_GENERATED_SHOWN && (keptTo < 0 || keptTo === index)) {
+        if (keptFrom < 0) keptFrom = index;
+        keptTo = index + 1;
+        kept += units[index];
+      }
+    }
+    const at = (index) => (rtl ? rect.right - spans[index] : rect.left + spans[index]);
+    const part = (from, to) => (rtl
+      ? { left: at(to), top: rect.top, right: at(from), bottom: rect.bottom }
+      : { left: at(from), top: rect.top, right: at(to), bottom: rect.bottom });
+    if (keptFrom < 0) {
+      dropToken(source, text, [rect], tokens);
+      return;
+    }
+    if (keptFrom > 0) dropToken(source, units.slice(0, keptFrom).join(''), [part(0, keptFrom)], tokens);
+    pushTextToken(source, kept, part(keptFrom, keptTo), collapsible, tokens);
+    if (keptTo < units.length) dropToken(source, units.slice(keptTo).join(''), [part(keptTo, units.length)], tokens);
+  }
+
+  // The characters of a generated box's text, each a code point with the marks
+  // and joiners that follow it (LOOKED_PAST), at most COLLECTION_ITEM_LIMIT.
+  function charactersOf(text) {
+    const characters = [];
+    for (let at = 0; at < text.length && characters.length < COLLECTION_ITEM_LIMIT;) {
+      const length = codePointLength(text, at);
+      const character = text.slice(at, at + length);
+      if (characters.length && LOOKED_PAST.test(character)) characters[characters.length - 1] += character;
+      else characters.push(character);
+      at += length;
+    }
+    return characters;
+  }
+
+  // Where each character of a generated box starts and ends along it, from its
+  // start side: [0, w1, ..., width], each the width of the box's text up to
+  // there in its own face as the browser sets it (browserCutCss), scaled so the
+  // whole is the box's `width`. Null when the probes are not read.
+  function characterEdges(source, characters, width) {
+    const css = browserCutCss(source.face);
+    const probes = [];
+    for (let index = 1; index <= characters.length; index++) {
+      probes.push({ css, text: characters.slice(0, index).join(''), baseline: false });
+    }
+    const sizes = measureProbes(probes, 'lossGeneratedCuts');
+    const whole = sizes && sizes[characters.length - 1] ? Number(sizes[characters.length - 1].w) : NaN;
+    if (!(whole > 0)) return null;
+    const edges = [0];
+    for (let index = 0; index < characters.length; index++) {
+      const prefix = sizes[index] ? Number(sizes[index].w) : NaN;
+      if (!Number.isFinite(prefix)) return null;
+      edges.push(Math.min(width, Math.max(edges[edges.length - 1], prefix * width / whole)));
+    }
+    return edges;
   }
 
   // ─── lines ───────────────────────────────────────────────────────────

@@ -2170,6 +2170,7 @@ async function snapshotPage(config, pseudoData, renderer) {
     paintsBox: (s, opacity, element) => paintsBox(s, opacity) || capturesBox(s, opacity, element),
     inlineClip,
     shows: (bounds, clip) => shownPart(bounds, clip) !== null,
+    shownPart,
     isPseudo,
     pseudoOf: (element) => pseudoHosts.get(element) || null,
     rectOf,

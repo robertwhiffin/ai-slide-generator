@@ -1736,3 +1736,85 @@ class TestSnapshotRoundedClip:
         assert badge_shape.image == base64.b64decode(badge.split(",", 1)[1]), (
             "the badge no corner reaches is not its source embedded as it is"
         )
+
+
+# ---------------------------------------------------------------------------
+# Generated text a clip cuts: each character drawn where half of it shows
+# ---------------------------------------------------------------------------
+
+# Three lanes clip their ::after: an arrow set 13 px past the lane's edge (a 7 px tip shows of
+# its 20 px box, the architecture decks' column arrows), one 4 px past it (most of it shows),
+# and a label 40 px past it; and words of the page's own text a box clips.
+CLIPPED_GENERATED_SLIDE = """<div class="slide"><style>
+.lane { position: absolute; top: 80px; width: 200px; height: 140px; background: #FFFFFF;
+        overflow: hidden; border-radius: 12px; font: 600 15px 'DM Sans', sans-serif;
+        padding: 14px; box-sizing: border-box; }
+.lane::after { content: '\\2192'; position: absolute; right: -13px; top: 56px; font-size: 20px;
+               color: #EB4A34; font-weight: 700; }
+#lane-most::after { right: -4px; }
+#lane-label::after { content: 'NEXT \\2192'; right: -40px; }
+.clipword { position: absolute; top: 260px; height: 40px; overflow: hidden; background: #FFFFFF;
+            font: 600 20px Arial, sans-serif; white-space: nowrap; padding: 8px;
+            box-sizing: border-box; }
+</style>
+<div class="lane" id="lane-tip" style="left: 88px;">Ingest</div>
+<div class="lane" id="lane-most" style="left: 340px;">Transform</div>
+<div class="lane" id="lane-label" style="left: 592px;">Serve</div>
+<div class="clipword" style="left: 88px; width: 96px;">Wordsmithing</div>
+<div class="clipword" style="left: 340px; width: 40px;">Governance</div>
+</div>"""
+LANE_LABEL = "NEXT →"
+ARROW = "→"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestClippedGeneratedText:
+    def test_a_generated_glyph_its_clip_shows_under_half_of_is_left_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``::after`` arrow its lane's ``overflow: hidden`` cuts to a tip is not drawn whole.
+
+        A text box cannot clip its glyphs, so a character is drawn whole or not at all. The
+        lane shows 7 px of the arrow's 20 px box: drawn whole (as both apps drew the
+        architecture decks' column arrows), 13 px of arrow stood past the lane where the
+        browser shows none; left out, the tip is lost. So a character is drawn where its clip
+        shows at least half of it: the tip's arrow is left out, the arrow 4 px past its lane
+        kept, and of the label 40 px past its lane the characters the lane shows half of,
+        a start of "NEXT", never its arrow.
+        """
+        document = _document(CLIPPED_GENERATED_SLIDE)
+        shapes = slide_shapes(_export_one(CLIPPED_GENERATED_SLIDE, monkeypatch))
+        lanes = {
+            name: browser_padding_box(document, f"#{name}")
+            for name in ("lane-tip", "lane-most", "lane-label")
+        }
+
+        def texts_in(lane: dict) -> list[str]:
+            return [
+                shape.text.strip()
+                for shape in shapes
+                if shape.kind == "text"
+                and lane["x"] <= shape.x + shape.w / 2
+                and shape.x <= lane["x"] + lane["w"] + 2
+                and lane["y"] + 40 <= shape.y <= lane["y"] + lane["h"]
+            ]
+
+        tip, most, label = (texts_in(lanes[name]) for name in ("lane-tip", "lane-most", "lane-label"))
+        assert tip == [], f"the tip's lane draws {tip}"
+        assert most == [ARROW], f"the 4 px lane draws {most}"
+        started = len(label) == 1 and label[0] and "NEXT".startswith(label[0])
+        assert started and ARROW not in label[0], (
+            f"the label's lane draws {label}; a start of {LANE_LABEL!r} is what it shows half of"
+        )
+
+    def test_a_clipped_word_of_the_pages_text_is_kept_whole(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GUARD: the page's own words a box clips are drawn whole, however little shows, and
+        none is lost (the half rule is generated text's alone)."""
+        document = _document(CLIPPED_GENERATED_SLIDE)
+        pptx = _export_one(CLIPPED_GENERATED_SLIDE, monkeypatch)
+        texts = [shape.text.strip() for shape in slide_shapes(pptx) if shape.kind == "text"]
+        assert "Wordsmithing" in texts and "Governance" in texts, texts
+        assert text_loss(pptx, [document]) == [[]]
