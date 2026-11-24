@@ -2280,3 +2280,129 @@ The scoped re-review of Fix C (`14ad61b3..6bac23fe`) left two Minor issues. One 
   engine for both targets. 18/18 slide XML are equal to `fixC/final-corpus` for pptx and
   gslides (slide 4 `6a259838…` / `8856e366…`). Every other part is equal but
   `docProps/core.xml`, no kill line, no failures (`fixD/byte-identity/report.json`).
+
+## Final fix E: the container's sidecar slots, a crash at launch, the bounded failures header
+
+The final real-deck matrix on the deployed dev app (0.5.9.dev4 at `6bac23fe`) found three
+defects. All on `feat/export-revamp` from `e00dbb76`, each commit pushed; no deploy, no Google
+deck, PowerPoint not used.
+
+| Commit | Item |
+|---|---|
+| `4cc217c1` | D2: the sidecar slots are the container's |
+| `35b2cc96` | the across-workers test's docstring cites no plan (source hygiene) |
+| `8a571530` | D1, with D3's line: a browser that crashes before its page loads is relaunched once |
+| `8d225056` | D3: the `X-Huashu-Failures` header is bounded |
+| `f31eda76` | `export-features.md`, `multi-user-concurrency.md` |
+| `71fec413` | the one-worker slots case contends three exports, not four |
+| `0db270bb` | test hygiene: node helpers end with their browsers; no browser outlives the session |
+| (this) | this ledger |
+
+- **D2, the slots are the container's** (`src/services/sidecar_slots.py`, the wrapper, `run.py`).
+  Measured: on a Medium app (4 workers, one slot each), three of four simultaneous exports
+  landed on one worker while the others idled, queued there, and one got 429 at its 60 s
+  wait. The kernel does not balance requests across uvicorn workers, and what a slot protects,
+  memory, is the container's.
+  - `SidecarSlots` is a counting semaphore of the container with `threading.BoundedSemaphore`'s
+    interface: N slot files in one directory, each held with a non-blocking `fcntl.flock` on a
+    descriptor of its own (the lock is the open file's, so threads of one worker contend as
+    workers do), tried again every 50 ms until the wait bound. The kernel drops a dead
+    holder's lock.
+  - N = `UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY`, 4 on a Medium app, so the memory
+    envelope is unchanged (measured at 4 concurrent exports: container peak 6,423 MB, working
+    set 4,267 MB, limit 8,192 MB). `run.py` sets `UVICORN_WORKERS` and a slot directory
+    (`TELLR_SIDECAR_SLOTS_DIR`) in the environment its spawned workers inherit, and removes the
+    directory after them. It writes the variable's name itself, pinned equal to the module's
+    by a test: importing `src.services` loads the agent's libraries (3 s: mlflow, langchain),
+    which the uvicorn master, that only supervises, would then hold.
+  - A process `run.py` did not start (local `uvicorn`, a test) runs alone: one worker, its
+    slots a semaphore of its own and no files. A first cut kept them in a private temporary
+    directory removed at exit; a SIGKILLed worker left it behind, so a test pins that a killed
+    lone worker leaves nothing in its `TMPDIR`.
+  - Each worker lets in one export per container slot plus `TELLR_SIDECAR_QUEUE`, so every slot
+    can run in one worker. Kept: the queue bound, the 60 s wait, the 429 text and `Retry-After`,
+    the summary's keys (`sidecarConcurrency` is now the container's slot count, `waitSeconds`
+    the wait for one of its slots). The startup line reads `[huashu] export sidecars: 4 slot(s)
+    in the container (4 worker(s) x TELLR_SIDECAR_CONCURRENCY=1); a worker lets in one export
+    per slot and 15 more to wait for one, each up to 60s`.
+  - Tests, red first: at most three real processes on one directory, with stub sidecars (no
+    Chromium): two slots, three workers, two at once and the third waits then runs; three
+    exports on one worker of two; the last refused at a 1 s bound while the slots are held; a
+    worker killed holding the only slot frees it; three exports on one worker of three all run
+    at once; a worker's places and summary; the count from the environment; `run.py`'s
+    environment and cleanup; the semaphore's interface. Red on the old code: three at once, no
+    refusal, an export running while another worker held the slot, exports refused on one
+    worker. 29 sabotages red on the final code (the commit message's "33" counted 5 that the
+    slots' refactor made moot).
+  - **Measured locally** (`fixE/measure/`), two trials before the memory alert and none after:
+    four workers started through `run.py`'s own `main()` (its `uvicorn.run` pointed at the real
+    app, the deck read, permission check and database stubbed), five simultaneous exports of
+    the 5-slide dense-off deck through the PPTX route and real Chrome, the process table read
+    every 0.1 s. Both: four sidecars at once, two of them in one worker; the fifth waited
+    9.2 s and 8.5 s (its own worker idle in the first), then ran 6.4 s; all five 200 with 5/5
+    slides. The slot directory existed while serving and was gone after the stop.
+- **D1, a crash before the page loads is relaunched once** (`render_slide.cjs` readSlide).
+  Measured: one Chromium of 420 died of SIGSEGV at its launch under four-way load, and its user
+  got 27 of 28 slides.
+  - A browser that exits before the slide's page is opened (its launch, context, the request
+    guard's routing, its page) is ended for good (closed, then Playwright's process kill
+    awaited, bounded: a disconnected browser's close answers at once while its process can
+    still be unreaped) and launched once more inside the same deadline; each launch gets what
+    is left of the deadline as Playwright's own timeout. A second exit fails the slide with its
+    own failure, as before.
+  - How it exited: Playwright's launch log (`<process did exit: exitCode=…, signal=…>`, present
+    in both its launch-failure paths, probed) or, after the launch, a disconnected browser or
+    its exited process. A browser that never started (no executable) did not exit and is not
+    relaunched; nothing is relaunched once the page is navigated, so a navigation away, a read
+    the page broke and the deadline are never retried.
+  - Tests, red first, through the real engine; the launch wrapped by a `NODE_OPTIONS` preload
+    (the deadline tests' seam) that hands Playwright an executable dying of SIGSEGV or exit
+    code 3 (it reproduces the measured message exactly), or kills the real browser as its
+    context opens: kept on a first crash (signal, exit code, context), failed as before on two,
+    the relaunch's deadline and the timeout each launch is given, a missing executable, and a
+    navigating, a read-breaking and a blocked slide each launched once. 16 sabotages red.
+  - Found on the way: after a crash as the context opened the relaunch began while the crashed
+    process was unreaped, fixed by the bounded kill-and-wait; a `TimeoutError` guard could
+    decide nothing (the deadline's stop always comes first) and was removed; Playwright does not
+    end a timed-out launch at once (it tries a graceful close for up to 30 s), so the
+    remaining-deadline timeout is pinned by the timeout each launch is given.
+  - **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`. Its launch stubs
+    (`BLOCKING_LAUNCH_PRELOAD`, `HANGING_LAUNCH_PRELOAD`, `HUNG_SLIDE`) were read against the new
+    path and need no change. For D2 its `_bound` also sets `_sidecar_slot_count`, the startup
+    line it expects is the new one, and a docstring says container; its two fresh-interpreter
+    scripts were replayed outside the file and give exactly what it now asserts.
+- **D3.** The crash line, one per exit and deck-text-free: `[html2pptx] the slide's browser
+  exited before its page loaded (at its launch, on signal SIGSEGV): relaunching it once`, the
+  second ending `it exited again once relaunched, so the slide fails`. `X-Huashu-Failures`
+  (`export.py` huashu_failures_header): each text cut at 300 characters with "…", the whole at
+  most 4,096 bytes of compact ASCII JSON, every text cut at the longest length that fits and
+  past that the first entries that fit; each entry keeps its `slide_index`, the other headers
+  count every failure, and a body (the 422, the Google Slides route) keeps each message whole.
+  Without `ensure_ascii` Starlette raises `UnicodeEncodeError` on such a header. 9 sabotages
+  red.
+- **Test hygiene** (`0db270bb`), asked for after the owner's Mac ran out of memory. Playwright
+  launches each browser detached and kills it from node's exit handler, which
+  `subprocess.run`'s timeout (SIGKILL) never runs; an idle browser exits once its pipe closes
+  (measured), one whose page is blocked does not. `export_snapshot_support.run_node` runs
+  node through `run_sidecar_process`, and `measure.cjs`, `node_json`, the three slide-root
+  probes and the temp-files test's direct sidecar run go through it.
+  `tests/fixtures/browser_leak_check.py`, on for every session through `tests/conftest.py`,
+  gives the session's child processes a `TMPDIR` of its own and, at its end, kills and fails
+  on any Playwright browser still running with its profile there. Red first (each helper left
+  its browser), 8 sabotages red.
+- **Byte identity.** Fix C's final documents of both corpora re-exported through the engine for
+  both targets: 18/18 and 27/27 slide parts equal to `fixC/final-corpus` and `final-ds`, every
+  other part equal but `docProps/core.xml`, no failure, no exit line, no model drop. The
+  harness itself (`run.py --pin-fonts`, no renders) on both corpora: `export.pptx` equal part
+  for part but `docProps/core.xml`, no text lost (`fixE/byte-identity/`, `harness-*`).
+- **Tests.** The gate (`-k "(export or huashu or google) and not timeout"`, serially, at
+  `f31eda76`): 1925 passed, 0 failed, 17 skipped, in 40 min (Fix D: 1836 / 0 / 13). Full suite
+  at `-n 4` (`f31eda76`), while the Mac was out of memory: 19578 passed, 7 failed, 51 skipped,
+  1 xfailed; the failures were the four live-credential tests of
+  `tests/integration/test_client_integration.py` (this machine's Databricks `DEFAULT` login
+  has an invalid refresh token), two canvas captures whose browser died mid-page, and a worker
+  that crashed; the two canvas tests pass serially. After the memory alert, serially only, at
+  `0db270bb`: 16,511 tests ran (16,467 passed, the same 4 live-credential failures, 39
+  skipped, 1 xfailed) before pytest was SIGKILLed at 83% (23:07:04, the kernel jetsam-killing
+  idle daemons every second for memory; the file it was in passes alone); the remaining 150
+  files: 3128 passed, 4 skipped, 0 failed, the session's browser check passing.
