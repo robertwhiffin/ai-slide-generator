@@ -2563,3 +2563,84 @@ Google Slides decks kept for this batch (intermediate probe and matrix decks del
   ("Tellr export revamp — fix F, in-repo corpus (pinned fonts, 819b12d2)")
 - Design-system corpus: https://docs.google.com/presentation/d/1lFSEriQPUB69dVDo85WhUhNTUtQEF33D3qsn-oqKS4c/edit
   ("Tellr export revamp — fix F, design-system corpus (pinned fonts, 819b12d2)")
+
+## Final fix G: three residuals of the merge review
+
+The review of the merge of origin/main (`216b1418`) left M2 and two Minor issues. Three commits
+on `feat/export-revamp`, plus this ledger, pushed. Every new test was red first and is
+sabotage-verified: 15 sabotages, all red, each file restored byte for byte.
+
+- **M2: a CSP source the request guard cannot mirror no longer stops the app starting**
+  (`src/utils/html_safety.py`, `700915e7`).
+  - **The defect.** `SLIDE_CSP_REQUEST_HOSTS` was computed at import, and any https source the
+    guard could not mirror raised `ValueError`. The security-headers middleware, the agent and
+    the streaming callback import the module, so a CSP edit such as `img-src https:` would have
+    stopped the whole app, chat included.
+  - **The fix.** `slide_csp_request_hosts` no longer raises. It returns the hosts and, as
+    `unmirrored`, each source it left out (`"<directive> <source>"`): an https source with a
+    path, a port or a wildcard, `https:` alone, or one in a directive other than `script-src`,
+    `style-src` and `font-src`. The guard then aborts those requests, so it fails closed for
+    that source alone and keeps every other host.
+  - **The warning.** Importing the module logs one warning naming every such source
+    (`SLIDE_CSP_UNMIRRORED_SOURCES`), once in each worker. Today's CSP has none.
+    `export-features.md` describes it.
+  - **Tests, red first** (`test_export_request_guard.py`). A fresh import of a copy of the
+    module, with an unmirrorable source added where `SLIDE_CSP` is written, was tried for four
+    kinds of source (an image directive's `https:`, a wildcard, a path, a port). Red: each
+    raised `ValueError`. Green:
+    - the import warns once, naming the source, and two sources go in one warning, in the
+      CSP's order;
+    - the derived hosts equal today's;
+    - `request_guard.cjs` blocks the source's request and allows every CDN request as before;
+    - the module as written imports with the meta tag's hosts and no warning (parity);
+    - the four old "is refused" cases now leave the source out and name it.
+  - **Sabotages, 9 red:**
+    - the raise restored;
+    - no warning, or a warning that names no source, or one warning per source;
+    - a path, port or wildcard host mirrored as its bare host (fails open);
+    - an unmapped directive mapped;
+    - a whole directive dropped for one bad source;
+    - a host dropped from today's list;
+    - today's import warning.
+  - **Probed:** `src.api.main` imports with `img-src https:` in the CSP, logs the one warning,
+    and the wrapper's `SIDECAR_REQUEST_HOSTS` are today's.
+- **Minor 1: the tables suite's preloaded sidecar run ends with its browsers**
+  (`test_export_snapshot_tables.py`, `76a72df5`).
+  - **The fix.** `TestFailedDottedRewrite` ran `emit_deck.mjs` with Chromium through
+    `subprocess.run`, whose timeout SIGKILLs node. It now goes through
+    `run_sidecar_with_preload`, which uses the suite's `run_node`.
+  - **Test, red first** (`test_export_test_hygiene.py`, beside `node_json`'s and
+    `measure.cjs`'s). The helper runs with a preload that says when each browser is up, on a
+    slide whose script blocks its page, past a 4 s timeout. Red: the browser was left running.
+    Green: none is.
+  - **Sabotages, 2 red:** the helper back on `subprocess.run`, and a preload that announces no
+    launch (the drift guard).
+- **Minor 2: the session check never kills its own process group**
+  (`tests/fixtures/browser_leak_check.py`, `64f55fa0`).
+  - **The fix.** `_kill_groups` skips `os.getpgrp()` and kills a browser in that group alone,
+    by its pid; every other browser still has its group killed. The hygiene file's per-test
+    cleanup killed groups the same way, and now goes through `_kill_groups`.
+  - **Test, red first.** A stand-in session runs in a group a shell leads, as pytest runs in
+    uv's or a shell's. It reports one child in its own group and one in a group of its own as
+    browsers. Red: the kill took the whole group (exit -9). Green: the shell and the session
+    survive, and both children are killed.
+  - **Sabotages, 4 red:** the guard removed, the own-group browser not killed, other groups not
+    killed, and the guard taken against `os.getpid()`.
+- **Tests.**
+  - **The gate** (`-k "(export or huashu or google) and not timeout"`, serially, at
+    `76a72df5`): 1978 passed, 0 failed, 17 skipped, in 44 min, with a peak RSS of 1.09 GB.
+    The merge had 1967 passed. Test by test against its junit: 15 new, the 4 renamed "is
+    refused" cases gone, and no outcome changed.
+  - **Not in the gate.** `-k` matches case-insensitively, so `not timeout` deselects
+    `TestAHelperPastItsTimeoutTakesItsBrowsers`, the new sidecar test with it.
+  - **The touched files, serially:**
+    - `test_export_test_hygiene.py`: 7 passed;
+    - `test_export_request_guard.py`, `test_security_headers.py`, `test_export_csp.py` and
+      `test_html_safety.py`: 121 passed.
+  - No browser, sidecar or pytest process was left after any run.
+  - **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`, which the gate
+    `--ignore`s.
+- **Byte identity.** The merge's final in-repo corpus documents (`merge/harness-corpus`, 18
+  slides) were re-exported through the engine for both targets:
+  - all 150 parts but `docProps/core.xml` are equal, for both the PowerPoint and the Google deck;
+  - there were no failures and 0 MODEL DROPS (`fixG/byte-identity/report.json`).
