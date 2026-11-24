@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures import browser_leak_check
 from tests.fixtures import export_snapshot_support as support
 from tests.fixtures.export_snapshot_support import requires_huashu_sidecar
 
@@ -95,6 +96,35 @@ def test_leaves_nothing():
     pass
 """
 
+# What stands for the session in the kill test: a process in a group a shell leads, as pytest
+# runs in the group of the shell or ``uv`` that started it, with a child in that group reported
+# as a browser there, and one in a group of its own reported as a browser too. It names its
+# children, calls the session check's kill, and says it survived it, with how each child ended
+# ("running" for one the kill left). The children hold none of its pipes, so a child left
+# running keeps no reader of its output waiting.
+OWN_GROUP_KILL = """
+import os, subprocess
+from tests.fixtures import browser_leak_check
+
+quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+in_its_group = subprocess.Popen(["sleep", "60"], **quiet)
+in_a_group_of_its_own = subprocess.Popen(["sleep", "60"], start_new_session=True, **quiet)
+print("its group is its parent's", os.getpgrp() == os.getppid() != os.getpid(), flush=True)
+print("children", in_its_group.pid, in_a_group_of_its_own.pid, flush=True)
+browser_leak_check._kill_groups(
+    {in_its_group.pid: os.getpgrp(), in_a_group_of_its_own.pid: in_a_group_of_its_own.pid}
+)
+ends = []
+for child in (in_its_group, in_a_group_of_its_own):
+    try:
+        ends.append(child.wait(timeout=5))
+    except subprocess.TimeoutExpired:
+        ends.append("running")
+print("survived", *ends, flush=True)
+"""
+# The shell leading the session's group: it runs the session, then says it is still there.
+GROUP_LEADER = '"$0" -c "$1"; echo "the group leader survived; the session exited $?"'
+
 
 def _browsers_under(scope: Path) -> dict[int, int]:
     """The running Playwright browsers whose profile is under ``scope``: pid -> process group."""
@@ -121,14 +151,6 @@ def _still_running_after_a_while(scope: Path) -> dict[int, int]:
         time.sleep(0.2)
 
 
-def _kill(browsers: dict[int, int]) -> None:
-    for group in set(browsers.values()):
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-
 @pytest.fixture
 def scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A TMPDIR for this test's helpers: their browsers' profiles go under it."""
@@ -136,7 +158,7 @@ def scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     directory.mkdir()
     monkeypatch.setenv("TMPDIR", str(directory))
     yield directory
-    _kill(_browsers_under(directory))
+    browser_leak_check._kill_groups(_browsers_under(directory))
 
 
 @requires_huashu_sidecar
@@ -212,6 +234,40 @@ class TestTheSessionCheck:
         inner = _inner_session(tmp_path, CLEAN_TEST)
 
         assert inner.returncode == 0, (inner.stdout + inner.stderr)[-3000:]
+
+
+def test_the_session_checks_kill_spares_its_own_process_group() -> None:
+    """A browser reported in the session's own group is killed alone, by its pid.
+
+    Killing that group would kill the session itself, and whatever else is in its group (the
+    shell or ``uv`` that started pytest). A browser in a group of its own still has its group
+    killed. The session here runs in a group a shell leads, never this one's.
+    """
+    inner = subprocess.run(
+        ["sh", "-c", GROUP_LEADER, sys.executable, OWN_GROUP_KILL],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        start_new_session=True,
+    )
+    named = re.findall(r"^children (\d+) (\d+)$", inner.stdout, re.M)
+    children = [int(pid) for pid in named[0]] if named else []
+    try:
+        assert children, f"fixture drift: the session named no children:\n{inner.stderr[-2000:]}"
+        assert "its group is its parent's True" in inner.stdout, inner.stdout
+        assert inner.returncode == 0 and "the group leader survived" in inner.stdout, (
+            f"the kill took the session's own group (exit {inner.returncode}):\n"
+            f"{inner.stdout}{inner.stderr[-2000:]}"
+        )
+        killed = f"survived {-signal.SIGKILL} {-signal.SIGKILL}"
+        assert killed in inner.stdout, f"a browser was left running: {inner.stdout}"
+        assert "the session exited 0" in inner.stdout, inner.stdout + inner.stderr[-2000:]
+    finally:
+        for pid in children:
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
 
 
 def _alive(pid: int) -> bool:

@@ -10,9 +10,10 @@ So the session gives the suite's child processes a ``TMPDIR`` of its own
 (``SESSION_TMPDIR_PREFIX``): Playwright makes each browser's profile under its launching node's
 ``TMPDIR``, and names it on the browser's command line, so every browser the suite starts says
 it is the suite's. When the session ends, a browser still running with its profile there gets
-``BROWSERS_GONE_WITHIN_SECONDS`` to exit; past that its process group is killed and the session
-fails (an error at the last test's teardown), naming the pids. A test that sets ``TMPDIR`` for
-its own helpers watches its own browsers.
+``BROWSERS_GONE_WITHIN_SECONDS`` to exit; past that its process group is killed (never the
+session's own: a browser in that group is killed by its pid) and the session fails (an error at
+the last test's teardown), naming the pids. A test that sets ``TMPDIR`` for its own helpers
+watches its own browsers.
 
 ``tests/conftest.py`` imports the fixture, so it is on for every session; a pytest run of its own
 loads it with ``-p tests.fixtures.browser_leak_check``.
@@ -27,7 +28,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -75,11 +76,25 @@ def _still_running(scope: Path) -> dict[int, int]:
 
 
 def _kill_groups(browsers: dict[int, int]) -> None:
-    for group in sorted(set(browsers.values())):
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass  # gone already, or a zombie its parent has yet to reap
+    """Kill each browser's process group, never this process's own.
+
+    A browser in this process's group (one its helper launched without detaching it) is killed
+    alone, by its pid: killing that group would kill the session itself, and whatever else is
+    in its group (the shell or ``uv`` that started pytest).
+    """
+    own_group = os.getpgrp()
+    for group in sorted(set(browsers.values()) - {own_group}):
+        _send_sigkill(os.killpg, group)
+    for pid in sorted(pid for pid, group in browsers.items() if group == own_group):
+        _send_sigkill(os.kill, pid)
+
+
+def _send_sigkill(send: Callable[[int, int], None], target: int) -> None:
+    """``send(target, SIGKILL)``: ``os.killpg`` to a group, or ``os.kill`` to a process."""
+    try:
+        send(target, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # gone already, or a zombie its parent has yet to reap
 
 
 @pytest.fixture(scope="session", autouse=True)
