@@ -81,8 +81,8 @@ what the browser itself laid out for the same document.
   ``slide_text_loss`` runs it on one slide of a deck, and
   ``reference_text_loss`` on given reference texts, with each slide's hidden
   text when given.
-* ``node_json`` evaluates a script in the sidecar directory with ``node -e``,
-  so a sidecar module's pure functions are testable without a browser.
+* ``node_json`` runs a script in the sidecar directory, given to node on its
+  stdin, so a sidecar module's pure functions are testable without a browser.
 * ``corpus_slide`` / ``corpus_document`` load the committed brand corpus in
   ``tests/fixtures/export_fidelity`` by its numeric prefix, so no test copies
   corpus HTML.
@@ -1725,15 +1725,18 @@ def slides_api_cell_text(cell: dict) -> str:
 
 
 def node_json(script: str) -> object:
-    """Run ``node -e script`` in the sidecar directory and parse what it prints as JSON.
+    """Run ``script`` in node in the sidecar directory and parse what it prints as JSON.
 
     The script's working directory is the sidecar's, with the sidecar's own
     environment, so it can ``require`` a sidecar module by absolute path and
-    print ``JSON.stringify`` of what that module returns.
+    print ``JSON.stringify`` of what that module returns. Node reads the script
+    from its stdin (``node -``), never from an argument: a script holds the data
+    it is given as literals, and Linux refuses any one argument longer than
+    128 KiB (MAX_ARG_STRLEN: ``OSError: [Errno 7] Argument list too long``).
     """
-    process = run_node(["-e", script], timeout=NODE_TIMEOUT_SECONDS)
+    process = run_node(["-"], input=script.encode("utf-8"), timeout=NODE_TIMEOUT_SECONDS)
     assert process.returncode == 0, (
-        f"node -e exited {process.returncode}: {process.stderr.strip()}\nscript: {script}"
+        f"node exited {process.returncode}: {process.stderr.strip()}\nscript: {script}"
     )
     return json.loads(process.stdout)
 

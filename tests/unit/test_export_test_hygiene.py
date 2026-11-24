@@ -1,7 +1,7 @@
 """The export tests leave no Playwright browser running.
 
 The export suites start node helpers that launch Chromium through Playwright: ``measure.cjs``
-(``browser_rect`` and its kin), ``node -e`` scripts (``node_json``), the slide-root probes, and
+(``browser_rect`` and its kin), node scripts (``node_json``), the slide-root probes, and
 the sidecar itself. Playwright launches each browser detached, the leader of a process group of
 its own, and kills it from node's exit handler. ``subprocess.run``'s timeout SIGKILLs node, so no
 handler of node's runs and the browser is left running with no parent; over a long session such
