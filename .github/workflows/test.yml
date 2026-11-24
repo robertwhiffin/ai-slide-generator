@@ -157,6 +157,15 @@ jobs:
       - name: Set up Python environment
         uses: ./.github/actions/setup-python-env
 
+      # Memory, measured on a Mac with the whole suite (tests/, the huashu timeout
+      # file aside) in ONE pytest process: it starts at 0.8 GB (the app's imports)
+      # and peaks at 2.9 GB RSS, 2.6 GB of it the process's own footprint; its two
+      # largest rises are the design-system importer's 500 MB budget reads and the
+      # fidelity harness's 4x raster, both freed once their test ends. -n auto gives
+      # each worker its own imports and a share of the rest. The app's job queues are
+      # module-level asyncio queues, and tests/conftest.py gives each test fresh ones:
+      # a queue a test's ended event loop had bound once made a worker spin, logging,
+      # until one serial process held 18 GB (tests/unit/test_queue_worker_loop_errors.py).
       - name: Run unit tests
         env:
           TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
@@ -195,6 +204,11 @@ jobs:
   # installed as below:
   #   pytest tests/unit -m network -k "export or huashu or google"
   # On the unit job's triggers, and on a change to the sidecar alone.
+  # Memory, measured on a Mac with these suites (1,969 tests) in ONE pytest
+  # process: the process peaks at 1.2 GB RSS (1.1 GB of footprint), and with the
+  # node and Chromium of the export under way (at most 8 Chromium processes, 12 in
+  # all) its tree at 2.1 GB RSS; its live objects stay flat over the run. -n auto
+  # runs one such tree per worker.
   export-engine-tests:
     name: Export Engine Tests
     runs-on: ubuntu-latest

@@ -2402,3 +2402,164 @@ deck, PowerPoint not used.
   skipped, 1 xfailed) before pytest was SIGKILLed at 83% (23:07:04, the kernel jetsam-killing
   idle daemons every second for memory; the file it was in passes alone); the remaining 150
   files: 3128 passed, 4 skipped, 0 failed, the session's browser check passing.
+
+## Final fix F: the seven fidelity defects the final real-deck matrix found, and the serial suite's memory
+
+The by-eye review of 100 real slides from the deployed app (`task-15-matrix2-perslide.md`) found
+seven defect classes, T1 to T7, and Fix E's serial full suite was killed for memory (T0). All on
+`feat/export-revamp` from `94c6590f`, each commit pushed; no deploy.
+
+| Commit | Item |
+|---|---|
+| `6e9608a8` | T1: a native table's one-line cells keep the browser's row height |
+| `fba218b3` | T7: a double border is drawn as its two lines |
+| `abd5079f` | T5: a script is set where the browser raised it |
+| `de5966a4` | T2: a collapsed cell's own rounded corner is drawn round |
+| `d8367f32` | T3: inset box-shadows are drawn, and keep a table native |
+| `e150f07c` | T4: generated text a clip cuts keeps what the clip shows of it |
+| `819b12d2` | T6: box drawing is written at the advance the browser laid it out at |
+| `3ce5d065` | T0: a queue worker yields after a loop error; each test waits on fresh queues |
+| `4e7a287a` | T2: a corner piece runs under the opaque pieces drawn after it, in the Google deck |
+| `75023710` | CALIBRATION.md T1-T7 and D13, `export-features.md`, the spec |
+| (this) | this ledger; the CI jobs' memory note |
+
+How each was measured: a probe deck of the seven constructs (`fixF/probe-deck`) through the UI
+truth (Chrome, device scale 2), PowerPoint for Mac (its PDF at 2x) and Drive (its PDF at 2x and
+its LARGE thumbnail), the engine's decks and XML edits of them (`fixF/tools/variants.py`), every
+Drive file deleted by id once read; then the same deck through the fixed engine
+(`fixF/probe-after`). The records are CALIBRATION.md T1 to T7.
+
+- **T1** (Important). Both apps lay a row out to hold each cell's lines at single spacing, 1.2 x
+  the size, and grow it where its cells need more; Chrome sets Arial, Helvetica and Georgia at
+  1.12 to 1.15 em, and a one-line cell had no `lnSpc`. Each cell paragraph set tighter than single
+  spacing is now written as its percentage of it, one line or more (`emit_text.cjs`
+  cellSpacingOf). Probe: eight tables, before +3 to +16 px in both apps, after every one the UI's
+  height (0 to +0.2 px), each row's text within 1 px. A DM Sans or DM Mono cell at normal (1.30 em)
+  stays natural.
+- **T2**. Chrome rounds a collapsed cell's background by its own radius; such a cell is now D5's
+  corner piece (unfilled in the table, its fill a shape under it cut to its rounded box, running
+  1 px under its opaque neighbours in the Google deck, D13). Probe: the coral header's 8 px corner
+  is round in both apps. Two pieces side by side (a two-column table's rounded header, its
+  rounded last row) then showed a light column in Google's thumbnail where they met, 41, 36 and
+  43 levels: each cut cell is now unfilled in the table only as its own piece is drawn, so a
+  piece runs under the opaque pieces drawn after it, which paint over it, and the columns there
+  are 0 levels from the fill, as in the UI (`4e7a287a`; the loop stays linear in the cut cells).
+- **T3**. A cell's inset-only box-shadow keeps its table native (it was 38 text boxes and 12
+  shapes); its layers are drawn over the table inside the cell's padding box. An ordinary box's
+  inset layers are drawn too, inside its padding box: one with no blur as the band it paints,
+  pixel for pixel in both apps; a blurred one as PowerPoint's inner shadow, its direction turned
+  back (measured), over an opaque fill; Drive drops inner shadows, so the Google deck draws none
+  (a trade-off). pptxgenjs writes an inner shadow unreadable, so the deck gives it after writing
+  (`emit_rewrite.cjs`).
+- **T4**. Generated text a clip cuts is drawn by character, each where its clip shows at least
+  half of it (the nearer of drawing it whole and leaving it out), its place read by probing its
+  text's widths; the page's own words keep the 2 px rule, whole, so no text is lost. Probe: the
+  13 px-out arrow is left out in both apps (the UI shows a 4 px tip), the 4 px-out arrow kept, and
+  "NEX" of a clipped "NEXT →" drawn, as the UI shows.
+- **T5**. The snapshot measures each script run's raise; the deck for PowerPoint writes it as the
+  run's baseline offset (PowerPoint raises a run by the offset times its written size, and lowers
+  one by 0.879 of that, `POWERPOINT_SUBSCRIPT_LOWERING`). Drive keeps only Google's own
+  superscript, raised 0.375 of the written size, the size it draws the glyph at, so the Google
+  deck keeps the flags: edited-on 02's 11 px superscript on a 32 px line stays 5 px low there (a
+  measured trade-off). A superscript alone in its box is written plain at its size. Probe: the
+  11 px superscript rises 12.5 px in PowerPoint (UI 12, before 6); the cut-off superscript sits
+  within 0.5 px of its own line in both apps (before 8 px high in PowerPoint, 1.5 in Google).
+- **T6**. A box-drawing character the written face lacks is written in its target's face whose
+  measured advance is nearest the one the browser laid it out at: Segoe UI Symbol (0.5 em) or MS
+  PGothic (1 em for JIS X 0208's 32, 0.667 for the rest) for PowerPoint, JetBrains Mono (0.6) or
+  Noto Sans JP (1) for Google Slides. Probe: a DM Mono heavy rule and a line of them no longer
+  wrap in Google.
+- **T7**. A double border of 3 px or more is a double compound line (`cmpd="dbl"`), which both apps
+  draw on shapes and lines and PowerPoint on table cells; Drive makes a double table border one
+  solid line, so the Google deck draws a double table edge as two strokes over the table.
+- **T0, the serial suite's memory** (`3ce5d065`). Measured (`fixF/t0/`): the full suite serially
+  under `/usr/bin/time -l`, a pytest plugin recording each test's RSS, peak and (every 100 tests)
+  live gc objects, and a 5 s sampler of the process tree. It ran 16,538 tests in 61.5 min, the
+  pytest process growing slowly (750 MB to 2.4 GB RSS, 1.65 M to 5.5 M objects), then spent
+  13 min in one test while its RSS reached 18.2 GB (ru_maxrss) and macOS killed it (exit 137):
+  `test_job_queue_timeout_sweeper.py::test_job_entry_gets_started_at_when_worker_marks_running`,
+  where Fix E's run died too (16,511 tests in).
+  - The cause. The chat jobs', exports' and slide-style previews' queues are module-level
+    `asyncio.Queue`s, bound to the first event loop that waits on them.
+    `tests/integration/test_architect_reply_is_persisted.py` drives the real chat worker under
+    its own `asyncio.run` and leaves the queue bound to that ended loop (a plugin reading each
+    queue's loop after every test found it); waiting on the queue in any later loop raises
+    "bound to a different event loop" before yielding. Each worker caught that, logged
+    "Worker loop error" and waited again: a loop that never yielded, so the sweeper test's 2 s
+    `wait_for` never fired and the records pytest's log capture keeps accrued at about 10,000 a
+    second (a bounded reproduction: 2,000 in 0.2 s). The export gate never runs that file.
+  - The fix. Each worker waits `WORKER_LOOP_ERROR_BACKOFF_SECONDS` (1 s) after a loop error, so a
+    queue it cannot wait on costs one line a second and the task can be cancelled; and
+    `tests/conftest.py` gives each test fresh queues for every queue module already imported (the
+    pattern two test files used for themselves). `tests/unit/test_queue_worker_loop_errors.py`
+    pins both, red first (each worker logged 50 errors in 0.2 s; each next test inherited a bound
+    queue); 7 sabotages red. The 25 files that touch the queues, in the suite's order under a
+    footprint watchdog: 657 passed, peak footprint 595 MB, no loop error logged.
+  - What else grows. Four files whose sampling windows grew most, each run three passes in one
+    session (`--keep-duplicates`), objects by type and the physical footprint before each pass:
+    after the first pass's imports `test_agent_test_workbench.py` and `evals/test_scorers.py`
+    hold flat (pytest's own reports aside); `test_design_system_import.py` lifts the footprint
+    once by about 1 GB, its two bundle-cap tests reading up to 500 MB through the importer's
+    budget, and holds it there (1,289 then 1,304 MB): the allocator's high-water mark, no objects
+    kept; `test_agent_definition_workbench_routes.py` keeps about 50,000 objects (19 MB) per pass
+    of 440 tests, one closed event loop per TestClient portal (anyio 4.11 keeps each loop's run
+    variables in a weak-keyed map whose values hold a task that holds the loop) and SQLAlchemy's
+    statement caches. Dropping the closed loops from anyio's map after each test left the
+    footprint's growth as it was (19 then 21 to 26 MB a pass), so no fixture holds anything
+    large.
+  - The bound. The export gate serially, before (`94c6590f`) and after (`75023710`): the pytest
+    process's peak RSS 1,101 and 1,103 MB (`/usr/bin/time -l`), its physical footprint after at
+    most 1,039 MB; the process tree at most 1,992 and 2,010 MB RSS (1,730 MB of footprint, summed),
+    with at most 8 Chromium, 3 node and 12 processes; live objects 1.21 M to 1.25 M over its
+    1,969 tests. Its one lasting rise is the 4x raster test's fake page (+290 MB, freed; the
+    allocator keeps it), so a serial gate stays within 1.2 GB for pytest and 2.1 GB for its tree.
+    The full suite serially (the timeout file ignored), before (`819b12d2`) and after
+    (`75023710`): killed at 83 % at a peak RSS of 17,331 MB, then whole, at 2,728 MB (the
+    pytest process's footprint at most 2,487 MB), its tree at most 3,249 MB RSS (2,702 MB of
+    footprint, summed); it starts at 742 MB, the app's imports, and its rises past 2 GB are
+    the importer's 500 MB budget reads (+440 MB) and the raster fake (+345 MB), the
+    allocator's high-water marks, not objects kept. (MB are 2^20 bytes throughout; Fix E's
+    and this run's kill were 18.2 x 10^9 bytes.)
+    The CI workflow's unit and export jobs carry the note.
+- **Harness.** Both corpora `--pin-fonts --powerpoint --gslides` at `819b12d2`, against Fix C's
+  final runs (Fix E's `export.pptx` is Fix C's, part for part):
+  - in-repo corpus: slide 18's table (T1) PowerPoint 2.93 to 2.02, Google 2.47 to 1.93; slide 09's
+    footnote superscript is written at its measured raise in the PowerPoint deck (2.14 to 2.14);
+    every other slide's parts equal; mean 1.95 to 1.90 and 2.44 to 2.41;
+  - design-system corpus: every score equal (1.62 / 1.52); slide-action-title's two superscripts
+    (PowerPoint deck: offsets 35236 and 29364) and slide-data-table's corner pieces (its header
+    cells round themselves 8 px inside the 8 px wrapper: one more vertex where the arcs meet)
+    differ, every other part equal;
+  - no text lost, 0 MODEL DROPS, nothing worse by more than 0.05; a second export of each corpus
+    for each target is identical part for part (core.xml aside);
+  - at `4e7a287a` both corpora re-export identically, part for part, for both targets, so the two
+    decks below are the final engine's.
+- **Matrix.** The 14 decks through the harness (`fixF/matrix`, PowerPoint and Google, each Google
+  deck deleted by id), against part 2's runs: every T1-T7 slide improved or held; nothing worse by
+  more than 0.05; no text lost, 0 MODEL DROPS. Part 2 rendered the deployed app's exports, whose
+  Linux container lays the DS-off stack out as Liberation, where this engine on the Mac lays it
+  out as Helvetica, as the UI truth does: slides Fix F leaves unchanged (an export of each deck's
+  documents with the engine before it, compared slide for slide) moved -1.40 (PowerPoint) and
+  -1.48 (Google) on the DS-off decks and -0.02 on the DS-on ones, which is the environment. The
+  slides Fix F changed are the T1-T7 slides plus dense-on 01 and 04, dense-off 01, 02 and 04,
+  long-on 16 and long-off 11 and 12 (their tables and superscripts), every one better or within
+  0.01. The corner-piece follow-up changes long-on 07's Google slide alone (4.64 to 4.63, through
+  the harness again); every other matrix deck re-exports identically for both targets.
+- **Tests.** The gate (`-k "(export or huashu or google) and not timeout"`, serially, at
+  `75023710`): 1958 passed, 2 failed, 17 skipped in 46 min. Both failures are tables slides
+  failed by the slide deadline ("did not finish within 30 s") after 1.6 s and 3.0 s of the
+  export's own time: the Mac, on battery once another tool's sleep assertion ended, went into
+  maintenance sleep during the run (`pmset -g log`: DarkWake at 08:55:17 and a 959 s sleep at
+  08:56:02), and node's deadline timer counts the sleep, Python's clock does not. Rerun,
+  `TestTableStructure`: 20 passed. The full suite serially at `75023710`, under `caffeinate -i`, the timeout file ignored:
+  19,624 passed, 4 failed, 51 skipped, 1 xfailed in 68 min, with no kill; the failures are the
+  four live-credential tests of `tests/integration/test_client_integration.py` (this
+  machine's Databricks `DEFAULT` login has an invalid refresh token), as in Fix E. No process
+  was left after any run, and PowerPoint was left with no presentation open.
+  - **Not run, as asked:** `tests/unit/test_pptx_from_html_huashu_timeout.py`.
+
+Google Slides decks kept for this batch (intermediate probe and matrix decks deleted by id):
+- In-repo corpus: https://docs.google.com/presentation/d/1xoiU_2auKmK1y9mEUHIH4YxkFzO1CrUpsmy-4oNLQFA/edit
+  ("Tellr export revamp — fix F, in-repo corpus (pinned fonts, 819b12d2)")
+- Design-system corpus: https://docs.google.com/presentation/d/1lFSEriQPUB69dVDo85WhUhNTUtQEF33D3qsn-oqKS4c/edit
+  ("Tellr export revamp — fix F, design-system corpus (pinned fonts, 819b12d2)")
