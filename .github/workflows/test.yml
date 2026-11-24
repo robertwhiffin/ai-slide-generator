@@ -234,9 +234,19 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      - name: Extract the sidecar's node_modules
+      # The app's boot runs this on Databricks Apps: node_modules, the bundled system
+      # libraries, and the font bundle with the fontconfig the sidecar's Chromium reads
+      # (FONTCONFIG_FILE). Without the fonts the suites would see the runner's DejaVu, a
+      # face production never draws.
+      - name: Set up the sidecar as the app's boot does (setup.sh)
         working-directory: services/pptx-emit-huashu
-        run: tar xzf node_modules.tar.gz
+        env:
+          HUASHU_SETUP_LOG: ${{ runner.temp }}/huashu-setup.log
+        run: |
+          sh setup.sh
+          cat "$HUASHU_SETUP_LOG"
+          test -f fonts/.bundle-complete && test -f fonts/fonts.conf || {
+            echo "::error::setup.sh did not put the font bundle in place"; exit 1; }
 
       - name: Install Chromium with its system dependencies
         working-directory: services/pptx-emit-huashu
