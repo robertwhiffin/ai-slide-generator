@@ -49,6 +49,7 @@ import pytest
 from src.api.routes import export as export_routes
 from src.services import pptx_from_html_huashu
 from src.services.pptx_from_html_huashu import HuashuExportError
+from tests.fixtures import browser_leak_check
 from tests.fixtures.export_snapshot_support import (
     CORPUS_DECK,
     CORPUS_DIR,
@@ -87,13 +88,6 @@ HUNG_SLIDE = (
     "<!doctype html><html><body><div class='slide'><p>hung</p></div>"
     "<script>while (true) {}</script></body></html>"
 )
-# What only Playwright's launched browser processes carry on their command line.
-PLAYWRIGHT_BROWSER_FLAG = "--remote-debugging-pipe"
-# Playwright makes each browser's profile in a directory of its own under the
-# launching node's TMPDIR, named with this prefix, and names it on the browser's
-# command line (--user-data-dir), so a browser says which run's TMPDIR it is of.
-PLAYWRIGHT_PROFILE_PREFIX = "playwright_chromiumdev_profile-"
-
 # A stub node script. The browser child is detached and killed (its group) by
 # the stub's exit handler, as Playwright does; the helper child stays in the
 # stub's group; SIGTERM ends the stub through its exit path, as the real
@@ -243,32 +237,16 @@ def _playwright_browsers(scope: str) -> dict[int, int]:
     makes inside the TMPDIR it is given (pptx_from_html_huashu._export_deck), so a
     browser's profile is in ``scope`` or in a directory under it. Only those: a
     browser another run on the machine launched (another test run, a developer's
-    own) is not this run's to watch or kill.
+    own) is not this run's to watch or kill. Read as the session check reads them
+    (``browser_leak_check.playwright_browsers``): by the flag and the profile on the
+    browser's whole command line, on Linux and macOS alike.
     """
-    profile = re.compile(
-        re.escape(f"{scope}/") + r"(?:[^/\s]+/)*" + re.escape(PLAYWRIGHT_PROFILE_PREFIX)
-    )
-    listing = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,command="], capture_output=True, text=True, check=True
-    ).stdout
-    browsers = {}
-    for line in listing.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile.search(fields[2]):
-            browsers[int(fields[0])] = int(fields[1])
-    return browsers
+    return browser_leak_check.playwright_browsers(scope)
 
 
 def _group_members(groups: set[int]) -> list[int]:
     """Every running process in any of ``groups``."""
-    listing = subprocess.run(
-        ["ps", "-axo", "pid=,pgid="], capture_output=True, text=True, check=True
-    ).stdout
-    return [
-        int(pid)
-        for pid, group in (line.split() for line in listing.splitlines() if line.strip())
-        if int(group) in groups
-    ]
+    return [process.pid for process in browser_leak_check.process_table() if process.pgid in groups]
 
 
 class _BrowserWatch:
@@ -553,15 +531,18 @@ def _running_after(pid: int, seconds: float) -> bool:
 
 def _browser_of(node_pid: int) -> int | None:
     """The Playwright browser node ``node_pid`` launched (its child with the pipe flag), or None."""
-    listing = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, check=True
-    ).stdout
-    for line in listing.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) == 3 and int(fields[1]) == node_pid:
-            if PLAYWRIGHT_BROWSER_FLAG in fields[2]:
-                return int(fields[0])
+    for process in browser_leak_check.process_table():
+        if process.ppid == node_pid and browser_leak_check.is_playwright_browser(process):
+            return process.pid
     return None
+
+
+def _no_browser_seen(what: str) -> str:
+    """The fixture-drift message for a run whose browser was not seen, with what was there."""
+    return (
+        f"fixture drift: {what} launched no browser; the process table's Chromium processes: "
+        f"{browser_leak_check.chromium_processes()}"
+    )
 
 
 @pytest.mark.slow
@@ -605,7 +586,7 @@ class TestTheWatchIsItsOwnRuns:
                 )
                 time.sleep(0.1)
             browser = _browser_of(node.pid)
-            assert browser is not None, "fixture drift: the other run launched no browser"
+            assert browser is not None, _no_browser_seen("the other run")
             time.sleep(1)  # several of the watch's looks at the process table
 
             browser_watch.end()
@@ -642,7 +623,7 @@ class TestTheRealSidecarLeavesNoBrowser:
             pptx_from_html_huashu.build_pptx_huashu("hung deck", [{"html": HUNG_SLIDE}])
         browser_watch.stop()
 
-        assert browser_watch.seen, "fixture drift: the export launched no browser"
+        assert browser_watch.seen, _no_browser_seen("the export")
         survivors = browser_watch.survivors()
         assert survivors == [], (
             f"the timed-out export left its browser running: {survivors} "
@@ -685,7 +666,7 @@ class TestTheRealSidecarWithItsLoopBlocked:
             )
         browser_watch.stop()
 
-        assert browser_watch.seen, "fixture drift: the export launched no browser"
+        assert browser_watch.seen, _no_browser_seen("the export")
         survivors = browser_watch.survivors()
         assert survivors == [], f"the blocked sidecar left its browser running: {survivors}"
 
@@ -775,7 +756,7 @@ class TestTheScriptsEndOnSigterm:
             deadline = time.monotonic() + HUNG_SLIDE_TIMEOUT_SECONDS
             while not watch.seen and time.monotonic() < deadline:
                 time.sleep(0.2)
-            assert watch.seen, "fixture drift: the script launched no browser"
+            assert watch.seen, _no_browser_seen("the script")
             time.sleep(1)
             process.send_signal(signal.SIGTERM)
             try:

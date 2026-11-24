@@ -15,6 +15,13 @@ session's own: a browser in that group is killed by its pid) and the session fai
 the last test's teardown), naming the pids. A test that sets ``TMPDIR`` for its own helpers
 watches its own browsers.
 
+A browser is told by its command line, which both platforms give whole (``process_table``):
+Playwright launches each with ``--remote-debugging-pipe`` and ``--user-data-dir`` naming its
+profile, the last of its arguments. On Linux the table is read from ``/proc``, each command line
+exactly as the kernel holds it; ``ps`` there fits its last column to ``COLUMNS`` when that is
+set, which would cut those two arguments off. macOS has no ``/proc``, and its ``ps -ww`` prints
+every column whole.
+
 ``tests/conftest.py`` imports the fixture, so it is on for every session; a pytest run of its own
 loads it with ``-p tests.fixtures.browser_leak_check``.
 """
@@ -26,10 +33,12 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -45,24 +54,98 @@ BROWSERS_GONE_WITHIN_SECONDS = 10
 PROCESS_LIST_TIMEOUT_SECONDS = 10
 
 
-def playwright_browsers(scope: Path) -> dict[int, int]:
-    """The running Playwright browsers whose profile is at or under ``scope``: pid -> group."""
-    profile = re.compile(
-        re.escape(f"{scope}/") + r"(?:[^/\s]+/)*" + re.escape(PLAYWRIGHT_PROFILE_PREFIX)
-    )
+class Process(NamedTuple):
+    """One running process: its id, its parent's, its process group's, and its command line."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    command: str
+
+
+def _proc_table() -> list[Process]:
+    """Linux: every process in ``/proc``, its command line's arguments joined by spaces."""
+    table = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            arguments = (entry / "cmdline").read_bytes()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue  # it ended while the table was read, or is no process of ours to read
+        # "pid (name) state ppid pgrp ...": the name may hold spaces and parentheses.
+        _, ppid, pgid = stat.rsplit(")", 1)[1].split()[:3]
+        command = " ".join(
+            argument.decode("utf-8", "replace") for argument in arguments.split(b"\0") if argument
+        )
+        table.append(Process(int(entry.name), int(ppid), int(pgid), command))
+    return table
+
+
+def _ps_table() -> list[Process]:
+    """Elsewhere: ``ps`` over every process (``-A``), every column whole (``-ww``)."""
     listing = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,command="],
+        ["ps", "-A", "-ww", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "command="],
         capture_output=True,
         text=True,
         check=True,
         timeout=PROCESS_LIST_TIMEOUT_SECONDS,
+        env={key: value for key, value in os.environ.items() if key != "COLUMNS"},
     ).stdout
-    browsers = {}
+    table = []
     for line in listing.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile.search(fields[2]):
-            browsers[int(fields[0])] = int(fields[1])
-    return browsers
+        fields = line.split(None, 3)
+        if len(fields) >= 3:
+            command = fields[3] if len(fields) == 4 else ""
+            table.append(Process(int(fields[0]), int(fields[1]), int(fields[2]), command))
+    return table
+
+
+def process_table() -> list[Process]:
+    """Every running process, with its whole command line, on Linux and on macOS alike."""
+    return _proc_table() if sys.platform.startswith("linux") else _ps_table()
+
+
+def is_playwright_browser(process: Process) -> bool:
+    """Whether the process is a browser Playwright launched (its pipe flag; not its children)."""
+    return PLAYWRIGHT_BROWSER_FLAG in process.command.split()
+
+
+def playwright_browsers(scope: Path | str) -> dict[int, int]:
+    """The running Playwright browsers whose profile is at or under ``scope``: pid -> group."""
+    profile = re.compile(
+        re.escape(f"{scope}/") + r"(?:[^/\s]+/)*" + re.escape(PLAYWRIGHT_PROFILE_PREFIX)
+    )
+    return {
+        process.pid: process.pgid
+        for process in process_table()
+        if is_playwright_browser(process) and profile.search(process.command)
+    }
+
+
+# How much of each command line ``chromium_processes`` shows.
+DESCRIBED_COMMAND_CHARACTERS = 300
+
+
+def chromium_processes() -> list[str]:
+    """Each running process whose command line names Chrome or Chromium, for a failure message.
+
+    Its pid, parent and group, its command line's length, and the start and end of it: where a
+    browser was expected and none was found, what the process table held in its place.
+    """
+    half = DESCRIBED_COMMAND_CHARACTERS // 2
+    described = []
+    for process in process_table():
+        if not re.search(r"chrom|headless", process.command, re.I):
+            continue
+        command = process.command
+        shown = command if len(command) <= 2 * half else f"{command[:half]} ... {command[-half:]}"
+        described.append(
+            f"pid {process.pid} ppid {process.ppid} pgid {process.pgid} "
+            f"({len(command)} characters): {shown}"
+        )
+    return described
 
 
 def _still_running(scope: Path) -> dict[int, int]:

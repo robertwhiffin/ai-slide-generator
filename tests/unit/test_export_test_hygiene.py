@@ -37,10 +37,6 @@ from tests.unit import test_export_snapshot_tables as tables
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER_SLIDE = pptx_from_html_huashu.SIDECAR_DIR / "render_slide.cjs"
-# What only Playwright's launched browsers carry on their command line, and the prefix of the
-# profile directory each is given under its launching node's TMPDIR.
-PLAYWRIGHT_BROWSER_FLAG = "--remote-debugging-pipe"
-PLAYWRIGHT_PROFILE_PREFIX = "playwright_chromiumdev_profile-"
 # The prefix of the session's own TMPDIR (browser_leak_check.SESSION_TMPDIR_PREFIX).
 SESSION_TMPDIR_PREFIX = "tellr-test-browsers-"
 # A helper's timeout here: past a browser's launch, well short of the helpers' own.
@@ -70,10 +66,15 @@ const os = require('os');
 
 # A test that leaves a browser running, as a helper killed outright does: node launches it with
 # the session's TMPDIR, opens a page whose script blocks it, then SIGKILLs itself, so no exit
-# handler kills the browser, and its blocked page keeps it from exiting by itself.
+# handler kills the browser, and its blocked page keeps it from exiting by itself. It checks
+# that the browser is there once node is gone, as the session check sees browsers, so a check
+# that sees none fails here, naming what the process table holds.
 LEAKING_TEST = """
+import os
 import subprocess
+from pathlib import Path
 from src.services import pptx_from_html_huashu as wrapper
+from tests.fixtures import browser_leak_check
 
 SCRIPT = '''
 const { chromium } = require('playwright');
@@ -93,6 +94,11 @@ def test_leaves_a_browser():
     subprocess.run(
         ["node", "-e", SCRIPT], cwd=wrapper.SIDECAR_DIR, env=wrapper.sidecar_subprocess_env(),
         timeout=60, check=False,
+    )
+    left = browser_leak_check.playwright_browsers(Path(os.environ["TMPDIR"]))
+    assert left, (
+        "fixture drift: no browser of this session's is running once its node is gone; "
+        f"the process table's Chromium processes: {browser_leak_check.chromium_processes()}"
     )
 """
 
@@ -145,26 +151,10 @@ print("survived", *ends, flush=True)
 GROUP_LEADER = '"$0" -c "$1"; echo "the group leader survived; the session exited $?"'
 
 
-def _browsers_under(scope: Path) -> dict[int, int]:
-    """The running Playwright browsers whose profile is under ``scope``: pid -> process group."""
-    profile = re.compile(
-        re.escape(f"{scope}/") + r"(?:[^/\s]+/)*" + re.escape(PLAYWRIGHT_PROFILE_PREFIX)
-    )
-    listing = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,command="], capture_output=True, text=True, check=True
-    ).stdout
-    browsers = {}
-    for line in listing.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) == 3 and PLAYWRIGHT_BROWSER_FLAG in fields[2] and profile.search(fields[2]):
-            browsers[int(fields[0])] = int(fields[1])
-    return browsers
-
-
 def _still_running_after_a_while(scope: Path) -> dict[int, int]:
     deadline = time.monotonic() + GONE_WITHIN_SECONDS
     while True:
-        browsers = _browsers_under(scope)
+        browsers = browser_leak_check.playwright_browsers(scope)
         if not browsers or time.monotonic() > deadline:
             return browsers
         time.sleep(0.2)
@@ -177,7 +167,7 @@ def scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     directory.mkdir()
     monkeypatch.setenv("TMPDIR", str(directory))
     yield directory
-    browser_leak_check._kill_groups(_browsers_under(directory))
+    browser_leak_check._kill_groups(browser_leak_check.playwright_browsers(directory))
 
 
 @requires_huashu_sidecar
