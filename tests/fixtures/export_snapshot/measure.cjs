@@ -15,6 +15,9 @@
 //        node measure.cjs <document.html> <point-json> --mode=hit|pixel
 //        node measure.cjs <document.html> <points-json> --mode=pixels
 //        node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo
+// A selector (or the JSON a mode takes in its place) given as "-" is read from
+// stdin, which is how export_snapshot_support.py passes it: a mode's JSON can be
+// longer than the 128 KiB Linux allows any one argument (MAX_ARG_STRLEN).
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches, and 3 when the document asks for anything from the network,
 // which the page aborts: a test's documents carry what they load.
@@ -101,6 +104,7 @@
 // browser_pixel, browser_pixels, browser_tables, browser_each_pseudo,
 // browser_each_layout_box, browser_ellipsis, browser_title).
 
+const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
@@ -1353,8 +1357,16 @@ function parseArguments(argv) {
   return { documentPath: positional[0], selector: positional[1], indexArgument: positional[2], mode };
 }
 
+// The selector argument as given, or what stdin holds when it is "-".
+function selectorOf(argument) {
+  return argument === '-' ? fs.readFileSync(0, 'utf8') : argument;
+}
+
 async function main() {
-  const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
+  const { documentPath, selector: selectorArgument, indexArgument, mode } = parseArguments(
+    process.argv.slice(2),
+  );
+  const selector = selectorArgument === undefined ? undefined : selectorOf(selectorArgument);
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
       'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|faces|text|ellipsis]\n' +

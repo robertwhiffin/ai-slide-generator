@@ -11,6 +11,10 @@ through its exit path, kills its browsers' groups and then its own; and a sessio
 (``tests/fixtures/browser_leak_check.py``) gives the suite's child processes a ``TMPDIR`` of its
 own and, once the session ends, kills and reports every Playwright browser still running with
 its profile under it.
+
+``run_node`` also keeps every helper to the argument size Linux allows (128 KiB for any one
+argument; macOS has no such cap): a longer one is refused on every platform, so a helper that
+hands node its data as an argument fails on a Mac as it would on Linux.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import pytest
 from src.services import pptx_from_html_huashu
 from tests.fixtures import browser_leak_check
 from tests.fixtures import export_snapshot_support as support
-from tests.fixtures.export_snapshot_support import requires_huashu_sidecar
+from tests.fixtures.export_snapshot_support import requires_huashu_sidecar, requires_node
 from tests.unit import test_export_snapshot_tables as tables
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -228,6 +232,23 @@ class TestAHelperPastItsTimeoutTakesItsBrowsers:
         assert "browser launched" in stderr, f"fixture drift: no browser launched: {stderr!r}"
         left = _still_running_after_a_while(scope)
         assert left == {}, f"the sidecar run left its browser running: {left}"
+
+
+@requires_node
+class TestRunNodeKeepsToLinuxsArgumentSize:
+    def test_an_argument_as_long_as_linux_allows_runs(self) -> None:
+        """A script that, with its terminating NUL, is exactly the cap: Linux runs it too."""
+        script = "//" + "x" * (support.LINUX_ARGUMENT_LIMIT_BYTES - len("//") - 1)
+
+        process = support.run_node(["-e", script], timeout=support.NODE_TIMEOUT_SECONDS)
+
+        assert process.returncode == 0, process.stderr
+
+    def test_a_longer_argument_is_refused_on_every_platform(self) -> None:
+        script = "//" + "x" * (support.LINUX_ARGUMENT_LIMIT_BYTES - len("//"))
+
+        with pytest.raises(AssertionError, match="pass the data on input"):
+            support.run_node(["-e", script], timeout=support.NODE_TIMEOUT_SECONDS)
 
 
 def test_the_suite_gives_its_child_processes_a_temporary_directory_of_its_own() -> None:

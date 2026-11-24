@@ -233,6 +233,9 @@ PERCENT_UNITS = 100000
 HUNDREDTHS = 100
 MEASURE_TIMEOUT_SECONDS = 120
 NODE_TIMEOUT_SECONDS = 30
+# The most bytes Linux lets any one argument of a new process hold, its terminating NUL
+# included (MAX_ARG_STRLEN, 32 pages of 4 KiB); macOS has no such cap.
+LINUX_ARGUMENT_LIMIT_BYTES = 128 * 1024
 # CSS font weights are multiples of 100 from 100 to 900; a variable face's
 # weight is a range of them ("100 900").
 FONT_WEIGHT_STEP = 100
@@ -686,7 +689,20 @@ def run_node(
     and ``subprocess.TimeoutExpired`` is raised; after any exit its group is swept. ``env``
     defaults to the sidecar's, with this session's TMPDIR (``browser_leak_check``). The
     output is decoded as UTF-8.
+
+    Data goes on ``input``: an argument as long as Linux's per-argument cap
+    (``LINUX_ARGUMENT_LIMIT_BYTES``) is refused here on every platform, so a helper that
+    would fail on Linux with "Argument list too long" fails the same way on a Mac.
     """
+    oversized = [
+        len(argument.encode("utf-8"))
+        for argument in arguments
+        if len(argument.encode("utf-8")) + 1 > LINUX_ARGUMENT_LIMIT_BYTES
+    ]
+    assert not oversized, (
+        f"node is given arguments of {oversized} bytes, past the {LINUX_ARGUMENT_LIMIT_BYTES} "
+        "Linux allows one argument: pass the data on input (stdin) instead"
+    )
     completed = pptx_from_html_huashu.run_sidecar_process(
         ["node", *arguments],
         input=input,
@@ -707,12 +723,24 @@ def run_node(
 # ---------------------------------------------------------------------------
 
 
-def _run_measure(document_html: str, *arguments: str) -> str:
+def _run_measure(document_html: str, selector: str | None, *arguments: str) -> str:
+    """``measure.cjs`` on ``document_html``; what it prints.
+
+    ``selector`` (or the JSON a mode takes in its place; None for a mode that reads the
+    whole document) goes to node on its stdin, never as an argument: a mode's JSON can be
+    longer than Linux lets one argument be (``run_node``).
+    """
     with tempfile.TemporaryDirectory(prefix="tellr-measure-") as directory:
         document_path = Path(directory) / "document.html"
         document_path.write_text(document_html, encoding="utf-8")
         process = run_node(
-            [str(MEASURE_SCRIPT), str(document_path), *arguments],
+            [
+                str(MEASURE_SCRIPT),
+                str(document_path),
+                *([] if selector is None else ["-"]),
+                *arguments,
+            ],
+            input=b"" if selector is None else selector.encode("utf-8"),
             timeout=MEASURE_TIMEOUT_SECONDS,
         )
     assert process.returncode == 0, (
@@ -1255,7 +1283,7 @@ def browser_title(document_html: str) -> str:
     reader of the poisoned realm now sees, so a test can prove the poisoning
     took before it asserts anything else. The title is no slide text.
     """
-    return json.loads(_run_measure(document_html, "--mode=title"))["title"]
+    return json.loads(_run_measure(document_html, None, "--mode=title"))["title"]
 
 
 def _face_weights(weight: str) -> list[int]:
@@ -1281,7 +1309,7 @@ def browser_loaded_weights(document_html: str) -> dict[str, list[int]]:
     range (``"100 900"``) contributes every hundred inside it. Family names are
     unquoted; weights are sorted and distinct.
     """
-    faces = json.loads(_run_measure(document_html, "--mode=fonts"))
+    faces = json.loads(_run_measure(document_html, None, "--mode=fonts"))
     loaded: dict[str, set[int]] = {}
     for face in faces:
         if face["status"] != "loaded":
@@ -1299,7 +1327,7 @@ def browser_loaded_faces(document_html: str) -> set[tuple[str, str, int]]:
     from the upright one. A variable face's weight range gives one entry per
     hundred inside it.
     """
-    faces = json.loads(_run_measure(document_html, "--mode=fonts"))
+    faces = json.loads(_run_measure(document_html, None, "--mode=fonts"))
     return {
         (face["family"].strip().strip("\"'"), face["style"], weight)
         for face in faces
