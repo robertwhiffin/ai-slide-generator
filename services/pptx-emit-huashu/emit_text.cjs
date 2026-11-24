@@ -42,9 +42,11 @@
 //   half its own leading and half the paragraph's before it, as CSS splits
 //   leading above and below each line.
 // A block of one line has neither, so its line stays where the renderer's
-// single spacing puts it (upstream pitfall 6). pptxgenjs writes a paragraph's
-// <a:pPr> from each of its runs' own options, so every run of a paragraph
-// carries the same spacing.
+// single spacing puts it (upstream pitfall 6). A native table cell's line is
+// the exception (cellSpacingOf): a cell's row holds its lines, so one set
+// tighter than single spacing is written as its percentage, as in a block of
+// several lines. pptxgenjs writes a paragraph's <a:pPr> from each of its runs'
+// own options, so every run of a paragraph carries the same spacing.
 //
 // Script lines in PowerPoint (target 'pptx', measured in PowerPoint).
 // PowerPoint places a line by what it holds, two ways the browser does not:
@@ -126,6 +128,24 @@ function spacingOf(paragraph, multiLine) {
   const pct = Math.round(1000 * lineHeight / single) / 10;
   if (pct > SINGLE_SPACING_PCT) return { pct: SINGLE_SPACING_PCT, gapPx: lineHeight - single };
   return { pct, gapPx: 0 };
+}
+
+// A native table cell's paragraph in a cell of one line. PowerPoint and
+// Google Slides lay a row out to hold each cell's lines at single spacing
+// (1.2 x the size) inside its margins, and grow a row whose cells need more
+// than it was written with. Chrome sets Arial and Helvetica at line-height:
+// normal at 1.15 em, so such a one-line cell grew its row about a px in both
+// apps (a balance sheet's 8 rows, 8 px). So a line height under single
+// spacing is written as its percentage of it (spacingOf, as in a block of
+// several lines), and the row holds the line as the browser's does; measured,
+// every row of Arial, Helvetica and Georgia probe tables then has the
+// browser's height in both apps, its text within a px of the browser's
+// (scripts/export_fidelity/CALIBRATION.md, T1). A line height at or over
+// single spacing needs none: the row the browser laid out is taller than the
+// apps' line.
+function cellSpacingOf(paragraph) {
+  const spacing = spacingOf(paragraph, true);
+  return spacing.pct !== null && spacing.pct < SINGLE_SPACING_PCT ? spacing : { pct: null, gapPx: 0 };
 }
 
 function lineCount(paragraphs) {
@@ -215,7 +235,8 @@ function lineEndOptions(line, item, faces) {
 // paragraph of the model, or one per line of a loosely spaced one, and for
 // PowerPoint one more at each later line the browser grew (growthBeforePx).
 // `renderer` is {target}: the renderer the deck is written for (emitText).
-function writtenParagraphs(item, faces, renderer) {
+// `tableCell` says the paragraphs are a native table cell's (cellSpacingOf).
+function writtenParagraphs(item, faces, renderer, tableCell) {
   const target = renderer && renderer.target;
   const forPowerPoint = target !== 'gslides';
   const paragraphs = item.paragraphs || [];
@@ -226,7 +247,7 @@ function writtenParagraphs(item, faces, renderer) {
   let previousGapPx = 0;
   for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex++) {
     const paragraph = paragraphs[paragraphIndex];
-    const spacing = spacingOf(paragraph, multiLine);
+    const spacing = tableCell && !multiLine ? cellSpacingOf(paragraph) : spacingOf(paragraph, multiLine);
     const lines = paragraph.lines || [];
     let current = null;
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
@@ -265,14 +286,14 @@ function writtenParagraphs(item, faces, renderer) {
   return written;
 }
 
-// textObjects(item, faces, renderer) -> the pptxgenjs text array of `item`'s
-// paragraphs ({paragraphs, rtl}: a text item, or a native table cell,
-// emit_table.cjs): every run carries its paragraph's spacing, and the last run
-// of every paragraph but the final one ends it. `faces` and `renderer` are
-// emitText's.
-function textObjects(item, faces, renderer) {
+// textObjects(item, faces, renderer, options) -> the pptxgenjs text array of
+// `item`'s paragraphs ({paragraphs, rtl}: a text item, or a native table cell,
+// emit_table.cjs, which passes options {tableCell: true}): every run carries
+// its paragraph's spacing, and the last run of every paragraph but the final
+// one ends it. `faces` and `renderer` are emitText's.
+function textObjects(item, faces, renderer, options) {
   const objects = [];
-  const written = writtenParagraphs(item, faces, renderer);
+  const written = writtenParagraphs(item, faces, renderer, Boolean(options && options.tableCell));
   for (let index = 0; index < written.length; index++) {
     const paragraph = written[index];
     for (const object of paragraph.objects) {

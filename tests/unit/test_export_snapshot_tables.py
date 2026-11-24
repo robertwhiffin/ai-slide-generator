@@ -335,6 +335,14 @@ TABLES_CSS = (
 .dotted tr.first td { border-bottom: 2px dotted #1B3139; }
 .dotted tr.second td { border-bottom: 2px dashed #FF5F46; }
 .dotted td + td { border-left: 1px dotted #5A6F77; }
+.app-rows { position: absolute; border-collapse: collapse; width: 360px; }
+.app-rows th { font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;
+               padding: 6px 10px; border-bottom: 2px solid #1B3139; }
+.app-rows td { padding: 6px 10px; border-bottom: 1px solid #E3E7E8; }
+#rows-sans { font-family: Inter, 'SF Pro Display', Helvetica, Arial, sans-serif; font-size: 15px; }
+#rows-tight { font-family: Arial, sans-serif; font-size: 16px; line-height: 1.0; }
+#rows-tight td { vertical-align: top; }
+#rows-loose { font-family: 'DM Sans', sans-serif; font-size: 15px; }
 """
 )
 
@@ -1006,7 +1014,26 @@ SNAP_GROUND = "F7F5F2"
 WHOLE_PX_TOLERANCE = 0.001
 CONTENT_TOLERANCE_PX = 0.05
 
+# Three tables of one-line and two-line cells. Chrome sets Arial and Helvetica at line-height:
+# normal at 1.15 em, and the tight table at 1.0, both under the apps' single spacing of 1.2 em;
+# DM Sans at normal is 1.30 em, over it.
+APP_ROWS_TABLE = (
+    "<thead><tr><th>$M</th><th>Q3 FY25</th></tr></thead><tbody>"
+    "<tr><td>Cash &amp; equivalents</td><td>412</td></tr>"
+    "<tr><td>Accounts receivable</td><td>186</td></tr>"
+    "<tr><td>Two-line cell<br>second line</td><td>894</td></tr>"
+    "<tr><td><b>Total assets</b></td><td><b>3,874</b></td></tr></tbody>"
+)
+APP_ROWS_BODY = f"""<div class="slide">
+  <table id="rows-sans" class="app-rows" style="left: 88px; top: 80px;">{APP_ROWS_TABLE}</table>
+  <table id="rows-tight" class="app-rows" style="left: 520px; top: 80px;">{APP_ROWS_TABLE}</table>
+  <table id="rows-loose" class="app-rows" style="left: 88px; top: 400px;">{APP_ROWS_TABLE}</table>
+</div>"""
+APP_ROWS_TIGHT = ("#rows-sans", "#rows-tight")
+APP_ROWS_LOOSE = "#rows-loose"
+
 INLINE_BODIES = {
+    "app-rows": APP_ROWS_BODY,
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
     "valign": VALIGN_BODY,
@@ -4221,6 +4248,106 @@ def dotted_export() -> Iterator[Callable[[str], list[Shape]]]:
             return exported[target]
 
         yield export
+
+
+# PowerPoint and Google Slides draw single spacing at 1.2 x the font size whatever the face
+# (scripts/export_fidelity/CALIBRATION.md, the rules), and lay a native table's row out to hold
+# each of its cells' lines at that spacing (times the paragraph's lnSpc percentage) plus their
+# space before, inside the cell's margins: a row whose cells need more is grown.
+APP_SINGLE_SPACING_EM = 1.2
+PX_PER_PT = 1 / PT_PER_PX
+# A row may come out this much taller than written: the EMU rounding of its margins and sizes.
+ROW_GROWTH_TOLERANCE_PX = 0.25
+
+
+def _app_row_heights(frame: Shape) -> list[float]:
+    """Each row's height as the apps lay it out: its written height, or the most any cell of
+    that row alone (no row span) needs at their single spacing, whichever is more."""
+    assert frame.table is not None
+    heights = []
+    for row, cells in enumerate(frame.table.rows):
+        need = frame.table.row_heights[row]
+        for cell in cells:
+            if cell.h_merge or cell.v_merge or cell.row_span > 1:
+                continue
+            text = 0.0
+            for para in cell.paras:
+                sizes = [run.size_pt * PX_PER_PT for run in para.runs if run.size_pt]
+                if not sizes:
+                    continue
+                lines = 1 + sum(1 for run in para.runs if run.soft_break_before)
+                pct = (para.line_spacing_pct or 100.0) / 100
+                text += lines * APP_SINGLE_SPACING_EM * max(sizes) * pct
+                text += (para.space_before_pt or 0.0) * PX_PER_PT
+            margins = (cell.margins_px["top"] or 0.0) + (cell.margins_px["bottom"] or 0.0)
+            need = max(need, margins + text)
+        heights.append(need)
+    return heights
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestRowsHoldTheirCellsAtTheAppsSpacing:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_row_of_cells_set_under_single_spacing_is_not_grown(
+        self,
+        target: str,
+        inline_export: Callable[[str], bytes],
+        google_inline_export: Callable[[str], bytes],
+    ) -> None:
+        """Arial-family rows keep the browser's height in both apps, one-line cells and two.
+
+        Chrome sets Arial and Helvetica at line-height: normal at 1.15 em (the tight table at
+        1.0), under the apps' single spacing of 1.2 em. A cell paragraph with no lnSpc is set at
+        1.2 em, so with its margins it needed more than the row the browser laid out, and both
+        apps grew every such row about a px (the finance deck's balance sheet, 8 px over 8
+        rows). So every cell's paragraph, one line or more, is spaced as a block of several
+        lines is (emit_text.cjs, a percentage of single spacing): each row of both tables,
+        laid out as the apps lay rows out, is its written height, which is the browser's.
+        """
+        document = _inline_document("app-rows")
+        pptx = (google_inline_export if target == "gslides" else inline_export)("app-rows")
+        shapes = slide_shapes(pptx)
+        problems = []
+        for selector in APP_ROWS_TIGHT:
+            (table,) = browser_tables(document, selector)
+            _, frame = _frame_for(shapes, _grid_rect(table), selector)
+            _assert_grid_matches(frame, table, selector)
+            written = frame.table.row_heights
+            for row, (height, laid_out) in enumerate(zip(written, _app_row_heights(frame))):
+                if laid_out - height > ROW_GROWTH_TOLERANCE_PX:
+                    problems.append(
+                        f"{selector} row {row}: written {height:.2f} px, the apps lay it out "
+                        f"{laid_out:.2f} px (+{laid_out - height:.2f})"
+                    )
+        assert not problems, f"rows the apps grow ({target}):\n  " + "\n  ".join(problems)
+
+    def test_a_cell_set_over_single_spacing_keeps_its_line_natural(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """DM Sans at line-height: normal is 1.30 em, over single spacing: its one-line cells
+        carry no lnSpc, and its rows still hold them (the control for the spacing above)."""
+        document = _inline_document("app-rows")
+        shapes = slide_shapes(inline_export("app-rows"))
+        (table,) = browser_tables(document, APP_ROWS_LOOSE)
+        _, frame = _frame_for(shapes, _grid_rect(table), APP_ROWS_LOOSE)
+        # A cell of one line: one paragraph and no soft break (a looser two-line cell is a
+        # paragraph a line, single spaced, emit_text.cjs).
+        spaced = [
+            f"row {row} {_normalised(cell.text)!r}: lnSpc {cell.paras[0].line_spacing_pct}"
+            for row, cells in enumerate(frame.table.rows)
+            for cell in cells
+            if len(cell.paras) == 1
+            and cell.paras[0].line_spacing_pct is not None
+            and not any(run.soft_break_before for run in cell.paras[0].runs)
+        ]
+        assert not spaced, "one-line DM Sans cells carry line spacing:\n  " + "\n  ".join(spaced)
+        grown = [
+            (row, height, laid_out)
+            for row, (height, laid_out) in enumerate(zip(frame.table.row_heights, _app_row_heights(frame)))
+            if laid_out - height > ROW_GROWTH_TOLERANCE_PX
+        ]
+        assert not grown, f"DM Sans rows the apps grow: {grown}"
 
 
 @pytest.mark.slow

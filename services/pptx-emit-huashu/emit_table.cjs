@@ -39,7 +39,9 @@
 //   option reaches one;
 // * its text: the runs of its paragraphs as a text box writes them
 //   (emit_text.cjs textObjects: soft breaks, line spacing, right-to-left), or
-//   none for a cell whose text is overlay items, or that holds none.
+//   none for a cell whose text is overlay items, or that holds none. A line
+//   set tighter than the apps' single spacing carries its spacing even alone
+//   in its cell (emit_text.cjs cellSpacingOf), so the apps do not grow its row.
 
 const path = require('path');
 const { textObjects } = require('./emit_text.cjs');
@@ -181,7 +183,7 @@ function cellObject(cell, faces, renderer) {
     options.fontSize = face.fontSize;
   }
   const paragraphs = cell.paragraphs || [];
-  const text = paragraphs.length ? textObjects({ paragraphs, rtl: cell.rtl }, faces, renderer) : [];
+  const text = paragraphs.length ? textObjects({ paragraphs, rtl: cell.rtl }, faces, renderer, { tableCell: true }) : [];
   return { text: text.length ? text : '', options };
 }
 
