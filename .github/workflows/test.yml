@@ -212,7 +212,8 @@ jobs:
   # runs one such tree per worker.
   export-engine-tests:
     name: Export Engine Tests
-    runs-on: ubuntu-latest
+    # Pinned, as e2e-tests is: Playwright cannot install chromium on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.sidecar == 'true'
