@@ -50,8 +50,13 @@ def test_it_runs_on_the_unit_jobs_triggers_and_the_sidecars_own() -> None:
 
 
 def test_it_installs_the_sidecar_as_the_apps_boot_does() -> None:
-    extract = _step_running("tar xzf node_modules.tar.gz")
-    assert extract["working-directory"] == "services/pptx-emit-huashu"
+    """With the sidecar's own setup.sh, which the deployed app's boot runs: its node_modules,
+    bundled libraries, and the font bundle with the fontconfig the sidecar's Chromium reads.
+    setup.sh only warns when the fonts do not extract, so the job checks they are in place,
+    or the suites would draw the runner's DejaVu, a face production never draws."""
+    setup = _step_running("sh setup.sh")
+    assert setup["working-directory"] == "services/pptx-emit-huashu"
+    assert "fonts/fonts.conf" in setup["run"] and "exit 1" in setup["run"], setup["run"]
     chromium = _step_running("install --with-deps chromium")
     assert chromium["working-directory"] == "services/pptx-emit-huashu"
     assert "node_modules/playwright/cli.js" in chromium["run"]
