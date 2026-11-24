@@ -25,6 +25,14 @@ cap and ``TELLR_SIDECAR_QUEUE`` waiting exports, or past
 ``TELLR_SIDECAR_WAIT_SECONDS`` of waiting, both Chrome export routes answer 429
 with a message to retry. One case runs a real uvicorn worker with more exports
 than threads and asks a sync route and an authenticated route meanwhile.
+
+Chat turns share the worker with its exports, and neither waits for the other's
+threads. A turn runs on one of the process's job runners (``job_queue.start_workers``,
+``TELLR_CHAT_JOB_CONCURRENCY`` of them, 8 by default), each with a thread of the
+runners' own ``chat-job`` pool, never one of the threadpool an export waits in. So
+with every thread of that threadpool held by exports, one of them running and one
+waiting for its sidecar slot, every runner still starts and finishes a turn; and with
+every runner busy with a turn, exports are still built, each in its turn of the slot.
 """
 
 from __future__ import annotations
@@ -44,11 +52,13 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import anyio
 import googleapiclient.http
 import httpx
 import pytest
 
 from src.api.routes import export as export_routes
+from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.services import drive_uploader, pptx_from_html_huashu
 from src.services.google_slides_auth import GoogleSlidesAuth
 from tests.fixtures.export_snapshot_support import requires_node
@@ -762,6 +772,295 @@ class TestAWorkerFullOfExportsStillAnswers:
         )
         assert runs.read_text(encoding="utf-8").split() == ["start"] * cap, "past the cap"
 
+
+# The chat cases' exports, sent together: one runs in the one sidecar slot, the other waits
+# for it. The chat cases send a turn for each of the process's job runners.
+CHAT_CASE_EXPORTS = 2
+# How long the chat cases' exports have to be in: each on a thread of the threadpool, one
+# sidecar started.
+EXPORTS_IN_SECONDS = 10
+# A graph turn's status writes, by the session manager's method that makes each.
+TURN_STATUS_WRITES = {
+    "start_chat_request": "running",
+    "complete_chat_request": "completed",
+    "fail_chat_request": "error",
+}
+
+
+class _ChatTurns:
+    """Stands in for ``job_queue._run_streaming_generator``: a turn holds its thread till released.
+
+    It records the thread each turn ran on and how many run at once, then completes the turn.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.released = threading.Event()
+        self.threads: dict[str, str] = {}
+        self.running = 0
+
+    def __call__(
+        self,
+        chat_service: object,
+        session_id: str,
+        message: str,
+        slide_context: object,
+        request_id: str,
+        *rest: object,
+    ) -> list[StreamEvent]:
+        with self.lock:
+            self.threads[request_id] = threading.current_thread().name
+            self.running += 1
+        try:
+            assert self.released.wait(30), f"{request_id} was never released"
+        finally:
+            with self.lock:
+                self.running -= 1
+        return [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+
+
+@pytest.fixture
+def chat_turns(google_route: dict, monkeypatch: pytest.MonkeyPatch) -> Iterator[_ChatTurns]:
+    """The process's real job runners, their turns stubbed as in ``test_job_queue_concurrency.py``.
+
+    Each turn holds its runner's thread until released. Its session manager is the Google
+    route's stub (``google_route``): the route and the runners read it through one module
+    attribute, and its calls record each turn's status writes. The runner count is the
+    shipped default.
+    """
+    from src.api.services import job_queue
+
+    monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
+    job_queue.jobs.clear()
+    # Another test's direct process_chat_request call may have left a pool of another size.
+    job_queue.shutdown_chat_executor()
+    turns = _ChatTurns()
+    monkeypatch.setattr(job_queue, "_run_streaming_generator", turns)
+    monkeypatch.setattr("src.api.services.chat_service.get_chat_service", lambda: MagicMock())
+    # No database: a finished graph turn finds no generation snapshot.
+    monkeypatch.setattr(
+        "src.services.generation_rollback.has_generation_snapshot", lambda request_id: False
+    )
+    yield turns
+    turns.released.set()
+    job_queue.shutdown_chat_executor()
+    job_queue.jobs.clear()
+
+
+def _agent_turn(session_id: str) -> dict:
+    """An Agent deck's turn, as ``enter_chat_turn`` enqueues it."""
+    return {
+        "session_id": session_id,
+        "message": "build",
+        "slide_context": None,
+        "is_first_message": False,
+        "image_ids": None,
+        "engine_mode": "graph",
+    }
+
+
+def _turn_statuses(sessions: MagicMock) -> dict[str, list[str]]:
+    """Each turn's status writes, in order, as the session manager stub recorded them."""
+    statuses: dict[str, list[str]] = {}
+    for name, args, _kwargs in sessions.mock_calls:
+        if name in TURN_STATUS_WRITES:
+            statuses.setdefault(args[0], []).append(TURN_STATUS_WRITES[name])
+    return statuses
+
+
+def _sidecar_starts(runs: Path) -> int:
+    """How many export sidecars have started (``STUB_PARKED_EMIT_DECK``'s record)."""
+    return len(runs.read_text(encoding="utf-8").split()) if runs.exists() else 0
+
+
+async def _seconds_until(predicate, seconds: float) -> float | None:
+    """How long ``predicate`` took to hold, polled each tick; None if not within ``seconds``."""
+    started = time.monotonic()
+    while not predicate():
+        if time.monotonic() - started >= seconds:
+            return None
+        await asyncio.sleep(TICK_SECONDS)
+    return time.monotonic() - started
+
+
+async def _chat_turns_while_exports_wait(path: str, turns: _ChatTurns, runs: Path) -> dict:
+    """Exports hold every thread of the threadpool, one running and one waiting; then the turns.
+
+    The loop's threadpool is cut to the exports' own number, so they hold all of it. A turn
+    for each runner is enqueued once the exports are in, and released once all have started.
+    """
+    from src.api.services import job_queue
+
+    threadpool = anyio.to_thread.current_default_thread_limiter()
+    threadpool.total_tokens = CHAT_CASE_EXPORTS
+
+    def exports_waiting() -> bool:
+        return threadpool.borrowed_tokens == CHAT_CASE_EXPORTS and _sidecar_starts(runs) == 1
+
+    runners = await job_queue.start_workers()
+    try:
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=60
+        ) as client:
+            exports = [
+                asyncio.create_task(client.post(path, json={"session_id": "s1"}))
+                for _ in range(CHAT_CASE_EXPORTS)
+            ]
+            exports_in = await _seconds_until(exports_waiting, EXPORTS_IN_SECONDS)
+            for index in range(len(runners)):
+                await job_queue.enqueue_job(f"req-{index}", _agent_turn(f"s-{index}"))
+            started = await _seconds_until(
+                lambda: len(turns.threads) == len(runners), ANSWER_WITHIN_SECONDS
+            )
+            started_by_then = len(turns.threads)
+            side_by_side = turns.running
+            waiting_when_started = exports_waiting()
+            turns.released.set()
+            finished = await _seconds_until(lambda: not job_queue.jobs, ANSWER_WITHIN_SECONDS)
+            waiting_when_finished = exports_waiting()
+            answers = await asyncio.gather(*exports)
+    finally:
+        turns.released.set()
+        await job_queue.stop_workers(runners)
+    return {
+        "runners": len(runners),
+        "exports_in": exports_in,
+        "started": started,
+        "started_by_then": started_by_then,
+        "side_by_side": side_by_side,
+        "waiting_when_started": waiting_when_started,
+        "finished": finished,
+        "waiting_when_finished": waiting_when_finished,
+        "answers": answers,
+        "threads": dict(turns.threads),
+    }
+
+
+async def _exports_while_chat_turns_run(path: str, turns: _ChatTurns) -> dict:
+    """A turn holds each runner's thread; meanwhile exports are sent together; then turns end."""
+    from src.api.services import job_queue
+
+    runners = await job_queue.start_workers()
+    try:
+        for index in range(len(runners)):
+            await job_queue.enqueue_job(f"req-{index}", _agent_turn(f"s-{index}"))
+        busy = await _seconds_until(
+            lambda: turns.running == len(runners), ANSWER_WITHIN_SECONDS
+        )
+        answers = await _exports_at_once(path, CHAT_CASE_EXPORTS)
+        busy_when_answered = turns.running
+        turns.released.set()
+        finished = await _seconds_until(lambda: not job_queue.jobs, ANSWER_WITHIN_SECONDS)
+    finally:
+        turns.released.set()
+        await job_queue.stop_workers(runners)
+    return {
+        "runners": len(runners),
+        "busy": busy,
+        "answers": answers,
+        "busy_when_answered": busy_when_answered,
+        "finished": finished,
+    }
+
+
+def _assert_built(route: str, response: httpx.Response) -> None:
+    """The export answered 200 with the stub sidecar's deck: the file, or its Drive presentation."""
+    assert response.status_code == 200, response.text
+    if route == "pptx":
+        assert response.content == b"PK stub deck"
+    else:
+        assert response.json()["presentation_id"] == PRESENTATION[0], response.text
+
+
+@requires_node
+@pytest.mark.usefixtures("admin_and_db", "both_export_routes")
+class TestChatTurnsBesideExports:
+    """A worker's chat turns and its exports never wait for each other's threads (module doc)."""
+
+    @pytest.mark.parametrize("route", EXPORT_ROUTES)
+    def test_every_runner_runs_a_turn_while_exports_wait_for_a_slot(
+        self,
+        route: str,
+        chat_turns: _ChatTurns,
+        google_route: dict,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runs = tmp_path / "runs.log"
+        stub = tmp_path / "emit_deck_counted.mjs"
+        stub.write_text(
+            STUB_PARKED_EMIT_DECK % {"runs": json.dumps(str(runs)), "ms": STUB_SECONDS * 1000},
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pptx_from_html_huashu, "SIDECAR_SCRIPT", stub)
+        _bound(monkeypatch, cap=1, queue=CHAT_CASE_EXPORTS - 1, wait=4 * STUB_SECONDS)
+
+        measured = asyncio.run(
+            _chat_turns_while_exports_wait(EXPORT_ROUTES[route], chat_turns, runs)
+        )
+
+        assert measured["runners"] == 8, f"fixture drift: {measured['runners']} runners shipped"
+        assert measured["exports_in"] is not None, (
+            f"the exports never held every thread of the threadpool, one running and one "
+            f"waiting for its slot ({_sidecar_starts(runs)} sidecar(s) started)"
+        )
+        assert measured["started"] is not None, (
+            f"{measured['started_by_then']} of {measured['runners']} turns started within "
+            f"{ANSWER_WITHIN_SECONDS}s while exports held the threadpool"
+        )
+        assert measured["side_by_side"] == measured["runners"], measured
+        assert measured["waiting_when_started"], (
+            "fixture drift: the waiting export was no longer waiting when the turns started"
+        )
+        assert all(name.startswith("chat-job") for name in measured["threads"].values()), (
+            measured["threads"]
+        )
+        assert measured["finished"] is not None, (
+            f"the turns did not finish within {ANSWER_WITHIN_SECONDS}s while exports waited"
+        )
+        assert measured["waiting_when_finished"], (
+            "the waiting export had its slot before the turns finished: the turns waited for it"
+        )
+        statuses = _turn_statuses(google_route["sessions"])
+        assert statuses == {
+            f"req-{index}": ["running", "completed"] for index in range(measured["runners"])
+        }, statuses
+        for response in measured["answers"]:
+            _assert_built(route, response)
+        assert _sidecar_starts(runs) == CHAT_CASE_EXPORTS
+
+    @pytest.mark.parametrize("route", EXPORT_ROUTES)
+    def test_exports_are_built_while_every_runner_runs_a_turn(
+        self,
+        route: str,
+        chat_turns: _ChatTurns,
+        google_route: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _bound(monkeypatch, cap=1, queue=CHAT_CASE_EXPORTS - 1, wait=4 * STUB_SECONDS)
+
+        measured = asyncio.run(_exports_while_chat_turns_run(EXPORT_ROUTES[route], chat_turns))
+
+        assert measured["runners"] == 8, f"fixture drift: {measured['runners']} runners shipped"
+        assert measured["busy"] is not None, (
+            f"fixture drift: {chat_turns.running} of {measured['runners']} runners took a turn"
+        )
+        for response, _seconds in measured["answers"]:
+            _assert_built(route, response)
+        last = max(seconds for _response, seconds in measured["answers"])
+        assert last >= CHAT_CASE_EXPORTS * STUB_SECONDS, (
+            f"the exports answered after {last:.1f}s: their sidecars overlapped in the one slot"
+        )
+        assert measured["busy_when_answered"] == measured["runners"], (
+            f"{measured['busy_when_answered']} of {measured['runners']} turns were still running "
+            "when the exports answered: the exports waited for the turns"
+        )
+        assert measured["finished"] is not None, measured
+        statuses = _turn_statuses(google_route["sessions"])
+        assert statuses == {
+            f"req-{index}": ["running", "completed"] for index in range(measured["runners"])
+        }, statuses
 
 
 # A Drive request that has heard nothing for this long fails (the test's

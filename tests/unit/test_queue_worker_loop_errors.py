@@ -11,7 +11,9 @@ its own 2 s timeout, and the log records pytest keeps grew the serial suite's on
 to 18 GB until macOS killed it.
 
 * each worker yields after a loop error, for its backoff, so a queue it cannot wait on costs
-  one log line per backoff and its task can still be cancelled;
+  one log line per backoff and its task can still be cancelled; that holds for each of the
+  chat queue's runners the app starts (``job_queue.start_workers``, 8 by default), which all
+  wait on the one queue;
 * each test waits on fresh queues (``tests/conftest.py``), so no test inherits a queue an
   earlier test's loop bound.
 """
@@ -109,6 +111,56 @@ def test_a_worker_yields_after_a_loop_error(
         f"per {module.WORKER_LOOP_ERROR_BACKOFF_SECONDS} s backoff"
     )
     assert stopped, f"{worker_name} did not stop when cancelled"
+
+
+def test_each_chat_runner_the_app_starts_yields_after_a_loop_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app's chat runners over a queue another loop bound: each logs once a backoff, and yields.
+
+    ``start_workers()`` with no count, as main.py's lifespan calls it, starts the shipped
+    number of runners over the one queue, so without the backoff each of them spins. The
+    runners a spin stopped are left out of ``stop_workers``, which re-raises a runner's error.
+    """
+    from src.api.services import job_queue
+
+    monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
+    queue: asyncio.Queue = asyncio.Queue()
+    _bind_to_an_ended_loop(queue)
+    monkeypatch.setattr(job_queue, "job_queue", queue)
+    errors: list[str] = []
+
+    def count_error(message: object, *args: object, **kwargs: object) -> None:
+        errors.append(str(message))
+        if len(errors) >= SPIN_CALLS:
+            raise _Spun
+
+    monkeypatch.setattr(job_queue.logger, "error", count_error)
+
+    def spun(task: asyncio.Task) -> bool:
+        return task.done() and not task.cancelled() and isinstance(task.exception(), _Spun)
+
+    async def run_for_the_window() -> tuple[int, bool]:
+        runners = await job_queue.start_workers()
+        await asyncio.sleep(WINDOW_SECONDS)
+        await job_queue.stop_workers([task for task in runners if not spun(task)])
+        return len(runners), all(task.done() for task in runners)
+
+    runners, stopped = asyncio.run(run_for_the_window())
+    assert runners == 8, f"fixture drift: start_workers() started {runners} runners"
+    assert len(errors) < SPIN_CALLS, (
+        f"the {runners} chat runners logged {len(errors)} loop errors in {WINDOW_SECONDS} s "
+        f"without yielding between them; the first: {errors[0]!r}"
+    )
+    assert len(errors) >= runners and "different event loop" in errors[0], (
+        f"fixture drift: {runners} runners over a queue an ended loop bound logged {errors}"
+    )
+    most = runners * (WINDOW_SECONDS / job_queue.WORKER_LOOP_ERROR_BACKOFF_SECONDS + 1)
+    assert len(errors) <= most, (
+        f"the {runners} chat runners logged {len(errors)} loop errors in {WINDOW_SECONDS} s, "
+        f"more than one each per {job_queue.WORKER_LOOP_ERROR_BACKOFF_SECONDS} s backoff"
+    )
+    assert stopped, "a chat runner did not stop when stop_workers cancelled it"
 
 
 class TestEachTestWaitsOnFreshQueues:
