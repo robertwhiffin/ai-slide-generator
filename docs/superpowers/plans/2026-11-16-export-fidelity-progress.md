@@ -2644,3 +2644,14 @@ sabotage-verified: 15 sabotages, all red, each file restored byte for byte.
   slides) were re-exported through the engine for both targets:
   - all 150 parts but `docProps/core.xml` are equal, for both the PowerPoint and the Google deck;
   - there were no failures and 0 MODEL DROPS (`fixG/byte-identity/report.json`).
+
+## The final Apps re-check, and the one open item
+
+**The re-check.** The final build, `0.5.9.dev5` at `cbe333fa` (main merged in), went to the kept dev app by the data-preserving path, and passed all six checks there:
+- 4 simultaneous 28-slide exports all ran at once, with no 429 and every slide written;
+- 4 exports beside 4 chat generations: every request completed, at a peak of about 5.4 GB;
+- every Fix F slide improved or held;
+- the C1, S1 and I1 guards held;
+- no text loss, and 0 MODEL DROPS.
+
+**T6 stays open, as a known limit.** A heavy box-drawing rule draws 42 px in PowerPoint against the UI's 77 px; Google draws it on one line. The root cause is the container's box-drawing face (DejaVu, about 0.7 em, against about 1 em on the UI's platforms). The fix, laying box drawing out at the UI's advance, was attempted twice. Both attempts were stopped by the agent platform's safety system before any change. The owner chose to record it as a known follow-up (`docs/technical/export-features.md`, Symbols).
