@@ -27,7 +27,14 @@ This module protects two invariants:
    captured at d50b716; the huashu golden is the snapshot engine's.
 
    The huashu golden is pinned to the machine/Chrome build that captured it
-   (the snapshot reads the page from a live Chrome). To re-capture:
+   (the snapshot reads the page from a live Chrome), so there is one per
+   platform (``HUASHU_PNG_GOLDENS``): macOS's, from Chrome, and Linux's, from
+   Playwright's Chromium headless shell as the export engine job runs it
+   (Chrome Headless Shell 147.0.7727.15, Playwright's chromium v1217, with the
+   sidecar's setup.sh). They differ in ``ppt/slides/slide1.xml`` alone, the
+   layout each browser read; the Linux one is the manifest the job's runs
+   45495272109 and 45504855550 both exported, without the font bundle and with
+   it. To re-capture the current platform's:
    ``TELLR_REGEN_EXPORT_GOLDENS=1 uv run --no-sync pytest
    tests/unit/test_export_svg_raster.py`` (regen runs report as skipped so
    they can never fake a pass).
@@ -52,6 +59,7 @@ import json
 import os
 import re
 import struct
+import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -67,6 +75,12 @@ FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_svg_raster"
 RECORDS_BUNDLE = REPO_ROOT / "services" / "pptx-emit" / "emit.bundle.mjs"
 
 REGEN_ENV = "TELLR_REGEN_EXPORT_GOLDENS"
+# The huashu PNG control deck's golden for each platform's browser (see the module's
+# docstring): the export reads its layout from that browser.
+HUASHU_PNG_GOLDENS = {
+    "darwin": FIXTURE_DIR / "golden_huashu_png_manifest.json",
+    "linux": FIXTURE_DIR / "golden_huashu_png_manifest_linux.json",
+}
 
 # SHA256 of pptxgenjs 3.12.0's hardcoded Node-side PNG fallback for SVG data
 # URIs (the 1594-byte gray broken-image icon). Pinned so the tests below can
@@ -252,9 +266,9 @@ class TestHuashuEmitter:
             monkeypatch, "huashu_png_control.html", "P5 PNG control (huashu)"
         )
         manifest = structural_manifest(pptx)
-        _assert_matches_golden(
-            manifest, FIXTURE_DIR / "golden_huashu_png_manifest.json"
-        )
+        golden = HUASHU_PNG_GOLDENS.get(sys.platform)
+        assert golden is not None, f"no huashu golden for this platform ({sys.platform})"
+        _assert_matches_golden(manifest, golden)
 
     def test_svg_deck_emits_rasterized_pngs_only(
         self, monkeypatch: pytest.MonkeyPatch
