@@ -19,6 +19,7 @@ hands node its data as an argument fails on a Mac as it would on Linux.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -64,41 +65,52 @@ const os = require('os');
 })();
 """
 
-# A test that leaves a browser running, as a helper killed outright does: node launches it with
-# the session's TMPDIR, opens a page whose script blocks it, then SIGKILLs itself, so no exit
-# handler kills the browser, and its blocked page keeps it from exiting by itself. It checks
-# that the browser is there once node is gone, as the session check sees browsers, so a check
-# that sees none fails here, naming what the process table holds.
+# A test that leaves a browser running: it starts a node helper that launches one, opens a page
+# whose script blocks it, says so in its ready file (with its pid), and idles, and the test
+# never ends it. A browser stays up for as long as its node does on every platform. One whose
+# node is killed outright stays up too on a Mac (Chrome with a blocked page outlives node,
+# measured), but not on Linux, where the headless shell exits as soon as its DevTools pipe
+# closes (measured on the export engine job), so a helper never ended is the leak both share.
+# The test checks the browser is there, as the session check sees browsers, so a check that
+# sees none fails here, naming what the process table holds.
 LEAKING_TEST = """
 import os
 import subprocess
+import time
 from pathlib import Path
 from src.services import pptx_from_html_huashu as wrapper
 from tests.fixtures import browser_leak_check
 
+READY = Path(%(ready_py)s)
 SCRIPT = '''
 const { chromium } = require('playwright');
 const { launchOptions } = require(%(render_slide)s);
+const fs = require('fs');
 const os = require('os');
 (async () => {
   const browser = await chromium.launch(launchOptions(os.tmpdir()));
   const page = await (await browser.newContext()).newPage();
   page.goto('data:text/html,<script>for (;;) {}</script>').catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  process.kill(process.pid, 'SIGKILL');
+  fs.writeFileSync(%(ready_js)s, String(process.pid));
+  setInterval(() => {}, 1000);
 })();
 '''
 
 
 def test_leaves_a_browser():
-    subprocess.run(
+    subprocess.Popen(
         ["node", "-e", SCRIPT], cwd=wrapper.SIDECAR_DIR, env=wrapper.sidecar_subprocess_env(),
-        timeout=60, check=False,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
+    deadline = time.monotonic() + 60
+    while not READY.exists():
+        assert time.monotonic() < deadline, "fixture drift: the helper never launched its browser"
+        time.sleep(0.1)
     left = browser_leak_check.playwright_browsers(Path(os.environ["TMPDIR"]))
     assert left, (
-        "fixture drift: no browser of this session's is running once its node is gone; "
-        f"the process table's Chromium processes: {browser_leak_check.chromium_processes()}"
+        "fixture drift: the helper's browser is not seen running; the process table's "
+        f"Chromium processes: {browser_leak_check.chromium_processes()}"
     )
 """
 
@@ -267,18 +279,27 @@ def _inner_session(tmp_path: Path, test_source: str) -> subprocess.CompletedProc
 @requires_huashu_sidecar
 class TestTheSessionCheck:
     def test_a_browser_left_running_fails_the_session_and_is_killed(self, tmp_path: Path) -> None:
-        source = LEAKING_TEST % {"render_slide": repr(str(RENDER_SLIDE))}
+        ready = tmp_path / "helper.ready"
+        source = LEAKING_TEST % {
+            "render_slide": repr(str(RENDER_SLIDE)),
+            "ready_py": repr(str(ready)),
+            "ready_js": json.dumps(str(ready)),
+        }
 
-        inner = _inner_session(tmp_path, source)
+        try:
+            inner = _inner_session(tmp_path, source)
 
-        output = inner.stdout + inner.stderr
-        assert inner.returncode != 0, output[-3000:]
-        assert re.search(r"\b1 passed\b.*\b1 error\b", output), output[-3000:]
-        assert "still running" in output, output[-3000:]
-        left = re.findall(r"pids? \[([0-9, ]+)\]", output)
-        assert left, output[-3000:]
-        pids = [int(pid) for pid in left[0].split(",")]
-        assert all(not _alive(pid) for pid in pids), f"the check left {pids} running"
+            output = inner.stdout + inner.stderr
+            assert inner.returncode != 0, output[-3000:]
+            assert re.search(r"\b1 passed\b.*\b1 error\b", output), output[-3000:]
+            assert "still running" in output, output[-3000:]
+            left = re.findall(r"pids? \[([0-9, ]+)\]", output)
+            assert left, output[-3000:]
+            pids = [int(pid) for pid in left[0].split(",")]
+            assert all(not _alive(pid) for pid in pids), f"the check left {pids} running"
+        finally:
+            if ready.exists():
+                _end_helper(int(ready.read_text(encoding="utf-8")))
 
     def test_a_session_that_leaves_nothing_passes(self, tmp_path: Path) -> None:
         inner = _inner_session(tmp_path, CLEAN_TEST)
@@ -318,6 +339,23 @@ def test_the_session_checks_kill_spares_its_own_process_group() -> None:
         for pid in children:
             if _alive(pid):
                 os.kill(pid, signal.SIGKILL)
+
+
+def _end_helper(pid: int) -> None:
+    """End the leaking test's helper, the node the session check leaves, and its children.
+
+    Its children are found by their parent, not as the session check finds browsers, so a
+    browser the check failed to see or kill is ended too; each leads a group of its own
+    (Playwright launches a browser detached), and the helper leads its own session's.
+    """
+    children = {
+        process.pgid for process in browser_leak_check.process_table() if process.ppid == pid
+    }
+    for group in sorted(children - {os.getpgrp()}) + [pid]:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # gone already, or a zombie group macOS will not signal
 
 
 def _alive(pid: int) -> bool:
