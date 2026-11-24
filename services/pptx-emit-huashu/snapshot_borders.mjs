@@ -69,11 +69,18 @@ function createBorders(env) {
   // solid side's region on a box whose corners round (pushSideBorders).
   // A spread-only box-shadow layer is a ring (paintedLayers).
   const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
+  // The narrowest double border Chrome paints as two lines (CSS px): it needs
+  // a px each for the lines and the gap (CSS Backgrounds 3, border-style).
+  const DOUBLE_MIN_PX = 3;
 
-  // The dash a border style paints with: dashed and dotted keep theirs, and
-  // every other style that paints (solid, double, groove, ridge, inset,
-  // outset) is drawn solid.
-  function borderDash(style) {
+  // The dash a border style paints with, at its computed width `cssWidth`
+  // (CSS px): dashed and dotted keep theirs; double is two lines with a gap
+  // between them, as Chrome paints it from DOUBLE_MIN_PX (a narrower one it
+  // paints solid), which the emitter writes as a double compound line
+  // (emit_model.cjs, emit_table.cjs); every other style that paints (solid,
+  // groove, ridge, inset, outset) is drawn solid.
+  function borderDash(style, cssWidth) {
+    if (style === 'double') return cssWidth >= DOUBLE_MIN_PX ? 'double' : 'solid';
     return style === 'dashed' ? 'dash' : style === 'dotted' ? 'dot' : 'solid';
   }
 
@@ -91,7 +98,7 @@ function createBorders(env) {
     }
     const painted = paintedColour(colour, opacity);
     if (!painted) return null;
-    return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash: borderDash(style) };
+    return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash: borderDash(style, width) };
   }
 
   // A border that is no single outline, side by side: {widths, painted}.
@@ -108,11 +115,12 @@ function createBorders(env) {
       const side = SIDES[index];
       const style = s['border' + side + 'Style'];
       const off = style === 'none' || style === 'hidden' || Boolean(slice && slice[side]);
-      const width = off ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * scale;
+      const cssWidth = off ? 0 : parseFloat(s['border' + side + 'Width']) || 0;
+      const width = cssWidth * scale;
       widths[side] = width;
       if (!(width > 0)) continue;
       const colour = paintedColour(s['border' + side + 'Color'], opacity);
-      if (colour) painted.push({ side, color: colour.color, alpha: colour.alpha, widthPx: width, dash: borderDash(style) });
+      if (colour) painted.push({ side, color: colour.color, alpha: colour.alpha, widthPx: width, dash: borderDash(style, cssWidth) });
     }
     return { widths, painted };
   }

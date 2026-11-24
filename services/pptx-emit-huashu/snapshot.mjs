@@ -43,7 +43,7 @@
 //  *
 //  * Item =
 //  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'roundCorners'|'ellipse'|'path', radius,
-//  *   radii, fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
+//  *   radii, fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'|'double'}|null,
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
 //  *   path:[{x,y}[]], closed:boolean}   (radius for geometry
 //  *   'roundRect', whose four corners are one circle; radii for 'roundCorners',

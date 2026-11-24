@@ -98,7 +98,7 @@ const PSEUDO_ELEMENTS = new Set(['before', 'after', 'marker']);
 const GEOMETRIES = new Set(['rect', 'roundRect', 'roundCorners', 'ellipse', 'path']);
 // A roundCorners shape's corners: top left, top right, bottom right, bottom left.
 const CORNER_COUNT = 4;
-const DASHES = new Set(['solid', 'dash', 'dot']);
+const DASHES = new Set(['solid', 'dash', 'dot', 'double']);
 const ALIGNMENTS = new Set(['left', 'center', 'right', 'justify']);
 const ANCHORS = new Set(['top', 'middle', 'bottom']);
 const BASELINES = new Set(['super', 'sub']);

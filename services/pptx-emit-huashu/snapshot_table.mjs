@@ -168,6 +168,9 @@ function createTableLayout(env) {
   const STYLE_RANK = { double: 8, solid: 7, dashed: 6, dotted: 5, ridge: 4, outset: 3, groove: 2, inset: 1 };
   const ORIGIN_RANK = { cell: 6, row: 5, rowGroup: 4, column: 3, columnGroup: 2, table: 1 };
   const SIDES = ['top', 'right', 'bottom', 'left'];
+  // The narrowest double border Chrome paints as two lines (CSS px), as
+  // snapshot_borders.mjs reads a box's.
+  const DOUBLE_MIN_PX = 3;
 
   function tagOf(element) {
     return String(dom.tagName(element) || '').toLowerCase();
@@ -556,14 +559,15 @@ function createTableLayout(env) {
 
   // ─── borders ─────────────────────────────────────────────────────────
   // One element's border on one side, as a candidate for the edge it lies on:
-  // {style, widthPx, colour, origin, backdrop}. widthPx is 0 for a style that
-  // paints nothing; colour is its own (parseColour), backdrop what it paints
-  // over, through which it is written solid.
+  // {style, widthPx, cssWidthPx, colour, origin, backdrop}. widthPx is 0 for a
+  // style that paints nothing, in slide px, and cssWidthPx the computed width
+  // it is (lineOf reads a double border's from it); colour is its own
+  // (parseColour), backdrop what it paints over, through which it is written solid.
   function sideOf(s, side, origin, scale, backdrop) {
     const name = side.charAt(0).toUpperCase() + side.slice(1);
     const style = String(s['border' + name + 'Style'] || 'none');
-    const width = style === 'none' || style === 'hidden' ? 0 : (parseFloat(s['border' + name + 'Width']) || 0) * scale;
-    return { style, widthPx: width, colour: env.parseColour(s['border' + name + 'Color']), origin, backdrop };
+    const cssWidth = style === 'none' || style === 'hidden' ? 0 : parseFloat(s['border' + name + 'Width']) || 0;
+    return { style, widthPx: cssWidth * scale, cssWidthPx: cssWidth, colour: env.parseColour(s['border' + name + 'Color']), origin, backdrop };
   }
 
   function paints(candidate) {
@@ -595,14 +599,21 @@ function createTableLayout(env) {
   }
 
   // The line a winning border draws, or null: hidden, painting nothing, or
-  // transparent. Its colour is written solid, over what it paints on.
+  // transparent. Its colour is written solid, over what it paints on. Its dash
+  // is dashed's and dotted's own, double's from DOUBLE_MIN_PX of computed width
+  // (two lines and a gap, as Chrome paints a double border; a narrower one it
+  // paints solid), and solid for every other style.
   function lineOf(winner) {
     if (!shows(winner)) return null;
+    let dash = 'solid';
+    if (winner.style === 'dashed') dash = 'dash';
+    else if (winner.style === 'dotted') dash = 'dot';
+    else if (winner.style === 'double' && winner.cssWidthPx >= DOUBLE_MIN_PX) dash = 'double';
     return {
       color: env.solidColour(winner.colour, winner.backdrop),
       alpha: 1,
       widthPx: winner.widthPx,
-      dash: winner.style === 'dashed' || winner.style === 'dotted' ? (winner.style === 'dashed' ? 'dash' : 'dot') : 'solid',
+      dash,
     };
   }
 
@@ -717,7 +728,7 @@ function createTableLayout(env) {
     if (!nearShows || !farShows) return nearShows ? near : farShows ? far : null;
     if (near.style !== far.style || near.colour.color !== far.colour.color ||
         Math.abs(near.colour.alpha - far.colour.alpha) > ALPHA_EPSILON) return undefined;
-    return { style: near.style, widthPx: near.widthPx + far.widthPx, colour: near.colour, origin: 'cell', backdrop: near.backdrop };
+    return { style: near.style, widthPx: near.widthPx + far.widthPx, cssWidthPx: near.cssWidthPx + far.cssWidthPx, colour: near.colour, origin: 'cell', backdrop: near.backdrop };
   }
 
   // Whether a candidate border (or null) paints a colour the eye sees.

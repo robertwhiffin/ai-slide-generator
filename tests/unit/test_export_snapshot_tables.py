@@ -343,6 +343,13 @@ TABLES_CSS = (
 #rows-tight { font-family: Arial, sans-serif; font-size: 16px; line-height: 1.0; }
 #rows-tight td { vertical-align: top; }
 #rows-loose { font-family: 'DM Sans', sans-serif; font-size: 15px; }
+.double-rows { position: absolute; border-collapse: collapse; width: 360px;
+               font: 15px Arial, sans-serif; color: #2B3940; }
+.double-rows td { padding: 6px 10px; border-bottom: 1px solid #E3E7E8; }
+.double-rows tr.total td { font-weight: 800; border-top: 2px solid #102025;
+                           border-bottom: 3px double #102025; }
+.double-rows tr.net td { border-bottom: 6px double #EB4A34; }
+.double-rows tr.thin td { border-bottom: 2px double #3C71AF; }
 """
 )
 
@@ -1032,8 +1039,25 @@ APP_ROWS_BODY = f"""<div class="slide">
 APP_ROWS_TIGHT = ("#rows-sans", "#rows-tight")
 APP_ROWS_LOOSE = "#rows-loose"
 
+# A balance sheet's total row ruled 3px double under, a 6px double rule, and a 2px one, which
+# Chrome paints solid (a double border needs a px each for its two lines and its gap).
+DOUBLE_ROWS_BODY = """<div class="slide">
+  <table id="double-rows" class="double-rows" style="left: 88px; top: 90px;"><tbody>
+    <tr><td>Cash</td><td>412</td></tr>
+    <tr class="total"><td>Total assets</td><td>3,874</td></tr>
+    <tr class="net"><td>Net income</td><td>186</td></tr>
+    <tr class="thin"><td>Margin</td><td>12%</td></tr>
+    <tr><td>Shares</td><td>40</td></tr>
+  </tbody></table>
+</div>"""
+# (row whose bottom edge is double, its colour, its width in px)
+DOUBLE_EDGES = ((1, "102025", 3.0), (2, "EB4A34", 6.0))
+# The 2px double rule's row: drawn solid.
+THIN_DOUBLE_ROW = 3
+
 INLINE_BODIES = {
     "app-rows": APP_ROWS_BODY,
+    "double-rows": DOUBLE_ROWS_BODY,
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
     "valign": VALIGN_BODY,
@@ -4352,6 +4376,92 @@ class TestRowsHoldTheirCellsAtTheAppsSpacing:
 
 @pytest.mark.slow
 @requires_huashu_sidecar
+class TestDoubleCellBorders:
+    def test_the_powerpoint_deck_writes_a_double_side_as_a_double_compound_line(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A ``3px double`` (and ``6px``) edge is ``cmpd="dbl"`` on both its cells, its width whole.
+
+        Chrome paints a double border as two lines with a gap, each a third of its width;
+        DrawingML's double compound line is the same (PowerPoint draws it so: CALIBRATION.md T7).
+        So the cell above the edge writes it on its ``lnB`` and the cell below on its ``lnT``,
+        double, at the border's whole width. The 2 px double rule, which Chrome paints solid,
+        stays a single line.
+        """
+        document = _inline_document("double-rows")
+        shapes = slide_shapes(inline_export("double-rows"))
+        (table,) = browser_tables(document, "#double-rows")
+        _, frame = _frame_for(shapes, _grid_rect(table), "#double-rows")
+        wrong = []
+        for row, colour, width in DOUBLE_EDGES:
+            for col, (above, below) in enumerate(zip(frame.table.rows[row], frame.table.rows[row + 1])):
+                for name, border in (("lnB above", above.borders["bottom"]), ("lnT below", below.borders["top"])):
+                    if (
+                        border is None
+                        or border.compound != "dbl"
+                        or border.color != colour
+                        or abs((border.width_pt or 0) - width * PT_PER_PX) > WIDTH_TOLERANCE_PT
+                    ):
+                        wrong.append(f"edge under row {row}, column {col}, {name}: {border}")
+        thin = frame.table.rows[THIN_DOUBLE_ROW][0].borders["bottom"]
+        if thin is None or thin.compound == "dbl":
+            wrong.append(f"the 2px double rule is not one solid line: {thin}")
+        assert not wrong, "double table borders, PowerPoint deck:\n  " + "\n  ".join(wrong)
+
+    def test_the_google_deck_draws_a_double_edge_as_its_two_lines_over_the_table(
+        self, google_inline_export: Callable[[str], bytes]
+    ) -> None:
+        """Drive makes a double table border one solid line, so the Google deck draws its lines.
+
+        Each double edge is no line on either cell (its ``lnB`` and ``lnT`` unfilled), and over
+        the table, after it, one unfilled custom shape per cell along the edge strokes the edge's
+        outer and inner thirds: two subpaths a third of the border's width apart from the edge's
+        centre line, each a third of its width wide, in its colour. The 2 px double rule stays
+        the cells' own solid line, with no shape over it.
+        """
+        document = _inline_document("double-rows")
+        pptx = google_inline_export("double-rows")
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+        (table,) = browser_tables(document, "#double-rows")
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "#double-rows")
+        rows, columns = table_row_edges(frame), table_column_edges(frame)
+        wrong = []
+        for row, colour, width in DOUBLE_EDGES:
+            line = rows[row + 1]
+            for col, (above, below) in enumerate(zip(frame.table.rows[row], frame.table.rows[row + 1])):
+                if above.borders["bottom"] is not None or below.borders["top"] is not None:
+                    wrong.append(f"edge under row {row}, column {col}: a line on the cells")
+                strokes = [
+                    (position, shape)
+                    for position, shape in enumerate(shapes)
+                    if position > frame_position
+                    and shape.geometry == "custGeom"
+                    and shape.line == colour
+                    and shape.fill is None
+                    and abs(shape.x - columns[col]) <= 0.5
+                    and abs(shape.w - (columns[col + 1] - columns[col])) <= 0.5
+                    and abs(shape.y - (line - width / 3)) <= 0.1
+                    and abs(shape.h - 2 * width / 3) <= 0.1
+                ]
+                if len(strokes) != 1:
+                    wrong.append(f"edge under row {row}, column {col}: {len(strokes)} strokes over it")
+                    continue
+                position, stroke = strokes[0]
+                moves = elements[position].findall(".//a:custGeom//a:moveTo", NAMESPACES)
+                if len(moves) != 2 or abs((stroke.line_w_pt or 0) - width / 3 * PT_PER_PX) > WIDTH_TOLERANCE_PT:
+                    wrong.append(
+                        f"edge under row {row}, column {col}: {len(moves)} subpaths, "
+                        f"{stroke.line_w_pt} pt (a third of {width} px is {width / 3 * PT_PER_PX:.3f} pt)"
+                    )
+        thin = frame.table.rows[THIN_DOUBLE_ROW][0].borders["bottom"]
+        if thin is None or thin.compound == "dbl":
+            wrong.append(f"the 2px double rule is not the cells' own solid line: {thin}")
+        assert not wrong, "double table borders, Google deck:\n  " + "\n  ".join(wrong)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
 class TestDottedCellBorders:
     @pytest.mark.parametrize("target", ["pptx", "gslides"])
     def test_a_dotted_cell_border_is_written_dotted(
@@ -4401,7 +4511,7 @@ class TestDottedCellBorders:
         assert not wrong, f"the {target} deck's dotted tables: " + "; ".join(wrong)
 
 
-# The rewrite that writes the dotted sides sysDot (emit_table.cjs dotTableBorders), and the
+# The rewrite that writes the dotted sides sysDot (emit_table.cjs rewriteBorders), and the
 # deck script that runs it once pptxgenjs has written the deck.
 EMIT_TABLE_MODULE = pptx_from_html_huashu.SIDECAR_DIR / "emit_table.cjs"
 # A module node preloads (--require) before emit_deck.mjs: it makes the zip library the

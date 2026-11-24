@@ -2000,3 +2000,71 @@ class TestRoundedOneSidedBorders:
         assert [shape.kind for shape, _ in items] == ["line"], (
             f"the {name} box's side is drawn as {[(s.kind, s.geometry) for s, _ in items]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Double borders: two lines and a gap, as a double compound line
+# ---------------------------------------------------------------------------
+
+DOUBLE_BOX = (
+    "position: absolute; top: 90px; width: 220px; height: 100px; background: #FFFFFF; "
+    "box-sizing: border-box;"
+)
+DOUBLE_SLIDE = f"""<div class="slide">
+  <div id="double-box" style="{DOUBLE_BOX} left: 88px; border: 3px double #102025;"></div>
+  <div id="double-round" style="{DOUBLE_BOX} left: 360px; border: 6px double #3C71AF;
+       border-radius: 10px;"></div>
+  <div id="double-side" style="{DOUBLE_BOX} left: 640px; border-bottom: 6px double #EB4A34;"></div>
+  <div id="thin-double" style="{DOUBLE_BOX} left: 920px; border: 2px double #4BA676;"></div>
+</div>"""
+# id -> (its colour, its width in px, the kind of item that draws it, whether it is double)
+DOUBLE_CASES = {
+    "double-box": ("102025", 3.0, "shape", True),
+    "double-round": ("3C71AF", 6.0, "shape", True),
+    "double-side": ("EB4A34", 6.0, "line", True),
+    "thin-double": ("4BA676", 2.0, "shape", False),
+}
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestDoubleBorders:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_double_border_is_a_double_compound_line_in_both_decks(
+        self, target: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A box's ``double`` border, all four sides or one, is one line drawn double.
+
+        Chrome paints a double border of 3 px or more as two lines and a gap, each a third
+        of its width; DrawingML's double compound line (``cmpd="dbl"``) is the same, and both
+        PowerPoint and Drive draw it on a shape's outline and on a line (CALIBRATION.md T7).
+        So a uniform double border is the box's outline at its whole width, double, a
+        rounded one too, and a one-sided one the line along its side, double; each such
+        shape is named a double border, by which the deck's rewrite finds it. A 2 px double
+        border, which Chrome paints solid, stays a single line.
+        """
+        pptx, failures = export_slides([DOUBLE_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target)
+        assert failures == [] and pptx, f"the export rejected the slide: {failures}"
+        shapes = slide_shapes(pptx)
+        document = _document(DOUBLE_SLIDE)
+        wrong = []
+        for name, (colour, width, kind, double) in DOUBLE_CASES.items():
+            bounds = browser_rect(document, f"#{name}")
+            drawn = [
+                shape
+                for shape in shapes
+                if shape.line == colour
+                and shape.x >= bounds["x"] - 1
+                and shape.x + shape.w <= bounds["x"] + bounds["w"] + 1
+            ]
+            if len(drawn) != 1 or drawn[0].kind != kind:
+                wrong.append(f"#{name}: drawn as {[(s.kind, s.geometry) for s in drawn]}, not one {kind}")
+                continue
+            shape = drawn[0]
+            if abs((shape.line_w_pt or 0) - width * 0.75) > 0.01:
+                wrong.append(f"#{name}: {shape.line_w_pt} pt, not its whole {width} px")
+            if double and (shape.line_compound != "dbl" or not shape.name.startswith("Double border ")):
+                wrong.append(f"#{name}: compound {shape.line_compound!r}, named {shape.name!r}")
+            if not double and shape.line_compound == "dbl":
+                wrong.append(f"#{name}: a 2 px double border drawn double")
+        assert not wrong, f"double borders ({target}):\n  " + "\n  ".join(wrong) + "\n" + _describe(shapes)

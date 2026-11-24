@@ -1787,6 +1787,7 @@ class Border:
     color: str | None
     width_pt: float | None
     dash: str | None
+    compound: str | None = None  # a:ln cmpd ('sng', 'dbl', ...); None when absent
 
 
 @dataclass
@@ -1839,6 +1840,7 @@ class Shape:
     flip_h: bool = False
     flip_v: bool = False
     name: str = ""  # cNvPr name
+    line_compound: str | None = None  # its a:ln cmpd ('dbl' for a double line); None when absent
 
 
 def _qualified(prefix: str, local: str) -> str:
@@ -1920,6 +1922,7 @@ def _line(line: etree._Element | None) -> Border | None:
         color=color,
         width_pt=None if width is None else int(width) / EMU_PER_PT,
         dash=None if dash is None else dash.get("val"),
+        compound=line.get("cmpd"),
     )
 
 
@@ -2180,6 +2183,7 @@ def _drawing_shape(
         flip_h=transform["flip_h"],
         flip_v=transform["flip_v"],
         name="" if non_visual is None else non_visual.get("name", ""),
+        line_compound=None if line is None else line.compound,
     )
 
 

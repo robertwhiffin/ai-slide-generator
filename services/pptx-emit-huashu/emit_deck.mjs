@@ -30,9 +30,11 @@
 // scripts/export_fidelity/CALIBRATION.md X1, D1, D12, D8, D6, D7 and D13).
 //
 // pptxgenjs writes the deck; its dotted table-cell borders are then written
-// sysDot, a dash pptxgenjs cannot write a table border in (emit_table.cjs
-// dotTableBorders). A rewrite that fails costs only that dash: the deck is
-// written as pptxgenjs wrote it, those borders dashed, with one [huashu] line.
+// sysDot, a dash pptxgenjs cannot write a table border in, and its double
+// borders a double compound line, which it writes for no line (emit_table.cjs
+// rewriteBorders). A rewrite that fails costs only those strokes: the deck is
+// written as pptxgenjs wrote it, the dotted borders dashed and the double ones
+// solid, with one [huashu] line.
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
@@ -112,11 +114,11 @@ async function main() {
   // node_modules are missing fails with one "setup" message. If chromium
   // isn't installed yet, the require itself succeeds but the first slide throws.
   let renderSlide;
-  let dotTableBorders;
+  let rewriteBorders;
   let requestHostsOf;
   try {
     ({ renderSlide } = require('./render_slide.cjs'));
-    ({ dotTableBorders } = require('./emit_table.cjs'));
+    ({ rewriteBorders } = require('./emit_table.cjs'));
     ({ requestHostsOf } = require('./request_guard.cjs'));
   } catch (e) {
     console.error('[huashu] failed to load render_slide.cjs:', oneLine(e.message));
@@ -141,7 +143,7 @@ async function main() {
   // (pptx_from_html_huashu.py _export_deck).
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'huashu-deck-'));
   try {
-    await writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBorders, bypassValidation, target, requestHosts });
+    await writeDeck({ slides, pres, tmpDir, outArg, renderSlide, rewriteBorders, bypassValidation, target, requestHosts });
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch((e) => {
       console.error('[huashu] the slides\' temporary directory could not be removed: ' + oneLine((e && e.message) || e));
@@ -151,7 +153,7 @@ async function main() {
 
 // Every slide rendered in turn, then the deck written (all but the slides
 // that failed), and the __HUASHU_RESULT__ line last.
-async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBorders, bypassValidation, target, requestHosts }) {
+async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, rewriteBorders, bypassValidation, target, requestHosts }) {
   const failed = [];
   let succeeded = 0;
 
@@ -200,9 +202,9 @@ async function writeDeck({ slides, pres, tmpDir, outArg, renderSlide, dotTableBo
   const deck = await pres.write({ outputType: 'nodebuffer' });
   let written = deck;
   try {
-    written = await dotTableBorders(deck, pres.slides);
+    written = await rewriteBorders(deck, pres.slides);
   } catch (e) {
-    console.error('[huashu] dotted table borders left dashed: their rewrite failed: ' +
+    console.error('[huashu] dotted table borders left dashed, double borders solid: their rewrite failed: ' +
       oneLine((e && e.message) || e));
   }
   await fs.writeFile(fileName, written);

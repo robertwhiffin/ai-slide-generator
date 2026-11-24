@@ -12,6 +12,8 @@
 // webfonts the page loaded (model.fonts, and model.italicFonts for an italic
 // run), and native tables by emit_table.cjs. The deck for Google Slides writes
 // a dotted line or outline as emit_dotted.cjs draws it, Drive having no 1:1 dot.
+// A double border's line or outline is written solid and named, and made a
+// double compound line once the deck is written (doubleBorderName).
 //
 // A box whose corners round by different radii (geometry 'roundCorners', a card
 // header's 16px 16px 0 0) is written as the preset that draws it exactly, when
@@ -24,7 +26,7 @@
 // scripts/export_fidelity/CALIBRATION.md D11).
 
 const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
-const { emitTable } = require('./emit_table.cjs');
+const { doubleBorderName, emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
 const { transparencyOf } = require('./emit_typography.cjs');
 const { inches, points } = require('./units.cjs');
@@ -41,7 +43,15 @@ const PPTXGENJS_INCH_LIMIT = 100;
 const ONE_EMU_IN_PT = 1 / 12700;
 const SMALLEST_ANGLE_DEG = 1 / 60000;
 
-const DASH_TYPES = { solid: 'solid', dash: 'dash', dot: 'sysDot' };
+// A double border is two lines with a gap between them (snapshot_borders.mjs
+// borderDash), which DrawingML draws as one line of the border's width with a
+// double compound (a:ln cmpd="dbl": two lines each a third of its width, a
+// third apart). pptxgenjs writes no compound, so such a stroke is written solid
+// and its shape named a double border (emit_table.cjs doubleBorderName), and
+// once the deck is written its a:ln is made double (emit_table.cjs
+// rewriteBorders). Both apps draw it so, Drive keeping it for a shape's outline
+// and a line, at 3, 4, 6 and 9 px (scripts/export_fidelity/CALIBRATION.md T7).
+const DASH_TYPES = { solid: 'solid', dash: 'dash', dot: 'sysDot', double: 'solid' };
 
 function withinInchLimit(...values) {
   return values.every((value) => Math.abs(inches(value)) < PPTXGENJS_INCH_LIMIT);
@@ -241,6 +251,7 @@ function emitShape(slide, pres, item, renderer) {
   if (geometry.options.angleRange) options.angleRange = geometry.options.angleRange;
   if (item.shadow) options.shadow = shadowOptions(item.shadow);
   if (item.rotate) options.rotate = item.rotate;
+  if (item.line && item.line.dash === 'double') options.objectName = doubleBorderName(slide);
   slide.addShape(geometry.shapeType, options);
 }
 
@@ -262,6 +273,7 @@ function emitLine(slide, pres, item, renderer) {
     line: lineOptions(item),
   };
   if (end.y < start.y) options.flipV = true;
+  if (item.dash === 'double') options.objectName = doubleBorderName(slide);
   slide.addShape(pres.ShapeType.line, options);
 }
 

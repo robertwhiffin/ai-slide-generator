@@ -20,12 +20,16 @@
 //   every side is written and none contradicts its neighbour's. pptxgenjs
 //   writes a table border solid or dashed (prstDash solid or sysDash), so a
 //   dotted side is passed dashed and its prstDash is written sysDot once the
-//   deck is written (dotTableBorders): PowerPoint draws sysDot one width on
+//   deck is written (rewriteBorders): PowerPoint draws sysDot one width on
 //   and one off, as CSS paints a dotted border, and Drive converts it to its
 //   DOT, one on and three off, the nearest dash a Google table border has
 //   (scripts/export_fidelity/CALIBRATION.md D10). A cell border is one a:ln,
 //   which holds no second stroke, so the deck for Google Slides cannot draw
-//   it twice as it does a dotted line (emit_dotted.cjs);
+//   it twice as it does a dotted line (emit_dotted.cjs). A double side is
+//   passed solid and written a double compound line (cmpd="dbl") in the deck
+//   for PowerPoint, which draws it; Drive makes a double table border one
+//   solid line, so in the deck for Google Slides it is no line on its cells
+//   and drawn over the table as its two lines (pushDoubleEdges; CALIBRATION.md T7);
 // * its margins [top, right, bottom, left]. pptxgenjs 3.12 reads all four as
 //   points when the TOP one is 1 or more, and as inches otherwise
 //   (pptxgen.cjs.js:5327): a cell whose top margin is an inch or more passes
@@ -54,43 +58,80 @@ const POINT_MARGINS_FROM_PX = PX_PER_IN;
 // height, so a grid line pair that meets is written one EMU apart.
 const SMALLEST_SIZE_IN = 1 / EMU_PER_IN;
 // pptxgenjs table borders are solid or dashed; a dotted one is passed dashed
-// and written sysDot (dotTableBorders).
-const BORDER_TYPES = { solid: 'solid', dash: 'dash', dot: 'dash' };
+// and written sysDot, a double one passed solid and written double
+// (rewriteBorders).
+const BORDER_TYPES = { solid: 'solid', dash: 'dash', dot: 'dash', double: 'solid' };
 // The a:tcPr border element of each side, and the dashes pptxgenjs and a
 // dotted side write.
 const SIDE_ELEMENTS = { top: 'lnT', right: 'lnR', bottom: 'lnB', left: 'lnL' };
 const PPTXGENJS_DASH = '<a:prstDash val="sysDash"/>';
 const DOTTED_DASH = '<a:prstDash val="sysDot"/>';
+// The compound pptxgenjs writes on a table border, and the one a double side is
+// written with (its two lines each a third of its width, a third apart).
+const SINGLE_COMPOUND = 'cmpd="sng"';
+const DOUBLE_COMPOUND = 'cmpd="dbl"';
+// What a shape with a double border is named (doubleBorderName): this, and its
+// number on its slide.
+const DOUBLE_BORDER_NAME = 'Double border';
+// A shape's a:ln as pptxgenjs writes it, with its width or with none.
+const SHAPE_LINE = /<a:ln( w="\d+")?>/;
 
-// pptxgenjs slide -> the dotted sides of each table emitted on it, in the
-// order emitted, which is the order of its a:tbl elements in the slide's XML:
-// Map<'row:col', Set<'lnT' | 'lnR' | 'lnB' | 'lnL'>> per table, one per table
-// so the n-th belongs to the n-th a:tbl. Keyed weakly, per slide object.
-const dottedSides = new WeakMap();
+// pptxgenjs slide -> the sides of each table emitted on it that are rewritten,
+// in the order emitted, which is the order of its a:tbl elements in the
+// slide's XML: Map<'row:col', Map<'lnT' | 'lnR' | 'lnB' | 'lnL', 'dot' |
+// 'double'>> per table, one per table so the n-th belongs to the n-th a:tbl.
+// Keyed weakly, per slide object.
+const rewrittenSides = new WeakMap();
+// pptxgenjs slide -> how many shapes with a double border it has been given.
+const doubleBorders = new WeakMap();
 
-function recordDottedSides(slide, item) {
+// Records the dotted sides of `item` on `slide`, and, but in the deck for
+// Google Slides (`forGoogle`), which draws them as strokes over the table
+// (pushDoubleEdges), its double ones.
+function recordRewrittenSides(slide, item, forGoogle) {
   const sides = new Map();
   for (const cell of item.cells) {
     for (const side of Object.keys(SIDE_ELEMENTS)) {
       const border = cell.borders[side];
-      if (!border || border.dash !== 'dot') continue;
+      if (!border || !(border.dash === 'dot' || (border.dash === 'double' && !forGoogle))) continue;
       const key = `${cell.row}:${cell.col}`;
-      if (!sides.has(key)) sides.set(key, new Set());
-      sides.get(key).add(SIDE_ELEMENTS[side]);
+      if (!sides.has(key)) sides.set(key, new Map());
+      sides.get(key).set(SIDE_ELEMENTS[side], border.dash);
     }
   }
-  if (!dottedSides.has(slide)) dottedSides.set(slide, []);
-  dottedSides.get(slide).push(sides);
+  if (!rewrittenSides.has(slide)) rewrittenSides.set(slide, []);
+  rewrittenSides.get(slide).push(sides);
 }
 
-// One slide's XML with the dotted sides of its tables (recordDottedSides)
-// written sysDot. pptxgenjs writes an a:tbl's rows in order, each row one
+// doubleBorderName(slide) -> the name of the next shape with a double border
+// on `slide` (emit_model.cjs): DOUBLE_BORDER_NAME and its number there, which
+// pptxgenjs writes as the shape's p:cNvPr name, and by which rewriteBorders
+// finds its a:ln.
+function doubleBorderName(slide) {
+  const count = (doubleBorders.get(slide) || 0) + 1;
+  doubleBorders.set(slide, count);
+  return `${DOUBLE_BORDER_NAME} ${count}`;
+}
+
+// One table side's a:ln as its recorded dash writes it: a dotted one sysDot,
+// a double one a double compound line.
+function rewrittenSide(line, dash) {
+  if (dash === 'dot') return line.replace(PPTXGENJS_DASH, DOTTED_DASH);
+  if (dash === 'double') return line.replace(SINGLE_COMPOUND, DOUBLE_COMPOUND);
+  return line;
+}
+
+// One slide's XML with the recorded sides of its tables (recordRewrittenSides)
+// written as their dashes draw them, and the a:ln of each shape named a double
+// border made double. pptxgenjs writes an a:tbl's rows in order, each row one
 // a:tc per grid slot (a merge placeholder among them), and each cell's sides
 // as a:lnL, a:lnR, a:lnT and a:lnB in its a:tcPr; no table holds another,
-// and text in a cell is escaped, so none of these tags occurs in it.
-function dottedSlideXml(xml, tables) {
+// and text in a cell is escaped, so none of these tags occurs in it. A
+// shape's name is its p:cNvPr name, which no text names: pptxgenjs names a
+// text box "Text N" and a shape "Shape N" unless told otherwise.
+function rewrittenSlideXml(xml, tables) {
   let table = 0;
-  return xml.replace(/<a:tbl>[\s\S]*?<\/a:tbl>/g, (tbl) => {
+  const withTables = xml.replace(/<a:tbl>[\s\S]*?<\/a:tbl>/g, (tbl) => {
     const sides = tables[table++];
     if (!sides || !sides.size) return tbl;
     let row = -1;
@@ -99,12 +140,18 @@ function dottedSlideXml(xml, tables) {
       let col = -1;
       return tr.replace(/<a:tc\b[\s\S]*?<\/a:tc>/g, (tc) => {
         col += 1;
-        const dotted = sides.get(`${row}:${col}`);
-        if (!dotted) return tc;
+        const rewritten = sides.get(`${row}:${col}`);
+        if (!rewritten) return tc;
         return tc.replace(/<a:(ln[LRTB])\b[\s\S]*?<\/a:\1>/g, (line, name) =>
-          (dotted.has(name) ? line.replace(PPTXGENJS_DASH, DOTTED_DASH) : line));
+          (rewritten.has(name) ? rewrittenSide(line, rewritten.get(name)) : line));
       });
     });
+  });
+  const named = `name="${DOUBLE_BORDER_NAME} `;
+  if (withTables.indexOf(named) < 0) return withTables;
+  return withTables.replace(/<p:sp>[\s\S]*?<\/p:sp>/g, (shape) => {
+    if (!new RegExp(`<p:cNvPr [^>]*${named}\\d+"`).test(shape)) return shape;
+    return shape.replace(SHAPE_LINE, (line) => line.replace(/>$/, ` ${DOUBLE_COMPOUND}>`));
   });
 }
 
@@ -117,16 +164,19 @@ function pptxgenjsZipPath() {
 }
 
 // The deck pptxgenjs wrote (a .pptx Buffer), each dotted side of each table
-// on `slides` (pres.slides, in order) written sysDot. A deck with none is
-// returned as it is. The parts are rewritten with the zip library pptxgenjs
-// writes with (pptxgenjsZipPath), as it writes them: in order, stored, each
-// part's date kept. It throws when the deck cannot be read or written back,
-// and emit_deck.mjs then writes the deck as pptxgenjs wrote it.
-async function dotTableBorders(deck, slides) {
+// on `slides` (pres.slides, in order) written sysDot, each double one double,
+// and each shape with a double border (doubleBorderName) drawn double. A deck
+// with none is returned as it is. The parts are rewritten with the zip library
+// pptxgenjs writes with (pptxgenjsZipPath), as it writes them: in order,
+// stored, each part's date kept. It throws when the deck cannot be read or
+// written back, and emit_deck.mjs then writes the deck as pptxgenjs wrote it.
+async function rewriteBorders(deck, slides) {
   const pending = [];
   slides.forEach((slide, index) => {
-    const tables = dottedSides.get(slide);
-    if (tables && tables.some((sides) => sides.size)) pending.push({ name: `ppt/slides/slide${index + 1}.xml`, tables });
+    const tables = rewrittenSides.get(slide) || [];
+    if (tables.some((sides) => sides.size) || doubleBorders.has(slide)) {
+      pending.push({ name: `ppt/slides/slide${index + 1}.xml`, tables });
+    }
   });
   if (!pending.length) return deck;
   const JSZip = require(pptxgenjsZipPath());
@@ -134,7 +184,7 @@ async function dotTableBorders(deck, slides) {
   for (const { name, tables } of pending) {
     const part = zip.file(name);
     if (!part) continue;
-    zip.file(name, dottedSlideXml(await part.async('string'), tables), { date: part.date });
+    zip.file(name, rewrittenSlideXml(await part.async('string'), tables), { date: part.date });
   }
   return zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
 }
@@ -149,9 +199,78 @@ function marginOf(margin) {
   return sides.map((px) => inches(px));
 }
 
-function borderOf(border) {
-  if (!border) return { type: 'none' };
+// A cell side's pptxgenjs border. In the deck for Google Slides (`forGoogle`)
+// a double side is none: its edge is drawn over the table (pushDoubleEdges).
+function borderOf(border, forGoogle) {
+  if (!border || (forGoogle && border.dash === 'double')) return { type: 'none' };
   return { type: BORDER_TYPES[border.dash] || 'solid', pt: border.widthPx * PT_PER_PX, color: border.color };
+}
+
+// pptxgenjs's custom geometry shape (ShapeType.custGeom).
+const CUSTOM_GEOMETRY = 'custGeom';
+// A double border's lines are each this share of its width, its outer and
+// inner thirds, as a double compound line draws them.
+const DOUBLE_LINE_SHARE = 1 / 3;
+
+// The double edges of a table item, each once: {horizontal, at, from, to,
+// border}, along the grid line at `at` from `from` to `to` (slide px), in the
+// order its cells give them. A cell writes the line of an edge on its side, as
+// does the cell across it, so a side its neighbour's gives too is the same edge.
+function doubleEdges(item) {
+  const columns = [item.x];
+  const rows = [item.y];
+  for (let index = 0; index < item.colWidths.length; index++) columns.push(columns[index] + item.colWidths[index]);
+  for (let index = 0; index < item.rowHeights.length; index++) rows.push(rows[index] + item.rowHeights[index]);
+  const edges = new Map();
+  for (const cell of item.cells) {
+    for (const side of Object.keys(SIDE_ELEMENTS)) {
+      const border = cell.borders[side];
+      if (!border || border.dash !== 'double') continue;
+      const horizontal = side === 'top' || side === 'bottom';
+      const at = horizontal
+        ? rows[side === 'top' ? cell.row : cell.row + cell.rowspan]
+        : columns[side === 'left' ? cell.col : cell.col + cell.colspan];
+      const from = horizontal ? columns[cell.col] : rows[cell.row];
+      const to = horizontal ? columns[cell.col + cell.colspan] : rows[cell.row + cell.rowspan];
+      const key = `${horizontal ? 'h' : 'v'}:${at}:${from}:${to}`;
+      if (!edges.has(key)) edges.set(key, { horizontal, at, from, to, border });
+    }
+  }
+  return [...edges.values()];
+}
+
+// The double edges of a table in the deck for Google Slides. Drive keeps a
+// shape's double compound line but makes a table border's one solid line of
+// its whole width (measured, scripts/export_fidelity/CALIBRATION.md T7), and a
+// cell border is one a:ln, which holds no second stroke. So each double edge is
+// no line on its cells (borderOf) and is drawn over the table as one unfilled
+// custom shape stroking the edge's outer and inner thirds, its two lines, each
+// a third of the border's width.
+function pushDoubleEdges(slide, item) {
+  for (const edge of doubleEdges(item)) {
+    const widthPx = edge.border.widthPx;
+    const line = widthPx * DOUBLE_LINE_SHARE;
+    const offset = (widthPx - line) / 2;
+    const length = Math.max(edge.to - edge.from, 0);
+    const frame = edge.horizontal
+      ? { x: edge.from, y: edge.at - offset, w: length, h: 2 * offset }
+      : { x: edge.at - offset, y: edge.from, w: 2 * offset, h: length };
+    const ends = edge.horizontal
+      ? [[{ x: 0, y: 0 }, { x: length, y: 0 }], [{ x: 0, y: 2 * offset }, { x: length, y: 2 * offset }]]
+      : [[{ x: 0, y: 0 }, { x: 0, y: length }], [{ x: 2 * offset, y: 0 }, { x: 2 * offset, y: length }]];
+    const points = [];
+    for (const [start, end] of ends) {
+      points.push({ x: inches(start.x), y: inches(start.y), moveTo: true }, { x: inches(end.x), y: inches(end.y) });
+    }
+    slide.addShape(CUSTOM_GEOMETRY, {
+      x: inches(frame.x),
+      y: inches(frame.y),
+      w: sizeOf(frame.w),
+      h: sizeOf(frame.h),
+      points,
+      line: { color: edge.border.color, width: line * PT_PER_PX, dashType: 'solid' },
+    });
+  }
 }
 
 function fillOf(fill) {
@@ -164,8 +283,9 @@ function fillOf(fill) {
 // One cell as a pptxgenjs table cell: {text, options}. `faces` and `renderer`
 // are emitText's.
 function cellObject(cell, faces, renderer) {
+  const forGoogle = Boolean(renderer && renderer.target === 'gslides');
   const options = {
-    border: [borderOf(cell.borders.top), borderOf(cell.borders.right), borderOf(cell.borders.bottom), borderOf(cell.borders.left)],
+    border: [cell.borders.top, cell.borders.right, cell.borders.bottom, cell.borders.left].map((border) => borderOf(border, forGoogle)),
     margin: marginOf(cell.margin),
     valign: cell.valign,
     align: cell.align,
@@ -187,17 +307,20 @@ function cellObject(cell, faces, renderer) {
   return { text: text.length ? text : '', options };
 }
 
-// emitTable(slide, item, faces, renderer): one table item as one pptxgenjs table.
+// emitTable(slide, item, faces, renderer): one table item as one pptxgenjs
+// table, and in the deck for Google Slides its double edges over it
+// (pushDoubleEdges).
 //   faces     the webfonts the page loaded (emit_text.cjs emitText);
 //   renderer  the renderer the deck is written for (emit_text.cjs emitText).
 function emitTable(slide, item, faces, renderer) {
+  const forGoogle = Boolean(renderer && renderer.target === 'gslides');
   const rows = item.rowHeights.map(() => []);
   for (const cell of item.cells) rows[cell.row].push(cell);
   const tableRows = rows.map((cells) => cells
     .slice()
     .sort((a, b) => a.col - b.col)
     .map((cell) => cellObject(cell, faces, renderer)));
-  recordDottedSides(slide, item);
+  recordRewrittenSides(slide, item, forGoogle);
   const colW = item.colWidths.map(sizeOf);
   const rowH = item.rowHeights.map(sizeOf);
   slide.addTable(tableRows, {
@@ -209,6 +332,7 @@ function emitTable(slide, item, faces, renderer) {
     rowH,
     autoPage: false,
   });
+  if (forGoogle) pushDoubleEdges(slide, item);
 }
 
-module.exports = { emitTable, dotTableBorders, pptxgenjsZipPath };
+module.exports = { DOUBLE_BORDER_NAME, doubleBorderName, emitTable, rewriteBorders, pptxgenjsZipPath };
