@@ -3507,11 +3507,9 @@ def _opaque_slot(frame: Shape, row: int, col: int) -> bool:
     return cell.fill is not None and cell.fill_alpha is None
 
 
-def _corner_piece(
-    shapes: list[Shape], elements: list, frame_position: int, fill: str, rect: dict
-) -> list[tuple[float, float]]:
-    """The vertices of the one custom shape under the frame filled ``fill`` whose box holds the
-    centre of the cell ``rect``: the corner cell's piece."""
+def _corner_piece_position(shapes: list[Shape], frame_position: int, fill: str, rect: dict) -> int:
+    """The position in paint order of the one custom shape under the frame filled ``fill``
+    whose box holds the centre of the cell ``rect``: the corner cell's piece."""
     centre = (rect["x"] + rect["w"] / 2, rect["y"] + rect["h"] / 2)
     found = [
         position
@@ -3525,7 +3523,15 @@ def _corner_piece(
         f"expected one {fill} custom shape under the table at {rect}, got {len(found)}:\n"
         f"{_describe(shapes)}"
     )
-    return _custom_geometry_points(elements[found[0]], shapes[found[0]])
+    return found[0]
+
+
+def _corner_piece(
+    shapes: list[Shape], elements: list, frame_position: int, fill: str, rect: dict
+) -> list[tuple[float, float]]:
+    """The vertices of the corner cell's piece (_corner_piece_position)."""
+    position = _corner_piece_position(shapes, frame_position, fill, rect)
+    return _custom_geometry_points(elements[position], shapes[position])
 
 
 @pytest.mark.slow
@@ -3837,8 +3843,12 @@ class TestRoundedWrapper:
         * between two grown sides the corner square is covered where the cell
           across that corner is opaque too, and left out where it is not
           (``translucent``: the first body row's middle cell);
-        * no corner cell's shape runs under another corner cell, which the
-          table leaves unfilled too (``pair``: a two-column table);
+        * a corner cell's shape runs under a corner cell's shape drawn after
+          it, which paints over it as a native cell does, and not under one
+          drawn before it: two pieces meeting each anti-aliased their edge, and
+          Google's thumbnail showed a light seam between them (``pair``: a
+          two-column table, each left piece under the right one;
+          ``span-corner``: the spanning header piece under the Cost one);
         * a side runs under only where every slot across it is opaque: a corner
           cell spanning two columns, the second slot below it translucent
           (``span-corner``), and one spanning two rows beside a header cell
@@ -3885,6 +3895,24 @@ class TestRoundedWrapper:
                 f"fixture drift: the rule row is {heights[1]:.3f} px tall, filled "
                 f"{frame.table.rows[1][0].fill}"
             )
+        # Each corner piece's place in paint order: a piece drawn later covers its slots.
+        positions = {
+            slot: _corner_piece_position(
+                shapes, frame_position, fill, table_cell_rect(frame, *slot)
+            )
+            for slot, fill in CORNER_PIECE_FILLS[name].items()
+        }
+
+        def covers(row: int, col: int, below: int) -> bool:
+            """Whether slot ``(row, col)`` is painted opaquely over the piece at ``below``:
+            by its native cell, or by a corner piece drawn after it."""
+            if not (0 <= row < len(heights) and 0 <= col < len(widths)):
+                return False
+            owner = table_slot_owner(frame.table, row, col)
+            if owner in positions:
+                return positions[owner] > below
+            return _opaque_slot(frame, row, col)
+
         wrong = []
         for (row, col), fill in CORNER_PIECE_FILLS[name].items():
             corner = ("top" if row == 0 else "bottom") + "-" + ("left" if col == 0 else "right")
@@ -3902,7 +3930,7 @@ class TestRoundedWrapper:
                 return min(CORNER_RUN_UNDER_PX, size / 2) if opaque else 0.0
 
             def across(rows: range, cols: range) -> bool:
-                return all(_opaque_slot(frame, r, c) for r in rows for c in cols)
+                return all(covers(r, c, positions[(row, col)]) for r in rows for c in cols)
 
             reaches = {
                 "top": reach(
@@ -3944,10 +3972,10 @@ class TestRoundedWrapper:
                 if reaches[vertical] and reaches[horizontal]:
                     x = left - depth["left"] if horizontal == "left" else right + depth["right"]
                     y = top - depth["top"] if vertical == "top" else bottom + depth["bottom"]
-                    diagonal = _opaque_slot(
-                        frame,
+                    diagonal = covers(
                         row - 1 if vertical == "top" else last_row,
                         col - 1 if horizontal == "left" else last_col,
+                        positions[(row, col)],
                     )
                     probes[f"the {vertical}-{horizontal} corner square"] = ((x, y), diagonal)
             corner_x, corner_y = _corner_of(rect, corner)

@@ -2447,8 +2447,13 @@ async function snapshotPage(config, pseudoData, renderer) {
   // cell's shape meets its neighbours' fills, and the table's own box, on whole px.
   // In the deck that keeps the browser's grid, the shape runs under each opaque
   // native cell beside it (CORNER_RUN_UNDER_PX; snapshot_table.mjs
-  // runUnderPolygon, over the table's own slot grid). Every cut cell is
-  // unfilled before any shape is drawn, so none counts as another's neighbour.
+  // runUnderPolygon, over the table's own slot grid), and under each opaque
+  // piece drawn after it, which paints over it as a native cell does: two
+  // pieces meeting between pixels each anti-aliased their edge, and Google's
+  // thumbnail showed a light seam between them (a two-column table's rounded
+  // header; CALIBRATION.md T2). So each cut cell is unfilled in the table as
+  // its piece is drawn: a piece drawn before it is no neighbour of it, one
+  // drawn after it still is.
   // A collapsed cell's own border-radius cuts its fill the same way
   // (layout.roundedCells: Chrome rounds a collapsed cell's background, not its
   // borders), to its grid rect rounded by its used radii, that rect's sides
@@ -2479,9 +2484,9 @@ async function snapshotPage(config, pseudoData, renderer) {
         }
         if (cutters.length || ownRadii) cut.push({ cell, fill: cell.fill, rect, cutters, ownRadii });
       }
-      for (let index = 0; index < cut.length; index++) cut[index].cell.fill = null;
       for (let index = 0; index < cut.length; index++) {
         const { cell, fill, rect, cutters, ownRadii } = cut[index];
+        cell.fill = null;
         let region = CORNER_RUN_UNDER_PX > 0 ? tableLayout.runUnderPolygon(layout, cell, rect, CORNER_RUN_UNDER_PX) : [
           { x: rect.left, y: rect.top },
           { x: rect.right, y: rect.top },

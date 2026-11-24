@@ -1235,8 +1235,9 @@ function createTableLayout(env) {
   // out with both where the slot across that corner is opaque too, and keeps
   // the cell's own corner otherwise: a notch, which clipConvex still cuts
   // whole, the convex rounded boxes cutting only the table's outer corners,
-  // where no side moves. The cells a rounded corner cuts are unfilled first,
-  // so none is another's opaque neighbour.
+  // where no side moves. Each cell a rounded corner cuts is unfilled as its
+  // piece is drawn (snapshot.mjs pushTable), so a piece runs under the opaque
+  // pieces drawn after it, which paint over it, and not under those before it.
   // runUnderReach(layout, cell, distance) -> {top, right, bottom, left}: how
   // far each side of a corner cell runs under its opaque native neighbours
   // (runUnderPolygon): the distance, or half that row's or column's size where
