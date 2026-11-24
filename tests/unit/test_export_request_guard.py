@@ -42,6 +42,7 @@ import json
 import logging
 import re
 import socket
+import sys
 import threading
 import zipfile
 from collections.abc import Iterator
@@ -425,10 +426,37 @@ class TestNothingOutsideTheSlideReachesTheDeck:
         assert f"{GUARDED_HEADING} {name}" in text, f"slide {deck.slide_of[name]} is not {name}"
 
 
+# The browser the engine launches (render_slide.cjs launchOptions): Chrome on a Mac, Playwright's
+# Chromium headless shell elsewhere, Databricks Apps' Linux container included. They hand the
+# guard different requests for the same slides (measured, without the CSP):
+# * a fetch() of a file: URL from the file: slide: Chrome makes it a request, which the guard
+#   aborts (1); the headless shell refuses it in the page before making any (0). The read fails
+#   in the page either way, so the slide writes "blocked".
+# * the popup slide's three window.open() calls (the local server, a file, about:blank): Chrome
+#   hands the guard each popup before it loads, and the guard closes all three (0 requests,
+#   3 popups); the headless shell routes the two loads first, which the guard aborts, and hands
+#   it the blank popup alone (2 requests, 1 popup). Each popup is closed or its load aborted.
+DARWIN = sys.platform == "darwin"
+READS_REFUSED_IN_THE_PAGE = set() if DARWIN else {"fetch-file"}
+POPUP_SLIDE_COUNTS = (
+    {"blockedRequests": 0, "closedPopups": 3}
+    if DARWIN
+    else {"blockedRequests": 2, "closedPopups": 1}
+)
+# How many popups the popup slide opens.
+POPUPS_OPENED = 3
+# What a slide whose read failed in the page writes (_read_into_out).
+READ_FAILED = "blocked"
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestTheGuardCountsWhatItStops:
-    """Without the CSP, every request a slide makes outside it reaches the guard, which counts it."""
+    """Without the CSP, every request a slide makes outside it reaches the guard, which counts it.
+
+    What reaches it as a request is the browser's to decide: see READS_REFUSED_IN_THE_PAGE and
+    POPUP_SLIDE_COUNTS for where the engine's two browsers differ.
+    """
 
     @pytest.mark.parametrize(
         "name",
@@ -441,8 +469,14 @@ class TestTheGuardCountsWhatItStops:
     def test_each_slide_has_its_requests_blocked(
         self, guarded_decks: dict[str, _GuardedDeck], name: str
     ) -> None:
-        summary = guarded_decks["without-csp"].summary_of(name)
-        assert summary["blockedRequests"] >= 1, summary
+        deck = guarded_decks["without-csp"]
+        summary = deck.summary_of(name)
+        if name in READS_REFUSED_IN_THE_PAGE:
+            assert summary["blockedRequests"] == 0, summary
+            text = "".join(slide_xml(deck.logged.pptx, deck.slide_of[name]).itertext())
+            assert READ_FAILED in text, f"{name}: the browser did not refuse the read: {text!r}"
+        else:
+            assert summary["blockedRequests"] >= 1, summary
 
     @pytest.mark.parametrize("variant", VARIANTS)
     def test_the_popups_are_closed(
@@ -450,7 +484,9 @@ class TestTheGuardCountsWhatItStops:
     ) -> None:
         deck = guarded_decks[variant]
         summary = deck.summary_of("window-open")
-        assert summary["closedPopups"] == 3, summary
+        counts = {key: summary[key] for key in POPUP_SLIDE_COUNTS}
+        assert counts == POPUP_SLIDE_COUNTS, summary
+        assert sum(counts.values()) == POPUPS_OPENED, "fixture drift: the slide's popups changed"
         text = "".join(slide_xml(deck.logged.pptx, deck.slide_of["window-open"]).itertext())
         assert POPUPS_CLOSED in text, f"the slide's blank popup stayed open: {text!r}"
 
