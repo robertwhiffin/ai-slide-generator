@@ -79,7 +79,8 @@ const { PT_PER_PX, PX_PER_IN } = require('./units.cjs');
 // * a run's size is 0 (none written) or 1 to 4000 pt (sz, ST_TextFontSize
 //   100..400000); a run's three trackings, which emit_typography.cjs adds,
 //   2000 pt either way each, so their sum is inside spc's 4000 pt (ST_TextPoint);
-// * a line height and a line's growth, written as spacing, at most 1584 pt,
+// * a line height, a line's growth and a script run's raise, written as
+//   spacing and a baseline offset, at most 1584 pt either way,
 //   2112 px (spcPts, ST_TextSpacingPoint 0..158400);
 // * a path's point lies within PPTXGENJS_INCH_LIMIT inches of the origin, as
 //   each item's box must (emit_model.cjs inRange).
@@ -200,6 +201,7 @@ function isRun(run) {
     typeof run.underline === 'boolean' &&
     typeof run.strike === 'boolean' &&
     (run.baseline === null || BASELINES.has(run.baseline)) &&
+    (run.raisePx === undefined || (isNumber(run.raisePx) && Math.abs(run.raisePx) <= SPACING_LIMIT_PX)) &&
     isTracking(run.opticalTrackingPx) &&
     isTracking(run.unkernedTrackingPx);
 }
@@ -504,6 +506,7 @@ const DIAGNOSTIC_PARTS = {
     'each inside one to its line as the browser laid it out',
   lossLineSpacing: 'this slide exports without line spacing, optical-size and kerning tracking',
   lossTurnedLines: 'turned text is placed across its lines by its font size, not by its face',
+  lossScriptRaises: 'this slide exports its superscripts and subscripts at the renderers\' own raise',
   lossEllipsis: 'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"',
   // Why a table is no a:tbl (snapshot_table.mjs).
   columnSpanUnread: "a column's span could not be read",

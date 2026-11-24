@@ -137,7 +137,7 @@
 //  *              inset?: {left, top, right, bottom}}
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
 //  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx,
-//  *        unkernedTrackingPx}
+//  *        unkernedTrackingPx, raisePx?}
 //  *
 //  * growthPx how much further down than its spacing the browser set a line
 //  *          after the block's first (a raised inline grew its line box;
@@ -179,6 +179,9 @@
 //  * opticalTrackingPx    tracking added to letterSpacingPx after every character,
 //  *          so the run is as wide at the export cut as the browser drew it; 0
 //  *          when the two widths agree within 0.5%;
+//  * raisePx  a script run's: how far above its line's baseline the browser set
+//  *          its own (below, negative), from the line's largest run no shift
+//  *          moves; absent where the line has none, or where it was not read;
 //  * unkernedTrackingPx   the same for the export cut drawn with no pair
 //  *          kerning, with no 0.5% band: the width delta per character plus
 //  *          the run's kerning per gap its tracking can close (one fewer than
@@ -356,8 +359,14 @@ function createTextLayout(env) {
   //   runs        {run, runs: the line's runs, which hold it, face, width: the
   //                browser's px | null (a justified line, whose drawn width
   //                includes the stretch), endsLine}
+  //   scripts     {run, face, top, lineFace, lineTop}: a run a baseline shift
+  //                moves, on an upright line with text none moves, its face and
+  //                its text's top, and the face and top of that line's largest
+  //                unmoved run (paragraphsOf): their baselines give the run's
+  //                raise (applyMetrics)
   const pendingParagraphs = [];
   const pendingRuns = [];
+  const pendingScripts = [];
   //   fonts       {font, face}: a table cell's own face (fontOf), whose family
   //               is resolved as a run's is (resolveWrittenFaces)
   const pendingFonts = [];
@@ -383,6 +392,7 @@ function createTextLayout(env) {
     undrawnFamilyOf,
     pendingParagraphs,
     pendingRuns,
+    pendingScripts,
     pendingFonts,
     coverageFont: env.coverageFont,
     target: env.target,
@@ -1898,8 +1908,10 @@ function createTextLayout(env) {
   // `upright` says the lines' rects are upright on the slide (not turned), so
   // where each line's own text lies (its body's top and height) is queued with
   // its paragraph, for applyMetrics to read how far past its spacing the
-  // browser set it (growthPx). Each queued paragraph knows the one before it
-  // in the block (`previous`, null for the first).
+  // browser set it (growthPx), and each run a baseline shift moves on a line
+  // with text none moves is queued with that line's largest unmoved run, for
+  // applyMetrics to read how far the browser raised it (raisePx). Each queued
+  // paragraph knows the one before it in the block (`previous`, null for the first).
   function paragraphsOf(lines, upright) {
     const paragraphs = [];
     let paragraph = null;
@@ -1921,10 +1933,33 @@ function createTextLayout(env) {
         }
       }
       paragraph.lines.push({ runs: line.runs });
+      if (upright) queueScripts(line);
       const body = upright && line.runs.length ? line.body || line.rect : null;
       pending.bodies.push(body ? { top: body.top, height: body.bottom - body.top } : null);
     }
     return paragraphs;
+  }
+
+  // Queues each run of an upright line that a baseline shift moves, with the
+  // line's largest run none moves, for its raise (applyMetrics). A line of
+  // script runs alone has no baseline of its own text to raise them from.
+  function queueScripts(line) {
+    let unmoved = -1;
+    for (let run = 0; run < line.runs.length; run++) {
+      if (line.runs[run].baseline) continue;
+      if (unmoved < 0 || line.runs[run].sizePx > line.runs[unmoved].sizePx) unmoved = run;
+    }
+    if (unmoved < 0) return;
+    for (let run = 0; run < line.runs.length; run++) {
+      if (!line.runs[run].baseline) continue;
+      pendingScripts.push({
+        run: line.runs[run],
+        face: line.extents[run].face,
+        top: line.extents[run].top,
+        lineFace: line.extents[unmoved].face,
+        lineTop: line.extents[unmoved].top,
+      });
+    }
   }
 
   // Queues every run of the block for the optical-size comparison.

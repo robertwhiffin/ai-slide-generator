@@ -2043,7 +2043,9 @@ class TestDoubleBorders:
         shape is named a double border, by which the deck's rewrite finds it. A 2 px double
         border, which Chrome paints solid, stays a single line.
         """
-        pptx, failures = export_slides([DOUBLE_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target)
+        pptx, failures = export_slides(
+            [DOUBLE_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+        )
         assert failures == [] and pptx, f"the export rejected the slide: {failures}"
         shapes = slide_shapes(pptx)
         document = _document(DOUBLE_SLIDE)
@@ -2058,13 +2060,17 @@ class TestDoubleBorders:
                 and shape.x + shape.w <= bounds["x"] + bounds["w"] + 1
             ]
             if len(drawn) != 1 or drawn[0].kind != kind:
-                wrong.append(f"#{name}: drawn as {[(s.kind, s.geometry) for s in drawn]}, not one {kind}")
+                drawn_as = [(s.kind, s.geometry) for s in drawn]
+                wrong.append(f"#{name}: drawn as {drawn_as}, not one {kind}")
                 continue
             shape = drawn[0]
             if abs((shape.line_w_pt or 0) - width * 0.75) > 0.01:
                 wrong.append(f"#{name}: {shape.line_w_pt} pt, not its whole {width} px")
-            if double and (shape.line_compound != "dbl" or not shape.name.startswith("Double border ")):
+            named = shape.name.startswith("Double border ")
+            if double and (shape.line_compound != "dbl" or not named):
                 wrong.append(f"#{name}: compound {shape.line_compound!r}, named {shape.name!r}")
             if not double and shape.line_compound == "dbl":
                 wrong.append(f"#{name}: a 2 px double border drawn double")
-        assert not wrong, f"double borders ({target}):\n  " + "\n  ".join(wrong) + "\n" + _describe(shapes)
+        assert not wrong, (
+            f"double borders ({target}):\n  " + "\n  ".join(wrong) + "\n" + _describe(shapes)
+        )

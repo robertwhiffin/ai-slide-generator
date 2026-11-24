@@ -4368,7 +4368,9 @@ class TestRowsHoldTheirCellsAtTheAppsSpacing:
         assert not spaced, "one-line DM Sans cells carry line spacing:\n  " + "\n  ".join(spaced)
         grown = [
             (row, height, laid_out)
-            for row, (height, laid_out) in enumerate(zip(frame.table.row_heights, _app_row_heights(frame)))
+            for row, (height, laid_out) in enumerate(
+                zip(frame.table.row_heights, _app_row_heights(frame))
+            )
             if laid_out - height > ROW_GROWTH_TOLERANCE_PX
         ]
         assert not grown, f"DM Sans rows the apps grow: {grown}"
@@ -4394,8 +4396,13 @@ class TestDoubleCellBorders:
         _, frame = _frame_for(shapes, _grid_rect(table), "#double-rows")
         wrong = []
         for row, colour, width in DOUBLE_EDGES:
-            for col, (above, below) in enumerate(zip(frame.table.rows[row], frame.table.rows[row + 1])):
-                for name, border in (("lnB above", above.borders["bottom"]), ("lnT below", below.borders["top"])):
+            pairs = zip(frame.table.rows[row], frame.table.rows[row + 1])
+            for col, (above, below) in enumerate(pairs):
+                sides = (
+                    ("lnB above", above.borders["bottom"]),
+                    ("lnT below", below.borders["top"]),
+                )
+                for name, border in sides:
                     if (
                         border is None
                         or border.compound != "dbl"
@@ -4429,7 +4436,8 @@ class TestDoubleCellBorders:
         wrong = []
         for row, colour, width in DOUBLE_EDGES:
             line = rows[row + 1]
-            for col, (above, below) in enumerate(zip(frame.table.rows[row], frame.table.rows[row + 1])):
+            pairs = zip(frame.table.rows[row], frame.table.rows[row + 1])
+            for col, (above, below) in enumerate(pairs):
                 if above.borders["bottom"] is not None or below.borders["top"] is not None:
                     wrong.append(f"edge under row {row}, column {col}: a line on the cells")
                 strokes = [
@@ -4445,14 +4453,17 @@ class TestDoubleCellBorders:
                     and abs(shape.h - 2 * width / 3) <= 0.1
                 ]
                 if len(strokes) != 1:
-                    wrong.append(f"edge under row {row}, column {col}: {len(strokes)} strokes over it")
+                    wrong.append(
+                        f"edge under row {row}, column {col}: {len(strokes)} strokes over it"
+                    )
                     continue
                 position, stroke = strokes[0]
                 moves = elements[position].findall(".//a:custGeom//a:moveTo", NAMESPACES)
-                if len(moves) != 2 or abs((stroke.line_w_pt or 0) - width / 3 * PT_PER_PX) > WIDTH_TOLERANCE_PT:
+                third = width / 3 * PT_PER_PX
+                if len(moves) != 2 or abs((stroke.line_w_pt or 0) - third) > WIDTH_TOLERANCE_PT:
                     wrong.append(
                         f"edge under row {row}, column {col}: {len(moves)} subpaths, "
-                        f"{stroke.line_w_pt} pt (a third of {width} px is {width / 3 * PT_PER_PX:.3f} pt)"
+                        f"{stroke.line_w_pt} pt (a third of {width} px is {third:.3f} pt)"
                     )
         thin = frame.table.rows[THIN_DOUBLE_ROW][0].borders["bottom"]
         if thin is None or thin.compound == "dbl":

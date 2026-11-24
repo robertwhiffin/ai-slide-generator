@@ -73,7 +73,9 @@
 // Placement. The snapshot's y is the top of the first line's glyphs. The
 // renderers set a single-spaced first line by its font size where the browser
 // sets it by the font's ascent, and spacing below 100% raises it, so the box is
-// raised by firstLineOffsetPx, fitted against both renderers.
+// raised by firstLineOffsetPx, fitted against both renderers. A first line of
+// script runs alone is written plain (scriptsAloneAsPlain): its glyph top, the
+// box's, holds the browser's raise already.
 //
 // A turned block (snapshot_text_turned.mjs turnedBlocks: rotated text, or text a
 // vertical writing mode sets sideways) is its root's layout box, grown by its
@@ -202,6 +204,19 @@ function growthBeforePx(line, lineIndex, forPowerPoint) {
   return grownByItsCap ? 0 : growth;
 }
 
+// The runs of a block's first line as the deck writes them: as they are, but
+// on a line of script runs alone (a <sup> a margin cuts off into a box of its
+// own), plain. The box is placed at that line's glyph top, so the browser's
+// raise is in its place already; written as scripts, the renderers raised them
+// again from a line set at their enlarged size (edited-off's "3x faster¹", 9 px
+// high in PowerPoint, 3 px in Google). Plain, at the browser's size, the line
+// is set as any first line is (firstLineOffsetPx).
+function scriptsAloneAsPlain(line) {
+  const runs = line.runs || [];
+  if (!runs.length || largestUnshiftedRun(line)) return runs;
+  return runs.map((run) => ({ ...run, baseline: null }));
+}
+
 // A blank line's NBSP run: the previous run's face and size without its glyph
 // marks, so neither an underline nor a baseline shift, nor the size a script
 // run is enlarged to for the renderer's own shrink. Its face is written as
@@ -271,13 +286,14 @@ function writtenParagraphs(item, faces, renderer, tableCell) {
       // Google's cap takes the growth of a line within its paragraph, where it
       // was measured; a paragraph's first line keeps its own size there.
       const sizing = { target, capPx: scriptCapPx(line, lineIndex > 0 ? line.growthPx : 0) };
-      for (let runIndex = 0; runIndex < runs.length; runIndex++) {
-        const options = itemRunOptions(runs[runIndex], item, faces, sizing);
+      const lineRuns = paragraphIndex === 0 && lineIndex === 0 ? scriptsAloneAsPlain(line) : runs;
+      for (let runIndex = 0; runIndex < lineRuns.length; runIndex++) {
+        const options = itemRunOptions(lineRuns[runIndex], item, faces, sizing);
         if (runIndex === 0 && !opensParagraph) options.softBreakBefore = true;
-        current.objects.push({ text: runText(runs[runIndex].text, sizing), options });
-        previousRun = runs[runIndex];
+        current.objects.push({ text: runText(lineRuns[runIndex].text, sizing), options });
+        previousRun = lineRuns[runIndex];
       }
-      if (forPowerPoint && runs[runs.length - 1].baseline) {
+      if (forPowerPoint && lineRuns[lineRuns.length - 1].baseline) {
         current.objects.push({ text: WORD_JOINER, options: lineEndOptions(line, item, faces) });
       }
     }

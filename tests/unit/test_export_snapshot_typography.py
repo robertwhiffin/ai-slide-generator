@@ -101,8 +101,6 @@ TABLE_MODULE = Path(pptx_from_html_huashu.SIDECAR_DIR) / "emit_table.cjs"
 
 PT_PER_PX = 0.75
 HUNDREDTHS = 100
-# A superscript is baseline="30000" (1000ths of a percent).
-SUPERSCRIPT_BASELINE = 30000
 # spc = round(size x em x 0.75 x 100) +/- 1.
 SPC_TOLERANCE_HUNDREDTHS = 1.0
 # CALIBRATION.md A1: a run whose width at the browser's automatic optical size
@@ -1185,16 +1183,17 @@ class TestSnapshotRunStyle:
     def test_footnote_marker_is_a_superscript_run(self, corpus_pptx: bytes) -> None:
         """Fixture 09: "gross profit<sup>1</sup>".
 
-        The marker is its own run "1" with ``baseline="30000"``, and the
-        "profit" before it sits on the baseline. A marker at the baseline reads
-        as "profit1".
+        The marker is its own run "1", raised (a positive ``baseline``: in the deck for
+        PowerPoint the raise the browser set it at, which ``test_export_snapshot_line_spacing``
+        TestScriptRaise pins), and the "profit" before it sits on the baseline. A marker at the
+        baseline reads as "profit1".
         """
         box = _box(_corpus_shapes(corpus_pptx, "09"), FOOTNOTE_LINE)
 
         marker = _run(box, FOOTNOTE_MARKER)
-        assert marker.baseline_offset == SUPERSCRIPT_BASELINE, (
-            f"the footnote marker's baseline is {marker.baseline_offset}, expected "
-            f"{SUPERSCRIPT_BASELINE}:\n{_box_runs(box)}"
+        assert marker.baseline == "super" and marker.baseline_offset > 0, (
+            f"the footnote marker's baseline is {marker.baseline_offset}, not raised:\n"
+            f"{_box_runs(box)}"
         )
         raised = [
             _describe_run(run)

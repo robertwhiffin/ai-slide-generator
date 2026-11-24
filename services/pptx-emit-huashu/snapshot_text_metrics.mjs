@@ -48,6 +48,7 @@ function createTextMetrics(layout) {
     undrawnFamilyOf,
     pendingParagraphs,
     pendingRuns,
+    pendingScripts,
     pendingFonts,
     coverageFont,
     target,
@@ -844,6 +845,7 @@ function createTextMetrics(layout) {
   // webfont lacks are split off (splitFallbackRuns), so their runs are the ones
   // measured. `webfonts` is model.fonts.
   function applyMetrics(webfonts) {
+    measureScriptRaises();
     resolveWrittenFaces(webfonts);
     splitFallbackRuns(webfonts);
     const list = probeList();
@@ -899,6 +901,41 @@ function createTextMetrics(layout) {
       const gaps = pending.endsLine ? characters - 1 : characters;
       const kerning = unkernedCut > 0 && gaps > 0 ? (exportCut - unkernedCut) / gaps : 0;
       pending.run.unkernedTrackingPx = delta + kerning;
+    }
+  }
+
+  // Each queued script run's raise (pendingScripts), raisePx: its baseline's
+  // height above its line's, which is that line's largest unmoved run's, each
+  // the top of its text plus its face's ascent (a baseline probe, as a
+  // paragraph's ascent is read). The browser raises a vertical-align: super
+  // run by a third of its parent's size and more (Chrome: parent / 3 + 1 px)
+  // and lowers a sub one by a fifth and more, whatever the run's own size, and
+  // a relative move by its offset; the emitter writes the raise it measured
+  // (emit_typography.cjs). Read before the runs are cut at the characters
+  // their face lacks (splitFallbackRuns), whose pieces carry it. A run whose
+  // probes could not be read keeps none.
+  function measureScriptRaises() {
+    if (!pendingScripts.length) return;
+    const list = probeList();
+    const wanted = [];
+    const length = Math.min(pendingScripts.length, COLLECTION_ITEM_LIMIT);
+    for (let index = 0; index < length; index++) {
+      const pending = pendingScripts[index];
+      wanted.push({
+        pending,
+        own: list.probe(lineProbeCss(pending.face), LINE_PROBE_TEXT, true),
+        line: list.probe(lineProbeCss(pending.lineFace), LINE_PROBE_TEXT, true),
+      });
+    }
+    const sizes = measureProbes(list.probes, 'lossScriptRaises');
+    if (!sizes) return;
+    for (let index = 0; index < wanted.length; index++) {
+      const { pending, own, line } = wanted[index];
+      const ownAscent = sizes[own] ? Number(sizes[own].ascent) : NaN;
+      const lineAscent = sizes[line] ? Number(sizes[line].ascent) : NaN;
+      if (!(ownAscent > 0) || !(lineAscent > 0)) continue;
+      const raise = (pending.lineTop + lineAscent * pending.lineFace.scale) - (pending.top + ownAscent * pending.face.scale);
+      if (Number.isFinite(raise)) pending.run.raisePx = raise;
     }
   }
 

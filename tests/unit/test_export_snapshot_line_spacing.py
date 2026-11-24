@@ -143,6 +143,7 @@ SUPERSCRIPT_FACTOR = "SUPERSCRIPT_SIZE_FACTOR"
 # Recorded only when the renders show subscript needs a factor of its own.
 SUBSCRIPT_FACTOR = "SUBSCRIPT_SIZE_FACTOR"
 GOOGLE_LINE_GROWTH = "GOOGLE_LINE_GROWTH_PER_PX"
+SUBSCRIPT_LOWERING = "POWERPOINT_SUBSCRIPT_LOWERING"
 # A decimal literal as Markdown or JavaScript writes it.
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
@@ -559,6 +560,22 @@ class TestCalibratedConstants:
             f"{GOOGLE_LINE_GROWTH} = {recorded:g} must lie in (0, 1]: a line is lowered by "
             "no more than the excess that lowers it"
         )
+
+    def test_powerpoint_subscript_lowering_is_the_recorded_calibration(self) -> None:
+        """T5: ``POWERPOINT_SUBSCRIPT_LOWERING`` in ``emit_typography.cjs`` is the recorded one.
+
+        PowerPoint raises a run by its baseline offset times its written size, and lowers one
+        with a negative offset by this share of that, measured in its PDF. It is a share, so it
+        lies in (0, 1].
+        """
+        recorded = _recorded_value(SUBSCRIPT_LOWERING)
+        emitted = _emitter_constant(SUBSCRIPT_LOWERING, (EMIT_TYPOGRAPHY_MODULE,))
+
+        assert emitted == recorded, (
+            f"emit_typography.cjs has {SUBSCRIPT_LOWERING} = {emitted:g}; CALIBRATION.md records "
+            f"{recorded:g}"
+        )
+        assert 0 < recorded <= 1, f"{SUBSCRIPT_LOWERING} = {recorded:g} must lie in (0, 1]"
 
     def test_subscript_size_factor_is_the_recorded_calibration_or_absent(self) -> None:
         """A2: ``SUBSCRIPT_SIZE_FACTOR`` exists in the emitter exactly when ``CALIBRATION.md``
@@ -1372,6 +1389,127 @@ class TestSnapshotScriptSize:
             "sub",
             _px(subscript_style["fontSize"]),
             CHEMISTRY_SIZE_PX,
+        )
+
+
+# A small superscript on a large line, a subscript, and a superscript a margin cuts off into
+# a box of its own, as the edited decks hold them.
+SCRIPT_RAISE_SLIDE = """<div class="slide">
+  <div style="position: absolute; left: 88px; top: 80px; font: 700 32px/1.3 'DM Sans', sans-serif;">
+    <span id="raise-base">10x</span><span id="raise-script" style="font-size: 11px;
+      vertical-align: super;">1</span></div>
+  <div style="position: absolute; left: 88px; top: 200px; font: 400 24px Arial, sans-serif;">
+    <span id="lower-base">H</span><sub id="lower-script">2</sub>O</div>
+  <p style="position: absolute; left: 88px; top: 300px; margin: 0;
+     font: 800 40px/1 Arial, sans-serif;">3x faster<sup id="alone-script"
+     style="font-size: 16px; margin-left: 2px;">1</sup></p>
+</div>"""
+# (base selector, its face, script selector, its face, the script's text); a face is
+# (family, weight, size px).
+SCRIPT_RAISES = (
+    ("#raise-base", ("DM Sans", 700, 32.0), "#raise-script", ("DM Sans", 700, 11.0), "1"),
+    ("#lower-base", ("Arial", 400, 24.0), "#lower-script", ("Arial", 400, 20.0), "2"),
+)
+ALONE_SCRIPT = "#alone-script"
+ALONE_SCRIPT_SIZE_PX = 16.0
+# PowerPoint's baselines sit on a 0.24 pt (0.32 px) grid (CALIBRATION.md, residuals).
+POWERPOINT_BASELINE_GRID_PX = 0.32
+
+
+def _browser_raise(
+    document: str, base: str, base_face: tuple, script: str, script_face: tuple
+) -> float:
+    """How far above its base's baseline the browser set a script's (below: negative), px:
+    each the top of its text (its inline box's content area) plus its face's ascent."""
+    base_top = browser_rect(document, base)["y"]
+    script_top = browser_rect(document, script)["y"]
+    return (base_top + browser_ascent(document, *base_face)) - (
+        script_top + browser_ascent(document, *script_face)
+    )
+
+
+@pytest.fixture(scope="module")
+def script_raise_exports() -> Iterator[dict[str, bytes]]:
+    """The script raise slide exported for each target, once."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        decks = {}
+        for target in ("pptx", "gslides"):
+            pptx, failures = export_slides(
+                [SCRIPT_RAISE_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [] and pptx, f"the export rejected the slide: {failures}"
+            decks[target] = pptx
+        yield decks
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestScriptRaise:
+    def test_powerpoint_sets_each_script_where_the_browser_raised_it(
+        self, script_raise_exports: dict[str, bytes]
+    ) -> None:
+        """T5: a script run's baseline offset raises it in PowerPoint as far as the browser did.
+
+        The browser raises an 11 px superscript on a 32 px line by about a third of the LINE's
+        size (11.7 px), and lowers a subscript by about a fifth; PowerPoint raises a run by its
+        baseline offset times its written size, and lowers it by 0.879 of that
+        (``POWERPOINT_SUBSCRIPT_LOWERING``, measured). pptxgenjs's fixed 30% set the small
+        superscript 6 px low. So the offset written, times the run's written size (and that
+        share for a lowering), is the browser's raise, within PowerPoint's 0.32 px baseline grid.
+        """
+        document = slide_document(SCRIPT_RAISE_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+        shapes = slide_shapes(script_raise_exports["pptx"])
+        lowering = _recorded_value(SUBSCRIPT_LOWERING)
+        wrong = []
+        for base, base_face, script, script_face, text in SCRIPT_RAISES:
+            raised = _browser_raise(document, base, base_face, script, script_face)
+            run = _run(_box_containing(shapes, browser_text(document, base)), text)
+            size_px = (run.size_pt or 0) / 0.75
+            share = run.baseline_offset / PERCENT_UNITS
+            drawn = share * size_px * (1 if share >= 0 else lowering)
+            if abs(drawn - raised) > POWERPOINT_BASELINE_GRID_PX:
+                wrong.append(
+                    f"{script}: offset {run.baseline_offset} at {size_px:.2f} px sets it "
+                    f"{drawn:.2f} px off its line; the browser {raised:.2f} px"
+                )
+        assert not wrong, "scripts PowerPoint sets off the browser's raise:\n  " + "\n  ".join(
+            wrong
+        )
+
+    def test_the_google_deck_keeps_googles_own_script(
+        self, script_raise_exports: dict[str, bytes]
+    ) -> None:
+        """GUARD (the measured trade-off): Drive converts any offset to Google's one superscript
+        or subscript, so the Google deck writes pptxgenjs's own 30000 and -40000."""
+        document = slide_document(SCRIPT_RAISE_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+        shapes = slide_shapes(script_raise_exports["gslides"])
+        offsets = {
+            script: _run(
+                _box_containing(shapes, browser_text(document, base)), text
+            ).baseline_offset
+            for base, _, script, _, text in SCRIPT_RAISES
+        }
+        assert offsets == {"#raise-script": 30000, "#lower-script": -40000}, offsets
+
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_script_alone_in_its_box_is_written_plain_at_the_browsers_size(
+        self, target: str, script_raise_exports: dict[str, bytes]
+    ) -> None:
+        """T5: a ``<sup>`` its margin cuts off into a box of its own is plain at its own size.
+
+        Its box is placed at its glyph top, where the browser raised it. Written as a
+        superscript, at 1.55 times its size and raised a third of that again, PowerPoint set
+        it about 9 px high and Google about 3. So its run carries no baseline offset and is
+        the browser's 16 px, 12 pt, in both decks.
+        """
+        shapes = slide_shapes(script_raise_exports[target])
+        (box,) = [shape for shape in shapes if shape.kind == "text" and shape.text.strip() == "1"
+                  and shape.y > 290]
+        (run,) = [run for run in box.paras[0].runs if run.text.strip()]
+        plain_size = abs((run.size_pt or 0) - ALONE_SCRIPT_SIZE_PX * 0.75) < 0.01
+        assert run.baseline_offset == 0 and plain_size, (
+            f"the script alone in its box is written with offset {run.baseline_offset} at "
+            f"{run.size_pt} pt; the browser draws it plain at {ALONE_SCRIPT_SIZE_PX * 0.75} pt"
         )
 
 

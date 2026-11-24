@@ -2214,7 +2214,9 @@ class TestScriptRunsPerRenderer:
         Every part but the slides is identical. Each slide holds the same
         shapes, at the same places, with the same lines and runs, once these
         are taken out:
-        * every script run's size (capped at its line's for Google);
+        * every script run's size (capped at its line's for Google), and its baseline
+          offset, the raise the browser set it at in the PowerPoint deck and Google's own
+          superscript or subscript in the Google one (CALIBRATION.md T5);
         * every run's tracking, which each target measures (CALIBRATION.md A1
           for Google, X1 for PowerPoint);
         * in the PowerPoint deck, the word joiner after a script run that ends
@@ -2272,8 +2274,9 @@ def _written_lines(shape: Shape, target: str) -> list[dict]:
 
     Each line is ``{opens, before, align, pct, rtl, runs}``: whether it opens
     a paragraph, that paragraph's space before (None for a line a soft break
-    starts), its paragraph's properties and its runs. A script run's size is
-    taken out, and so is every run's tracking (``_without_tracking``), and, in
+    starts), its paragraph's properties and its runs. A script run's size and
+    baseline offset are taken out (its side, super or sub, stays), and so is every
+    run's tracking (``_without_tracking``), and, in
     the deck for PowerPoint, the run holding a word joiner that follows a
     script run at the end of its line.
     """
@@ -2301,6 +2304,7 @@ def _written_lines(shape: Shape, target: str) -> list[dict]:
                 dataclasses.replace(
                     run,
                     size_pt=None if run.baseline else run.size_pt,
+                    baseline_offset=0 if run.baseline else run.baseline_offset,
                     soft_break_before=False,
                     spc_pt=0.0,
                 )

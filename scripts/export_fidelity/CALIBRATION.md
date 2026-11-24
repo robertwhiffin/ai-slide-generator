@@ -21,9 +21,11 @@ The tests read the constants from this file: each sits on a line of its own, onc
     FIRST_LINE_C = -1.5
     SUPERSCRIPT_SIZE_FACTOR = 0.646
     GOOGLE_LINE_GROWTH_PER_PX = 0.96
+    POWERPOINT_SUBSCRIPT_LOWERING = 0.879
 
 There is no subscript factor: both renderers shrink a subscript run exactly as they shrink a
-superscript one (A2 below). `GOOGLE_LINE_GROWTH_PER_PX` is A4's.
+superscript one (A2 below). `GOOGLE_LINE_GROWTH_PER_PX` is A4's, `POWERPOINT_SUBSCRIPT_LOWERING`
+T5's.
 
 ## The rules these constants serve
 

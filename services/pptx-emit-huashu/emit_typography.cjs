@@ -74,6 +74,20 @@
 // emit_text.cjs), which keeps the line where the browser has it, the script
 // glyph up to some 20% small (measured in both apps; CALIBRATION.md A4).
 //
+// Super- and subscript raise. The browser raises a vertical-align: super run by
+// a third of its PARENT's size and more (Chrome: parent / 3 + 1 px), and lowers
+// a sub one by a fifth and more, whatever the run's own size: an 11 px
+// superscript on a 32 px line rises 11.7 px. The snapshot measures it
+// (raisePx). PowerPoint raises a run by its baseline offset (a:rPr baseline, in
+// 1000ths of a percent) times the run's written size, so the fixed 30% that
+// pptxgenjs writes for a superscript set that 11 px one 6 px low; the deck for
+// PowerPoint writes the measured raise instead (baselineOffsetOf). Drive
+// converts any positive offset to Google's one superscript and any negative one
+// to its one subscript (measured: 30000 and 60000 alike), which Google raises
+// by 0.375 of the written size, the size it also draws the glyph at; so the
+// deck for Google Slides keeps the flags, and its script sits where Google's
+// own raise of its written size puts it (CALIBRATION.md T5).
+//
 // Hyphens. The browser draws U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN
 // with the face's own hyphen-minus where the face has neither (DM Sans has
 // neither). PowerPoint draws U+2011 so too, but U+2010 from another font
@@ -93,6 +107,17 @@ const { PT_PER_PX } = require('./units.cjs');
 // The fraction of a superscript or subscript run's size the renderers draw it at,
 // calibrated against PowerPoint and Google Slides (scripts/export_fidelity/CALIBRATION.md).
 const SUPERSCRIPT_SIZE_FACTOR = 0.646;
+// How far PowerPoint lowers a run with a negative baseline offset, as a share
+// of the offset times its written size (a raise is the offset times the size
+// itself), measured in its PDF: 5.44 and 10.88 px at -20000 and -40000 for a
+// 30.96 px run, where superscripts rose 5.44, 10.56, 25.28 and 49.28 px at
+// 30000 and 60000 for 17.03 and 82.56 px runs, within its 0.32 px baseline grid
+// (scripts/export_fidelity/CALIBRATION.md T5).
+const POWERPOINT_SUBSCRIPT_LOWERING = 0.879;
+// pptxgenjs writes a run's `baseline` option times this as its a:rPr baseline.
+const PPTXGENJS_BASELINE_UNITS = 50;
+// A baseline offset is in 1000ths of a percent of the run's size.
+const BASELINE_OFFSET_UNITS = 100000;
 const LIGHTEST_WEIGHT = 100;
 const HEAVIEST_WEIGHT = 900;
 const WEIGHT_STEP = 100;
@@ -245,6 +270,23 @@ function fontSizePt(run, sizing) {
   return capPx > 0 ? Math.min(written, capPx * PT_PER_PX) : written;
 }
 
+// The baseline offset (a:rPr baseline, 1000ths of a percent) that puts a
+// script run's baseline `run.raisePx` above its line's in PowerPoint, at its
+// written size `sizePt`: the raise over the size, a lowering over the size
+// times POWERPOINT_SUBSCRIPT_LOWERING. Never 0, which would write no shift and
+// no script, but at least one unit its way. Null for a run that is no script,
+// or whose raise was not measured: pptxgenjs then writes its own 30000 or -40000.
+function baselineOffsetOf(run, sizePt) {
+  if (!(run.baseline === 'super' || run.baseline === 'sub')) return null;
+  const raise = Number(run.raisePx);
+  const sizePx = sizePt / PT_PER_PX;
+  if (!Number.isFinite(raise) || !(sizePx > 0)) return null;
+  const share = raise >= 0 ? raise / sizePx : raise / (sizePx * POWERPOINT_SUBSCRIPT_LOWERING);
+  const offset = Math.round(share * BASELINE_OFFSET_UNITS);
+  if (offset !== 0) return offset;
+  return raise >= 0 ? 1 : -1;
+}
+
 // The renderer a run is written for: 'gslides', or 'pptx' (also when none is named).
 function targetOf(sizing) {
   return sizing && sizing.target === 'gslides' ? 'gslides' : 'pptx';
@@ -269,11 +311,12 @@ function runOptions(run, faces, sizing) {
     : { ...typefaceFor(run.family, run.weight, weights, target), italic: Boolean(run.italic) };
   const measuredPx = target === 'pptx' ? run.unkernedTrackingPx : run.opticalTrackingPx;
   const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(measuredPx) || 0);
-  return {
+  const fontSize = fontSizePt(run, sizing);
+  const options = {
     fontFace: xmlAttribute(face.fontFace),
     bold: face.bold,
     italic: face.italic,
-    fontSize: fontSizePt(run, sizing),
+    fontSize,
     color: run.color,
     charSpacing: trackingPx * PT_PER_PX,
     underline: run.underline ? { style: 'sng' } : undefined,
@@ -281,6 +324,9 @@ function runOptions(run, faces, sizing) {
     superscript: run.baseline === 'super',
     subscript: run.baseline === 'sub',
   };
+  const offset = target === 'pptx' ? baselineOffsetOf(run, fontSize) : null;
+  if (offset !== null) options.baseline = offset / PPTXGENJS_BASELINE_UNITS;
+  return options;
 }
 
 // transparencyOf(alpha) -> the pptxgenjs transparency of a fill or line at
