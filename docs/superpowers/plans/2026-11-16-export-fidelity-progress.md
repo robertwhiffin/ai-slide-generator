@@ -2119,10 +2119,6 @@ Google Slides decks kept for this batch (intermediate probe decks deleted by id)
   ("Tellr export revamp — fix B, in-repo corpus (pinned fonts, 1a4c0b52)")
 - Design-system corpus: https://docs.google.com/presentation/d/1nP3nPwLERMa8k-5ZW3VzqnI9t4qFiGyXPPgIziFRxFc/edit
   ("Tellr export revamp — fix B, design-system corpus (pinned fonts, 1a4c0b52)")
-
-printf "\n"
-
-cat /Users/tariq.yaaqba/.claude/jobs/937bacb3/tmp/fixC/ledger-draft.md
 
 ## Final fix C: the residuals of the final fix round
 

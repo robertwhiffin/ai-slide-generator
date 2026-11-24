@@ -294,6 +294,11 @@ which address capture targets.
 - clipped to under 2 px by `clip`, `clip-path` or an `overflow` ancestor (the
   visually-hidden pattern).
 
+Generated text (`::before`, `::after`) a clip cuts is drawn by the character, each whole where
+its clip shows at least half of it (as built, final fix F: a text box cannot clip its glyphs,
+and drawing a character whole is the nearer from half shown up); the page's own words are
+drawn whole, so none is lost.
+
 **Paint order.** Items follow CSS painting order. Within each stacking context the order
 is:
 1. the context's own background;
@@ -458,7 +463,12 @@ these table constructs.
 `build_pptx_huashu(..., target=...)` names the app the deck is for: `"pptx"` (the download)
 or `"gslides"` (the Google Slides route). Only those constructs branch. In the Google deck a
 script glyph on a line the browser did not grow is drawn at 0.8 of its size, an accepted
-trade-off: the line sits where the browser has it.
+trade-off: the line sits where the browser has it. A script run's raise is the browser's,
+measured, in the deck for PowerPoint (its baseline offset); Drive keeps only Google's one
+superscript and subscript, so the Google deck sets it at Google's own raise (as built, final
+fix F, T5). A blurred inset box-shadow is PowerPoint's inner shadow and nothing in Google
+(T3); a box-drawing character is written in the face of its target whose advance is nearest
+the browser's (T6).
 
 **Pictures.** These become capture targets:
 - `<img>` (`data:` only), `<canvas>`, `<video>` posters and inline `<svg>`;
@@ -484,7 +494,18 @@ PowerPoint pictures have no radius.
   deck for Google Slides that shape runs 1 px under each opaque native cell beside it, which
   paints over it (B6); the table's own background is cut to that box too (B3);
 - a dotted border is written `sysDot` (B3): pptxgenjs writes table borders only solid or
-  dashed, so the deck's XML is rewritten for it once written.
+  dashed, so the deck's XML is rewritten for it once written;
+- a double border is a double compound line in the deck for PowerPoint; Drive makes a double
+  table border one solid line, so the deck for Google Slides draws the edge over the table as
+  its two lines (as built, final fix F, T7);
+- a collapsed cell whose own border-radius rounds its background (Chrome rounds it under
+  collapse) as the rounded clip's corner cells are: unfilled, its fill a shape under the table
+  cut to its rounded box (T2); in the deck for Google Slides each such shape also runs 1 px
+  under an opaque one drawn after it, so two side by side meet with no seam;
+- a cell's inset box-shadow, which keeps the table native, drawn over the table inside the
+  cell's padding box (T3);
+- each cell paragraph set tighter than the apps' single spacing written at its percentage of
+  it, one line or more, so the apps keep the browser's row height (T1).
 
 A cell holding an image, SVG, Harvey ball or block layout keeps the native table, and that
 content is overlaid as its own items at its measured rect. A table containing a nested

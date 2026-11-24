@@ -1206,7 +1206,8 @@ As built (`snapshot.mjs` pushTable and `CORNER_RUN_UNDER_PX`, the deck for Googl
 `snapshot_table.mjs` runUnderPolygon, over the table's own slot grid): each side whose every slot
 across is an opaque native cell moves out by 1 px, or half that row's or column's size where that
 is less; the corner square between two such sides only where the slot across the corner is
-opaque too; never under another corner cell. On `slide-data-table`
+opaque too; under an opaque corner piece drawn after it, which paints over it, and never
+under one drawn before it (T2). On `slide-data-table`
 the seam at x = 356.5 is then 0 levels in the thumbnail (73 before), its other edges are as they
 were there, and in Google's PDF its inner edges match the UI (0) where native cell boundaries
 still show MuPDF's 9 to 45 levels.
@@ -1233,6 +1234,143 @@ pixel of the seam comes back:
 - in the PDF, 28–33 levels at 1× and 4–8 at 2×.
 
 The PDF does not stay at 0, so the strips run to the table's edges, as built.
+
+## T1: a native table's rows at the apps' single spacing
+
+Measured 2026-11-24 (final fix F) on a probe slide of eight native tables (`fixF/probe-deck`
+slide 01), rendered in PowerPoint for Mac (its PDF at 2x) and converted through Drive (its PDF at
+2x), against Chrome at device scale 2: each a header and five rows, one of them two lines, the
+cells padded and ruled 1 px. Each table's height from its top rule to its bottom one, export
+minus UI (px), and the largest error of a row's first-column ink top:
+
+| table | engine before: PowerPoint / Google | one-line cells spaced: PowerPoint / Google | ink top, after |
+|---|---|---|---|
+| Inter, SF Pro Display, Helvetica, Arial 15 px (finance-off's) | +5.0 / +5.0 | 0 / 0 | 0 / -0.5 |
+| Arial 13 px | +3.0 / +3.0 | 0 / 0 | -0.5 / +0.5 |
+| DM Sans 14 px (1.30 em at normal) | 0 / 0 | 0 / 0 | -1.0 / -0.5 |
+| Georgia 15 px | +5.0 / +5.0 | 0 / 0 | -0.5 / -0.5 |
+| Arial 16 px, line-height 1.0, top | +16.0 / +16.0 | 0 / 0 | -1.0 / -0.5 |
+| Helvetica 15 px, line-height 1.6 | 0 / 0 | 0 / 0 | +1.5 / +1.0 |
+| Arial 20 px, top | +5.0 / +5.0 | +0.2 / 0 | +1.0 / +0.5 |
+| DM Mono 13 px (1.32 em at normal) | 0 / 0 | 0 / 0 | -1.0 / +0.5 |
+
+Both apps lay a row out to hold each cell's lines at single spacing, 1.2 x the size, inside its
+margins, and grow it where that is taller. Chrome sets Arial, Helvetica and Georgia at
+`line-height: normal` at 1.12 to 1.15 em, so a one-line cell written with no `lnSpc` grew its row
+about a px. Written at its percentage of single spacing, as a block of several lines is, the row is
+the browser's in both apps; a cell set at or over single spacing (DM Sans, DM Mono at normal, the
+1.6 table) needs none and stays natural. The text's own place moved by at most 0.8 px, so no
+margin correction was added (`emit_text.cjs` cellSpacingOf).
+
+## T2: a collapsed cell's own rounded corner
+
+Under `border-collapse: collapse` Chrome rounds a cell's background by the cell's own
+`border-radius` (long-on's coral headers, `th:first-child { border-top-left-radius: 8px }`), its
+collapsed borders staying straight; an `a:tc` is square. Such a cell is drawn as D5's corner
+piece (unfilled in the table, its fill a custom shape under it, its grid rect cut to its rounded
+box), running 1 px under each opaque native neighbour in the deck for Google Slides as D13's do,
+its rounded box grown by the same reach so the arc stays at the cell's own corner. On the probe
+(`fixF/probe-deck` slide 02) the 8 px and 16 px header corners and a table's four rounded corner
+cells are round in both apps, as in the UI.
+
+Two pieces side by side (`#r8`'s two header cells; `#rall`'s, and its rounded last row's) each
+anti-aliased its edge at the grid line between them, and Google's LARGE thumbnail showed one light
+column there: 41, 36 and 43 levels from the row's fill, the mean over the row's middle third. So a
+piece also runs 1 px under each opaque piece drawn after it, which paints over it as a native cell
+does (each cut cell is unfilled in the table only as its own piece is drawn), and never under one
+drawn before it. After it every column across those lines is 0 levels from the fill, as in the UI
+(`fixF/probe-seam-after`). The deck for PowerPoint, whose pieces lie on whole px, draws no
+run-under.
+
+## T3: inset box-shadows
+
+Measured 2026-11-24 on a probe slide (`fixF/probe-deck` slide 03) and an XML edit of its deck.
+- **A layer with no blur** paints a band inside the padding box: the box less its hole, the
+  padding box moved by the offset and shrunk by the spread. Drawn as rects of the layer's colour
+  (cut to a rounded box's corners), both apps match the UI pixel for pixel at 2x on `inset 4px 0 0`,
+  `inset 0 0 0 3px`, `inset 3px 3px 0` inside a 2 px border, and the pricing table's
+  `inset ±2px 0 0` column rules. On a rounded box the hole's corners stay square, so a bottom band
+  is a little thinner where the UI's curves up into the corners.
+- **A blurred layer** as `a:innerShdw` on a shape in the box's fill: PowerPoint draws it, on the
+  side opposite its direction (`inset 0 2px 8px` written dir 90 degrees shaded the bottom; the deck
+  writes CSS's angle plus 180 degrees); Drive drops it (nothing drawn). A shape with no fill draws
+  no inner shadow. pptxgenjs writes an inner shadow closed as `a:outerShdw`, which neither app
+  reads, so the deck gives it after writing (`emit_rewrite.cjs`).
+
+## T4: generated text a clip cuts
+
+A text box cannot clip its glyphs: a character is drawn whole or not at all. Drawn whole, a
+character a clip shows a share f of paints 1 - f of it where the browser shows nothing; left out it
+loses f. So a character of generated text is drawn where its clip shows at least half of it
+(`CLIPPED_GENERATED_SHOWN` = 0.5), its place in its box read by probing its text's widths. On the
+probe (`fixF/probe-deck` slide 04): an arrow 13 px past its lane (7 of its 20 px shown, the
+architecture decks') is left out where both apps drew it whole; one 4 px past it is kept; of
+`NEXT →` 40 px past its lane, "NEX" is drawn, as the UI shows. The page's own words keep the 2 px
+rule, whole however little shows, so no text is lost.
+
+## T5: super- and subscript raise
+
+Measured 2026-11-24, from the text origins of each app's PDF of the probe slide
+(`fixF/probe-deck` slide 05) and of XML edits of its deck, the run's baseline offset varied:
+
+| run (written size) | offset | PowerPoint raises it by | Google Slides raises it by |
+|---|---|---|---|
+| 11 px superscript on a 32 px line (17.03 px) | 15000 / 30000 / 60000 | 2.56 / 5.44 / 10.56 px | 6.39 / 6.39 / 6.39 px |
+| 53 px superscript on a 64 px line (82.56 px) | 15000 / 30000 / 60000 | 11.84 / 25.28 / 49.28 px | 24.00 px (capped at 64 px) |
+| 20 px subscript on a 24 px line (30.96 px) | -20000 / -40000 / -60000 | -5.44 / -10.88 / -17.60 px | -9.00 px |
+
+PowerPoint raises a run by its offset times its written size, within its 0.32 px baseline grid,
+and lowers one by 0.879 of that (`POWERPOINT_SUBSCRIPT_LOWERING`, the 20% and 40% points; 60%
+lowers by 0.947 of it, past any subscript a deck holds). Drive converts any positive offset to
+Google's one superscript and any negative one to its subscript, which Google raises by 0.375 of the
+written size and draws at 0.666 of it, so its raise and its size go together. The browser raises a
+`vertical-align: super` run by a third of its parent's size and more (Chrome: parent / 3 + 1 px):
+the 11 px superscript on a 32 px line rose 12 px in the UI, where pptxgenjs's fixed 30000 set it
+6 px in PowerPoint and Google set it 7. So the snapshot measures each script run's raise and the
+deck for PowerPoint writes it as the offset; after it the superscript rises 12.5 px in PowerPoint.
+The deck for Google Slides keeps the flags: placing that superscript there would draw it at 1.8
+times its size (a measured trade-off, as the 0.8 rule is). A superscript alone in its box (a
+margin cuts it off, edited-off's "3x faster¹") is written plain at its size: 8 px high in
+PowerPoint and 1.5 px in Google before, within 0.5 px of its own line after.
+
+## T6: box drawing in each app
+
+Measured 2026-11-24: every character of U+2500-257F (and U+2580-259F) written in each of seven
+faces, read from each app's PDF (`fixF/probe-boxdraw`), the face it was drawn in and its advance:
+
+| face | PowerPoint for Mac | Google Slides |
+|---|---|---|
+| Segoe UI Symbol | all 160 itself; box drawing 0.5 em, blocks 0.9 | none (MS PGothic, Arial) |
+| MS PGothic | 150; JIS X 0208's 32 at 1 em, the rest 0.667 | the same |
+| MS Gothic | 150; JIS X 0208's 32 at 1 em, the rest 0.5 | the same |
+| JetBrains Mono, Noto Sans Mono | none (MS Gothic, Segoe UI Symbol, Arial) | all 160 at 0.6 em |
+| Noto Sans JP | none | all 160 at 1 em |
+| Courier New | the 48 of WGL4 at 0.6 em; the heavy ones from MS Mincho | the same |
+
+Chrome lays box drawing out at its fallback face's cell: Menlo's 0.6 em after DM Mono on a Mac,
+about 1 em after Helvetica, the container's DejaVu about 0.7 em. Written in MS Gothic (a
+monospace run's symbol face) or MS PGothic, at 1 em, a heavy rule ran past its box: Google, which
+wraps every box at its width, broke long-off 01's `━━━━━` 3 + 2. So a box-drawing character the
+written face lacks is written in its target's face whose advance is nearest the browser's
+(`TARGET_BOX_DRAWING_FACES`): Segoe UI Symbol or MS PGothic for PowerPoint, JetBrains Mono or
+Noto Sans JP for Google Slides. On the probe the DM Mono rule and the `Stage ━━ next ━━━ last`
+line no longer wrap in Google.
+
+## T7: double borders
+
+Measured 2026-11-24 on a probe slide (`fixF/probe-deck` slide 07) and an XML edit of its deck
+writing `cmpd="dbl"` on every line of 3 px or more, profiled across each border at 2x:
+
+| written | PowerPoint | Google Slides |
+|---|---|---|
+| a shape's outline, 3, 6 and 9 px, square and rounded | two lines and a gap, a third each | the same |
+| a line (one side), 4 and 6 px | the same | the same |
+| a table cell's border, 3 and 6 px | the same | one solid line of the whole width |
+
+Chrome paints a double border of 3 px or more as two lines and a gap (1 + 1 + 1 at 3 px, 1 + 2 + 1
+at 4, 2 + 2 + 2 at 6), and a narrower one solid. So the deck writes such a border `cmpd="dbl"`, and
+in the deck for Google Slides a double table edge is no line on its cells and is drawn over the
+table as one unfilled custom shape stroking its outer and inner thirds.
 
 ## H1: rasterising an app's PDF
 
@@ -1284,7 +1422,9 @@ workspace running the sidecar's own bootstrap and Chromium, read through the Dev
 against the Mac's Chrome, and on probe decks of symbols written in each candidate face, rendered in
 PowerPoint for Mac and converted through Drive, their PDFs read and the presentations deleted by id;
 the app was deleted afterwards (`docs/superpowers/plans/2026-11-16-export-fidelity-progress.md`,
-B8).
+B8). T1 to T7 (final fix F, 2026-11-24) were measured on probe decks the engine wrote and XML edits
+of them (`fixF/probe-deck`, `fixF/probe-boxdraw`), rendered in PowerPoint for Mac and converted
+through Drive, both PDFs read at 2x and every presentation deleted by id once read.
 
 To re-run (PowerPoint will briefly open a window):
 
