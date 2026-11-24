@@ -29,6 +29,7 @@ from src.services import pptx_from_html_huashu
 from tests.fixtures import browser_leak_check
 from tests.fixtures import export_snapshot_support as support
 from tests.fixtures.export_snapshot_support import requires_huashu_sidecar
+from tests.unit import test_export_snapshot_tables as tables
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RENDER_SLIDE = pptx_from_html_huashu.SIDECAR_DIR / "render_slide.cjs"
@@ -95,6 +96,20 @@ CLEAN_TEST = """
 def test_leaves_nothing():
     pass
 """
+
+# Required into the sidecar (node --require): says so on stderr once each browser it launches
+# is up, so a run that launched none is told from one whose browser went with it.
+ANNOUNCED_LAUNCH_PRELOAD = """
+const { chromium } = require(require.resolve('playwright', { paths: [process.cwd()] }));
+const launch = chromium.launch.bind(chromium);
+chromium.launch = async (...args) => {
+  const browser = await launch(...args);
+  console.error('browser launched');
+  return browser;
+};
+"""
+# A slide whose script blocks its page, so its browser does not exit by itself once node is gone.
+BLOCKED_SLIDE_BODY = '<div class="slide"><p>x</p><script>for (;;) {}</script></div>'
 
 # What stands for the session in the kill test: a process in a group a shell leads, as pytest
 # runs in the group of the shell or ``uv`` that started it, with a child in that group reported
@@ -189,6 +204,30 @@ class TestAHelperPastItsTimeoutTakesItsBrowsers:
 
         left = _still_running_after_a_while(scope)
         assert left == {}, f"measure.cjs left its browser running: {left}"
+
+    def test_the_sidecar_run_with_a_preload(self, scope: Path, tmp_path: Path) -> None:
+        """``emit_deck.mjs`` run directly, a preload required first, as the tables suite's
+        failed-rewrite test runs it, on a slide whose page never loads, past its timeout."""
+        preload = tmp_path / "announced_launch.cjs"
+        preload.write_text(ANNOUNCED_LAUNCH_PRELOAD, encoding="utf-8")
+        payload = {
+            "title": "blocked",
+            "slides": [{"html": support.slide_document(BLOCKED_SLIDE_BODY)}],
+            "bypassValidation": True,
+            "target": "pptx",
+        }
+
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            tables.run_sidecar_with_preload(
+                preload, tmp_path / "out.pptx", payload, timeout=SHORT_HELPER_TIMEOUT_SECONDS
+            )
+
+        stderr = raised.value.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        assert "browser launched" in stderr, f"fixture drift: no browser launched: {stderr!r}"
+        left = _still_running_after_a_while(scope)
+        assert left == {}, f"the sidecar run left its browser running: {left}"
 
 
 def test_the_suite_gives_its_child_processes_a_temporary_directory_of_its_own() -> None:

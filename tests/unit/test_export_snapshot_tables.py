@@ -123,6 +123,7 @@ from tests.fixtures.export_snapshot_support import (
     overlaps,
     requires_google_slides,
     requires_huashu_sidecar,
+    run_node,
     single_line_box_top,
     slide_document,
     slide_shape_elements,
@@ -4809,6 +4810,22 @@ JSZip.loadAsync = () => Promise.reject(new Error('the test refuses to read the d
 REWRITE_FAILURE_REASON = "the test refuses to read the deck"
 
 
+def run_sidecar_with_preload(
+    preload: Path, out_path: Path, payload: dict, *, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """``emit_deck.mjs`` on ``payload``, run as the wrapper runs it, ``preload`` required first.
+
+    Through ``run_node``, in the sidecar's directory with its environment: past ``timeout``
+    node is ended through its exit path, which takes the browsers it launched with it, and
+    ``subprocess.TimeoutExpired`` is raised.
+    """
+    return run_node(
+        ["--require", str(preload), str(pptx_from_html_huashu.SIDECAR_SCRIPT), str(out_path)],
+        input=json.dumps(payload).encode("utf-8"),
+        timeout=timeout,
+    )
+
+
 @requires_huashu_sidecar
 class TestDottedRewriteZip:
     def test_the_rewrite_resolves_the_zip_library_pptxgenjs_loads(self) -> None:
@@ -4860,22 +4877,10 @@ class TestFailedDottedRewrite:
             "bypassValidation": True,
             "target": "pptx",
         }
-        process = subprocess.run(
-            [
-                "node",
-                "--require",
-                str(preload),
-                str(pptx_from_html_huashu.SIDECAR_SCRIPT),
-                str(out_path),
-            ],
-            input=json.dumps(payload).encode("utf-8"),
-            cwd=pptx_from_html_huashu.SIDECAR_DIR,
-            env=pptx_from_html_huashu.sidecar_subprocess_env(),
-            capture_output=True,
-            timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS,
-            check=False,
+        process = run_sidecar_with_preload(
+            preload, out_path, payload, timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS
         )
-        stderr = process.stderr.decode("utf-8", errors="replace")
+        stderr = process.stderr
         assert process.returncode == 0 and out_path.is_file(), (
             f"the deck was not written (exit {process.returncode}):\n{stderr[-2000:]}"
         )
