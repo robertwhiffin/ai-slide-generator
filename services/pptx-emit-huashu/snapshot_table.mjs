@@ -73,7 +73,7 @@
 //   be an anonymous table box);
 // * every part paints as a cell of an a:tbl can: shown, in flow (static, or
 //   relative where gridOf finds it on its grid), untransformed, without a
-//   background image, a shadow or an effect;
+//   background image, a shadow (but a cell's inset one) or an effect;
 // * its cells do not stand apart: a separated table whose spacing
 //   exceeds SPACING_VISIBLE_PX on either axis has no cell that paints a fill
 //   or a border, and no separated cell that paints rounds its corners;
@@ -85,7 +85,7 @@
 // by any clip and unrotated.
 //
 // /**
-//  * TableLayout = {collapse, item, parts, cells, slots, slotCells, roundedCells}   (page-side only)
+//  * TableLayout = {collapse, item, parts, cells, slots, slotCells, roundedCells, insetCells}   (page-side only)
 //  *   collapse  border-collapse: collapse, whose table border is the grid's;
 //  *   item      the TableItem, its cells' text still to come (snapshot.mjs);
 //  *   parts     every element whose box the item draws: row groups, rows,
@@ -100,7 +100,11 @@
 //  *             item.cells, so a fill pushTable takes off one is off here too;
 //  *   roundedCells  [{model: TableCell, radii}] under collapse, each filled cell
 //  *             whose own border-radius rounds its background, its used radii
-//  *             (top left first), for pushTable to cut its fill to.
+//  *             (top left first), for pushTable to cut its fill to;
+//  *   insetCells    [{layers, opacity, area}] each cell with an inset
+//  *             box-shadow: its layers (snapshot_borders.mjs insetShadowLayers),
+//  *             its cumulative opacity and its padding box on the grid, which
+//  *             pushTable draws them in over the table.
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
@@ -143,7 +147,9 @@
 //   placeGroups      (groups, paint, seq) -> places inline groups as overlay items (snapshot.mjs);
 //   wholePixelGrid   whether the deck lays a native table's grid on whole px
 //                    (snapshot.mjs WHOLE_PIXEL_TABLES, snappedLines);
-//   usedCornerRadii  (style, box) -> a box's used corner radii [{h, v}], top left first.
+//   usedCornerRadii  (style, box) -> a box's used corner radii [{h, v}], top left first;
+//   insetOnlyShadow  computed box-shadow -> whether every layer of it is inset;
+//   insetShadowLayers  computed box-shadow -> its inset layers (snapshot_borders.mjs).
 function createTableLayout(env) {
   const TEXT_NODE = 3;
   const dom = domAccess();
@@ -215,13 +221,17 @@ function createTableLayout(env) {
   // with no shadow and no effect. Opacity it may have: its fill keeps it as
   // alpha and its text and lines are composited through it. Relative
   // positioning keeps it in flow; an offset that moves it off its grid cell
-  // is caught by gridOf.
-  function plainPart(s) {
+  // is caught by gridOf. A cell (`cell`) may carry an inset box-shadow, which
+  // paints inside its padding box and the walk draws over the table
+  // (insetCells, snapshot.mjs pushTable): a column highlight's inset rules cost
+  // its table nothing.
+  function plainPart(s, cell) {
+    const shadow = !isSet(s.boxShadow, 'none') || (cell && env.insetOnlyShadow(s.boxShadow));
     return s.visibility === 'visible' && (s.position === 'static' || s.position === 'relative') &&
       s.transform === 'none' && !isSet(s.rotate, 'none') && !isSet(s.scale, 'none') && !isSet(s.translate, 'none') &&
       s.filter === 'none' && !isSet(s.backdropFilter, 'none') && s.mixBlendMode === 'normal' &&
       !isSet(s.clipPath, 'none') && !isSet(s.maskImage, 'none') && !isSet(s.webkitMaskImage, 'none') &&
-      !isSet(s.boxShadow, 'none') && !isSet(s.backgroundImage, 'none');
+      shadow && !isSet(s.backgroundImage, 'none');
   }
 
   // The part an element is, by its tag, when it lays out as that part. A
@@ -232,7 +242,7 @@ function createTableLayout(env) {
     if (!Object.prototype.hasOwnProperty.call(PART_DISPLAY, name) || s.display !== PART_DISPLAY[name]) return null;
     if (name === 'caption') return name;
     const cell = name === 'td' || name === 'th';
-    if (!plainPart(s) || (!cell && generatesContent(element))) return null;
+    if (!plainPart(s, cell) || (!cell && generatesContent(element))) return null;
     return name;
   }
 
@@ -908,6 +918,7 @@ function createTableLayout(env) {
         colspan: read.colspan,
         rect: boundsOf(env.rectOf(read.element)),
         fill: fillOf(layers),
+        opacity,
         sides: sidesOf(read.style, 'cell', backdrop),
         lines: { top: null, right: null, bottom: null, left: null },
         share: { top: 0, right: 0, bottom: 0, left: 0 },
@@ -1056,6 +1067,7 @@ function createTableLayout(env) {
     const cells = new Map();
     const modelCells = [];
     const roundedCells = [];
+    const insetCells = [];
     for (let index = 0; index < model.cells.length; index++) {
       const cell = model.cells[index];
       const gridRect = {
@@ -1104,6 +1116,26 @@ function createTableLayout(env) {
         const box = { w: cell.rect.right - cell.rect.left, h: cell.rect.bottom - cell.rect.top, scale: frame.scale };
         roundedCells.push({ model: modelCell, radii: env.usedCornerRadii(cell.style, box) });
       }
+      // A cell's inset box-shadow paints inside its padding box: its grid
+      // rect in by the border it holds on each side (half a collapsed edge's,
+      // its own whole border when separated), on the grid the deck lays.
+      const insets = cell.element ? env.insetShadowLayers(cell.style.boxShadow) : [];
+      if (insets.length) {
+        const held = (name) => (collapse ? cell.share[name] : cell.sides[name].widthPx);
+        insetCells.push({
+          layers: insets,
+          opacity: cell.opacity,
+          area: {
+            x: gridRect.left + held('left'),
+            y: gridRect.top + held('top'),
+            w: Math.max(0, gridRect.right - gridRect.left - held('left') - held('right')),
+            h: Math.max(0, gridRect.bottom - gridRect.top - held('top') - held('bottom')),
+            rotate: null,
+            scale: frame.scale,
+            radii: null,
+          },
+        });
+      }
     }
     // model.visualSlots indexes model.cells, which modelCells follows until it is sorted.
     const slotCells = [];
@@ -1116,6 +1148,7 @@ function createTableLayout(env) {
       slots: model.visualSlots,
       slotCells,
       roundedCells,
+      insetCells,
       item: {
         kind: 'table',
         x: columnLines[0],

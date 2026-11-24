@@ -184,9 +184,12 @@ function isStroke(value) {
     DASHES.has(value.dash);
 }
 
+// A shape's shadow: outer, or inner (`inner` true: an inset box-shadow layer in
+// the deck for PowerPoint, snapshot_borders.mjs pushInsetShadows).
 function isShadow(value) {
   return isFill(value) && isLength(value.blurPx) && isLength(value.offsetPx) &&
-    isNumber(value.angle) && value.angle >= 0 && value.angle < FULL_TURN_DEG;
+    isNumber(value.angle) && value.angle >= 0 && value.angle < FULL_TURN_DEG &&
+    (value.inner === undefined || typeof value.inner === 'boolean');
 }
 
 function isRun(run) {

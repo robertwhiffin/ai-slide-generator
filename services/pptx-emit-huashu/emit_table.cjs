@@ -20,7 +20,7 @@
 //   every side is written and none contradicts its neighbour's. pptxgenjs
 //   writes a table border solid or dashed (prstDash solid or sysDash), so a
 //   dotted side is passed dashed and its prstDash is written sysDot once the
-//   deck is written (rewriteBorders): PowerPoint draws sysDot one width on
+//   deck is written (emit_rewrite.cjs rewriteDeck): PowerPoint draws sysDot one width on
 //   and one off, as CSS paints a dotted border, and Drive converts it to its
 //   DOT, one on and three off, the nearest dash a Google table border has
 //   (scripts/export_fidelity/CALIBRATION.md D10). A cell border is one a:ln,
@@ -58,8 +58,8 @@ const POINT_MARGINS_FROM_PX = PX_PER_IN;
 // height, so a grid line pair that meets is written one EMU apart.
 const SMALLEST_SIZE_IN = 1 / EMU_PER_IN;
 // pptxgenjs table borders are solid or dashed; a dotted one is passed dashed
-// and written sysDot, a double one passed solid and written double
-// (rewriteBorders).
+// and written sysDot, a double one passed solid and written double, once the
+// deck is written (emit_rewrite.cjs rewriteDeck, rewrittenTablesXml).
 const BORDER_TYPES = { solid: 'solid', dash: 'dash', dot: 'dash', double: 'solid' };
 // The a:tcPr border element of each side, and the dashes pptxgenjs and a
 // dotted side write.
@@ -70,11 +70,6 @@ const DOTTED_DASH = '<a:prstDash val="sysDot"/>';
 // written with (its two lines each a third of its width, a third apart).
 const SINGLE_COMPOUND = 'cmpd="sng"';
 const DOUBLE_COMPOUND = 'cmpd="dbl"';
-// What a shape with a double border is named (doubleBorderName): this, and its
-// number on its slide.
-const DOUBLE_BORDER_NAME = 'Double border';
-// A shape's a:ln as pptxgenjs writes it, with its width or with none.
-const SHAPE_LINE = /<a:ln( w="\d+")?>/;
 
 // pptxgenjs slide -> the sides of each table emitted on it that are rewritten,
 // in the order emitted, which is the order of its a:tbl elements in the
@@ -82,8 +77,6 @@ const SHAPE_LINE = /<a:ln( w="\d+")?>/;
 // 'double'>> per table, one per table so the n-th belongs to the n-th a:tbl.
 // Keyed weakly, per slide object.
 const rewrittenSides = new WeakMap();
-// pptxgenjs slide -> how many shapes with a double border it has been given.
-const doubleBorders = new WeakMap();
 
 // Records the dotted sides of `item` on `slide`, and, but in the deck for
 // Google Slides (`forGoogle`), which draws them as strokes over the table
@@ -103,14 +96,11 @@ function recordRewrittenSides(slide, item, forGoogle) {
   rewrittenSides.get(slide).push(sides);
 }
 
-// doubleBorderName(slide) -> the name of the next shape with a double border
-// on `slide` (emit_model.cjs): DOUBLE_BORDER_NAME and its number there, which
-// pptxgenjs writes as the shape's p:cNvPr name, and by which rewriteBorders
-// finds its a:ln.
-function doubleBorderName(slide) {
-  const count = (doubleBorders.get(slide) || 0) + 1;
-  doubleBorders.set(slide, count);
-  return `${DOUBLE_BORDER_NAME} ${count}`;
+// tableSidesOf(slide) -> the recorded sides of each table on `slide`, in its
+// a:tbl order (recordRewrittenSides), [] for none; whether any of them is to be
+// rewritten is whether any map holds an entry.
+function tableSidesOf(slide) {
+  return rewrittenSides.get(slide) || [];
 }
 
 // One table side's a:ln as its recorded dash writes it: a dotted one sysDot,
@@ -121,17 +111,15 @@ function rewrittenSide(line, dash) {
   return line;
 }
 
-// One slide's XML with the recorded sides of its tables (recordRewrittenSides)
-// written as their dashes draw them, and the a:ln of each shape named a double
-// border made double. pptxgenjs writes an a:tbl's rows in order, each row one
-// a:tc per grid slot (a merge placeholder among them), and each cell's sides
-// as a:lnL, a:lnR, a:lnT and a:lnB in its a:tcPr; no table holds another,
-// and text in a cell is escaped, so none of these tags occurs in it. A
-// shape's name is its p:cNvPr name, which no text names: pptxgenjs names a
-// text box "Text N" and a shape "Shape N" unless told otherwise.
-function rewrittenSlideXml(xml, tables) {
+// rewrittenTablesXml(xml, tables) -> one slide's XML with the recorded sides of
+// its tables (tableSidesOf) written as their dashes draw them. pptxgenjs writes
+// an a:tbl's rows in order, each row one a:tc per grid slot (a merge
+// placeholder among them), and each cell's sides as a:lnL, a:lnR, a:lnT and
+// a:lnB in its a:tcPr; no table holds another, and text in a cell is escaped,
+// so none of these tags occurs in it.
+function rewrittenTablesXml(xml, tables) {
   let table = 0;
-  const withTables = xml.replace(/<a:tbl>[\s\S]*?<\/a:tbl>/g, (tbl) => {
+  return xml.replace(/<a:tbl>[\s\S]*?<\/a:tbl>/g, (tbl) => {
     const sides = tables[table++];
     if (!sides || !sides.size) return tbl;
     let row = -1;
@@ -147,12 +135,6 @@ function rewrittenSlideXml(xml, tables) {
       });
     });
   });
-  const named = `name="${DOUBLE_BORDER_NAME} `;
-  if (withTables.indexOf(named) < 0) return withTables;
-  return withTables.replace(/<p:sp>[\s\S]*?<\/p:sp>/g, (shape) => {
-    if (!new RegExp(`<p:cNvPr [^>]*${named}\\d+"`).test(shape)) return shape;
-    return shape.replace(SHAPE_LINE, (line) => line.replace(/>$/, ` ${DOUBLE_COMPOUND}>`));
-  });
 }
 
 // The zip library pptxgenjs writes the deck with, resolved as pptxgenjs's own
@@ -161,32 +143,6 @@ function rewrittenSlideXml(xml, tables) {
 // pptxgenjs; package.json names no zip library of the sidecar's own).
 function pptxgenjsZipPath() {
   return require.resolve('jszip', { paths: [path.dirname(require.resolve('pptxgenjs'))] });
-}
-
-// The deck pptxgenjs wrote (a .pptx Buffer), each dotted side of each table
-// on `slides` (pres.slides, in order) written sysDot, each double one double,
-// and each shape with a double border (doubleBorderName) drawn double. A deck
-// with none is returned as it is. The parts are rewritten with the zip library
-// pptxgenjs writes with (pptxgenjsZipPath), as it writes them: in order,
-// stored, each part's date kept. It throws when the deck cannot be read or
-// written back, and emit_deck.mjs then writes the deck as pptxgenjs wrote it.
-async function rewriteBorders(deck, slides) {
-  const pending = [];
-  slides.forEach((slide, index) => {
-    const tables = rewrittenSides.get(slide) || [];
-    if (tables.some((sides) => sides.size) || doubleBorders.has(slide)) {
-      pending.push({ name: `ppt/slides/slide${index + 1}.xml`, tables });
-    }
-  });
-  if (!pending.length) return deck;
-  const JSZip = require(pptxgenjsZipPath());
-  const zip = await JSZip.loadAsync(deck);
-  for (const { name, tables } of pending) {
-    const part = zip.file(name);
-    if (!part) continue;
-    zip.file(name, rewrittenSlideXml(await part.async('string'), tables), { date: part.date });
-  }
-  return zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
 }
 
 function sizeOf(px) {
@@ -335,4 +291,4 @@ function emitTable(slide, item, faces, renderer) {
   if (forGoogle) pushDoubleEdges(slide, item);
 }
 
-module.exports = { DOUBLE_BORDER_NAME, doubleBorderName, emitTable, rewriteBorders, pptxgenjsZipPath };
+module.exports = { emitTable, pptxgenjsZipPath, rewrittenTablesXml, tableSidesOf };

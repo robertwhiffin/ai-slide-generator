@@ -357,6 +357,13 @@ TABLES_CSS = (
 .cell-rounds tbody tr:nth-child(even) { background: #F3F3F3; }
 .cell-rounds th:first-child { border-top-left-radius: 8px; }
 .cell-rounds th:last-child { border-top-right-radius: 8px; }
+.hl-table { position: absolute; border-collapse: collapse; width: 560px; font-size: 15px; }
+.hl-table th { background: #FF5F46; color: #FFFFFF; text-align: left; padding: 12px 16px; }
+.hl-table th.hl { background: #102025; }
+.hl-table td { padding: 12px 16px; border-bottom: 1px solid #DCE0E2; }
+.hl-table tbody tr:nth-child(odd) { background: #FFFFFF; }
+.hl-table tbody tr:nth-child(even) { background: #F3F3F3; }
+.hl-table .hl-cell { box-shadow: inset 2px 0 0 #EB4A34, inset -2px 0 0 #EB4A34; }
 """
 )
 
@@ -1059,6 +1066,21 @@ CELL_ROUND_RADIUS_PX = 8.0
 CELL_ROUND_CORNERS = {(0, 0): "top-left", (0, 2): "top-right"}
 CELL_ROUND_FILLS = (("FF5F46",) * 3, ("FFFFFF",) * 3, ("F3F3F3",) * 3)
 
+# A pricing table whose middle column is highlighted by inset rules on its cells (the edited
+# deck's Pro column): `inset 2px 0 0` and `inset -2px 0 0`, a 2 px band at each side.
+INSET_HIGHLIGHT_BODY = """<div class="slide">
+  <table id="highlight" class="hl-table" style="left: 88px; top: 110px;">
+    <thead><tr><th>Plan</th><th class="hl">Pro</th><th>Enterprise</th></tr></thead>
+    <tbody><tr><td>Price</td><td class="hl-cell">TBD</td><td>TBD</td></tr>
+    <tr><td>Users</td><td class="hl-cell">Growing teams</td><td>Organisation</td></tr>
+    <tr><td>Support</td><td class="hl-cell">Business hours</td><td>24x7</td></tr></tbody>
+  </table>
+</div>"""
+INSET_HIGHLIGHT_COLUMN = 1
+INSET_HIGHLIGHT_ROWS = (1, 2, 3)
+INSET_HIGHLIGHT_COLOUR = "EB4A34"
+INSET_HIGHLIGHT_BAND_PX = 2.0
+
 # A balance sheet's total row ruled 3px double under, a 6px double rule, and a 2px one, which
 # Chrome paints solid (a double border needs a px each for its two lines and its gap).
 DOUBLE_ROWS_BODY = """<div class="slide">
@@ -1077,6 +1099,7 @@ THIN_DOUBLE_ROW = 3
 
 INLINE_BODIES = {
     "app-rows": APP_ROWS_BODY,
+    "highlight": INSET_HIGHLIGHT_BODY,
     "cell-rounds": CELL_ROUNDS_BODY,
     "double-rows": DOUBLE_ROWS_BODY,
     "caption": CAPTION_BODY,
@@ -4539,6 +4562,65 @@ class TestCollapsedCellRadii:
 
 @pytest.mark.slow
 @requires_huashu_sidecar
+class TestInsetShadowedCells:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_cells_inset_rules_are_bands_over_a_native_table(
+        self,
+        target: str,
+        inline_export: Callable[[str], bytes],
+        google_inline_export: Callable[[str], bytes],
+    ) -> None:
+        """A column its cells' inset box-shadow highlights stays one native table, its rules drawn.
+
+        ``inset 2px 0 0`` and ``inset -2px 0 0`` paint a 2 px band inside each cell's padding
+        box, at its left and its right. A box-shadow used to cost the whole table its
+        nativeness (the edited deck's pricing table: 38 text boxes and 12 shapes), and the
+        bands were not drawn. Now the table is one native frame on the browser's grid, its
+        cells' text its own, and over it each highlighted cell's two bands are rects of the
+        rule's colour, 2 px wide, at its grid rect's sides and its whole height (but the half
+        collapsed rule its padding box leaves out).
+        """
+        document = _inline_document("highlight")
+        pptx = (google_inline_export if target == "gslides" else inline_export)("highlight")
+        shapes = slide_shapes(pptx)
+        (table,) = browser_tables(document, "#highlight")
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "#highlight")
+        _assert_grid_matches(frame, table, "#highlight")
+        texts = [shape for shape in shapes if shape.kind == "text" and shape.text.strip()]
+        assert not texts, f"cell text left the table: {[shape.text for shape in texts]}"
+        bands = [
+            shape
+            for position, shape in enumerate(shapes)
+            if position > frame_position
+            and shape.kind == "shape"
+            and shape.fill == INSET_HIGHLIGHT_COLOUR
+        ]
+        wrong = []
+        for row in INSET_HIGHLIGHT_ROWS:
+            rect = table_cell_rect(frame, row, INSET_HIGHLIGHT_COLUMN)
+            for side, x in (
+                ("left", rect["x"]),
+                ("right", rect["x"] + rect["w"] - INSET_HIGHLIGHT_BAND_PX),
+            ):
+                found = [
+                    band
+                    for band in bands
+                    if abs(band.x - x) <= 0.1
+                    and abs(band.w - INSET_HIGHLIGHT_BAND_PX) <= 0.1
+                    and rect["y"] - 0.1 <= band.y <= rect["y"] + 1
+                    and abs(band.h - rect["h"]) <= 1.1
+                ]
+                if len(found) != 1:
+                    wrong.append(
+                        f"row {row}, its {side} band: {len(found)} at x {x:.2f} over {rect}"
+                    )
+        assert len(bands) == 2 * len(INSET_HIGHLIGHT_ROWS) and not wrong, (
+            f"the highlight's bands ({target}): {len(bands)} drawn\n  " + "\n  ".join(wrong)
+        )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
 class TestDoubleCellBorders:
     def test_the_powerpoint_deck_writes_a_double_side_as_a_double_compound_line(
         self, inline_export: Callable[[str], bytes]
@@ -4683,7 +4765,7 @@ class TestDottedCellBorders:
         assert not wrong, f"the {target} deck's dotted tables: " + "; ".join(wrong)
 
 
-# The rewrite that writes the dotted sides sysDot (emit_table.cjs rewriteBorders), and the
+# The rewrite that writes the dotted sides sysDot (emit_rewrite.cjs rewriteDeck), and the
 # deck script that runs it once pptxgenjs has written the deck.
 EMIT_TABLE_MODULE = pptx_from_html_huashu.SIDECAR_DIR / "emit_table.cjs"
 # A module node preloads (--require) before emit_deck.mjs: it makes the zip library the

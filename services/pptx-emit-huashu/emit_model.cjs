@@ -13,7 +13,8 @@
 // run), and native tables by emit_table.cjs. The deck for Google Slides writes
 // a dotted line or outline as emit_dotted.cjs draws it, Drive having no 1:1 dot.
 // A double border's line or outline is written solid and named, and made a
-// double compound line once the deck is written (doubleBorderName).
+// double compound line once the deck is written; a shape's inner shadow is
+// given once the deck is written too (emit_rewrite.cjs).
 //
 // A box whose corners round by different radii (geometry 'roundCorners', a card
 // header's 16px 16px 0 0) is written as the preset that draws it exactly, when
@@ -26,7 +27,8 @@
 // scripts/export_fidelity/CALIBRATION.md D11).
 
 const { dottedLine, dottedOutline, strokePoints } = require('./emit_dotted.cjs');
-const { doubleBorderName, emitTable } = require('./emit_table.cjs');
+const { doubleBorderName, innerShadowName } = require('./emit_rewrite.cjs');
+const { emitTable } = require('./emit_table.cjs');
 const { emitText } = require('./emit_text.cjs');
 const { transparencyOf } = require('./emit_typography.cjs');
 const { inches, points } = require('./units.cjs');
@@ -47,9 +49,9 @@ const SMALLEST_ANGLE_DEG = 1 / 60000;
 // borderDash), which DrawingML draws as one line of the border's width with a
 // double compound (a:ln cmpd="dbl": two lines each a third of its width, a
 // third apart). pptxgenjs writes no compound, so such a stroke is written solid
-// and its shape named a double border (emit_table.cjs doubleBorderName), and
-// once the deck is written its a:ln is made double (emit_table.cjs
-// rewriteBorders). Both apps draw it so, Drive keeping it for a shape's outline
+// and its shape named a double border (emit_rewrite.cjs doubleBorderName), and
+// once the deck is written its a:ln is made double (emit_rewrite.cjs
+// rewriteDeck). Both apps draw it so, Drive keeping it for a shape's outline
 // and a line, at 3, 4, 6 and 9 px (scripts/export_fidelity/CALIBRATION.md T7).
 const DASH_TYPES = { solid: 'solid', dash: 'dash', dot: 'sysDot', double: 'solid' };
 
@@ -249,7 +251,11 @@ function emitShape(slide, pres, item, renderer) {
   }
   if (geometry.options.rectRadius !== undefined) options.rectRadius = geometry.options.rectRadius;
   if (geometry.options.angleRange) options.angleRange = geometry.options.angleRange;
-  if (item.shadow) options.shadow = shadowOptions(item.shadow);
+  // An inner shadow (an inset box-shadow layer, snapshot_borders.mjs
+  // pushInsetShadows) pptxgenjs writes closed as an outer one, which no app
+  // reads: the shape is named and given it once the deck is written.
+  if (item.shadow && item.shadow.inner) options.objectName = innerShadowName(slide, item.shadow);
+  else if (item.shadow) options.shadow = shadowOptions(item.shadow);
   if (item.rotate) options.rotate = item.rotate;
   if (item.line && item.line.dash === 'double') options.objectName = doubleBorderName(slide);
   slide.addShape(geometry.shapeType, options);

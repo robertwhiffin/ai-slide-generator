@@ -55,6 +55,7 @@ SIDECAR_SOURCES = (
     "emit_deck.mjs",
     "emit_dotted.cjs",
     "emit_model.cjs",
+    "emit_rewrite.cjs",
     "emit_table.cjs",
     "emit_text.cjs",
     "emit_typography.cjs",

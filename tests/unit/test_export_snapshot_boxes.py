@@ -2074,3 +2074,131 @@ class TestDoubleBorders:
         assert not wrong, (
             f"double borders ({target}):\n  " + "\n  ".join(wrong) + "\n" + _describe(shapes)
         )
+
+
+# ---------------------------------------------------------------------------
+# Inset box-shadow: bands inside the padding box, and PowerPoint's inner shadow
+# ---------------------------------------------------------------------------
+
+INSET_BOX = (
+    "position: absolute; width: 200px; height: 110px; background: #FFFFFF; box-sizing: border-box;"
+)
+INSET_SLIDE = f"""<div class="slide">
+  <div id="inset-band" style="{INSET_BOX} left: 88px; top: 80px;
+       box-shadow: inset 4px 0 0 #EB4A34;"></div>
+  <div id="inset-ring" style="{INSET_BOX} left: 340px; top: 80px;
+       box-shadow: inset 0 0 0 3px #3C71AF;"></div>
+  <div id="inset-round" style="{INSET_BOX} left: 600px; top: 80px; border-radius: 16px;
+       box-shadow: inset 0 -4px 0 #4BA676;"></div>
+  <div id="inset-bordered" style="{INSET_BOX} left: 88px; top: 260px; border: 2px solid #102025;
+       box-shadow: inset 3px 3px 0 #F2AE3D;"></div>
+  <div id="inset-blurred" style="{INSET_BOX} left: 340px; top: 260px;
+       box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.35);"></div>
+</div>"""
+# id -> its colour and the bands it paints, each (x, y, w, h) from the box's top left, px
+INSET_BANDS = {
+    "inset-band": ("EB4A34", [(0, 0, 4, 110)]),
+    "inset-ring": ("3C71AF", [(0, 0, 200, 3), (0, 107, 200, 3), (0, 3, 3, 104), (197, 3, 3, 104)]),
+    "inset-bordered": ("F2AE3D", [(2, 2, 196, 3), (2, 5, 3, 103)]),
+}
+
+
+@pytest.fixture(scope="module")
+def inset_exports() -> dict[str, bytes]:
+    """The inset box-shadow slide exported for each target, once."""
+    decks = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            pptx, failures = export_slides(
+                [INSET_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [] and pptx, f"the export rejected the slide: {failures}"
+            decks[target] = pptx
+    return decks
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestInsetShadows:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_solid_inset_layer_is_the_band_it_paints(
+        self, target: str, inset_exports: dict[str, bytes]
+    ) -> None:
+        """An inset layer with no blur paints a band inside the padding box: shapes of its colour.
+
+        ``inset 4px 0 0`` is a 4 px strip at the left; ``inset 0 0 0 3px`` a 3 px ring, four
+        rects; inside a 2 px border, ``inset 3px 3px 0`` the padding box's top and left 3 px.
+        Each band is a rect of the layer's colour where the browser paints it, in both decks;
+        an inset shadow used to be skipped.
+        """
+        document = _document(INSET_SLIDE)
+        shapes = slide_shapes(inset_exports[target])
+        wrong = []
+        for name, (colour, bands) in INSET_BANDS.items():
+            box = browser_rect(document, f"#{name}")
+            drawn = sorted(
+                (round(s.x - box["x"], 1), round(s.y - box["y"], 1), round(s.w, 1), round(s.h, 1))
+                for s in shapes
+                if s.kind == "shape" and s.fill == colour
+            )
+            expected = sorted((float(x), float(y), float(w), float(h)) for x, y, w, h in bands)
+            if len(drawn) != len(expected) or any(
+                max(abs(a - b) for a, b in zip(found, wanted)) > 0.15
+                for found, wanted in zip(drawn, expected)
+            ):
+                wrong.append(f"#{name}: bands {drawn}, the browser's {expected}")
+        assert not wrong, f"inset bands ({target}):\n  " + "\n  ".join(wrong)
+
+    def test_a_rounded_boxs_band_follows_its_corners(self, inset_exports: dict[str, bytes]) -> None:
+        """On a 16 px rounded box, ``inset 0 -4px 0`` is its bottom 4 px cut to its corners."""
+        document = _document(INSET_SLIDE)
+        box = browser_rect(document, "#inset-round")
+        pptx = inset_exports["pptx"]
+        found = [
+            (shape, element)
+            for shape, element in zip(slide_shapes(pptx), slide_shape_elements(pptx))
+            if shape.fill == "4BA676"
+        ]
+        assert len(found) == 1 and found[0][0].geometry == "custGeom", (
+            f"the rounded box's band is drawn as {[(s.kind, s.geometry) for s, _ in found]}"
+        )
+        shape, element = found[0]
+        assert abs(shape.y + shape.h - (box["y"] + box["h"])) <= 0.1 and abs(shape.h - 4) <= 0.1
+        assert shape.x > box["x"] + 1 and shape.x + shape.w < box["x"] + box["w"] - 1, (
+            f"the band's ends at {shape.x:.2f}..{shape.x + shape.w:.2f} are not cut to the box's "
+            f"corners ({box['x']:.2f}..{box['x'] + box['w']:.2f})"
+        )
+
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_a_blurred_inset_layer_is_powerpoints_inner_shadow(
+        self, target: str, inset_exports: dict[str, bytes]
+    ) -> None:
+        """``inset 0 2px 8px`` at 0.35 black: PowerPoint's inner shadow; in Google none.
+
+        PowerPoint draws ``a:innerShdw`` on a filled shape, on the side opposite the one its
+        direction points to (measured), so over the box's own white shape lies a white shape
+        at its padding box carrying the layer, blur 8 px, 2 px, direction 270 degrees (CSS
+        shades the top). Drive drops an inner shadow, so the Google deck draws the box alone.
+        """
+        document = _document(INSET_SLIDE)
+        box = browser_rect(document, "#inset-blurred")
+        shapes = slide_shapes(inset_exports[target])
+        over = [
+            shape
+            for shape in shapes
+            if shape.kind == "shape" and shape.fill == "FFFFFF"
+            and abs(shape.x - box["x"]) <= 0.1 and abs(shape.y - box["y"]) <= 0.1
+        ]
+        inner = [s for s in over if s.shadow is not None and s.shadow.kind == "inner"]
+        if target == "gslides":
+            assert len(over) == 1 and not inner, f"the Google deck draws {over}"
+            return
+        assert len(over) == 2 and len(inner) == 1, f"the PowerPoint deck draws {over}"
+        shadow = inner[0].shadow
+        assert (
+            shadow.color == "000000"
+            and abs((shadow.alpha or 0) - 0.35) <= 0.01
+            and abs(shadow.blur_px - 8) <= 0.05
+            and abs(shadow.dist_px - 2) <= 0.05
+            and abs(shadow.angle - 270) <= 0.01
+        ), f"the inner shadow is {shadow}"

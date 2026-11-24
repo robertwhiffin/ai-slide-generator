@@ -44,7 +44,7 @@
 //  * Item =
 //  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'roundCorners'|'ellipse'|'path', radius,
 //  *   radii, fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'|'double'}|null,
-//  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
+//  *   shadow:{color, alpha, blurPx, offsetPx, angle, inner?}|null, rotate,
 //  *   path:[{x,y}[]], closed:boolean}   (radius for geometry
 //  *   'roundRect', whose four corners are one circle; radii for 'roundCorners',
 //  *   a box whose corners differ: each corner's radii {h, v}, top left, top
@@ -1131,7 +1131,10 @@ async function snapshotPage(config, pseudoData, renderer) {
   // border as an outline, a line per side or, on a box whose corners round,
   // the region each solid side paints; its outline rings and its outer
   // shadow, each a shape, a path or a line pushed here.
-  const { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, reportShadowFits, sliceOf } = createBorders({
+  const {
+    SIDES, clipsToText, emitBox, insetOnlyShadow, insetShadowLayers, outerShadowLayers, paintsBox, pushInsetShadows,
+    reportShadowFits, sliceOf,
+  } = createBorders({
     paintedColour,
     normalisedAngle,
     cornerShape,
@@ -1148,6 +1151,7 @@ async function snapshotPage(config, pseudoData, renderer) {
     clipConvex,
     cuttingRounds,
     arcSteps,
+    target: renderer && renderer.target === 'gslides' ? 'gslides' : 'pptx',
   });
 
   // ─── side lines ──────────────────────────────────────────────────────
@@ -2411,6 +2415,8 @@ async function snapshotPage(config, pseudoData, renderer) {
     placeGroups,
     wholePixelGrid: WHOLE_PIXEL_TABLES,
     usedCornerRadii,
+    insetOnlyShadow,
+    insetShadowLayers,
   });
 
   // The TableLayout of a <table> drawn as a native table, its parts now owned
@@ -2497,6 +2503,14 @@ async function snapshotPage(config, pseudoData, renderer) {
     }
     items.push({ ...item, id: nextItemId++, order });
     stats.tables++;
+    // Over the table, each cell's inset box-shadow, in its padding box (the
+    // column highlight's lava rules): bands, which the cell's own padding keeps
+    // off its text and its collapsed borders. A cell can carry no inner shadow,
+    // so a blurred layer is not drawn there (pushInsetShadows, without a fill).
+    const insets = layout.insetCells || [];
+    for (let index = 0; index < insets.length && index < COLLECTION_ITEM_LIMIT; index++) {
+      pushInsetShadows(insets[index].area, insets[index].layers, insets[index].opacity, order, clip, null);
+    }
   }
 
   // A rounded padding box with its edges on the whole px nearest them, its radii kept.

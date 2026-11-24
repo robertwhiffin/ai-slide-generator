@@ -9,7 +9,10 @@
 // spread-only box-shadow layer is a ring: the box's outline when it is opaque
 // and on top, else an unfilled shape of its own. The blurred or offset layers
 // are the box's one outer shadow, on its own shape (shadowOf): one layer as it
-// is, more than one fitted to the one closest to them all. paintsBox says
+// is, more than one fitted to the one closest to them all. An inset layer
+// paints inside the padding box, over the fill and under the border
+// (pushInsetShadows): one with no blur as the band it paints, shapes; a blurred
+// one, in the deck for PowerPoint, as an inner shadow. paintsBox says
 // whether a box paints anything of that, and the walk and the text layout ask
 // it.
 //
@@ -41,9 +44,12 @@
 //   cuttingRounds     (clip, points, grow) -> the clip's rounded padding boxes that
 //                     cut the points, as convex polygons;
 //   arcSteps          radius -> the segments that stand for a quarter arc of it
-//                     within the snapshot's arc tolerance.
-// It gives back SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox,
-// reportShadowFits and sliceOf.
+//                     within the snapshot's arc tolerance;
+//   target            the renderer the deck is written for, 'pptx' or
+//                     'gslides': PowerPoint draws an inner shadow on a shape,
+//                     Google Slides none (pushInsetShadows).
+// It gives back SIDES, clipsToText, emitBox, insetOnlyShadow, outerShadowLayers,
+// paintsBox, pushInsetShadows, reportShadowFits and sliceOf.
 
 function createBorders(env) {
   const {
@@ -63,6 +69,7 @@ function createBorders(env) {
     clipConvex,
     cuttingRounds,
     arcSteps,
+    target,
   } = env;
   // A border that is the same on all four sides is the shape's outline. A
   // border that differs between sides is a line per painted side, or each
@@ -412,6 +419,206 @@ function createBorders(env) {
     return painted;
   }
 
+  // The inset layers of a computed box-shadow, in order: {colourText, offsetX,
+  // offsetY, blur, spread}, lengths in the element's own px, as
+  // outerShadowLayers reads the outer ones.
+  function insetShadowLayers(value) {
+    const inset = [];
+    if (!value || value === 'none') return inset;
+    const layers = splitTopLevelCommas(value);
+    for (let index = 0; index < layers.length; index++) {
+      if (!/\binset\b/.test(layers[index])) continue;
+      const layer = layers[index].replace(/\binset\b/, '').trim();
+      const functional = /^[a-z-]+\([^)]*\)/i.exec(layer);
+      const colourText = functional ? functional[0] : layer.split(/\s+/)[0];
+      const lengths = (layer.slice(colourText.length).match(/-?[\d.]+(?:e[-+]?\d+)?px/g) || []).map(parseFloat);
+      inset.push({
+        colourText,
+        offsetX: lengths[0] || 0,
+        offsetY: lengths[1] || 0,
+        blur: lengths[2] || 0,
+        spread: lengths[3] || 0,
+      });
+    }
+    return inset;
+  }
+
+  // Whether every layer of a computed box-shadow is inset: what a native
+  // table's cell may carry and stay a cell (snapshot_table.mjs plainPart).
+  function insetOnlyShadow(value) {
+    if (!value || value === 'none') return false;
+    return insetShadowLayers(value).length === splitTopLevelCommas(value).length;
+  }
+
+  // The band a solid inset layer paints in its padding box `area` (box-local
+  // px, {left, top, right, bottom}): the area less its hole, the area moved by
+  // the layer's offset and shrunk by its spread (CSS Backgrounds 3: an inset
+  // shadow is painted inside the padding box, outside the shadow shape). As at
+  // most four rects, the top and bottom ones across the whole area, the left
+  // and right ones between them; the whole area where the hole is empty.
+  function bandRects(area, layer, scaleX, scaleY) {
+    const hole = {
+      left: area.left + (layer.offsetX + layer.spread) * scaleX,
+      right: area.right + (layer.offsetX - layer.spread) * scaleX,
+      top: area.top + (layer.offsetY + layer.spread) * scaleY,
+      bottom: area.bottom + (layer.offsetY - layer.spread) * scaleY,
+    };
+    const cut = {
+      left: Math.max(area.left, Math.min(area.right, hole.left)),
+      right: Math.min(area.right, Math.max(area.left, hole.right)),
+      top: Math.max(area.top, Math.min(area.bottom, hole.top)),
+      bottom: Math.min(area.bottom, Math.max(area.top, hole.bottom)),
+    };
+    if (!(cut.right > cut.left && cut.bottom > cut.top)) return [area];
+    const rects = [
+      { left: area.left, top: area.top, right: area.right, bottom: cut.top },
+      { left: area.left, top: cut.bottom, right: area.right, bottom: area.bottom },
+      { left: area.left, top: cut.top, right: cut.left, bottom: cut.bottom },
+      { left: cut.right, top: cut.top, right: area.right, bottom: cut.bottom },
+    ];
+    const bands = [];
+    for (let index = 0; index < rects.length; index++) {
+      if (rects[index].right - rects[index].left > 0 && rects[index].bottom - rects[index].top > 0) bands.push(rects[index]);
+    }
+    return bands;
+  }
+
+  // pushInsetShadows(area, layers, opacity, order, clip, fill) pushes what a
+  // box's inset box-shadow layers paint (insetShadowLayers, of its computed
+  // style), the last listed first, as CSS paints them under one another:
+  //   area     its padding box, {x, y, w, h, rotate, scale, radii}: radii its
+  //            inner radii [{h, v}] top left first (none for a square one), the
+  //            area turned about its centre by rotate;
+  //   fill     the box's own fill {color, alpha} or null.
+  // * A layer with no blur paints a band, a border-like ring or strip
+  //   (bandRects; the column highlight's `inset 2px 0 0` left rule): each of its
+  //   rects one filled shape, or on a rounded area the rect cut to it, a filled
+  //   path, the hole's own corners square.
+  // * A blurred layer: PowerPoint draws an inner shadow on a filled shape, which
+  //   its offset puts on the side opposite the one it points to (measured:
+  //   `inset 0 2px 8px`, dir 90 degrees shaded the bottom), so in the deck for
+  //   PowerPoint the area is a shape in the box's fill carrying the layer as its
+  //   inner shadow, its direction turned back; only over an opaque fill, which it
+  //   paints again unchanged. Google Slides draws no inner shadow (Drive drops
+  //   a:innerShdw, measured), nor does a shape with no fill, so there it is not
+  //   drawn (scripts/export_fidelity/CALIBRATION.md T3).
+  function pushInsetShadows(area, layers, opacity, order, clip, fill) {
+    const centreX = area.x + area.w / 2;
+    const centreY = area.y + area.h / 2;
+    const radians = (area.rotate || 0) * Math.PI / 180;
+    const rounds = Boolean(area.radii) && area.radii.some((corner) => corner.h > 0 && corner.v > 0);
+    const local = { left: area.x, top: area.y, right: area.x + area.w, bottom: area.y + area.h };
+    const roundedArea = rounds ? roundedAreaPolygon(local, area.radii) : null;
+    const turned = (point) => (radians
+      ? {
+        x: centreX + (point.x - centreX) * Math.cos(radians) - (point.y - centreY) * Math.sin(radians),
+        y: centreY + (point.x - centreX) * Math.sin(radians) + (point.y - centreY) * Math.cos(radians),
+      }
+      : point);
+    for (let index = layers.length - 1; index >= 0; index--) {
+      const layer = layers[index];
+      const colour = paintedColour(layer.colourText, opacity);
+      if (!colour) continue;
+      if (layer.blur > 0) {
+        if (target === 'pptx' && fill && fill.alpha >= 1) pushInnerShadow(area, layer, colour, fill, order, clip);
+        continue;
+      }
+      const bands = bandRects(local, layer, area.scale, area.scale);
+      for (let band = 0; band < bands.length; band++) {
+        const rect = bands[band];
+        if (!rounds && !radians) {
+          pushBoxShape({
+            order,
+            x: rect.left,
+            y: rect.top,
+            w: rect.right - rect.left,
+            h: rect.bottom - rect.top,
+            geometry: 'rect',
+            radius: 0,
+            fill: { color: colour.color, alpha: colour.alpha },
+            line: null,
+            shadow: null,
+            rotate: null,
+            extent: { x: rect.left, y: rect.top, w: rect.right - rect.left, h: rect.bottom - rect.top },
+          }, clip);
+          continue;
+        }
+        let region = [
+          { x: rect.left, y: rect.top },
+          { x: rect.right, y: rect.top },
+          { x: rect.right, y: rect.bottom },
+          { x: rect.left, y: rect.bottom },
+        ];
+        if (roundedArea) region = clipConvex(region, roundedArea);
+        const placed = [];
+        for (let point = 0; point < region.length; point++) placed.push(turned(region[point]));
+        region = clipPolygon(placed, clip);
+        const cutting = cuttingRounds(clip, region, 0);
+        for (let round = 0; round < cutting.length && region.length; round++) region = clipConvex(region, cutting[round]);
+        if (region.length >= 3) pushPath(order, [region], true, { color: colour.color, alpha: colour.alpha }, null, null);
+      }
+    }
+  }
+
+  // A padding box {left, top, right, bottom} rounded by `radii` as a convex
+  // polygon, each corner's quarter arc within the snapshot's arc tolerance.
+  function roundedAreaPolygon(box, radii) {
+    const points = [];
+    const corners = [
+      { x: box.left, y: box.top, signX: 1, signY: 1, start: Math.PI },
+      { x: box.right, y: box.top, signX: -1, signY: 1, start: Math.PI * 1.5 },
+      { x: box.right, y: box.bottom, signX: -1, signY: -1, start: 0 },
+      { x: box.left, y: box.bottom, signX: 1, signY: -1, start: Math.PI * 0.5 },
+    ];
+    for (let index = 0; index < corners.length; index++) {
+      const corner = corners[index];
+      const radius = radii[index];
+      if (!(radius.h > 0 && radius.v > 0)) {
+        points.push({ x: corner.x, y: corner.y });
+        continue;
+      }
+      const steps = arcSteps(Math.max(radius.h, radius.v));
+      for (let step = 0; step <= steps; step++) {
+        const angle = corner.start + (Math.PI / 2) * (step / steps);
+        points.push({
+          x: corner.x + corner.signX * radius.h + radius.h * Math.cos(angle),
+          y: corner.y + corner.signY * radius.v + radius.v * Math.sin(angle),
+        });
+      }
+    }
+    return points;
+  }
+
+  // A blurred inset layer as PowerPoint's inner shadow (pushInsetShadows): the
+  // padding box, rounded by its inner radii, in the box's own opaque fill,
+  // carrying the layer, its offset turned back to the side CSS shades.
+  function pushInnerShadow(area, layer, colour, fill, order, clip) {
+    const corners = cornerGeometry(area.radii || [{ h: 0, v: 0 }, { h: 0, v: 0 }, { h: 0, v: 0 }, { h: 0, v: 0 }]);
+    const shape = {
+      order,
+      x: area.x,
+      y: area.y,
+      w: area.w,
+      h: area.h,
+      geometry: corners.geometry,
+      radius: corners.geometry === 'roundRect' ? corners.radius : 0,
+      fill: { color: fill.color, alpha: fill.alpha },
+      line: null,
+      shadow: {
+        inner: true,
+        color: colour.color,
+        alpha: colour.alpha,
+        blurPx: layer.blur * area.scale,
+        offsetPx: Math.hypot(layer.offsetX, layer.offsetY) * area.scale,
+        angle: normalisedAngle(Math.atan2(layer.offsetY, layer.offsetX) * 180 / Math.PI + 180 + (area.rotate || 0)),
+      },
+      rotate: area.rotate,
+      extent: { x: area.x, y: area.y, w: area.w, h: area.h, rotate: area.rotate },
+    };
+    if (corners.radii) shape.radii = corners.radii;
+    pushBoxShape(shape, clip);
+  }
+
   // The one outer shadow a box's shadow layers (paintedLayers) are written as,
   // {color, alpha, blurPx, offsetPx, angle} in slide px, or null for none that
   // shows. One shape carries one outer shadow (a:outerShdw), in either app. One
@@ -637,7 +844,45 @@ function createBorders(env) {
   function paintsBox(s, opacity) {
     return Boolean((!clipsToText(s) && paintedColour(s.backgroundColor, opacity)) ||
       uniformBorder(s, opacity, UNIT_BOX.scale) || paintedLayers(s.boxShadow, opacity, UNIT_BOX).length ||
+      paintedInsetLayers(s.boxShadow, opacity).length ||
       sideBorders(s, opacity, UNIT_BOX.scale, null).painted.length);
+  }
+
+  // The inset layers of a computed box-shadow whose colour shows.
+  function paintedInsetLayers(value, opacity) {
+    const layers = insetShadowLayers(value);
+    const painted = [];
+    for (let index = 0; index < layers.length; index++) {
+      if (paintedColour(layers[index].colourText, opacity)) painted.push(layers[index]);
+    }
+    return painted;
+  }
+
+  // A box's padding box as pushInsetShadows takes it: the border box in by
+  // each side's border width, its corners the inner radii (the outer less the
+  // border beside them, floored at 0).
+  function paddingAreaOf(s, box) {
+    const width = (side) => (s['border' + side + 'Style'] === 'none' || s['border' + side + 'Style'] === 'hidden'
+      ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * box.scale);
+    const left = width('Left');
+    const top = width('Top');
+    const right = width('Right');
+    const bottom = width('Bottom');
+    const outer = usedCornerRadii(s, box);
+    return {
+      x: box.x + left,
+      y: box.y + top,
+      w: Math.max(0, box.w - left - right),
+      h: Math.max(0, box.h - top - bottom),
+      rotate: box.rotate,
+      scale: box.scale,
+      radii: [
+        { h: Math.max(0, outer[0].h - left), v: Math.max(0, outer[0].v - top) },
+        { h: Math.max(0, outer[1].h - right), v: Math.max(0, outer[1].v - top) },
+        { h: Math.max(0, outer[2].h - right), v: Math.max(0, outer[2].v - bottom) },
+        { h: Math.max(0, outer[3].h - left), v: Math.max(0, outer[3].v - bottom) },
+      ],
+    };
   }
 
   // A painted box becomes shapes and lines, cut to its clip, in the order CSS
@@ -661,6 +906,8 @@ function createBorders(env) {
   //     covers nothing of the box), and every other ring under the box;
   // * the box's own shape: its background colour and its shadow, outlined by
   //   its uniform border or else by its outline ring (ringedShape);
+  // * its inset box-shadow layers, inside its padding box, over its fill
+  //   (pushInsetShadows);
   // * a border that differs between sides, over the fill (pushSideBorders):
   //   on a box whose corners round, each solid side the region CSS paints for
   //   it, which follows the corners and tapers; else, and for a dashed or
@@ -678,8 +925,9 @@ function createBorders(env) {
     const sliced = Boolean(slice && (slice.Left || slice.Right));
     let line = sliced || withoutBorder ? null : uniformBorder(s, opacity, box.scale);
     const layers = isSlideRoot ? [] : paintedLayers(s.boxShadow, opacity, box);
+    const insets = isSlideRoot ? [] : paintedInsetLayers(s.boxShadow, opacity);
     const sides = line || withoutBorder ? null : sideBorders(s, opacity, box.scale, slice);
-    if (!fill && !line && !layers.length && !(sides && sides.painted.length)) return;
+    if (!fill && !line && !layers.length && !insets.length && !(sides && sides.painted.length)) return;
     const corners = cornerShape(s, box);
     // The stroke centred on a bordered shape's edge needs a shape left inside the border box.
     if (line && !(box.w - line.widthPx > 0 && box.h - line.widthPx > 0)) line = null;
@@ -708,6 +956,7 @@ function createBorders(env) {
     if (shadow) {
       for (let index = firstShadow - 1; index >= 0; index--) ringAt(index);
     }
+    if (insets.length) pushInsetShadows(paddingAreaOf(s, box), insets, opacity, order, clip, fill);
     if (sides) pushSideBorders(box, sides, sliced ? null : usedCornerRadii(s, box), order, clip);
   }
 
@@ -813,7 +1062,7 @@ function createBorders(env) {
     return s.direction === 'rtl' ? { Left: notLast, Right: notFirst } : { Left: notFirst, Right: notLast };
   }
 
-  return { SIDES, clipsToText, emitBox, outerShadowLayers, paintsBox, reportShadowFits, sliceOf };
+  return { SIDES, clipsToText, emitBox, insetOnlyShadow, insetShadowLayers, outerShadowLayers, paintsBox, pushInsetShadows, reportShadowFits, sliceOf };
 }
 
 export const BORDERS_SOURCE = createBorders.toString();
