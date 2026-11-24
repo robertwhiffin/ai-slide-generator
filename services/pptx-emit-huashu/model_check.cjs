@@ -512,6 +512,7 @@ const DIAGNOSTIC_PARTS = {
   lossScriptRaises: 'this slide exports its superscripts and subscripts at the renderers\' own raise',
   lossEllipsis: 'a text-overflow: ellipsis line exports as its overflow clip shows it, without its "…"',
   lossGeneratedCuts: 'generated text its clip cuts is drawn or left out whole, by the share of it shown',
+  lossBoxDrawing: 'this slide exports its box-drawing characters in the faces its symbols are written in',
   // Why a table is no a:tbl (snapshot_table.mjs).
   columnSpanUnread: "a column's span could not be read",
   columnsPass: 'its columns pass {n}',

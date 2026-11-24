@@ -58,6 +58,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_face_families,
     browser_loaded_weights,
     export_corpus,
+    browser_probes,
     export_slides,
     requires_huashu_sidecar,
     slide_document,
@@ -525,3 +526,81 @@ class TestSymbolsAreWrittenInTheFaceEachAppDrawsAtTheUisSize:
                 ("₩", "Arial", False),
                 ("7 now", "DM Sans", False),
             ], target
+
+
+# Box drawing (CALIBRATION.md T6): heavy rules after a monospace webfont (Chrome draws them from
+# its monospace fallback, about 0.6 em) and after a sans stack with no face for them (about
+# 1 em on a Mac), and a light dashed rule outside JIS X 0208, each a run of its own.
+BOX_FONTS = {
+    "rule-mono": ("700 14px 'DM Mono', monospace", "\u2501" * 5),
+    "rule-sans": (f"700 14px {DS_OFF_STACK.replace('&quot;', chr(39))}", "\u2501" * 6),
+    "dash-mono": ("400 16px 'DM Mono', monospace", "\u2504" * 4),
+}
+BOX_SLIDE = '<div class="slide">' + "".join(
+    f'<div id="{name}" style="position: absolute; left: 88px; top: {80 + 60 * index}px; '
+    f'font: {font.replace(chr(39), "&quot;")};">{text}</div>'
+    for index, (name, (font, text)) in enumerate(BOX_FONTS.items())
+) + "</div>"
+JIS_BOX_DRAWING = set("─━│┃┌┏┐┓└┗┘┛├┝┠┣┤┥┨┫┬┯┰┳┴┷┸┻┼┿╂╋")
+# Each target's faces that draw every U+2500-257F themselves, and their advance (em): measured
+# in each app's PDF, the first listed winning a tie.
+BOX_DRAWING_FACES = {
+    "pptx": (
+        ("Segoe UI Symbol", lambda character: 0.5),
+        ("MS PGothic", lambda character: 1.0 if character in JIS_BOX_DRAWING else 0.667),
+    ),
+    "gslides": (
+        ("JetBrains Mono", lambda character: 0.6),
+        ("Noto Sans JP", lambda character: 1.0),
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def box_decks() -> Iterator[dict[str, bytes]]:
+    """The box-drawing slide exported once for each target."""
+    exported = {}
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for target in ("pptx", "gslides"):
+            exported[target], failures = export_slides(
+                [BOX_SLIDE], css=DECK_CSS, monkeypatch=monkeypatch, target=target
+            )
+            assert failures == [], f"the export rejected the slide: {failures}"
+    yield exported
+
+
+class TestBoxDrawingIsWrittenAtTheBrowsersAdvance:
+    @pytest.mark.parametrize("target", ["pptx", "gslides"])
+    def test_each_rule_is_written_in_the_face_nearest_its_advance(
+        self, target: str, box_decks: dict[str, bytes]
+    ) -> None:
+        """A box-drawing character the written face lacks is written at the browser's advance.
+
+        Box drawing fills a cell of its face's width, and the faces differ: a heavy rule after
+        DM Mono, which Chrome lays out at its monospace fallback's 0.6 em, written in MS Gothic
+        at 1 em, ran past its box, and Google wrapped it (long-off 01, laid out at 0.7 em in the
+        container). So each is written in the target's face whose measured advance is nearest
+        the browser's (read here by a probe of the character alone in its own font): Segoe UI
+        Symbol (0.5 em) or MS PGothic (1 em for JIS X 0208's, 0.667 for the rest) for
+        PowerPoint, JetBrains Mono (0.6) or Noto Sans JP (1) for Google Slides.
+        """
+        document = slide_document(BOX_SLIDE, css=DECK_CSS, slide_id="snapshot-1")
+        shapes = slide_shapes(box_decks[target])
+        wrong = []
+        for name, (font, text) in BOX_FONTS.items():
+            character = text[0]
+            (size,) = browser_probes(
+                document, [(character, f"font: {font}; letter-spacing: 0; line-height: normal")]
+            )
+            size_px = float(font.split()[1].removesuffix("px"))
+            advance = size["w"] / size_px
+            faces = BOX_DRAWING_FACES[target]
+            expected = min(faces, key=lambda face: abs(face[1](character) - advance))[0]
+            (box,) = [shape for shape in shapes if shape.paras and shape.text.strip() == text]
+            runs = _runs(box)
+            written = {typeface for run_text, typeface, _ in runs if run_text.strip()}
+            if written != {expected}:
+                wrong.append(
+                    f"#{name}: laid out at {advance:.3f} em, written in {written}, not {expected}"
+                )
+        assert not wrong, f"box drawing ({target}):\n  " + "\n  ".join(wrong)

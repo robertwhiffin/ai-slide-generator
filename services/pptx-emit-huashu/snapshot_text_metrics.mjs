@@ -250,6 +250,40 @@ function createTextMetrics(layout) {
     ],
   };
   const SYMBOL_FACES = TARGET_SYMBOL_FACES[target === 'gslides' ? 'gslides' : 'pptx'];
+  // Box drawing (CALIBRATION.md T6). Its characters fill a cell of their
+  // face's width, which differs between faces: Chrome lays a run's out at its
+  // fallback face's (Menlo's 0.6 em after DM Mono on a Mac, about 1 em after
+  // Helvetica, the container's DejaVu 0.6 to 0.7 em), while the symbol faces
+  // draw them wider or narrower, so a heavy rule ━━━━━ in MS Gothic, 1 em a
+  // character, ran past its box and Google wrapped it. Measured, each of
+  // U+2500-257F written in each candidate face, read from each app's PDF: the
+  // faces that draw all of them themselves, and their advance. So such a
+  // character, written in a face that lacks it, is written in the target's
+  // face whose advance is nearest the one the browser laid it out at
+  // (boxDrawingFaceOf):
+  // * PowerPoint: Segoe UI Symbol, 0.5 em each; MS PGothic, 1 em for the 32 of
+  //   JIS X 0208 (─━│┃┌┏┐┓└┗┘┛├┝┠┣┤┥┨┫┬┯┰┳┴┷┸┻┼┿╂╋) and 0.667 em for the rest;
+  // * Google Slides, which hosts neither Segoe UI Symbol nor Menlo: JetBrains
+  //   Mono, 0.6 em each; Noto Sans JP, 1 em each.
+  // The nearer of a tie is the first listed.
+  const BOX_DRAWING = [[0x2500, 0x257f]];
+  const JIS_BOX_DRAWING = [
+    [0x2500, 0x2503], [0x250c, 0x250c], [0x250f, 0x2510], [0x2513, 0x2514], [0x2517, 0x2518],
+    [0x251b, 0x251d], [0x2520, 0x2520], [0x2523, 0x2525], [0x2528, 0x2528], [0x252b, 0x252c],
+    [0x252f, 0x2530], [0x2533, 0x2534], [0x2537, 0x2538], [0x253b, 0x253c], [0x253f, 0x253f],
+    [0x2542, 0x2542], [0x254b, 0x254b],
+  ];
+  const TARGET_BOX_DRAWING_FACES = {
+    pptx: [
+      { face: 'Segoe UI Symbol', advanceEm: () => 0.5 },
+      { face: 'MS PGothic', advanceEm: (codePoint) => (inRanges(JIS_BOX_DRAWING, codePoint) ? 1 : 0.667) },
+    ],
+    gslides: [
+      { face: 'JetBrains Mono', advanceEm: () => 0.6 },
+      { face: 'Noto Sans JP', advanceEm: () => 1 },
+    ],
+  };
+  const BOX_DRAWING_FACES = TARGET_BOX_DRAWING_FACES[target === 'gslides' ? 'gslides' : 'pptx'];
   // What a coverage probe never asks about: white space, and the marks and
   // format characters that join or space the text around them.
   const COVERAGE_SKIP = /[\s\p{M}\p{Cf}]/u;
@@ -669,6 +703,49 @@ function createTextMetrics(layout) {
     return symbolFaceOf(face.fallback, codePoint);
   }
 
+  // The face a box-drawing character the browser laid out at `advanceEm` is
+  // written in: the target's face whose advance for it is nearest
+  // (BOX_DRAWING_FACES).
+  function boxDrawingFaceOf(codePoint, advanceEm) {
+    let best = BOX_DRAWING_FACES[0];
+    for (let index = 1; index < BOX_DRAWING_FACES.length; index++) {
+      const candidate = BOX_DRAWING_FACES[index];
+      if (Math.abs(candidate.advanceEm(codePoint) - advanceEm) < Math.abs(best.advanceEm(codePoint) - advanceEm)) best = candidate;
+    }
+    return best.face;
+  }
+
+  // Writes each box-drawing character among the characters queued runs are
+  // cut at (`lackingOf`, by a run's place in pendingRuns: [{at, family}]) in the
+  // face its advance picks (boxDrawingFaceOf): the advance the browser laid it
+  // out at in its run's face, a probe of it alone, over its size. One probe per
+  // face and character; where a probe is not read the character keeps the face
+  // it was given.
+  function boxDrawingFaces(lackingOf) {
+    const list = probeList();
+    const asked = [];
+    for (let index = 0; index < pendingRuns.length && index < COLLECTION_ITEM_LIMIT; index++) {
+      const lacking = lackingOf[index];
+      if (!lacking) continue;
+      const pending = pendingRuns[index];
+      for (let at = 0; at < lacking.length; at++) {
+        const codePoint = pending.run.text.codePointAt(lacking[at].at);
+        if (!inRanges(BOX_DRAWING, codePoint)) continue;
+        const character = String.fromCodePoint(codePoint);
+        asked.push({ entry: lacking[at], codePoint, pending, probe: list.probe(lineProbeCss(pending.face), character, false) });
+      }
+    }
+    if (!asked.length) return;
+    const sizes = measureProbes(list.probes, 'lossBoxDrawing');
+    if (!sizes) return;
+    for (let index = 0; index < asked.length; index++) {
+      const { entry, codePoint, pending, probe } = asked[index];
+      const width = sizes[probe] ? Number(sizes[probe].w) : NaN;
+      const size = pending.run.sizePx / pending.face.scale;
+      if (width > 0 && size > 0) entry.family = boxDrawingFaceOf(codePoint, width / size);
+    }
+  }
+
   // Puts `pieces` (runs) where `run` is in `runs`, a line's runs.
   function replaceRun(runs, run, pieces) {
     for (let index = 0; index < runs.length; index++) {
@@ -691,9 +768,10 @@ function createTextMetrics(layout) {
   //   in the symbol face. Every WGL4 character is the face's own in every app.
   //   The face drawn may have them (the container's Liberation faces have ◔◑◕);
   //   the face written does not, and the apps draw the written one.
-  // A piece of such characters is the run's style in that face, with no
-  // measured tracking, and leaves the queue: its width in the export is that
-  // face's. Every other piece stays queued, its width now probed at the
+  // A box-drawing character of either is written in the face its advance picks
+  // instead (boxDrawingFaces). A piece of such characters is the run's style in
+  // that face, with no measured tracking, and leaves the queue: its width in the
+  // export is that face's. Every other piece stays queued, its width now probed at the
   // browser's own cut. Any other face (one installed on the viewer's machine)
   // has that machine's coverage, so its run is left.
   function splitFallbackRuns(webfonts) {
@@ -733,6 +811,7 @@ function createTextMetrics(layout) {
       }
     }
     if (!splits) return;
+    boxDrawingFaces(lackingOf);
     const queued = [];
     for (let index = 0; index < pendingRuns.length; index++) {
       const pending = pendingRuns[index];
