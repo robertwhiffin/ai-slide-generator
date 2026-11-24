@@ -1,0 +1,132 @@
+[
+  {
+    "cost_usd": {
+      "opus": 147.21484519999981,
+      "sonnet": 3.517624499999999
+    },
+    "final_review_at": "2026-10-26T17:42:10.608000Z",
+    "first_task_at": "2026-10-26T10:48:26.644000Z",
+    "handover_at": "2026-10-27T09:45:06Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 347,
+    "sessions": [
+      "dafb74a1-38ea-4e1c-96e1-5a3b19312ed0"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "opus": 139.09287479999992,
+      "sonnet": 2.7952353000000008
+    },
+    "final_review_at": "2026-10-29T09:18:57.523000Z",
+    "first_task_at": "2026-10-28T17:47:51.417000Z",
+    "handover_at": "2026-10-29T09:18:57.523000Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 351,
+    "sessions": [
+      "125625f6-cd95-43d5-b8b4-a8964179e636"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "haiku": 0.06520726000000002,
+      "opus": 165.85694399999994,
+      "sonnet": 6.010194300000002
+    },
+    "final_review_at": "2026-10-30T04:27:14.813000Z",
+    "first_task_at": "2026-10-29T21:42:39.536000Z",
+    "handover_at": "2026-10-30T04:27:14.813000Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 354,
+    "sessions": [
+      "ebd20c8f-55a5-4a7e-af25-33e29f98c436"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "opus": 417.4141093999994,
+      "sonnet": 6.160076799999999
+    },
+    "final_review_at": "2026-10-31T02:05:26.676000Z",
+    "first_task_at": "2026-10-29T21:51:10.433000Z",
+    "handover_at": "2026-10-31T02:05:26.676000Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 356,
+    "sessions": [
+      "bea865f1-408c-431d-abf2-2178a1c0e9f1"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "opus": 52.45825760000004,
+      "sonnet": 2.6435277000000004
+    },
+    "final_review_at": "2026-11-02T23:02:00.717000Z",
+    "first_task_at": "2026-11-02T19:33:35.483000Z",
+    "handover_at": "2026-11-02T23:05:43Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 359,
+    "sessions": [
+      "dfd8af7c-6886-4b96-b4f0-37416a87dfe3"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "opus": 148.38647639999985,
+      "sonnet": 6.197545399999995
+    },
+    "final_review_at": "2026-11-03T01:53:05.398000Z",
+    "first_task_at": "2026-11-02T20:37:31.245000Z",
+    "handover_at": "2026-11-03T01:53:56Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 360,
+    "sessions": [
+      "816dc5cb-afcc-4331-9dfc-bdd544ee3b7d"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "haiku": 0.018727120000000003,
+      "opus": 139.12464439999997,
+      "sonnet": 6.543139299999997
+    },
+    "final_review_at": "2026-11-12T23:23:29.344000Z",
+    "first_task_at": "2026-11-12T13:51:01.573000Z",
+    "handover_at": "2026-11-12T23:23:29.344000Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 384,
+    "sessions": [
+      "bc92b130-7822-48a0-891e-1f234186f197"
+    ],
+    "version": 1
+  },
+  {
+    "cost_usd": {
+      "opus": 302.42867280000104,
+      "sonnet": 6.532522599999997
+    },
+    "final_review_at": "2026-11-13T05:27:49.148000Z",
+    "first_task_at": "2026-11-12T14:18:45.238000Z",
+    "handover_at": "2026-11-13T05:27:49.148000Z",
+    "mode": "single-session",
+    "plan": "(baseline)",
+    "pr": 385,
+    "sessions": [
+      "742d711f-3942-455e-8991-313f731c4609"
+    ],
+    "version": 1
+  }
+]

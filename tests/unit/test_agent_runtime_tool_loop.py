@@ -221,7 +221,13 @@ def _harness(
         client_calls.append(system_client)
         return system_client
 
-    adapter = DatabricksModelAdapter(model_factory=model_factory, client_factory=client_factory)
+    # ``retry_policy=None``: one attempt per model call.  A scripted double cannot serve a
+    # retry (a second attempt exhausts the script), and these tests pin the loop, not the
+    # retries, which ``test_model_adapter_retries.py`` covers.  The limiter and the
+    # transport are still production's.
+    adapter = DatabricksModelAdapter(
+        model_factory=model_factory, client_factory=client_factory, retry_policy=None
+    )
     return Harness(chat, adapter, constructed, client_calls, system_client)
 
 
@@ -894,13 +900,18 @@ def test_a_turn_stopped_during_a_tool_call_starts_no_further_round(turn_status):
     assert len(harness.chat.invocations) == 1, (
         "a model round started after the turn was stopped"
     )
-    assert asked == [RID]
+    assert asked == [
+        RID,  # call_model's check before round 1: live (and cached for 2 s)
+        RID,  # the loop's own uncached check before round 2: stopped, so it raises
+    ]
 
 
-def test_a_live_turn_runs_every_round_and_is_checked_before_each_after_the_first(
-    turn_status,
-):
-    """The guard: a live turn's multi-round loop is unchanged, and round 1 is not checked."""
+def test_a_live_turn_runs_every_round_and_is_checked_before_each_round(turn_status):
+    """The guard: a live turn's multi-round loop is unchanged, and every round is checked.
+
+    ``call_model`` checks before every attempt (spec §3), round 1 included; the loop keeps
+    its own uncached check before rounds 2 and 3, where ``call_model``'s is served from
+    the cache."""
     statuses, asked = turn_status
     statuses[RID] = "running"
     tool = RecordingTool(results=("first answer", "second answer"))
@@ -912,7 +923,11 @@ def test_a_live_turn_runs_every_round_and_is_checked_before_each_after_the_first
     assert result == SCHEMA.model_validate(OUTPUT)
     assert len(harness.chat.invocations) == 3
     assert [run.args for run in tool.runs] == [LookupArgs(question="q1"), LookupArgs(question="q2")]
-    assert asked == [RID, RID], "the check must run before rounds 2 and 3 only"
+    assert asked == [
+        RID,  # call_model's check before round 1 (its answer is cached for 2 s)
+        RID,  # the loop's own uncached check before round 2 (call_model's is cached)
+        RID,  # the loop's own uncached check before round 3 (call_model's is cached)
+    ]
 
 
 def test_no_request_id_means_the_loop_never_checks_the_turn(monkeypatch):
@@ -1028,11 +1043,13 @@ def test_bound_tools_are_schema_plus_toolset_tools_in_one_bind_call():
     for tool in tools:
         if convert_to_openai_tool(tool)["function"]["name"] != SCHEMA_NAME:
             assert isinstance(tool, dict)
+    # A production adapter turns the SDK's own retries off (spec §3).
     assert harness.constructed == [
         {
             "model": CONFIGURATION.endpoint_name,
             "max_tokens": CONFIGURATION.max_tokens,
             "workspace_client": harness.system_client,
+            "max_retries": 0,
         }
     ]
     assert harness.client_calls == [harness.system_client]

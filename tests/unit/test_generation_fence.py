@@ -18,7 +18,8 @@ What is proven here, on a real SQLite schema built the production way
 * the fence reads the request id from the graph's ``ContextVar`` when no id is
   passed, and an explicit id wins over it;
 * ``allow_completed=True`` (the title thread) refuses only ``cancelled``/``error``;
-* ``start_chat_request`` moves a row ``pending -> running`` exactly once;
+* ``start_chat_request`` moves a row ``pending -> running`` exactly once, and
+  stamps its ``started_at`` in the same UPDATE;
 * ``turn_is_live`` reads committed status and writes nothing;
 * ``raise_if_turn_ended`` (the check before a model call that no fenced write
   precedes) refuses a turn that is not live, reads only, issues no SQL without a
@@ -39,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import re
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
@@ -395,8 +397,13 @@ def test_start_chat_request_only_from_pending(db, status):
 
     if status == "pending":
         assert started is True
-        expected = {**before, rid: {**before[rid], "status": "running"}}
-        assert db.table() == expected
+        after = db.table()
+        # The same UPDATE stamps started_at (Task 6), on the target row only.
+        stamped = after[rid].get("started_at", "<no started_at column>")
+        assert isinstance(stamped, datetime), f"started_at is {stamped!r}"
+        assert [r for r, row in after.items() if row["started_at"] is not None] == [rid]
+        expected = {**before, rid: {**before[rid], "status": "running", "started_at": stamped}}
+        assert after == expected
 
         # Only once: the row is running now.
         with db.factory() as session:

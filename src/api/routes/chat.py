@@ -16,6 +16,7 @@ import asyncio
 import contextvars
 import logging
 import time
+from dataclasses import dataclass
 from typing import AsyncGenerator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -84,12 +85,25 @@ ENGINE_MODE_UNAVAILABLE_DETAIL = {
 }
 
 
-class _EngineModeUnresolvedError(Exception):
+class EngineModeUnresolvedError(Exception):
     """The async route's engine-mode resolution (and nothing else) failed closed."""
 
 
-class _EngineRaceError(Exception):
+class EngineRaceError(Exception):
     """Enter decided the monolith but the saved message resolves the graph."""
+
+
+class SessionBusyError(Exception):
+    """Enter found the session lock held: nothing was written."""
+
+
+@dataclass(frozen=True)
+class EnteredTurn:
+    """A turn ``enter_chat_turn`` queued."""
+
+    request_id: str
+    #: ``"graph"`` or ``"monolith"``.
+    engine_mode: str
 
 
 #: The 409 details of an Agent deck's Enter and stop (Global Constraints copy, exact).
@@ -375,6 +389,19 @@ def _apply_genie_one_default(
     agent_config_data["tools"] = tools
 
 
+def apply_new_deck_tool_defaults(
+    agent_config_data: dict,
+    *,
+    client_set_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Seed a new deck's tool defaults, in place. The one place a new-deck tool default goes.
+
+    Shared by the browser's new-session path and MCP's ``create_deck`` so both
+    start a deck with the same tools. Today that is the admin's Genie One default.
+    """
+    _apply_genie_one_default(agent_config_data, client_set_fields=client_set_fields)
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -446,7 +473,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         """
         seeded = dict(config_data)
         _apply_org_default_style_source(seeded, client_set_fields=client_set_fields)
-        _apply_genie_one_default(seeded, client_set_fields=client_set_fields)
+        apply_new_deck_tool_defaults(seeded, client_set_fields=client_set_fields)
         return seeded
 
     def _without_template_pin(config_data: dict) -> dict:
@@ -643,9 +670,10 @@ async def send_message_streaming(
 
     # ws4d D2 — the engine for this turn is resolved HERE, in the chat route,
     # and passed down.  Not in send_message_streaming and not in the job queue:
-    # MCP's enqueue_create_job drains through the same worker as POST
-    # /chat/async, so a resolution downstream of enqueue_job would put MCP on
-    # the graph.  Resolution reads the database, so it runs off the event loop.
+    # MCP's create_deck and edit_deck enter through enter_chat_turn and drain
+    # through the same worker as POST /chat/async, so the choice of engine is made
+    # at Enter, never downstream of enqueue_job.  Resolution reads the database,
+    # so it runs off the event loop.
     #
     # FAIL CLOSED (#271 C24/C47): a failure to resolve is a 503, never a silent
     # monolith turn.  The response has not started, so the SSE generator's
@@ -773,6 +801,227 @@ async def send_message_streaming(
 
 
 
+async def enter_chat_turn(
+    *,
+    session_id: str,
+    message: str,
+    requested_deck_mode: Optional[str],
+    slide_context: Optional[dict] = None,
+    image_ids: Optional[list[str]] = None,
+    stage_slide: Optional[dict] = None,
+    extra_payload: Optional[dict] = None,
+) -> EnteredTurn:
+    """Enter one async chat turn: from the session lock to the queued job.
+
+    The caller has already checked permission, screened the message and made
+    the session.  An Agent deck's turn is all-or-nothing.  The engine is decided
+    read-only first; on the graph, Enter (under the deck row's lock) refuses
+    while a failed restore is pending or an arc review holds the deck, and
+    otherwise takes the generation snapshot BEFORE the user message.  Any
+    failure after that rolls the turn back.  A Legacy deck's turn never touches
+    the snapshot.
+
+    The job payload is ``extra_payload`` overlaid by the turn's own keys, so
+    ``extra_payload`` can add keys but never replace one.  ``stage_slide``
+    reaches only a graph turn.
+
+    Every failure is cleaned up here (lock release, the request's error mark,
+    rollback or discard) and then raised for the caller to answer:
+    ``SessionBusyError`` (nothing was written), ``GenerationRefusedError``,
+    ``EngineRaceError``, ``SessionNotFoundError``, ``EngineModeUnresolvedError``
+    (its ``__cause__`` is the resolver's error), ``DeckModeLockedError``,
+    ``ActiveGraphReleaseUnavailableError``, or the original error.
+    """
+    session_manager = get_session_manager()
+    current_user = get_current_user()
+
+    # Check session lock first
+    locked = await asyncio.to_thread(
+        session_manager.acquire_session_lock, session_id
+    )
+    if not locked:
+        raise SessionBusyError()
+
+    request_id = None
+    # Set only once the bind succeeded: a release matched on an id the lock was
+    # never bound to would leave it held, so before then release unconditionally.
+    lock_owner = None
+    # True from the moment an Agent deck's Enter committed its generation
+    # snapshot until it is discarded: a failure in between rolls the turn back.
+    snapshot_taken = False
+    # A rollback whose restore failed (or that could not run) keeps the deck
+    # locked to this request until the orphan sweep restores it, so the exits
+    # below must not release the lock.
+    keep_lock = False
+
+    async def release_lock() -> None:
+        if not keep_lock:
+            await asyncio.to_thread(
+                session_manager.release_session_lock, session_id, lock_owner
+            )
+
+    try:
+        # Create request record
+        request_id = await asyncio.to_thread(
+            session_manager.create_chat_request,
+            session_id,
+            current_user,
+        )
+        # Record which request owns the lock, so a stale release cannot free a
+        # newer request's lock.
+        await asyncio.to_thread(
+            session_manager.bind_session_lock, session_id, request_id
+        )
+        lock_owner = request_id
+
+        # The engine this turn will run on, decided READ-ONLY before anything is
+        # written: only an Agent deck's (graph) turn takes a snapshot, and it must
+        # take it before the user message locks the deck mode.  The deck owner's
+        # stored Deck Mode decides or, on a deck not locked yet, the mode this
+        # message asks for.  A failed read fails closed, as resolution does.
+        try:
+            stored_deck_mode = await asyncio.to_thread(
+                session_manager.get_deck_mode, session_id
+            )
+        except SessionNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Deck-mode read at Enter failed; failing the turn closed",
+                extra={"session_id": session_id, "error_class": type(e).__name__},
+            )
+            raise EngineModeUnresolvedError() from e
+        entered_engine = engine_mode_for_deck_mode(stored_deck_mode or requested_deck_mode)
+
+        if entered_engine == "graph":
+            await asyncio.to_thread(
+                session_manager.begin_generation, session_id, request_id
+            )
+            snapshot_taken = True
+
+        try:
+            # Capture first-message flag BEFORE persisting the user message,
+            # because saving the message increments message_count.
+            session_data = await asyncio.to_thread(
+                session_manager.get_session, session_id
+            )
+            is_first_message = session_data.get("message_count", 0) == 0
+
+            # Persist user message (locks the deck's mode atomically with it)
+            await asyncio.to_thread(
+                session_manager.add_user_message,
+                session_id,
+                message,
+                message_type="user_query",
+                request_id=request_id,
+                requested_deck_mode=requested_deck_mode,
+            )
+
+            # ws4d D2 — resolved AFTER the user message is persisted just above,
+            # because resolve_engine_mode reads the deck owner's `deck_mode`
+            # column, which that save locks: on turn 1 the column has to be set
+            # already or a legacy first message would resolve to the NULL default
+            # (graph) engine.
+            #
+            # FAIL CLOSED (#271 C24/C47): a failure of THIS call (and only this
+            # call) becomes `EngineModeUnresolvedError`, which the clause below
+            # re-raises after releasing the lock, for the caller to answer with a
+            # 503 (not the generic 500).  On a Legacy deck the chat_requests row
+            # and the user message persisted above stay; an Agent deck's Enter is
+            # rolled back first.
+            try:
+                engine_mode = await asyncio.to_thread(
+                    resolve_engine_mode_or_unavailable, session_id
+                )
+            except PersistedConfigurationUnavailableError as e:
+                raise EngineModeUnresolvedError() from e
+
+            # Only a concurrent first message (another person's, on a shared
+            # deck) can lock the deck to another mode between the two decisions.
+            if snapshot_taken and engine_mode != "graph":
+                # The turn runs on the monolith: drop the snapshot, never restore
+                # it (that would undo the other message's lock), even if this
+                # fails (then the request is ended and the answer is a 500).
+                snapshot_taken = False
+                await _discard_snapshot_or_end_request(session_manager, request_id)
+            elif not snapshot_taken and engine_mode == "graph":
+                # Fail closed: a graph turn never runs without a snapshot.
+                await asyncio.to_thread(
+                    session_manager.abandon_chat_request, request_id, ENGINE_RACE_CODE
+                )
+                raise EngineRaceError()
+
+            # Queue for processing
+            await enqueue_job(
+                request_id,
+                {
+                    **(extra_payload or {}),
+                    "session_id": session_id,
+                    "message": message,
+                    "slide_context": slide_context,
+                    "is_first_message": is_first_message,
+                    "image_ids": image_ids,
+                    # `engine_mode`, NEVER `mode`: an older payload's `mode` was a
+                    # generate/edit flag whose values are neither "graph" nor
+                    # "monolith". MCP sends no `mode` key.
+                    "engine_mode": engine_mode,
+                    # Graph-only: None on a Legacy turn, even if one was supplied.
+                    "stage_slide": stage_slide if engine_mode == "graph" else None,
+                },
+            )
+        except DeckModeLockedError:
+            # Nothing was saved, and another first message locked the mode (or
+            # this message asked for a different one): rolling back would undo
+            # that other lock and its pins, so the snapshot is only dropped (C9).
+            # A discard that raises ends the request and answers 500 (C13).
+            if snapshot_taken:
+                await _discard_snapshot_or_end_request(session_manager, request_id)
+            raise
+        except Exception:
+            if snapshot_taken:
+                outcome = await _roll_back_failed_enter(request_id)
+                # A failed restore keeps the deck locked for its retry.  So does a
+                # rollback that could not run at all (None): the request is still
+                # pending with its active snapshot, and the lock stays bound to it
+                # so no new turn starts before the orphan sweep rolls it back.
+                keep_lock = outcome is None or outcome is RollbackResult.RESTORE_FAILED
+            raise
+
+        return EnteredTurn(request_id=request_id, engine_mode=engine_mode)
+
+    except GenerationRefusedError as e:
+        # Refused before the snapshot: nothing else was written.
+        await release_lock()
+        await _mark_chat_request_error(session_manager, request_id, e.reason)
+        raise
+    except EngineRaceError:
+        await release_lock()
+        raise
+    except SessionNotFoundError:
+        await release_lock()
+        raise
+    except EngineModeUnresolvedError:
+        await release_lock()
+        raise
+    except DeckModeLockedError:
+        await release_lock()
+        await _mark_chat_request_error(session_manager, request_id, DECK_MODE_LOCKED_CODE)
+        raise
+    except ActiveGraphReleaseUnavailableError:
+        await release_lock()
+        # A rollback whose restore failed already marked the request with the
+        # restore-pending copy; that must not be overwritten.
+        if not keep_lock:
+            await _mark_chat_request_error(
+                session_manager, request_id, "no_active_graph_release"
+            )
+        raise
+    except Exception:
+        # Release lock on failure
+        await release_lock()
+        raise
+
+
 @router.post("/chat/async")
 async def submit_chat_async(
     request: ChatRequest,
@@ -824,7 +1073,6 @@ async def submit_chat_async(
     _reject_if_injection(request.message)
 
     session_manager = get_session_manager()
-    current_user = get_current_user()
 
     # Create session on the fly if none provided
     try:
@@ -836,176 +1084,23 @@ async def submit_chat_async(
         ) from e
     new_session_id = request.session_id if created else None
 
-    # Check session lock first
-    locked = await asyncio.to_thread(
-        session_manager.acquire_session_lock, request.session_id
-    )
-    if not locked:
+    try:
+        entered = await enter_chat_turn(
+            session_id=request.session_id,
+            message=request.message,
+            requested_deck_mode=request.deck_mode,
+            slide_context=(
+                request.slide_context.model_dump() if request.slide_context else None
+            ),
+            image_ids=request.image_ids,
+            stage_slide=request.stage_slide.model_dump() if request.stage_slide else None,
+        )
+    except SessionBusyError:
         raise HTTPException(
             status_code=409,
             detail="Session is already processing a request",
-        )
-
-    request_id = None
-    # Set only once the bind succeeded: a release matched on an id the lock was
-    # never bound to would leave it held, so before then release unconditionally.
-    lock_owner = None
-    # True from the moment an Agent deck's Enter committed its generation
-    # snapshot until it is discarded: a failure in between rolls the turn back.
-    snapshot_taken = False
-    # A rollback whose restore failed (or that could not run) keeps the deck
-    # locked to this request until the orphan sweep restores it, so the exits
-    # below must not release the lock.
-    keep_lock = False
-
-    async def release_lock() -> None:
-        if not keep_lock:
-            await asyncio.to_thread(
-                session_manager.release_session_lock, request.session_id, lock_owner
-            )
-
-    try:
-        # Create request record
-        request_id = await asyncio.to_thread(
-            session_manager.create_chat_request,
-            request.session_id,
-            current_user,
-        )
-        # Record which request owns the lock, so a stale release cannot free a
-        # newer request's lock.
-        await asyncio.to_thread(
-            session_manager.bind_session_lock, request.session_id, request_id
-        )
-        lock_owner = request_id
-
-        # The engine this turn will run on, decided READ-ONLY before anything is
-        # written: only an Agent deck's (graph) turn takes a snapshot, and it must
-        # take it before the user message locks the deck mode.  The deck owner's
-        # stored Deck Mode decides or, on a deck not locked yet, the mode this
-        # message asks for.  A failed read fails closed, as resolution does.
-        try:
-            stored_deck_mode = await asyncio.to_thread(
-                session_manager.get_deck_mode, request.session_id
-            )
-        except SessionNotFoundError:
-            raise
-        except Exception as e:
-            logger.error(
-                "Deck-mode read at Enter failed; failing the turn closed",
-                extra={"session_id": request.session_id, "error_class": type(e).__name__},
-            )
-            raise _EngineModeUnresolvedError() from e
-        entered_engine = engine_mode_for_deck_mode(stored_deck_mode or request.deck_mode)
-
-        if entered_engine == "graph":
-            await asyncio.to_thread(
-                session_manager.begin_generation, request.session_id, request_id
-            )
-            snapshot_taken = True
-
-        try:
-            # Capture first-message flag BEFORE persisting the user message,
-            # because saving the message increments message_count.
-            session_data = await asyncio.to_thread(
-                session_manager.get_session, request.session_id
-            )
-            is_first_message = session_data.get("message_count", 0) == 0
-
-            # Persist user message (locks the deck's mode atomically with it)
-            await asyncio.to_thread(
-                session_manager.add_user_message,
-                request.session_id,
-                request.message,
-                message_type="user_query",
-                request_id=request_id,
-                requested_deck_mode=request.deck_mode,
-            )
-
-            # ws4d D2 — resolved AFTER the user message is persisted just above,
-            # because resolve_engine_mode reads the deck owner's `deck_mode`
-            # column, which that save locks: on turn 1 the column has to be set
-            # already or a legacy first message would resolve to the NULL default
-            # (graph) engine.
-            #
-            # FAIL CLOSED (#271 C24/C47): a failure of THIS call (and only this
-            # call) becomes `_EngineModeUnresolvedError`, which the clause below
-            # turns into a 503 (not the generic 500) after releasing the lock.  On
-            # a Legacy deck the chat_requests row and the user message persisted
-            # above stay; an Agent deck's Enter is rolled back first.
-            try:
-                engine_mode = await asyncio.to_thread(
-                    resolve_engine_mode_or_unavailable, request.session_id
-                )
-            except PersistedConfigurationUnavailableError as e:
-                raise _EngineModeUnresolvedError() from e
-
-            # Only a concurrent first message (another person's, on a shared
-            # deck) can lock the deck to another mode between the two decisions.
-            if snapshot_taken and engine_mode != "graph":
-                # The turn runs on the monolith: drop the snapshot, never restore
-                # it (that would undo the other message's lock), even if this
-                # fails (then the request is ended and the answer is a 500).
-                snapshot_taken = False
-                await _discard_snapshot_or_end_request(session_manager, request_id)
-            elif not snapshot_taken and engine_mode == "graph":
-                # Fail closed: a graph turn never runs without a snapshot.
-                await asyncio.to_thread(
-                    session_manager.abandon_chat_request, request_id, ENGINE_RACE_CODE
-                )
-                raise _EngineRaceError()
-
-            # Queue for processing
-            await enqueue_job(
-                request_id,
-                {
-                    "session_id": request.session_id,
-                    "message": request.message,
-                    "slide_context": (
-                        request.slide_context.model_dump()
-                        if request.slide_context
-                        else None
-                    ),
-                    "is_first_message": is_first_message,
-                    "image_ids": request.image_ids,
-                    # `engine_mode`, NEVER `mode`: `mode` is already MCP's
-                    # generate/edit flag in this same payload (mcp_server.py), whose
-                    # values are neither "graph" nor "monolith".
-                    "engine_mode": engine_mode,
-                    # Graph-only: None on a Legacy turn, even if one was supplied.
-                    "stage_slide": (
-                        request.stage_slide.model_dump()
-                        if request.stage_slide and engine_mode == "graph"
-                        else None
-                    ),
-                },
-            )
-        except DeckModeLockedError:
-            # Nothing was saved, and another first message locked the mode (or
-            # this message asked for a different one): rolling back would undo
-            # that other lock and its pins, so the snapshot is only dropped (C9).
-            # A discard that raises ends the request and answers 500 (C13).
-            if snapshot_taken:
-                await _discard_snapshot_or_end_request(session_manager, request_id)
-            raise
-        except Exception:
-            if snapshot_taken:
-                outcome = await _roll_back_failed_enter(request_id)
-                # A failed restore keeps the deck locked for its retry.  So does a
-                # rollback that could not run at all (None): the request is still
-                # pending with its active snapshot, and the lock stays bound to it
-                # so no new turn starts before the orphan sweep rolls it back.
-                keep_lock = outcome is None or outcome is RollbackResult.RESTORE_FAILED
-            raise
-
-        result = {"request_id": request_id, "status": "pending"}
-        if new_session_id:
-            result["session_id"] = new_session_id
-        return result
-
+        ) from None
     except GenerationRefusedError as e:
-        # Refused before the snapshot: nothing else was written.
-        await release_lock()
-        await _mark_chat_request_error(session_manager, request_id, e.reason)
         if e.reason == GenerationRefusedError.GENERATION_IN_FLIGHT:
             # Another Enter on this deck won the deck lock: the same answer as
             # the holder gate this one passed just before that Enter committed.
@@ -1018,39 +1113,30 @@ async def submit_chat_async(
         raise HTTPException(
             status_code=409, detail=_GENERATION_REFUSED_DETAILS[e.reason]
         ) from e
-    except _EngineRaceError as e:
-        await release_lock()
+    except EngineRaceError as e:
         raise HTTPException(status_code=409, detail=ENGINE_RACE_DETAIL) from e
     except SessionNotFoundError as e:
-        await release_lock()
         raise HTTPException(
             status_code=404,
             detail=f"Session not found: {request.session_id}",
         ) from e
-    except _EngineModeUnresolvedError as e:
-        await release_lock()
+    except EngineModeUnresolvedError as e:
         raise _engine_mode_unavailable() from e.__cause__
     except DeckModeLockedError as e:
-        await release_lock()
-        await _mark_chat_request_error(session_manager, request_id, DECK_MODE_LOCKED_CODE)
         raise _deck_mode_locked(e) from e
     except ActiveGraphReleaseUnavailableError as e:
-        await release_lock()
-        # A rollback whose restore failed already marked the request with the
-        # restore-pending copy; that must not be overwritten.
-        if not keep_lock:
-            await _mark_chat_request_error(
-                session_manager, request_id, "no_active_graph_release"
-            )
         raise HTTPException(
             status_code=503,
             detail="No active Graph Release available",
         ) from e
     except Exception as e:
-        # Release lock on failure
-        await release_lock()
         logger.error(f"Failed to submit async chat: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+    result = {"request_id": entered.request_id, "status": "pending"}
+    if new_session_id:
+        result["session_id"] = new_session_id
+    return result
 
 
 @router.get("/chat/poll/{request_id}")

@@ -122,6 +122,77 @@ def test_to_html_document_strips_style_closer_from_css():
     assert closers == 1, f"expected exactly 1 </style>, saw {closers}"
 
 
+#: Where the HTML tokenizer ends a <style> element's raw text: ``</style`` followed by
+#: whitespace, ``/`` or ``>`` (any case), or at the end of the input.
+_TOKENIZER_STYLE_CLOSER = re.compile(r"</style(?=[\t\n\f\r />]|\Z)", re.IGNORECASE)
+
+
+@pytest.mark.parametrize(
+    "closer",
+    [
+        pytest.param("</style>", id="plain"),
+        pytest.param("</style x>", id="with-attribute"),
+        pytest.param("</style/>", id="self-closing"),
+        pytest.param("</STYLE\t>", id="upper-case-tab"),
+        pytest.param("<</style/style>", id="re-forms-when-removed"),
+        pytest.param("</</style>style>", id="re-forms-when-its-prefix-is-removed"),
+        pytest.param("</sty</style>le>", id="nested-in-a-closer"),
+    ],
+)
+def test_to_html_document_neutralises_every_style_closer_form(closer):
+    """Final review M1: every form the tokenizer reads as the style end tag is
+    neutralised, so the css cannot open a live <script>; the css text survives."""
+    css = f"body {{ color: red; }}{closer}<script>alert(1)</script><style>"
+    out = SlideDeck(title="X", css=css).to_html_document()
+
+    assert "body { color: red; }" in out
+    assert "alert(1)" in out
+    # Exactly one closer remains: the one we emit ourselves, after all the css.
+    closers = [m.start() for m in _TOKENIZER_STYLE_CLOSER.finditer(out)]
+    assert len(closers) == 1, closers
+    assert closers[0] > out.index("alert(1)")
+
+
+def test_to_html_document_neutralises_a_closer_at_the_end_of_the_css():
+    """``</style`` ending the css is followed by our newline: the tokenizer reads that
+    as the end tag too."""
+    out = SlideDeck(title="X", css="body { color: red; }</style").to_html_document()
+
+    closers = [m.start() for m in _TOKENIZER_STYLE_CLOSER.finditer(out)]
+    assert len(closers) == 1, closers
+    assert "body { color: red; }" in out
+
+
+def test_to_html_document_keeps_only_http_and_https_external_scripts():
+    """Final review M2: the http(s)-only script src guard. ``external_scripts`` reaches
+    ``to_html_document`` from a deck dict through ``SlideDeck.from_dict`` (which keeps
+    the list as given; the constructor appends the Chart.js default)."""
+    deck = SlideDeck.from_dict(
+        {
+            "title": "X",
+            "external_scripts": [
+                "javascript:alert(1)",
+                "data:text/javascript,alert(2)",
+                "//evil.example/x.js",
+                "https://ok.example/a.js",
+                "http://ok.example/b.js",
+            ],
+            "slides": [],
+        }
+    )
+
+    out = deck.to_html_document()
+
+    assert re.findall(r'<script src="([^"]*)"></script>', out) == [
+        "https://ok.example/a.js",
+        "http://ok.example/b.js",
+        SlideDeck.CHART_JS_URL,
+    ]
+    assert "javascript:" not in out
+    assert "alert(2)" not in out
+    assert "evil.example" not in out
+
+
 def test_to_html_document_preserves_legitimate_css_with_angle_brackets():
     """CSS containing <> in string literals or data URIs must be preserved."""
     legit_css = (

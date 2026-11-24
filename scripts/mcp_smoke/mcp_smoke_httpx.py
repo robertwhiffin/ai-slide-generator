@@ -199,9 +199,18 @@ def main() -> int:
         if status == "ready":
             print(f"  slide_count={payload.get('slide_count')}")
             print(f"  deck_url={payload.get('deck_url')}")
-            html_doc = payload.get("html_document", "")
-            if not html_doc.lower().startswith("<!doctype"):
-                print(f"ERROR: html_document does not start with <!doctype>")
+            preview = payload.get("preview") or {}
+            if preview.get("included"):
+                preview_html = (
+                    content[1].get("text", "")
+                    if len(content) > 1 and isinstance(content[1], dict)
+                    else ""
+                )
+                if not preview_html.lower().startswith("<!doctype"):
+                    print("ERROR: the preview (content[1]) does not start with <!doctype>")
+                    return 1
+            elif len(content) != 1:
+                print("ERROR: preview.included is false but the result has a second item")
                 return 1
             print("SUCCESS")
             return 0

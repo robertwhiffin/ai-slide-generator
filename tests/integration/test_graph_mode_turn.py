@@ -1151,7 +1151,7 @@ class TestTheCompleteEvent:
 
         events = graph_chat_env.run(is_first_message=False)
 
-        assert events[-1].metadata == {"engine_mode": "graph"}
+        assert events[-1].metadata == {"engine_mode": "graph", "architect_intent": "build"}
 
 
 # ---------------------------------------------------------------------------

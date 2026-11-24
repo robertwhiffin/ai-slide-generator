@@ -13,12 +13,14 @@ import logging
 import os
 import queue
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.services.generation_fence import TurnStopped
+from src.services.model_calls import model_fault_kind, set_turn_deadline
 from src.services.persisted_graph_release import PersistedRuntimeError
 
 logger = logging.getLogger(__name__)
@@ -44,13 +46,12 @@ job_queue: asyncio.Queue = asyncio.Queue()
 WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
 
 # Job runners per uvicorn process.  Each process (UVICORN_WORKERS, default 4) takes
-# the chat jobs POSTed to it; with one runner a second turn on the same process
-# waited "pending" until the first finished.  A session's turns are still
-# serialised by its database session lock, so runners only overlap different
-# sessions.  The default stays 1: a load test of 8 concurrent decks drew 118
-# model 429s and failed 6 turns, so more runners wait on better 429 handling.
+# the chat jobs POSTed to it.  A session's turns are still serialised by its
+# database session lock, so runners only overlap different sessions.  Runners only
+# decide which turns start; model load is capped separately, per process, by
+# TELLR_MODEL_CALL_CONCURRENCY (default 15) in src/services/model_calls.py.
 CHAT_JOB_CONCURRENCY_ENV = "TELLR_CHAT_JOB_CONCURRENCY"
-DEFAULT_CHAT_JOB_CONCURRENCY = 1
+DEFAULT_CHAT_JOB_CONCURRENCY = 8
 MAX_CHAT_JOB_CONCURRENCY = 16
 
 # Chat jobs block a thread for minutes, so they run on their own pool.  The API's
@@ -61,7 +62,7 @@ _chat_executor_lock = threading.Lock()
 
 
 def chat_job_concurrency() -> int:
-    """Job runners per process, from ``TELLR_CHAT_JOB_CONCURRENCY`` (default 1, max 16)."""
+    """Job runners per process, from ``TELLR_CHAT_JOB_CONCURRENCY`` (default 8, max 16)."""
     raw = os.getenv(CHAT_JOB_CONCURRENCY_ENV)
     if raw is None:
         return DEFAULT_CHAT_JOB_CONCURRENCY
@@ -118,11 +119,13 @@ def shutdown_chat_executor() -> None:
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
 
-# Maximum duration (seconds) a chat request can stay in "running" before the
-# hard-timeout sweeper marks it failed. Belt-and-suspenders on top of the
-# startup recover_stuck_requests() pass: the sweeper runs continuously while
-# the app is up, whereas recovery only runs at process boot. Gives MCP callers
-# a predictable upper bound on poll duration independent of deploy cadence.
+# Maximum duration (seconds) a monolith (Legacy deck) chat request can stay in
+# "running" before the hard-timeout sweeper marks it failed. Belt-and-suspenders
+# on top of the startup recover_stuck_requests() pass: the sweeper runs
+# continuously while the app is up, whereas recovery only runs at process boot,
+# so a running turn's duration is bounded independent of deploy cadence. MCP
+# turns are Agent (graph) turns and get GRAPH_JOB_HARD_TIMEOUT_SECONDS below;
+# the sweeper counts from when a turn starts running, so queue wait comes on top.
 JOB_HARD_TIMEOUT_SECONDS = 600
 
 # Agent-mode ("graph") turns get a longer hard limit: a multi-step graph run
@@ -215,8 +218,11 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     A graph request (an Agent deck's turn, ``engine_mode == "graph"``) is
     all-or-nothing: it starts only if it is still ``pending`` (a stop while it
     was queued already rolled it back), completes only while it is still live,
-    and a failure rolls back its generation snapshot.  Every other request (a
-    Legacy deck's, every MCP job) takes the path it always has.
+    and a failure rolls back its generation snapshot and records the kind of
+    model fault that ended it (best-effort).  MCP turns are Agent turns too:
+    ``create_deck`` and ``edit_deck`` enter them through ``enter_chat_turn``,
+    the same Enter the async chat route uses.  Every other request (a Legacy
+    deck's) takes the path it always has.
 
     Args:
         request_id: Unique request identifier
@@ -236,17 +242,16 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     slide_context = payload.get("slide_context")
     is_first_message = payload.get("is_first_message", False)
     image_ids = payload.get("image_ids")
-    # ws4d D2.  The key is `engine_mode`, NOT `mode`: `mode` is already MCP's
-    # generate/edit flag in this same payload (mcp_server.py's enqueue_create_job
-    # sets it), so reading `mode` here would hand this the string "generate".
-    # The default is what excludes MCP structurally — mcp_server.py builds no
-    # `engine_mode` key, so every MCP job runs on the monolith without
-    # mcp_server.py knowing this switch exists.
+    # ws4d D2.  The key is `engine_mode`, NOT `mode`: a payload built before
+    # `engine_mode` existed carried a `mode` generate/edit flag, whose values are
+    # neither "graph" nor "monolith".  MCP turns enter through `enter_chat_turn`,
+    # which sets `engine_mode` and sends no `mode` key.  The default covers only a
+    # payload with no `engine_mode` at all.
     engine_mode = payload.get("engine_mode", "monolith")
-    # Only the async route's Agent-deck turns carry engine_mode "graph"; a payload
-    # without the key (every MCP job) is never one.
+    # Only Agent-deck turns carry engine_mode "graph" (the async route's, and MCP's,
+    # both entered through `enter_chat_turn`); a payload without the key is never one.
     is_graph = payload.get("engine_mode") == "graph"
-    # Graph-only snapshot of the slide on stage; absent on MCP and pre-existing jobs.
+    # Graph-only snapshot of the slide on stage; absent on a Legacy turn and on pre-existing jobs.
     stage_slide = payload.get("stage_slide")
 
     chat_service = get_chat_service()
@@ -299,6 +304,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     image_ids,
                     engine_mode,
                     stage_slide,
+                    _turn_deadline(request_id, engine_mode),
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -328,6 +334,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     image_ids,
                     engine_mode,
                     stage_slide,
+                    _turn_deadline(request_id, engine_mode),
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -362,7 +369,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             "Chat job ended: its turn was stopped", extra={"request_id": request_id}
         )
 
-    except _PinnedGraphConfigurationTerminalError:
+    except _PinnedGraphConfigurationTerminalError as exc:
         if not is_graph:
             session_manager.update_chat_request_status(
                 request_id,
@@ -380,6 +387,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             )
         else:
             session_manager.fail_chat_request(request_id, PINNED_GRAPH_CONFIGURATION_ERROR)
+        if is_graph:
+            _record_fault_kind(session_manager, request_id, exc)
 
     except Exception as e:
         logger.error(f"Job failed: {e}", extra={"request_id": request_id})
@@ -396,21 +405,44 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             # No snapshot: a stop (or another rollback) has already ended the
             # turn, and its status must not be overwritten.
             session_manager.fail_chat_request(request_id, str(e))
+        if is_graph:
+            _record_fault_kind(session_manager, request_id, e)
         raise
 
     finally:
         # Always release session lock.  Graph requests bind the lock to their
         # request id, so release only while this request still owns it, and not
         # while its snapshot survives: a failed restore keeps the deck locked to
-        # its sender until a retry restores it.  Monolith requests (including
-        # every MCP job) never bind and release as before.  A graph request that
-        # never started releases nothing: its stop already released the lock.
+        # its sender until a retry restores it.  Monolith requests (a Legacy
+        # deck's) release unconditionally, as before, whether or not they bound
+        # the lock.  A graph request that never started releases nothing: its
+        # stop already released the lock.
         if not is_graph:
             session_manager.release_session_lock(session_id)
         elif started and (completed or not _snapshot_survives(request_id)):
             session_manager.release_session_lock(session_id, request_id=request_id)
         # Clean up in-memory tracking
         jobs.pop(request_id, None)
+
+
+def _record_fault_kind(session_manager: Any, request_id: str, exc: BaseException) -> None:
+    """Best-effort: record the kind of model fault that ended a failed graph turn.
+
+    Never raises, so it cannot mask the error the caller is handling.  The
+    kind is worked out first, inside the same guard, so a failed write still
+    logs it (``unclassified`` if the classifier itself raised).
+    """
+    kind = "unclassified"
+    try:
+        kind = model_fault_kind(exc)
+        session_manager.set_chat_request_fault_kind(request_id, kind)
+    except Exception:
+        logger.warning(
+            "Could not record the model fault kind %s of request %s",
+            kind,
+            request_id,
+            exc_info=True,
+        )
 
 
 def _snapshot_survives(request_id: str) -> bool:
@@ -435,6 +467,20 @@ def _snapshot_survives(request_id: str) -> bool:
         return True
 
 
+def _turn_deadline(request_id: str, engine_mode: str | None) -> float:
+    """The ``time.monotonic()`` deadline of this turn's hard timeout.
+
+    Same clock as ``mark_timed_out_jobs_once``: the entry's ``started_at``
+    (``datetime.utcnow()``) plus ``job_hard_timeout_seconds(engine_mode)``.
+    With no job entry, or an entry without ``started_at``, the elapsed time
+    counts as 0, so the deadline is the full limit from now; the no-context
+    recovery path relies on that.
+    """
+    started_at = jobs.get(request_id, {}).get("started_at")
+    elapsed = (datetime.utcnow() - started_at).total_seconds() if started_at else 0
+    return time.monotonic() + job_hard_timeout_seconds(engine_mode) - elapsed
+
+
 def _run_streaming_generator(
     chat_service,
     session_id: str,
@@ -445,6 +491,7 @@ def _run_streaming_generator(
     image_ids: Optional[list] = None,
     engine_mode: str = "monolith",
     stage_slide: Optional[Dict[str, Any]] = None,
+    turn_deadline: Optional[float] = None,
 ) -> list:
     """Run the streaming generator and collect events.
 
@@ -466,10 +513,16 @@ def _run_streaming_generator(
         stage_slide: Optional graph-only snapshot of the slide on stage
             (``{"slide_number", "slide_id"}``), appended after ``engine_mode``
             and passed positionally by both call sites.
+        turn_deadline: ``time.monotonic()`` value of the job's hard timeout
+            (from ``_turn_deadline``): the turn's model calls never start a retry
+            wait that would end at or after it.  Appended last and passed
+            positionally by both call sites.  Installed first, inside the job's
+            context.
 
     Returns:
         List of all events from the generator
     """
+    set_turn_deadline(turn_deadline)
     events = []
     try:
         for event in chat_service.send_message_streaming(
@@ -589,7 +642,8 @@ def _fail_stuck_request(request_id: str, session_pk: int) -> bool:
     """A stuck request with nothing to restore (a monolith one): ``error``, and
     its session's lock freed unless a newer request has taken it.
 
-    An unbound lock (MCP jobs never bind theirs) counts as this request's.
+    An unbound lock (from a request that never bound its lock: one entered before
+    the bind existed) counts as this request's.
     """
     from sqlalchemy import or_, update
 
@@ -632,7 +686,7 @@ async def recover_stuck_requests() -> int:
     no longer refreshed is rolled back, and every failed restore retried.  Then
     every request still ``running`` past ``GRAPH_JOB_HARD_TIMEOUT_SECONDS``: one
     with a generation snapshot is rolled back to Enter; any other (a Legacy deck's
-    turn, an MCP job) is marked ``error`` as before, its lock freed unless a newer
+    turn) is marked ``error`` as before, its lock freed unless a newer
     request holds it.  One request's error is logged and the others go on.
 
     Returns:
@@ -761,7 +815,7 @@ async def refresh_job_session_locks_once() -> int:
     A graph entry refreshes its session's lock only while the lock is bound to its
     own request: an entry whose turn was stopped while it was queued must not keep
     a newer request's lock alive (that request's process may have died).  A
-    monolith entry (a Legacy deck's turn, an MCP job) refreshes whatever its
+    monolith entry (a Legacy deck's turn) refreshes whatever its
     session holds, as before.
 
     Returns:

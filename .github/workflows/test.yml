@@ -60,6 +60,7 @@ jobs:
               - 'frontend/tests/**'
               - 'scripts/check_release_notes.py'
               - 'scripts/verify_app_wheel.py'
+              - 'scripts/build_metrics.py'
             # `frontend` also gates E2E, so it names what E2E runs on besides
             # frontend/: this workflow and the per-spec runner. Without them a
             # change to how E2E runs would skip E2E.
@@ -556,6 +557,7 @@ jobs:
             tests/integration/test_delete_message_graph_turn.py \
             tests/integration/test_generation_stop_routes.py \
             tests/integration/test_generation_stop_graph_turn.py \
+            tests/integration/test_mcp_agent_mode_postgres.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live" \
             -o faulthandler_timeout=120
       - uses: actions/upload-artifact@v4

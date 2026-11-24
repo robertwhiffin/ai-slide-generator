@@ -162,7 +162,7 @@ async def lifespan(app: FastAPI):
         disable_autologging_unless_opted_in()
 
         # Start the job queue runners for async chat processing (per process:
-        # TELLR_CHAT_JOB_CONCURRENCY, default 1)
+        # TELLR_CHAT_JOB_CONCURRENCY, default 8)
         _worker_tasks = await start_workers()
         logger.info("Chat job queue started with %d runners", len(_worker_tasks))
 

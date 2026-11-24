@@ -662,6 +662,8 @@ def _run_migrations(engine, schema: str | None = None):
 
         # --- chat_requests: the graph turn's stage summary for the chat placeholder (#319) ---
         _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite)
+        # --- chat-concurrency: chat_requests.started_at + model_fault_kind ---
+        _migrate_chat_request_measurement(conn, inspector, schema, _qual, is_sqlite)
 
         # --- interrupt generation: generation_snapshots + request-owned lock columns ---
         # ORDERING: before _reassign_new_objects_to_shared_owner (below) so the new
@@ -1484,6 +1486,34 @@ def _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite) ->
     for col_name, col_def in (
         ("progress_json", "TEXT NULL"),
         ("progress_seq", "INTEGER NULL"),
+    ):
+        if col_name not in cols:
+            logger.info("Migration: adding %s to chat_requests", col_name)
+            conn.execute(text(f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"))
+
+
+def _migrate_chat_request_measurement(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add ``started_at`` and ``model_fault_kind`` to ``chat_requests`` (idempotent).
+
+    ``create_all`` adds both on a fresh install but never ALTERs an existing
+    table.  Both are nullable with no default: a request that predates them, a
+    request never started, and a request that did not fail on a model fault all
+    read NULL.
+    """
+    from sqlalchemy import text
+
+    try:
+        cols = {c["name"] for c in inspector.get_columns("chat_requests", schema=schema)}
+    except Exception:
+        return
+    if not cols:
+        return
+    qualified = _qual("chat_requests")
+    for col_name, col_def in (
+        ("started_at", "TIMESTAMP NULL"),
+        ("model_fault_kind", "VARCHAR(32) NULL"),
     ):
         if col_name not in cols:
             logger.info("Migration: adding %s to chat_requests", col_name)

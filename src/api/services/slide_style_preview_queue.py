@@ -68,12 +68,14 @@ WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
 # Validation / safety caps.
 PREVIEW_MAX_BYTES = 3_000_000      # reject runaway payloads
 PREVIEW_MAX_ASSETS = 24            # referenced-asset ceiling
-PREVIEW_MAX_RETRIES = 2            # transient provider errors
+# The model adapter already retries transient provider faults; a queue retry on
+# top would multiply them.
+PREVIEW_MAX_RETRIES = 0
 
 # An in-flight row whose last transition is older than this is presumed
 # abandoned (its worker restarted or crashed) and may be claimed again. Generous
-# against a live job: one generation is three parallel builder calls, retried at
-# most PREVIEW_MAX_RETRIES times.
+# against a live job: one generation is three parallel builder calls, each retried
+# by the model adapter within its own time budget.
 PREVIEW_STALE_AFTER = timedelta(minutes=30)
 
 # Statuses a preview can be re-queued from.

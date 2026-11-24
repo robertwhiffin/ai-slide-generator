@@ -288,6 +288,9 @@ def _assert_refused_submit(api: Api, before, after, *, session_id: str) -> None:
         "progress_json": None,
         "progress_seq": None,
         "rollback_outcome": None,
+        # Never started (no runner reached it) and no model fault (no graph ran).
+        "started_at": None,
+        "model_fault_kind": None,
     }
 
 
