@@ -19,7 +19,10 @@ the container's files into a deck. So:
 
 The hosts are ``SLIDE_CSP``'s own: ``src/utils/html_safety.py`` derives them
 (``slide_csp_request_hosts``) and the wrapper passes them in the sidecar's stdin
-payload (``allowedHosts``), so the CSP is their one source.
+payload (``allowedHosts``), so the CSP is their one source. A CSP source the guard
+could not mirror stops no app from starting: ``html_safety`` still imports, warns once
+naming the source, and leaves it out, so the guard aborts its requests and every other
+host is as before.
 
 Through the real engine, each way a slide's script could reach a local file, a
 directory or a local server is tried, in a deck whose other slide is ordinary, once in
@@ -33,8 +36,10 @@ from __future__ import annotations
 
 import contextlib
 import http.server
+import importlib.util
 import io
 import json
+import logging
 import re
 import socket
 import threading
@@ -42,6 +47,7 @@ import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from PIL import Image
@@ -478,6 +484,42 @@ def _https_hosts_of_meta() -> dict[str, list[str]]:
     return hosts
 
 
+HTML_SAFETY_SOURCE = Path(html_safety.__file__)
+
+
+def _import_html_safety(directory: Path, *edits: tuple[str, str]) -> ModuleType:
+    """``src/utils/html_safety.py`` imported afresh, as an app's startup imports it.
+
+    From a copy in ``directory`` where each ``(written, rewritten)`` of ``edits`` has the
+    text the module writes once, ``written``, read ``rewritten``; with no edits the copy is
+    the module as it is. The copy runs under the module's own name, so it logs where the
+    module logs, and neither the module the tests import nor ``sys.modules`` is touched.
+    """
+    source = HTML_SAFETY_SOURCE.read_text(encoding="utf-8")
+    for written, rewritten in edits:
+        assert source.count(written) == 1, (
+            f"fixture drift: html_safety.py writes {written!r} "
+            f"{source.count(written)} times, not once"
+        )
+        source = source.replace(written, rewritten)
+    copy = directory / "html_safety.py"
+    copy.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(html_safety.__name__, copy)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _warnings_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """What html_safety logged at warning level or above, message by message."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == html_safety.__name__ and record.levelno >= logging.WARNING
+    ]
+
+
 class TestTheHostsAreTheCsps:
     def test_html_safety_derives_each_request_types_hosts_from_the_csp(self) -> None:
         assert {
@@ -493,17 +535,45 @@ class TestTheHostsAreTheCsps:
         }
 
     @pytest.mark.parametrize(
-        "csp",
+        ("csp", "source"),
         [
-            "default-src 'none'; img-src data: https://images.example.com;",
-            "default-src 'none'; script-src https://cdn.example.com/path/;",
-            "default-src 'none'; script-src https://*.example.com;",
-            "default-src 'none'; script-src https://cdn.example.com:8443;",
+            (
+                "default-src 'none'; img-src data: https://images.example.com;",
+                "img-src https://images.example.com",
+            ),
+            (
+                "default-src 'none'; script-src https://cdn.example.com/path/;",
+                "script-src https://cdn.example.com/path/",
+            ),
+            (
+                "default-src 'none'; script-src https://*.example.com;",
+                "script-src https://*.example.com",
+            ),
+            (
+                "default-src 'none'; script-src https://cdn.example.com:8443;",
+                "script-src https://cdn.example.com:8443",
+            ),
         ],
+        ids=["an-image-host", "a-host-with-a-path", "a-wildcard-host", "a-host-with-a-port"],
     )
-    def test_a_csp_the_guard_cannot_mirror_is_refused(self, csp: str) -> None:
-        with pytest.raises(ValueError):
-            html_safety.slide_csp_request_hosts(csp)
+    def test_a_source_the_guard_cannot_mirror_is_left_out_and_named(
+        self, csp: str, source: str
+    ) -> None:
+        """No host of it is allowed, for any request type, and it is named as unmirrored."""
+        assert html_safety.slide_csp_request_hosts(csp) == ({}, (source,))
+
+    def test_todays_csp_imports_with_todays_hosts_and_no_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Parity: html_safety imported as it is written gives the meta tag's hosts, unwarned."""
+        with caplog.at_level(logging.WARNING, logger=html_safety.__name__):
+            imported = _import_html_safety(tmp_path)
+
+        assert {
+            kind: list(hosts) for kind, hosts in imported.SLIDE_CSP_REQUEST_HOSTS.items()
+        } == _https_hosts_of_meta()
+        assert imported.SLIDE_CSP_UNMIRRORED_SOURCES == ()
+        assert _warnings_of(caplog) == []
 
     def test_the_wrapper_gives_the_sidecar_the_csps_hosts(
         self,
@@ -729,20 +799,28 @@ VERDICTS = [
 ]
 
 
+def _guard_verdicts(hosts: object, requests: list[tuple[str, str, bool, bool]]) -> list[str]:
+    """request_guard.cjs's verdict on each (url, resourceType, navigation, mainFrame) request.
+
+    ``hosts`` is read as the stdin payload's ``allowedHosts`` is (``requestHostsOf``).
+    """
+    shaped = [
+        {"url": url, "resourceType": kind, "navigation": navigation, "mainFrame": main}
+        for url, kind, navigation, main in requests
+    ]
+    return node_json(
+        f"const guard = require({json.dumps(str(GUARD_MODULE))});"
+        f"const policy = {{ slideUrl: {json.dumps(SLIDE_URL)}, "
+        f"hosts: guard.requestHostsOf({json.dumps(hosts)}).hosts }};"
+        f"console.log(JSON.stringify({json.dumps(shaped)}.map("
+        "(request) => guard.requestVerdict(request, policy))));"
+    )
+
+
 @requires_node
 class TestTheVerdicts:
     def _verdicts(self, hosts: object) -> list[str]:
-        requests = [
-            {"url": url, "resourceType": kind, "navigation": navigation, "mainFrame": main}
-            for (url, kind, navigation, main), _ in VERDICTS
-        ]
-        return node_json(
-            f"const guard = require({json.dumps(str(GUARD_MODULE))});"
-            f"const policy = {{ slideUrl: {json.dumps(SLIDE_URL)}, "
-            f"hosts: guard.requestHostsOf({json.dumps(hosts)}).hosts }};"
-            f"console.log(JSON.stringify({json.dumps(requests)}.map("
-            "(request) => guard.requestVerdict(request, policy))));"
-        )
+        return _guard_verdicts(hosts, [request for request, _ in VERDICTS])
 
     def test_each_request_gets_its_verdict(self) -> None:
         verdicts = self._verdicts(CSP_HOSTS)
@@ -793,6 +871,120 @@ class TestTheVerdicts:
             "([kind, names]) => [kind, [...names]])), ignored: read.ignored }));"
         )
         assert read == {"hosts": payload, "ignored": 0}
+
+
+# ---------------------------------------------------------------------------
+# A CSP source the guard cannot mirror stops no startup
+# ---------------------------------------------------------------------------
+
+# A source the guard cannot mirror, added to SLIDE_CSP where html_safety.py writes it: the
+# text written there, that text with the source added, the source as html_safety names it,
+# and a request (url, resourceType) that source alone allows.
+UNMIRRORABLE_SOURCES = [
+    pytest.param(
+        '"img-src data:; "',
+        '"img-src data: https:; "',
+        "img-src https:",
+        ("https://images.example.com/p.png", "image"),
+        id="a-directive-the-guard-maps-to-no-request-type",
+    ),
+    pytest.param(
+        'https://cdn.tailwindcss.com; "',
+        'https://cdn.tailwindcss.com https://*.example.com; "',
+        "script-src https://*.example.com",
+        ("https://cdn.example.com/x.js", "script"),
+        id="a-wildcard-host",
+    ),
+    pytest.param(
+        'https://cdn.tailwindcss.com; "',
+        'https://cdn.tailwindcss.com https://cdn.example.com/lib/; "',
+        "script-src https://cdn.example.com/lib/",
+        ("https://cdn.example.com/lib/x.js", "script"),
+        id="a-host-with-a-path",
+    ),
+    pytest.param(
+        'https://fonts.gstatic.com; "',
+        'https://fonts.gstatic.com https://fonts.example.com:8443; "',
+        "font-src https://fonts.example.com:8443",
+        ("https://fonts.example.com:8443/x.woff2", "font"),
+        id="a-host-with-a-port",
+    ),
+]
+
+
+class TestASourceTheGuardCannotMirror:
+    """A CSP edit such as ``img-src https:``: every app still starts, and only an export's
+    requests to that source are aborted.
+
+    ``html_safety`` is imported by the security-headers middleware, the agent and the
+    streaming callback, so raising at its import used to stop the whole app, chat included.
+    """
+
+    @pytest.mark.parametrize(
+        ("written", "rewritten", "source", "blocked_request"), UNMIRRORABLE_SOURCES
+    )
+    def test_html_safety_still_imports_and_warns_once_naming_it(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        written: str,
+        rewritten: str,
+        source: str,
+        blocked_request: tuple[str, str],
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger=html_safety.__name__):
+            imported = _import_html_safety(tmp_path, (written, rewritten))
+
+        warnings = _warnings_of(caplog)
+        assert len(warnings) == 1 and source in warnings[0], warnings
+        assert imported.SLIDE_CSP_UNMIRRORED_SOURCES == (source,)
+
+    def test_several_are_named_in_one_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The image directive's source and the wildcard script host, in the CSP's order."""
+        image, wildcard = (param.values for param in UNMIRRORABLE_SOURCES[:2])
+
+        with caplog.at_level(logging.WARNING, logger=html_safety.__name__):
+            imported = _import_html_safety(tmp_path, image[:2], wildcard[:2])
+
+        sources = ("script-src https://*.example.com", "img-src https:")
+        warnings = _warnings_of(caplog)
+        assert len(warnings) == 1 and all(source in warnings[0] for source in sources), warnings
+        assert imported.SLIDE_CSP_UNMIRRORED_SOURCES == sources
+
+    @requires_node
+    @pytest.mark.parametrize(
+        ("written", "rewritten", "source", "blocked_request"), UNMIRRORABLE_SOURCES
+    )
+    def test_the_guard_aborts_its_requests_and_keeps_every_other_host(
+        self,
+        tmp_path: Path,
+        written: str,
+        rewritten: str,
+        source: str,
+        blocked_request: tuple[str, str],
+    ) -> None:
+        """Fails closed for that source alone: no host of it, and the CSP's others all kept."""
+        imported = _import_html_safety(tmp_path, (written, rewritten))
+        assert imported.SLIDE_CSP_REQUEST_HOSTS == html_safety.SLIDE_CSP_REQUEST_HOSTS
+        # As the wrapper passes them in the stdin payload (allowedHosts).
+        allowed_hosts = {
+            kind: list(hosts) for kind, hosts in imported.SLIDE_CSP_REQUEST_HOSTS.items()
+        }
+        url, resource_type = blocked_request
+        cdn_requests = [
+            cdn_request
+            for cdn_request, expected in VERDICTS
+            if expected == "allow" and cdn_request[0].lower().startswith("https:")
+        ]
+
+        verdict, *cdn_verdicts = _guard_verdicts(
+            allowed_hosts, [(url, resource_type, False, True), *cdn_requests]
+        )
+
+        assert verdict == "block", f"{source}: the guard lets {url} ({resource_type}) through"
+        assert cdn_verdicts == ["allow"] * len(cdn_requests), list(zip(cdn_requests, cdn_verdicts))
 
 
 # ---------------------------------------------------------------------------
