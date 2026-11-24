@@ -69,6 +69,7 @@ from tests.fixtures.export_snapshot_support import (
     PINNED_FONT_DIR,
     Run,
     Shape,
+    browser_face_families,
     browser_line_boxes,
     browser_lines,
     browser_loaded_faces,
@@ -1585,6 +1586,30 @@ def _lacks(document: str, selector: str, character: str) -> bool:
     return abs(widths[0]["w"] - widths[1]["w"]) > 1
 
 
+# Two widths of one glyph's advance at the probes' 100 px agree to within this.
+HYPHEN_WIDTH_TOLERANCE_PX = 0.5
+
+
+def _hyphen_widths(document: str, selector: str) -> dict[str, float]:
+    """How wide the browser draws U+2011 in the element's own font, and the hyphens it could be.
+
+    Each set alone at 100 px: ``U+2011`` in the element's stack; ``own U+002D``, the
+    hyphen-minus of the stack's face; ``generic U+2010`` in the stack's generic family alone,
+    the face the browser falls back to for a character the stack's face lacks.
+    """
+    style = browser_style(document, selector)
+    stack = style["fontFamily"]
+    generic = stack.split(",")[-1].strip()
+    font = f"font: {style['fontStyle']} {style['fontWeight']} 100px"
+    probes = {
+        "U+2011": (NBH, f"{font} {stack}"),
+        "own U+002D": ("-", f"{font} {stack}"),
+        "generic U+2010": (HYPHEN, f"{font} {generic}"),
+    }
+    widths = browser_probes(document, list(probes.values()))
+    return {name: width["w"] for name, width in zip(probes, widths)}
+
+
 def _written_runs(shape: Shape) -> list[tuple[str, str | None]]:
     return [(run.text, run.typeface) for run in _runs(shape) if run.text]
 
@@ -1674,8 +1699,19 @@ class TestSnapshotFallbackFaces:
 
         Georgia lacks ▲ (guarded), but a family the page did not load is a
         font on the viewer's machine, whose coverage is that machine's own.
+        The machine must have Georgia for that: a Mac does; Linux, the export's
+        container on Databricks Apps included, has none, so there the stack
+        draws nothing and is written as the face drawn instead (N4,
+        test_export_snapshot_drawn_faces.py's georgia case).
         """
-        assert _lacks(_fallback_document(), "#fallback-georgia", "▲"), (
+        document = _fallback_document()
+        drawn = browser_face_families(document, "#fallback-georgia")
+        if not drawn or drawn[0] != "Georgia":
+            pytest.skip(
+                f"this machine has no Georgia (the paragraph is drawn in {drawn}): no face the "
+                "machine has and the page did not load lacks ▲ here"
+            )
+        assert _lacks(document, "#fallback-georgia", "▲"), (
             "fixture drift: the machine's Georgia has ▲"
         )
         for target, deck in fallback_decks.items():
@@ -1766,18 +1802,24 @@ class TestSnapshotFallbackFaces:
     ) -> None:
         """D8: U+2010 and U+2011 in DM Sans, which has neither.
 
-        The browser draws both with DM Sans's own hyphen-minus, so neither is
-        taken out of its run (guarded: the page's DM Sans draws them). Measured
-        in the apps (CALIBRATION.md D8): PowerPoint draws U+2011 so too, but
-        U+2010 from Cambria Math; Google Slides draws both from MS PGothic, 22
-        px short over "end-to-end" at 48 px. So the deck for PowerPoint writes
-        U+2010 as U+002D and keeps U+2011, which keeps its no-break meaning;
-        the deck for Google Slides writes both as U+002D.
+        Each is drawn as a hyphen whole, so neither is taken out of its run
+        (guarded: the browser draws U+2011 as one of the stack's hyphens, by
+        width). Chrome on a Mac draws it as DM Sans's own hyphen-minus; Linux's
+        Chromium as the U+2010 of the stack's generic face, Liberation Sans on
+        the export's container, which HarfBuzz shapes for a U+2011 the face
+        lacks. Measured in the apps (CALIBRATION.md D8): PowerPoint draws U+2011
+        as DM Sans's hyphen-minus, but U+2010 from Cambria Math; Google Slides
+        draws both from MS PGothic, 22 px short over "end-to-end" at 48 px. So
+        the deck for PowerPoint writes U+2010 as U+002D and keeps U+2011, which
+        keeps its no-break meaning; the deck for Google Slides writes both as
+        U+002D.
         """
         document = _fallback_document()
-        assert not _lacks(document, "#fallback-nbh", NBH), (
-            "fixture drift: the page's DM Sans does not draw U+2011 itself"
-        )
+        widths = _hyphen_widths(document, "#fallback-nbh")
+        assert any(
+            abs(widths["U+2011"] - widths[hyphen]) <= HYPHEN_WIDTH_TOLERANCE_PX
+            for hyphen in ("own U+002D", "generic U+2010")
+        ), f"fixture drift: the browser draws U+2011 as none of the stack's hyphens: {widths}"
         shapes = slide_shapes(fallback_decks[target], 0)
         for fragment in (f"end{nbh}to{nbh}end", f"left{hyphen}to{hyphen}right"):
             box = _box(shapes, fragment[:4])
