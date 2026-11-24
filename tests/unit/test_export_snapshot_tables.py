@@ -350,6 +350,13 @@ TABLES_CSS = (
                            border-bottom: 3px double #102025; }
 .double-rows tr.net td { border-bottom: 6px double #EB4A34; }
 .double-rows tr.thin td { border-bottom: 2px double #3C71AF; }
+.cell-rounds { position: absolute; border-collapse: collapse; width: 480px; font-size: 16px; }
+.cell-rounds th { background: #FF5F46; color: #FFFFFF; text-align: left; padding: 13px 18px; }
+.cell-rounds td { padding: 13px 18px; }
+.cell-rounds tbody tr:nth-child(odd) { background: #FFFFFF; }
+.cell-rounds tbody tr:nth-child(even) { background: #F3F3F3; }
+.cell-rounds th:first-child { border-top-left-radius: 8px; }
+.cell-rounds th:last-child { border-top-right-radius: 8px; }
 """
 )
 
@@ -1039,6 +1046,19 @@ APP_ROWS_BODY = f"""<div class="slide">
 APP_ROWS_TIGHT = ("#rows-sans", "#rows-tight")
 APP_ROWS_LOOSE = "#rows-loose"
 
+# A collapsed data table whose header cells round its top corners themselves (the long
+# deck's coral headers), with no wrapper to clip them.
+CELL_ROUNDS_BODY = """<div class="slide" style="background: #E9ECEF;">
+  <table id="cell-rounds" class="cell-rounds" style="left: 88px; top: 120px;">
+    <thead><tr><th>Assets</th><th>Type</th><th>$M</th></tr></thead>
+    <tbody><tr><td>Cash</td><td>Current</td><td>240</td></tr>
+    <tr><td>Fleet</td><td>Long</td><td>980</td></tr></tbody>
+  </table>
+</div>"""
+CELL_ROUND_RADIUS_PX = 8.0
+CELL_ROUND_CORNERS = {(0, 0): "top-left", (0, 2): "top-right"}
+CELL_ROUND_FILLS = (("FF5F46",) * 3, ("FFFFFF",) * 3, ("F3F3F3",) * 3)
+
 # A balance sheet's total row ruled 3px double under, a 6px double rule, and a 2px one, which
 # Chrome paints solid (a double border needs a px each for its two lines and its gap).
 DOUBLE_ROWS_BODY = """<div class="slide">
@@ -1057,6 +1077,7 @@ THIN_DOUBLE_ROW = 3
 
 INLINE_BODIES = {
     "app-rows": APP_ROWS_BODY,
+    "cell-rounds": CELL_ROUNDS_BODY,
     "double-rows": DOUBLE_ROWS_BODY,
     "caption": CAPTION_BODY,
     "rowspan": ROWSPAN_BODY,
@@ -4374,6 +4395,146 @@ class TestRowsHoldTheirCellsAtTheAppsSpacing:
             if laid_out - height > ROW_GROWTH_TOLERANCE_PX
         ]
         assert not grown, f"DM Sans rows the apps grow: {grown}"
+
+
+def _cell_round_pieces(
+    shapes: list[Shape], elements: list, frame_position: int, frame: Shape
+) -> tuple[list[str], dict]:
+    """What is wrong with the corner cells of the cell-rounds table, and each corner piece (its
+    shape, its points and its cell's rect, by slot): every corner cell unfilled in the a:tbl,
+    one custom shape of its fill under the frame, every vertex within the cell's rect grown by
+    at most 1.5 px, a vertex on the cell's 8 px arc and none at its square corner, and no
+    outline; every other cell its own fill."""
+    wrong, pieces = [], {}
+    for row, fills in enumerate(CELL_ROUND_FILLS):
+        for col, fill in enumerate(fills):
+            cell = frame.table.rows[row][col]
+            corner = CELL_ROUND_CORNERS.get((row, col))
+            if cell.fill != (None if corner else fill):
+                wrong.append(f"slot ({row}, {col}): a:tc fill {cell.fill}")
+            if not corner:
+                continue
+            rect = table_cell_rect(frame, row, col)
+            grown = {
+                "x": rect["x"] - 1.5,
+                "y": rect["y"] - 1.5,
+                "w": rect["w"] + 3,
+                "h": rect["h"] + 3,
+            }
+            under = [
+                position
+                for position, shape in enumerate(shapes[:frame_position])
+                if shape.kind == "shape"
+                and shape.geometry == "custGeom"
+                and shape.fill == fill
+                and _centre_inside(shape, rect, 0.5)
+            ]
+            if len(under) != 1:
+                wrong.append(f"slot ({row}, {col}): {len(under)} {fill} pieces under the table")
+                continue
+            shape = shapes[under[0]]
+            points = _custom_geometry_points(elements[under[0]], shape)
+            outside = [point for point in points if not _inside_rounded(point, grown, 0, 0.01)]
+            corner_x, corner_y = _corner_of(rect, corner)
+            at_corner = [
+                point
+                for point in points
+                if abs(point[0] - corner_x) <= ARC_TOLERANCE_PX
+                and abs(point[1] - corner_y) <= ARC_TOLERANCE_PX
+            ]
+            centre_x = corner_x + (
+                CELL_ROUND_RADIUS_PX if "left" in corner else -CELL_ROUND_RADIUS_PX
+            )
+            centre_y = corner_y + CELL_ROUND_RADIUS_PX
+            on_arc = [
+                point
+                for point in points
+                if abs(math.hypot(point[0] - centre_x, point[1] - centre_y) - CELL_ROUND_RADIUS_PX)
+                <= ARC_TOLERANCE_PX
+                and abs(point[0] - centre_x) > ARC_TOLERANCE_PX
+                and abs(point[1] - centre_y) > ARC_TOLERANCE_PX
+            ]
+            if outside or at_corner or not on_arc or shape.line is not None:
+                wrong.append(
+                    f"slot ({row}, {col}) {corner}: points past its rect {outside[:3]}, at the "
+                    f"square corner {at_corner}, on the arc {len(on_arc)}, outline {shape.line}"
+                )
+            pieces[(row, col)] = (shape, points, rect)
+    return wrong, pieces
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestCollapsedCellRadii:
+    def test_a_collapsed_cells_own_radius_cuts_its_fill_to_the_arc(
+        self, inline_export: Callable[[str], bytes]
+    ) -> None:
+        """A collapsed header cell's own ``border-top-left-radius`` rounds its fill, as in Chrome.
+
+        Under ``border-collapse: collapse`` Chrome rounds a cell's background by its own radius
+        (its collapsed borders stay straight), so the long deck's coral headers have round top
+        corners; an a:tc is square. So, as a rounded wrapper's corner cells are (D5), each such
+        cell is unfilled in the native table and its fill is a custom shape under it: the
+        cell's rect, its corner replaced by the 8 px arc. The table stays one native frame, on
+        the browser's grid, every cell's text its own.
+        """
+        document = _inline_document("cell-rounds")
+        pptx = inline_export("cell-rounds")
+        shapes = slide_shapes(pptx)
+        (table,) = browser_tables(document, "#cell-rounds")
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "#cell-rounds")
+        _assert_grid_matches(frame, table, "#cell-rounds")
+        wrong, pieces = _cell_round_pieces(
+            shapes, slide_shape_elements(pptx), frame_position, frame
+        )
+        for (row, col), (shape, _, rect) in pieces.items():
+            if not _same_rect(_box(shape), rect, 0.5):
+                wrong.append(
+                    f"slot ({row}, {col}): the piece is at {_box(shape)}, its cell at {rect}"
+                )
+        assert not wrong, "the rounded header cells:\n  " + "\n  ".join([*wrong, _describe(shapes)])
+
+    def test_in_the_deck_for_google_a_cells_own_round_runs_under_its_neighbours(
+        self, google_inline_export: Callable[[str], bytes]
+    ) -> None:
+        """In the Google deck the piece runs 1 px under each opaque native neighbour (D13).
+
+        Its side beside the next header cell and its side over the first body row run 1 px
+        past the cell's grid lines; its sides on the table's outer edge stay on them, and its
+        arc is the cell's own, about its own corner.
+        """
+        document = _inline_document("cell-rounds")
+        pptx = google_inline_export("cell-rounds")
+        shapes = slide_shapes(pptx)
+        (table,) = browser_tables(document, "#cell-rounds")
+        frame_position, frame = _frame_for(shapes, _grid_rect(table), "#cell-rounds")
+        wrong, pieces = _cell_round_pieces(
+            shapes, slide_shape_elements(pptx), frame_position, frame
+        )
+        for (row, col), (shape, points, rect) in pieces.items():
+            inner = (
+                rect["x"] + rect["w"] + CORNER_RUN_UNDER_PX
+                if col == 0
+                else rect["x"] - CORNER_RUN_UNDER_PX
+            )
+            outer = rect["x"] if col == 0 else rect["x"] + rect["w"]
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            inner_side = max(xs) if col == 0 else min(xs)
+            if abs(inner_side - inner) > 0.01:
+                wrong.append(f"slot ({row}, {col}): its inner side at {inner_side}, not {inner}")
+            if (
+                abs((min(xs) if col == 0 else max(xs)) - outer) > 0.01
+                or abs(min(ys) - rect["y"]) > 0.01
+            ):
+                wrong.append(f"slot ({row}, {col}): its outer sides moved off the grid")
+            if abs(max(ys) - (rect["y"] + rect["h"] + CORNER_RUN_UNDER_PX)) > 0.01:
+                wrong.append(
+                    f"slot ({row}, {col}): its bottom at {max(ys)}, not 1 px under the row below"
+                )
+        assert not wrong, "the Google deck's rounded header cells:\n  " + "\n  ".join(
+            [*wrong, _describe(shapes)]
+        )
 
 
 @pytest.mark.slow

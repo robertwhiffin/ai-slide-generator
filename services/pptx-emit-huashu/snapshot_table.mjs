@@ -6,6 +6,9 @@
 // table's own background, radius and shadow as a shape under the table, its
 // box on whole px where the grid is and cut to any round corners its clip has
 // (its border too, in the separated model, where it frames the cells from outside),
+// draws the fill of each corner cell a rounded clip cuts, and of each collapsed
+// cell whose own border-radius rounds its background (roundedCells), as a
+// shape under the table cut to the arc, that cell unfilled in it,
 // pushes the table item over it, draws no box of the table's rows, row groups,
 // columns and cells (the item holds their fills and borders), gives each
 // cell's text to collectCellText, which makes it that cell's paragraphs where
@@ -82,7 +85,7 @@
 // by any clip and unrotated.
 //
 // /**
-//  * TableLayout = {collapse, item, parts, cells, slots, slotCells}   (page-side only)
+//  * TableLayout = {collapse, item, parts, cells, slots, slotCells, roundedCells}   (page-side only)
 //  *   collapse  border-collapse: collapse, whose table border is the grid's;
 //  *   item      the TableItem, its cells' text still to come (snapshot.mjs);
 //  *   parts     every element whose box the item draws: row groups, rows,
@@ -94,7 +97,10 @@
 //  *             that grid slot, columns left to right on the slide (slotsOf's
 //  *             grid in visual columns), every slot covered;
 //  *   slotCells the item's TableCells in that index order: the same objects as
-//  *             item.cells, so a fill pushTable takes off one is off here too.
+//  *             item.cells, so a fill pushTable takes off one is off here too;
+//  *   roundedCells  [{model: TableCell, radii}] under collapse, each filled cell
+//  *             whose own border-radius rounds its background, its used radii
+//  *             (top left first), for pushTable to cut its fill to.
 //  *
 //  * TableItem = {kind:'table', x, y, colWidths:number[], rowHeights:number[], cells:TableCell[]}
 //  *   x, y       the grid's top left: its first column and row lines, slide px;
@@ -136,7 +142,8 @@
 //                    overlay text items, as anywhere on the slide (snapshot.mjs);
 //   placeGroups      (groups, paint, seq) -> places inline groups as overlay items (snapshot.mjs);
 //   wholePixelGrid   whether the deck lays a native table's grid on whole px
-//                    (snapshot.mjs WHOLE_PIXEL_TABLES, snappedLines).
+//                    (snapshot.mjs WHOLE_PIXEL_TABLES, snappedLines);
+//   usedCornerRadii  (style, box) -> a box's used corner radii [{h, v}], top left first.
 function createTableLayout(env) {
   const TEXT_NODE = 3;
   const dom = domAccess();
@@ -937,8 +944,10 @@ function createTableLayout(env) {
         if (model.cells[index].element && cellShows(model.cells[index])) return null;
       }
     }
-    // A separated cell that paints may round its corners, which no a:tc does;
-    // under collapse border-radius does not apply to a cell (CSS Backgrounds 3).
+    // A separated cell that paints may round its corners, which no a:tc does.
+    // Under collapse Chrome still rounds a cell's background by its own
+    // border-radius, its collapsed borders straight: layoutOf lists such a
+    // cell, and pushTable draws its fill as a shape under the table, cut to it.
     if (!collapse) {
       for (let index = 0; index < model.cells.length; index++) {
         const cell = model.cells[index];
@@ -1046,6 +1055,7 @@ function createTableLayout(env) {
     const tableFont = env.fontOf(s, frame.scale);
     const cells = new Map();
     const modelCells = [];
+    const roundedCells = [];
     for (let index = 0; index < model.cells.length; index++) {
       const cell = model.cells[index];
       const gridRect = {
@@ -1087,6 +1097,13 @@ function createTableLayout(env) {
       };
       modelCells.push(modelCell);
       if (cell.element) cells.set(cell.element, { model: modelCell, grid: gridRect, blocks: cell.blocks });
+      // Under collapse a filled cell's own border-radius rounds its background
+      // as Chrome paints it (long-on's coral headers, 8 px top corners): its
+      // used radii on its border box, which is its rect there.
+      if (collapse && cell.element && cell.fill && roundsCorners(cell.style)) {
+        const box = { w: cell.rect.right - cell.rect.left, h: cell.rect.bottom - cell.rect.top, scale: frame.scale };
+        roundedCells.push({ model: modelCell, radii: env.usedCornerRadii(cell.style, box) });
+      }
     }
     // model.visualSlots indexes model.cells, which modelCells follows until it is sorted.
     const slotCells = [];
@@ -1098,6 +1115,7 @@ function createTableLayout(env) {
       cells,
       slots: model.visualSlots,
       slotCells,
+      roundedCells,
       item: {
         kind: 'table',
         x: columnLines[0],
@@ -1186,15 +1204,28 @@ function createTableLayout(env) {
   // whole, the convex rounded boxes cutting only the table's outer corners,
   // where no side moves. The cells a rounded corner cuts are unfilled first,
   // so none is another's opaque neighbour.
-  function runUnderPolygon(layout, cell, rect, distance) {
+  // runUnderReach(layout, cell, distance) -> {top, right, bottom, left}: how
+  // far each side of a corner cell runs under its opaque native neighbours
+  // (runUnderPolygon): the distance, or half that row's or column's size where
+  // that is less, on a side whose every slot across is an opaque cell; 0 on any
+  // other.
+  function runUnderReach(layout, cell, distance) {
     const item = layout.item;
     const lastRow = cell.row + cell.rowspan;
     const lastCol = cell.col + cell.colspan;
     const reach = (opaque, size) => (opaque ? Math.min(distance, size / 2) : 0);
-    const top = reach(opaqueSlots(layout, cell.row - 1, cell.row - 1, cell.col, lastCol - 1), item.rowHeights[cell.row - 1]);
-    const bottom = reach(opaqueSlots(layout, lastRow, lastRow, cell.col, lastCol - 1), item.rowHeights[lastRow]);
-    const left = reach(opaqueSlots(layout, cell.row, lastRow - 1, cell.col - 1, cell.col - 1), item.colWidths[cell.col - 1]);
-    const right = reach(opaqueSlots(layout, cell.row, lastRow - 1, lastCol, lastCol), item.colWidths[lastCol]);
+    return {
+      top: reach(opaqueSlots(layout, cell.row - 1, cell.row - 1, cell.col, lastCol - 1), item.rowHeights[cell.row - 1]),
+      bottom: reach(opaqueSlots(layout, lastRow, lastRow, cell.col, lastCol - 1), item.rowHeights[lastRow]),
+      left: reach(opaqueSlots(layout, cell.row, lastRow - 1, cell.col - 1, cell.col - 1), item.colWidths[cell.col - 1]),
+      right: reach(opaqueSlots(layout, cell.row, lastRow - 1, lastCol, lastCol), item.colWidths[lastCol]),
+    };
+  }
+
+  function runUnderPolygon(layout, cell, rect, distance) {
+    const lastRow = cell.row + cell.rowspan;
+    const lastCol = cell.col + cell.colspan;
+    const { top, bottom, left, right } = runUnderReach(layout, cell, distance);
     // Each corner: the side before it moved out, the side after it moved out, and the slot across it.
     const corners = [
       { x: rect.left, y: rect.top, before: { x: -left, y: 0 }, after: { x: 0, y: -top }, row: cell.row - 1, col: cell.col - 1 },
@@ -1218,7 +1249,7 @@ function createTableLayout(env) {
     return polygon;
   }
 
-  return { collectTable, collectCellText, runUnderPolygon };
+  return { collectTable, collectCellText, runUnderPolygon, runUnderReach };
 }
 
 export const TABLE_SOURCE = createTableLayout.toString();

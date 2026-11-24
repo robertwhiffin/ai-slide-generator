@@ -2410,6 +2410,7 @@ async function snapshotPage(config, pseudoData, renderer) {
     collectText,
     placeGroups,
     wholePixelGrid: WHOLE_PIXEL_TABLES,
+    usedCornerRadii,
   });
 
   // The TableLayout of a <table> drawn as a native table, its parts now owned
@@ -2441,10 +2442,16 @@ async function snapshotPage(config, pseudoData, renderer) {
   // native cell beside it (CORNER_RUN_UNDER_PX; snapshot_table.mjs
   // runUnderPolygon, over the table's own slot grid). Every cut cell is
   // unfilled before any shape is drawn, so none counts as another's neighbour.
+  // A collapsed cell's own border-radius cuts its fill the same way
+  // (layout.roundedCells: Chrome rounds a collapsed cell's background, not its
+  // borders), to its grid rect rounded by its used radii, that rect's sides
+  // run out by their run-under reach so the cut keeps what runs under a
+  // neighbour (snapshot_table.mjs runUnderReach).
   function pushTable(layout, order, clip) {
     const item = layout.item;
     const rounds = (WHOLE_PIXEL_TABLES ? snappedClip(clip) : clip).rounds || [];
-    if (rounds.length) {
+    const owned = layout.roundedCells || [];
+    if (rounds.length || owned.length) {
       const columns = [item.x];
       const rows = [item.y];
       for (let index = 0; index < item.colWidths.length; index++) columns.push(columns[index] + item.colWidths[index]);
@@ -2459,17 +2466,31 @@ async function snapshotPage(config, pseudoData, renderer) {
         for (let round = 0; round < rounds.length && round < WALK_STEP_LIMIT; round++) {
           if (!roundHolds(rounds[round], rect)) cutters.push(roundedPolygon(rounds[round]));
         }
-        if (cutters.length) cut.push({ cell, fill: cell.fill, rect, cutters });
+        let ownRadii = null;
+        for (let rounded = 0; rounded < owned.length && rounded < COLLECTION_ITEM_LIMIT; rounded++) {
+          if (owned[rounded].model === cell) ownRadii = owned[rounded].radii;
+        }
+        if (cutters.length || ownRadii) cut.push({ cell, fill: cell.fill, rect, cutters, ownRadii });
       }
       for (let index = 0; index < cut.length; index++) cut[index].cell.fill = null;
       for (let index = 0; index < cut.length; index++) {
-        const { cell, fill, rect, cutters } = cut[index];
+        const { cell, fill, rect, cutters, ownRadii } = cut[index];
         let region = CORNER_RUN_UNDER_PX > 0 ? tableLayout.runUnderPolygon(layout, cell, rect, CORNER_RUN_UNDER_PX) : [
           { x: rect.left, y: rect.top },
           { x: rect.right, y: rect.top },
           { x: rect.right, y: rect.bottom },
           { x: rect.left, y: rect.bottom },
         ];
+        if (ownRadii) {
+          const reach = tableLayout.runUnderReach(layout, cell, CORNER_RUN_UNDER_PX);
+          cutters.push(roundedPolygon({
+            left: rect.left - reach.left,
+            top: rect.top - reach.top,
+            right: rect.right + reach.right,
+            bottom: rect.bottom + reach.bottom,
+            radii: ownRadii,
+          }));
+        }
         for (let cutter = 0; cutter < cutters.length && region.length; cutter++) region = clipConvex(region, cutters[cutter]);
         if (region.length >= 3) pushPath(order, [region], true, fill, null, null);
       }
