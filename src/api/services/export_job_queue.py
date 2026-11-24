@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # Only needs to work within a single process.
 export_queue: asyncio.Queue = asyncio.Queue()
 
+# How long (seconds) the export worker waits after an error outside any job
+# before it waits on the queue again, so an error that recurs at once cannot
+# spin it without yielding (job_queue.WORKER_LOOP_ERROR_BACKOFF_SECONDS).
+WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
+
 EXPORT_CLEANUP_INTERVAL_SECONDS = 300
 EXPORT_JOB_MAX_AGE_MINUTES = 30
 
@@ -390,6 +395,7 @@ async def export_worker() -> None:
             break
         except Exception as e:
             logger.error(f"Export worker loop error: {e}")
+            await asyncio.sleep(WORKER_LOOP_ERROR_BACKOFF_SECONDS)
 
 
 async def process_google_slides_job(job_id: str, payload: dict) -> None:

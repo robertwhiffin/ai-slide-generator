@@ -60,6 +60,11 @@ preview_queue: "asyncio.Queue[int]" = asyncio.Queue()
 # an ``asyncio.Queue`` may only be touched from its own loop.
 _worker_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# How long (seconds) the worker waits after an error outside any job before it
+# waits on the queue again, so an error that recurs at once cannot spin it
+# without yielding (job_queue.WORKER_LOOP_ERROR_BACKOFF_SECONDS).
+WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
+
 # Validation / safety caps.
 PREVIEW_MAX_BYTES = 3_000_000      # reject runaway payloads
 PREVIEW_MAX_ASSETS = 24            # referenced-asset ceiling
@@ -522,6 +527,7 @@ async def preview_worker() -> None:
             break
         except Exception as e:  # noqa: BLE001
             logger.error(f"Preview worker loop error: {e}")
+            await asyncio.sleep(WORKER_LOOP_ERROR_BACKOFF_SECONDS)
 
 
 async def start_preview_worker() -> "asyncio.Task[None]":

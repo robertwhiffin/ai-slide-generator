@@ -37,6 +37,12 @@ CRASH_RECOVERY_ERROR = "Request timed out (worker crash recovery)"
 jobs: Dict[str, Dict[str, Any]] = {}
 job_queue: asyncio.Queue = asyncio.Queue()
 
+# How long (seconds) a job runner waits after an error outside any job before it
+# waits on the queue again.  An error that recurs at once (waiting on a queue
+# another event loop bound raises before it yields) would otherwise spin the
+# runner without ever yielding to its loop, logging without end.
+WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
+
 # Job runners per uvicorn process.  Each process (UVICORN_WORKERS, default 4) takes
 # the chat jobs POSTed to it; with one runner a second turn on the same process
 # waited "pending" until the first finished.  A session's turns are still
@@ -515,6 +521,7 @@ async def worker() -> None:
             break
         except Exception as e:
             logger.error(f"Worker loop error: {e}")
+            await asyncio.sleep(WORKER_LOOP_ERROR_BACKOFF_SECONDS)
 
 
 async def start_worker() -> asyncio.Task:
