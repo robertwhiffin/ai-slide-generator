@@ -33,7 +33,6 @@ from tests.fixtures.export_snapshot_support import (
     export_logged,
     node_json,
     requires_huashu_sidecar,
-    requires_node,
     slide_document,
     slide_xml,
 )
@@ -345,7 +344,7 @@ _BOUNDED_WAITS = (
 )
 
 
-@requires_node
+@requires_huashu_sidecar
 def test_the_deadline_is_above_every_wait_the_engine_bounds_itself() -> None:
     modules = {"render_slide": RENDER_SLIDE, "capture": CAPTURE}
     names = {(module, name) for module, name, _ in _BOUNDED_WAITS}

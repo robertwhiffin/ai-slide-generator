@@ -69,9 +69,11 @@ Every case's words come from the browser's own reading of the very document
 exported (``render_truth.cjs`` for the harness reference, ``browser_ellipsis``
 for an ellipsis cut).
 
-Gating matches the sibling export suites: the Node tests need node; the export
-tests need node, the extracted sidecar ``node_modules`` and a local
-Chrome/Chromium (skipped otherwise). Corpus slides come from
+Gating matches the sibling export suites: the Node tests need node, but a Node
+test that loads a module of the sidecar's ``node_modules`` (pptxgenjs, writing
+a slide) is gated as the export tests are; the export tests need node, the
+extracted sidecar ``node_modules`` and a local Chrome/Chromium (skipped
+otherwise). Corpus slides come from
 ``tests/fixtures/export_fidelity`` by prefix (``corpus_document``).
 """
 
@@ -3310,6 +3312,7 @@ class TestModelCheck:
             assert checked["model"][field] == reset
         assert checked["model"]["items"] == _valid_model()["items"]
 
+    @requires_huashu_sidecar
     @pytest.mark.parametrize(
         "defect", ["table-grid-empty", "table-grid-no-rows", "table-grid-no-columns"]
     )
@@ -3336,6 +3339,7 @@ class TestModelCheck:
         assert written["dropped"] == {"items": 1, "captures": 0, "fields": 0}, written
         assert written["tables"] == 0 and written["bytes"] > 0, written
 
+    @requires_huashu_sidecar
     def test_no_shape_is_written_for_a_shadow_alone(self) -> None:
         """A shape is never named for a shadow, whatever the model says of it.
 
@@ -3361,6 +3365,7 @@ class TestModelCheck:
         )
         assert written["named"] == 0 and written["shapes"] > 0, written
 
+    @requires_huashu_sidecar
     @pytest.mark.parametrize("target", ["pptx", "gslides"])
     def test_a_typeface_holding_xml_characters_is_written_escaped(self, target: str) -> None:
         """A family named with ``&``, ``"`` and ``<`` reaches the slide part escaped, in runs

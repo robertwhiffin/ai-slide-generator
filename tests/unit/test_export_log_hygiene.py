@@ -425,7 +425,7 @@ process.stdout.write(JSON.stringify(written));
 """
 
 
-@requires_node
+@requires_huashu_sidecar
 def test_with_the_flag_nothing_a_page_logs_once_its_slide_stopped_is_forwarded() -> None:
     """A slide stopped (its page left it, or its deadline) is about no page any more.
 
