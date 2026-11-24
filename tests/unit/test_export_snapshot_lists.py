@@ -77,6 +77,7 @@ from tests.fixtures.export_snapshot_support import (
     browser_each_rect,
     browser_line_boxes,
     browser_pixel,
+    browser_probes,
     browser_style,
     corpus_document,
     corpus_slide,
@@ -568,7 +569,9 @@ def _items_on(shapes: list[Shape], marker: dict) -> list[int]:
     return [position for position, shape in enumerate(shapes) if _on_marker(shape, marker)]
 
 
-def _assert_outside_marker(shapes: list[Shape], marker: dict, what: str) -> int:
+def _assert_outside_marker(
+    shapes: list[Shape], marker: dict, what: str, advance_end: float | None = None
+) -> int:
     """A marker outside its item is one single-line text item at its glyphs.
 
     It reads the browser's marker text with the trailing white space trimmed.
@@ -578,6 +581,10 @@ def _assert_outside_marker(shapes: list[Shape], marker: dict, what: str) -> int:
     slack to the right, and its paragraph is right-to-left as the marker is.
     It is no wider than the browser's marker box with its slack: never a box
     across its item or its list. Returns its spTree index.
+
+    ``advance_end``, where the browser's trimmed marker text advances to (left to right), is
+    for a marker whose glyphs come from a face whose side bearing can be past the 3 px:
+    the item's right edge is then within 0.5 px of it, and the glyphs end inside it.
     """
     ink = marker["ink"]
     assert ink is not None, f"fixture drift: {what} paints no pixels the browser shows"
@@ -616,11 +623,22 @@ def _assert_outside_marker(shapes: list[Shape], marker: dict, what: str) -> int:
         assert para.align == "right", (
             f"{what}: a marker is right-aligned at its glyphs, got {para.align}"
         )
-        assert abs(shape.x + shape.w - _right(ink)) <= MARKER_EDGE_TOLERANCE_PX, (
-            f"{what}: the marker item's right edge is {shape.x + shape.w:.2f}; the browser's "
-            f"glyphs end at {_right(ink):.2f} (its box at {_right(marker):.2f}; tolerance "
-            f"{MARKER_EDGE_TOLERANCE_PX} px)"
-        )
+        if advance_end is None:
+            assert abs(shape.x + shape.w - _right(ink)) <= MARKER_EDGE_TOLERANCE_PX, (
+                f"{what}: the marker item's right edge is {shape.x + shape.w:.2f}; the "
+                f"browser's glyphs end at {_right(ink):.2f} (its box at "
+                f"{_right(marker):.2f}; tolerance {MARKER_EDGE_TOLERANCE_PX} px)"
+            )
+        else:
+            assert _right(ink) <= advance_end + RECT_TOLERANCE_PX, (
+                f"fixture drift: {what}'s glyphs end at {_right(ink):.2f}, past their advance "
+                f"at {advance_end:.2f}"
+            )
+            assert abs(shape.x + shape.w - advance_end) <= RECT_TOLERANCE_PX, (
+                f"{what}: the marker item's right edge is {shape.x + shape.w:.2f}; the "
+                f"browser's glyphs advance to {advance_end:.2f} (their ink ends at "
+                f"{_right(ink):.2f}; tolerance {RECT_TOLERANCE_PX} px)"
+            )
         assert shape.x <= ink["x"] - SLACK_PX + RECT_TOLERANCE_PX, (
             f"{what}: the marker item starts at {shape.x:.2f}, the glyphs at {ink['x']:.2f}: "
             "its slack is not grown to the left"
@@ -1002,11 +1020,24 @@ class TestUnorderedListMarkers:
 
         The text is the browser's rendering of the marker's ``content``, never
         computed by the export: each item's marker reads "→", an outside marker
-        at its glyphs.
+        at its glyphs. DM Sans has no "→", so it is drawn from a fallback face,
+        whose side bearing is the machine's (1.7 px on a Mac; Liberation Sans's,
+        Linux's, is 0.204 em, 4.1 px at this 20 px): the item's right edge is
+        checked against where the browser advances the arrow to, its marker
+        box's start plus the arrow's own width, set in the marker's font.
         """
         shapes = kinds.shapes
+        document = _document(KINDS_BODY, css=DECK_CSS + KINDS_CSS)
         for marker, label in _marked(kinds, "lm-arrow"):
-            _assert_outside_marker(shapes, marker, f"the {label!r} item's arrow")
+            style = marker["style"]
+            font = (
+                f"font: {style['fontStyle']} {style['fontWeight']} {style['fontSize']} "
+                f"{style['fontFamily']}"
+            )
+            (arrow,) = browser_probes(document, [(_trimmed(marker), font)])
+            _assert_outside_marker(
+                shapes, marker, f"the {label!r} item's arrow", advance_end=marker["x"] + arrow["w"]
+            )
 
 
 # ---------------------------------------------------------------------------
