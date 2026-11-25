@@ -161,4 +161,8 @@ def test_huashu_available_response_is_slim(client):
         "playwright_browsers_path_env", "environment", "databricks_app_name",
     }
     assert not leak_keys & set(body.get("checks", {}).keys())
+    # Booleans only: a path, count or log line goes to the server log alone.
+    assert body["checks"] and all(isinstance(value, bool) for value in body["checks"].values()), (
+        body["checks"]
+    )
     assert "available" in body

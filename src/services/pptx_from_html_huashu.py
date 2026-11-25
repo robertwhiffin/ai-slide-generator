@@ -1,27 +1,190 @@
-"""Local-only Tellr → huashu-design pipeline bridge.
+"""Tellr → editable .pptx through the snapshot engine, a Node sidecar.
 
-Spawns the ``services/pptx-emit-huashu/emit_deck.mjs`` Node sidecar, which
-runs alchaincyf/huashu-design's ``html2pptx.js`` (Playwright + pptxgenjs
-server-side) over each slide's complete HTML doc and writes a single
-editable .pptx.
+Spawns ``services/pptx-emit-huashu/emit_deck.mjs``, which loads each slide's
+complete HTML document in server-side Chromium (Playwright), reads the page as
+the browser laid it out (``render_slide.cjs``: settle the page, move the slide
+root's ground onto body, snapshot the page read-only, screenshot what cannot be
+drawn natively) and writes one editable .pptx with pptxgenjs: text boxes,
+shapes, native tables and pictures where the browser drew them.
 
-Why local-only: huashu's pipeline needs Chromium via Playwright. Databricks
-Apps containers run as non-root with limited memory and ship without Chromium.
-Adopting this on FEVM would require a deeper infra change than this round
-covers. ``is_available()`` returns False outside the local-dev gate.
+Availability. ``is_available()`` gates every call: it needs node, the
+sidecar's ``node_modules`` and a Playwright Chromium, and either
+``HUASHU_PIPELINE_ENABLED=1`` (set by the deployed app's app.yaml, whose boot
+runs the sidecar's ``setup.sh`` to install them) or ``ENVIRONMENT=development``.
+Until then the wrapper raises ``HuashuUnavailableError``, the export routes
+answer 503, and the frontend falls back to the records pipeline. A run past its
+timeout is ``HuashuTimeoutError`` (504), any other failure ``HuashuExportError``
+(500): those the frontend shows, falling back on neither.
+
+Requests. A slide's page reads nothing but its slide: the sidecar decides every
+request its Chromium makes (``request_guard.cjs``, through Playwright's
+routing), whatever the document says, since slide script can navigate a page
+where no CSP reaches and a caller's document may carry none. It allows the
+slide's own file, ``data:`` and ``blob:``, and the https hosts the slide CSP
+allows for each kind of request, ``SIDECAR_REQUEST_HOSTS``, which this module
+passes in the stdin payload (``allowedHosts``); it aborts everything else (any
+other file, ``http:``, loopback and link-local addresses, other hosts,
+WebSockets) and closes popups. A slide whose page navigates away from it fails,
+its failure in the list ``build_pptx_huashu`` returns, and the rest of the deck
+is written.
+
+Temporary files. The sidecar writes each slide's HTML to a file for its browser
+to load, so what it leaves holds the deck's content. ``emit_deck.mjs`` removes
+its slides' directory however the deck ends, and the sidecar runs with a TMPDIR
+of its own: the export's ``TemporaryDirectory``, which also holds the written
+deck, made where the sidecar's TMPDIR would otherwise be (``_export_deck``). So
+whatever a sidecar ended at its timeout leaves there, its slides and its
+browsers' profiles, is removed with that directory.
+
+Logs. Every line the sidecar prints on stderr is echoed into the app's log
+(``[huashu-emit] …``), which every manager of the app reads, outside Tellr's
+per-deck permissions. So the sidecar prints no text of a slide's own: a slide
+summary counts its hidden words (``hiddenWords``), the text-loss line names its
+slide and how many words it lost, a validation message names the text box it
+quotes by its length, a message a slide's page made (a failure's, a read's) is
+said by its length, and what a page logs itself is counted, by level, and not
+logged. The engine's own page-side diagnostics (a slide with no root, a
+collection cut at its bound) never pass through the page's console: each pass
+returns them with its result, and they are logged whole, the page's text in
+them (an error's message, a tag name) by its length.
+``SIDECAR_DEBUG_TEXT_ENV`` adds the words, and no app passes it: it is not in
+``_SIDECAR_ENV_ALLOWLIST``, and the export fidelity harness adds it for its own
+runs alone. A failure's whole message stays in the list ``build_pptx_huashu``
+returns, which the routes give the user who exported the deck.
+
+Timeout. A run past ``SIDECAR_TIMEOUT_SECONDS`` must end node and every
+Chromium it launched: killed alone, node would leave its browser running with
+no parent, holding its memory until the app restarts. Playwright launches each
+browser ``detached``, the leader of a process group of its own, and kills those
+groups from node's exit handler, so no signal to node's group reaches a
+browser. ``run_sidecar_process`` therefore sends SIGTERM to the sidecar's own
+group first, which emit_deck.mjs answers with ``process.exit(143)``, so node
+leaves through that exit path. A node still running after a grace period could
+not (its event loop blocked), so the helper kills the groups of node's detached
+children, its browsers, itself, then SIGKILLs node's group as a backstop. The
+admin routes that run probe_launch.mjs and the Playwright installer use the
+same helper.
+
+Concurrency. The export routes run in FastAPI's threadpool, so a worker could
+start a sidecar per request; each node and Chromium tree takes about 790 MB.
+That memory is the container's, which runs several uvicorn workers
+(``UVICORN_WORKERS``) that the kernel does not balance requests across, so the
+sidecar slots are the container's too: ``UVICORN_WORKERS`` x
+``TELLR_SIDECAR_CONCURRENCY`` of them (default 4 x 1 on Databricks Apps),
+shared by every worker through slot files (``sidecar_slots.py``; run.py names
+their directory in each worker's environment). ``build_pptx_huashu`` runs a
+sidecar in any free one, whichever worker it is in. An export with every slot
+taken waits for one, logged once, and its timeout starts only once it has one.
+A waiting export holds one of its worker's threadpool threads (40 per worker,
+shared with every sync route and every authenticated request's identity
+lookup), so each worker bounds the exports it lets in: one for each of the
+container's slots, which it may run all at once, and ``TELLR_SIDECAR_QUEUE``
+more (default 15) to wait for one; an export past them is refused at once.
+One that waits ``TELLR_SIDECAR_WAIT_SECONDS`` (default 60) is refused then,
+and one that gets its slot logs how long it waited. Either refusal is
+``HuashuBusyError``, which the export routes answer 429 with a message to
+retry. With the defaults, an
+export is answered within the 300 s the Databricks Apps proxy allows a request
+(measured): 60 s of waiting plus the 180 s sidecar timeout, and on the Google
+Slides route its Drive upload, each request of which fails after
+``DRIVE_HTTP_TIMEOUT_SECONDS`` (drive_uploader.py) of silence. Bounds that
+would defeat this, a wait whose worst case reaches the proxy's 300 s or as
+many places as a worker has threads, are warned about once, when this
+module loads (``sidecar_bounds_warnings``), which the app's startup does in
+every worker (``log_sidecar_bounds``).
+
+Telemetry. Every export logs one line once it ends, however it ends (written,
+partly written, failed, timed out, or refused as busy): ``[huashu] export
+summary {json}`` (``_ExportSummary``), counts and timings only, never a slide's
+content, a user or a path. Its ``peakRssMb`` is the most memory the sidecar's
+process tree held, node and every Chromium it launched, read from the process
+table about every ``MEMORY_SAMPLE_SECONDS`` while it runs
+(``_TreeMemorySampler``); ``containerPeakMb`` and ``containerWorkingSetMb``
+are the most the whole container held meanwhile, as its own cgroup counts it
+(``_container_cgroup``): its usage, and that less the page cache nothing has
+used lately, null where there is no cgroup. A reading that fails is null,
+the other source still read, and never fails or slows the export. The
+container's memory limit is logged once, when a worker starts
+(``log_sidecar_bounds``). Both lines have a logger of their own that writes
+each record as one line to stderr (``telemetry_logger``), not through the
+app's root handler: in a worker that is FastMCP's RichHandler, which wraps a
+long line at 80 columns where stderr is no terminal, as on Databricks Apps, so
+the JSON would reach the logs in pieces.
+
+Renderer target. ``build_pptx_huashu(..., target=...)`` names the app the deck
+is written for: ``"pptx"`` (the default) for PowerPoint and the .pptx download,
+``"gslides"`` for the Google Slides conversion. The two draw a few constructs
+apart, and only those are written differently (measured in both apps;
+``scripts/export_fidelity/CALIBRATION.md``). On lines that hold a superscript
+or subscript run (A2, A4 and A5):
+
+* a script run's size. PowerPoint shrinks a script run and places its line by
+  its other runs, so the run is written enlarged and PowerPoint draws it at the
+  browser's size; Google Slides sizes the whole line by that enlarged size and
+  draws it low, so for it the run is capped at its line's size (its glyph then
+  drawn at 0.8 of the browser's, an accepted trade-off);
+* for PowerPoint alone, a word joiner after a script run that ends its line,
+  which PowerPoint would otherwise size the line by;
+* the growth of a later line the browser set further down than its spacing
+  (a raised script run's line box, a larger run's own line height, the
+  block's strut), which both apps space by its paragraph alone: written as
+  that line's space before, in both decks but for a line within its paragraph
+  that holds a script run, which Google Slides grows by the run's written
+  size instead (a later paragraph's first line holding one takes the space
+  before).
+
+And in any deck:
+
+* each run's tracking. PowerPoint for Mac kerns no DM Sans, and pptxgenjs
+  turns its kerning off with every ``spc``, so the deck for PowerPoint adds
+  the run's kerning to its tracking, with no optical-size band (X1); the deck
+  for Google Slides, which kerns, adds the optical-size delta alone (A1);
+* an italic run of a webfont the page loaded: for PowerPoint its italic
+  static's own name with italic off, since PowerPoint draws the family plus
+  italic as Bold Italic; for Google Slides the family plus italic, since
+  Google has no family named for the italic static (D1);
+* the browser's synthetic bold, a bold request only a lighter loaded face
+  meets: for PowerPoint that face plus bold, which it draws at the face's
+  advances; for Google Slides the face alone, since Drive converts a bold
+  flag to weight 700 and Google draws a family without one as a faux bold
+  laid out wider than it draws it (D12);
+* U+2011 NON-BREAKING HYPHEN: kept for PowerPoint, which draws it as the
+  face's hyphen; written as U+002D for Google Slides, which draws it from MS
+  PGothic (D8; U+2010 is U+002D in both decks);
+* a dotted border: for PowerPoint a line or outline dashed sysDot, which it
+  draws one width on and one off as CSS does; for Google Slides, whose every
+  dot dash is one width on and three off, one unfilled custom shape drawing
+  the centre line twice, the second pass two widths along (D6);
+* a native table: for PowerPoint its grid on whole px, where Chrome paints
+  it (D7); for Google Slides the browser's own grid, on which a rounded
+  table's corner fills run 1 px under their opaque neighbour cells, since
+  Google draws a native cell on whole pixels and a shape anti-aliased (D13).
+
+So the two decks differ wherever text is tracked, kerned, italic or
+synthetic bold, a border is dotted, or a table is native.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
-from typing import Any
+import threading
+import time
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, NamedTuple
+
+from src.services.sidecar_slots import SidecarSlots, slots_directory
+from src.utils.html_safety import SLIDE_CSP_REQUEST_HOSTS
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +207,255 @@ def _resolve_sidecar_dir() -> Path:
 SIDECAR_DIR = _resolve_sidecar_dir()
 SIDECAR_SCRIPT = SIDECAR_DIR / "emit_deck.mjs"
 SIDECAR_SYS_LIBS_DIR = SIDECAR_DIR / "sys-libs"
+# The fontconfig setup.sh writes from the sidecar's font bundle (fonts-liberation.tar.gz).
+SIDECAR_FONTCONFIG_FILE = SIDECAR_DIR / "fonts" / "fonts.conf"
 SIDECAR_TIMEOUT_SECONDS = 180  # huashu opens chromium per-slide; slower than pptx-emit
+
+# How many sidecars each worker process adds to the container's slots. Each is a
+# node and Chromium tree of about 790 MB (measured), and the export routes run
+# in the threadpool, so without a bound a burst of exports would start them all.
+# The container runs UVICORN_WORKERS times this many at once (sidecar_slot_count).
+SIDECAR_CONCURRENCY_ENV = "TELLR_SIDECAR_CONCURRENCY"
+DEFAULT_SIDECAR_CONCURRENCY = 1
+
+
+def sidecar_concurrency(environ: Mapping[str, str] = os.environ) -> int:
+    """The slots each worker adds, ``TELLR_SIDECAR_CONCURRENCY``: a whole number from 1, else 1."""
+    value = environ.get(SIDECAR_CONCURRENCY_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_CONCURRENCY
+    try:
+        cap = int(value)
+    except ValueError:
+        cap = 0
+    if cap < 1:
+        logger.warning(
+            "%s=%r is not a whole number from 1; running %d sidecar(s) at once",
+            SIDECAR_CONCURRENCY_ENV,
+            value,
+            DEFAULT_SIDECAR_CONCURRENCY,
+        )
+        return DEFAULT_SIDECAR_CONCURRENCY
+    return cap
+
+
+# How many uvicorn worker processes share the container's sidecar slots:
+# UVICORN_WORKERS, which run.py reads (its default 4) and sets in the
+# environment of the workers it starts. A process run.py did not start (local
+# development's single uvicorn, a test) runs alone.
+UVICORN_WORKERS_ENV = "UVICORN_WORKERS"
+DEFAULT_SIDECAR_WORKERS = 1
+
+
+def sidecar_workers(environ: Mapping[str, str] = os.environ) -> int:
+    """How many workers share the container's sidecar slots: ``UVICORN_WORKERS``, else 1.
+
+    A whole number from 1; unset, the process runs alone. Any other value is
+    warned about, and counted as 1.
+    """
+    value = environ.get(UVICORN_WORKERS_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_WORKERS
+    try:
+        workers = int(value)
+    except ValueError:
+        workers = 0
+    if workers < 1:
+        logger.warning(
+            "%s=%r is not a whole number from 1; counting the sidecar slots for %d worker(s)",
+            UVICORN_WORKERS_ENV,
+            value,
+            DEFAULT_SIDECAR_WORKERS,
+        )
+        return DEFAULT_SIDECAR_WORKERS
+    return workers
+
+
+def sidecar_slot_count(environ: Mapping[str, str] = os.environ) -> int:
+    """How many sidecars the container runs at once: its workers x ``TELLR_SIDECAR_CONCURRENCY``."""
+    return sidecar_workers(environ) * sidecar_concurrency(environ)
+
+
+# How many exports past the container's slots one worker lets wait for one, and
+# for how long. Each waiting export holds a thread of the worker's threadpool
+# (40 by default, shared with every sync route and with every authenticated
+# request's identity lookup), so both are bounded: a worker lets in one export
+# for each of the container's slots and the queue, with the defaults on a
+# four-worker app 19 of its 40 threads. The default wait, the sidecar's own
+# timeout and a Drive upload, 60 + 180 + about 20 s, stay under the 300 s the
+# Databricks Apps proxy allows a request, with some 40 s to spare.
+SIDECAR_QUEUE_ENV = "TELLR_SIDECAR_QUEUE"
+DEFAULT_SIDECAR_QUEUE = 15
+SIDECAR_WAIT_ENV = "TELLR_SIDECAR_WAIT_SECONDS"
+DEFAULT_SIDECAR_WAIT_SECONDS = 60
+
+# What the bounds are checked against (sidecar_bounds_warnings). The Databricks
+# Apps proxy ends a request at about 300 s (measured: a request answered at
+# 185 s returned, one at 310 s got 502 at 300 s). The Google Slides route, the
+# longest, answers after its slot wait, its sidecar run and its Drive upload,
+# which DRIVE_UPLOAD_MARGIN_SECONDS stands for (4 to 20 s measured). A worker
+# runs every sync route in Starlette's threadpool, THREADPOOL_THREADS threads.
+APPS_PROXY_REQUEST_SECONDS = 300
+DRIVE_UPLOAD_MARGIN_SECONDS = 20
+THREADPOOL_THREADS = 40
+
+
+def sidecar_queue(environ: Mapping[str, str] = os.environ) -> int:
+    """How many exports ``TELLR_SIDECAR_QUEUE`` lets a worker take in past the container's slots.
+
+    A whole number from 0, else the default, 15.
+    """
+    value = environ.get(SIDECAR_QUEUE_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_QUEUE
+    try:
+        queue = int(value)
+    except ValueError:
+        queue = -1
+    if queue < 0:
+        logger.warning(
+            "%s=%r is not a whole number from 0; letting %d export(s) wait for a sidecar",
+            SIDECAR_QUEUE_ENV,
+            value,
+            DEFAULT_SIDECAR_QUEUE,
+        )
+        return DEFAULT_SIDECAR_QUEUE
+    return queue
+
+
+def sidecar_wait_seconds(environ: Mapping[str, str] = os.environ) -> float:
+    """How long ``TELLR_SIDECAR_WAIT_SECONDS`` lets an export wait for a sidecar slot.
+
+    A number of seconds above 0 and under ``threading.TIMEOUT_MAX``, the longest
+    wait a lock can be told (a longer one raises OverflowError, not
+    HuashuBusyError), else the default, 60.
+    """
+    value = environ.get(SIDECAR_WAIT_ENV)
+    if value is None:
+        return DEFAULT_SIDECAR_WAIT_SECONDS
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not (math.isfinite(seconds) and 0 < seconds < threading.TIMEOUT_MAX):
+        logger.warning(
+            "%s=%r is not a number of seconds above 0 and under %g; "
+            "an export waits up to %ds for a sidecar",
+            SIDECAR_WAIT_ENV,
+            value,
+            threading.TIMEOUT_MAX,
+            DEFAULT_SIDECAR_WAIT_SECONDS,
+        )
+        return DEFAULT_SIDECAR_WAIT_SECONDS
+    return seconds
+
+
+def sidecar_bounds_warnings(
+    slots: int, queue: int, wait: float, timeout: float = SIDECAR_TIMEOUT_SECONDS
+) -> list[str]:
+    """What these sidecar bounds defeat in the app they run in, one message each: [] for nothing.
+
+    The container runs ``slots`` sidecars at once, any of them in one worker; a
+    worker lets ``queue`` exports more wait for one, each up to ``wait``
+    seconds; and a run is bounded by ``timeout``.
+    """
+    warnings = []
+    worst = wait + timeout + DRIVE_UPLOAD_MARGIN_SECONDS
+    if worst >= APPS_PROXY_REQUEST_SECONDS:
+        warnings.append(
+            f"{SIDECAR_WAIT_ENV}={wait:g}: a queued Google Slides export can take {wait:g} s "
+            f"of waiting, the {timeout:g} s sidecar timeout and about "
+            f"{DRIVE_UPLOAD_MARGIN_SECONDS} s of Drive upload, {worst:g} s, which reaches the "
+            f"{APPS_PROXY_REQUEST_SECONDS} s the Databricks Apps proxy allows a request: the "
+            "proxy would answer it 502 before the app does"
+        )
+    if slots + queue >= THREADPOOL_THREADS:
+        warnings.append(
+            f"{slots} sidecar slot(s) in the container ({UVICORN_WORKERS_ENV} x "
+            f"{SIDECAR_CONCURRENCY_ENV}) and {SIDECAR_QUEUE_ENV}={queue}: a worker lets "
+            f"{slots + queue} exports in at once, which can hold all {THREADPOOL_THREADS} "
+            "threads of its threadpool, which every sync route and every authenticated "
+            "request's identity lookup need too"
+        )
+    return warnings
+
+
+def _container_slots(count: int) -> SidecarSlots | threading.BoundedSemaphore:
+    """The container's ``count`` sidecar slots, as the environment shares them.
+
+    In the directory run.py names for its workers, shared by them all
+    (``sidecar_slots.py``). A process it did not start runs alone
+    (``sidecar_workers``), so its slots are its own, counted by a semaphore,
+    and no file holds them.
+    """
+    directory = slots_directory()
+    if directory is None:
+        return threading.BoundedSemaphore(count)
+    return SidecarSlots(count, directory)
+
+
+_sidecar_cap = sidecar_concurrency()
+_sidecar_workers = sidecar_workers()
+# The container's slots, shared by every worker (module docstring, Concurrency).
+_sidecar_slot_count = _sidecar_workers * _sidecar_cap
+_sidecar_queue = sidecar_queue()
+_sidecar_slots = _container_slots(_sidecar_slot_count)
+# A place for each export this worker lets in: one for each of the container's
+# slots, all of which it may run at once since requests are not balanced across
+# workers, and one for each export queued for a slot. Taken without waiting, so
+# with every place taken an export is refused at once (HuashuBusyError).
+_sidecar_admissions = threading.BoundedSemaphore(_sidecar_slot_count + _sidecar_queue)
+SIDECAR_WAIT_SECONDS = sidecar_wait_seconds()
+
+
+def _warn_about_the_bounds() -> None:
+    """Log each warning ``sidecar_bounds_warnings`` has for this worker's bounds."""
+    for warning in sidecar_bounds_warnings(
+        _sidecar_slot_count, _sidecar_queue, SIDECAR_WAIT_SECONDS
+    ):
+        logger.warning("%s", warning)
+
+
+_warn_about_the_bounds()
+
+
+def log_sidecar_bounds() -> None:
+    """Log the container's sidecar slots, this worker's bounds, and the container's memory limit.
+
+    The app's startup calls it, in every worker. Loading this module has warned
+    already about any bound that defeats what it is for, so with the startup
+    loading it a misconfiguration shows when a worker starts, not on its first
+    export. The limit, ``[huashu] container memory limit <MB or none>``, is what
+    the exports' ``containerWorkingSetMb`` is read against (module docstring,
+    Telemetry); one that cannot be read is logged as none, and never stops the
+    startup.
+    """
+    logger.info(
+        "[huashu] export sidecars: %d slot(s) in the container (%d worker(s) x %s=%d); "
+        "a worker lets in one export per slot and %d more to wait for one, each up to %gs",
+        _sidecar_slot_count,
+        _sidecar_workers,
+        SIDECAR_CONCURRENCY_ENV,
+        _sidecar_cap,
+        _sidecar_queue,
+        SIDECAR_WAIT_SECONDS,
+    )
+    try:
+        limit = _container_memory_limit_bytes()
+    except (OSError, ValueError) as error:
+        logger.warning("could not read the container's cgroup limit: %s", error)
+        limit = None
+    telemetry_logger.info(
+        "[huashu] container memory limit %s",
+        "none" if limit is None else f"{limit / BYTES_PER_MB:.1f} MB",
+    )
 
 # SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
 # No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
 # the converter jail's scrubbed env): Playwright finds Chromium under
 # ~/.cache/ms-playwright. Proxy and CA settings stay so the page can still
-# load Chart.js from its CDN.
+# load Chart.js from its CDN. FONTCONFIG_FILE is the sidecar's own fontconfig
+# wherever its font bundle is installed (sidecar_subprocess_env).
 _SIDECAR_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
@@ -59,6 +464,7 @@ _SIDECAR_ENV_ALLOWLIST = (
     "LC_CTYPE",
     "TMPDIR",
     "LD_LIBRARY_PATH",
+    "FONTCONFIG_FILE",
     "PLAYWRIGHT_BROWSERS_PATH",
     "XDG_CACHE_HOME",
     "HTTP_PROXY",
@@ -72,6 +478,21 @@ _SIDECAR_ENV_ALLOWLIST = (
     "NODE_EXTRA_CA_CERTS",
 )
 
+# The one variable that lets the sidecar log a slide's own words (module
+# docstring, Logs; log_line.cjs DEBUG_TEXT_ENV). It is not in
+# _SIDECAR_ENV_ALLOWLIST, so no app passes it, however its environment is set:
+# the export fidelity harness adds it for its own runs alone
+# (scripts/export_fidelity/run.py sidecar_debug_text).
+SIDECAR_DEBUG_TEXT_ENV = "TELLR_EXPORT_DEBUG_TEXT"
+
+
+# The https hosts a slide's page may load in the sidecar's Chromium, by request
+# type: the slide CSP's (html_safety.SLIDE_CSP_REQUEST_HOSTS), passed in the stdin
+# payload as ``allowedHosts``. The sidecar's request guard aborts every other
+# request a slide's page makes, and fails a slide that navigates away from itself
+# (module docstring, Requests).
+SIDECAR_REQUEST_HOSTS: Mapping[str, tuple[str, ...]] = SLIDE_CSP_REQUEST_HOSTS
+
 
 def sidecar_subprocess_env() -> dict[str, str]:
     """Build the env dict for any node subprocess that ends up spawning
@@ -83,6 +504,12 @@ def sidecar_subprocess_env() -> dict[str, str]:
     next runtime libs aren't installed. Scoping it here (not as a global
     env in app.yaml) prevents the Python process from accidentally loading
     incompatible libs from the bundle.
+
+    Sets ``FONTCONFIG_FILE`` to the sidecar's own fontconfig
+    (``fonts/fonts.conf``, which ``setup.sh`` writes from the font bundle) where
+    it exists, so Chromium lays out a font stack with no loaded webfont in the
+    Liberation faces metric-compatible with Arial, Times New Roman and Courier
+    New, as a desktop does, instead of the base image's DejaVu.
     """
     env = {k: os.environ[k] for k in _SIDECAR_ENV_ALLOWLIST if k in os.environ}
     if SIDECAR_SYS_LIBS_DIR.exists():
@@ -90,25 +517,736 @@ def sidecar_subprocess_env() -> dict[str, str]:
         env["LD_LIBRARY_PATH"] = (
             f"{SIDECAR_SYS_LIBS_DIR}:{existing}" if existing else str(SIDECAR_SYS_LIBS_DIR)
         )
+    if SIDECAR_FONTCONFIG_FILE.is_file():
+        env["FONTCONFIG_FILE"] = str(SIDECAR_FONTCONFIG_FILE)
     return env
 
 
 class HuashuExportError(RuntimeError):
-    """Raised when the huashu sidecar cannot run at all (setup, timeout)."""
+    """Raised when the export produced no deck: the sidecar ran and failed.
+
+    The export routes answer it 500. Two kinds of it they answer otherwise:
+    ``HuashuUnavailableError`` and ``HuashuTimeoutError``.
+    """
+
+
+class HuashuUnavailableError(HuashuExportError):
+    """Raised when the pipeline cannot run here at all: not enabled, or not installed.
+
+    The export routes answer it 503, on which the frontend falls back to the
+    records pipeline: this deployment has no snapshot engine to try.
+    """
+
+
+class HuashuTimeoutError(HuashuExportError):
+    """Raised when the sidecar ran past ``SIDECAR_TIMEOUT_SECONDS`` and was ended.
+
+    The export routes answer it 504, which the frontend shows: the pipeline is
+    installed, and a records export would not stand in for it silently.
+    """
+
+
+class HuashuBusyError(RuntimeError):
+    """Raised when there is no room for another export just now.
+
+    Either every export place of this worker is taken (one for each of the
+    container's sidecar slots, and the queue for them) or the wait for one of
+    the container's slots ran past ``SIDECAR_WAIT_SECONDS``. Not a
+    ``HuashuExportError``: the export routes answer this 429 with a message to
+    retry, but a ``HuashuExportError`` 500 (``HuashuTimeoutError`` 504,
+    ``HuashuUnavailableError`` 503), and the frontend answers a 503 alone by
+    falling back to the records pipeline.
+    """
+
+
+@contextlib.contextmanager
+def _export_place() -> Iterator[None]:
+    """One of this worker's export places, held for the whole export.
+
+    With every place taken, ``HuashuBusyError`` at once.
+    """
+    admissions = _sidecar_admissions
+    if not admissions.acquire(blocking=False):
+        raise HuashuBusyError(
+            f"every export place of this worker is taken: one for each of the container's "
+            f"{_sidecar_slot_count} sidecar slot(s) ({UVICORN_WORKERS_ENV} x "
+            f"{SIDECAR_CONCURRENCY_ENV}) and the queue for them ({SIDECAR_QUEUE_ENV})"
+        )
+    try:
+        yield
+    finally:
+        admissions.release()
+
+
+@contextlib.contextmanager
+def _sidecar_slot(slides: int) -> Iterator[None]:
+    """One of the container's sidecar slots for a run, waited for up to ``SIDECAR_WAIT_SECONDS``.
+
+    A wait past it raises ``HuashuBusyError``. An export that waits says so,
+    and once it has the slot, how long it waited.
+    """
+    slots = _sidecar_slots
+    if not slots.acquire(blocking=False):
+        bound = SIDECAR_WAIT_SECONDS
+        logger.info(
+            "[huashu] export waits for a sidecar slot (the container's %d, %s x %s), "
+            "up to %gs: %d slide(s)",
+            _sidecar_slot_count,
+            UVICORN_WORKERS_ENV,
+            SIDECAR_CONCURRENCY_ENV,
+            bound,
+            slides,
+        )
+        waiting_since = time.monotonic()
+        if not slots.acquire(timeout=bound):
+            raise HuashuBusyError(
+                f"none of the container's sidecar slots came free within {bound:g}s "
+                f"({SIDECAR_WAIT_ENV})"
+            )
+        logger.info(
+            "[huashu] export took a sidecar slot after %.1fs: %d slide(s)",
+            time.monotonic() - waiting_since,
+            slides,
+        )
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+# How long a sidecar told to stop (SIGTERM) has to end before it is killed
+# (SIGKILL), and the bound on each wait for it after that: node ends through
+# its exit path within it, where Playwright kills the browsers it launched.
+SIDECAR_TERM_GRACE_SECONDS = 5
+
+
+def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
+    """Send ``sig`` to the process group ``process`` leads, else to ``process`` itself.
+
+    The group's id is the process's own (``start_new_session``). A group that
+    cannot be found (ProcessLookupError), or cannot be signalled
+    (PermissionError: macOS answers EPERM for a group whose only member is the
+    process, exited and not yet reaped), gets the signal on the process alone
+    while it still runs; ``poll`` reaps it otherwise.
+    """
+    try:
+        os.killpg(process.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        if process.poll() is None:
+            try:
+                process.send_signal(sig)
+            except (ProcessLookupError, PermissionError):
+                pass  # it exited between the poll and the signal
+
+
+class _ProcessRow(NamedTuple):
+    """A running process: its id, its parent's, its group's, and its resident memory."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    # Bytes resident (RSS); None where its /proc line stops short of the field.
+    rss_bytes: int | None
+
+
+# /proc/<pid>/stat, past "pid (comm) ": state is field 3, ppid 4, pgrp 5, rss 24
+# (proc(5)), the number of pages resident.
+_STAT_PPID, _STAT_PGRP, _STAT_RSS = 1, 2, 21
+# ps reports RSS in KiB.
+_PS_RSS_UNIT_BYTES = 1024
+
+
+def _read_process_table(proc: Path = Path("/proc")) -> list[_ProcessRow]:
+    """Every running process, in one pass: from /proc on Linux, else from ``ps``.
+
+    Bounded: ``ps`` gets ``SIDECAR_TERM_GRACE_SECONDS``, and a process that
+    exits while it is read, or whose line does not parse, is skipped. A table
+    that cannot be read at all raises ``OSError`` or ``subprocess.SubprocessError``.
+    """
+    if (proc / "self" / "stat").exists():
+        page_bytes = os.sysconf("SC_PAGE_SIZE")
+        table = []
+        for entry in os.listdir(proc):
+            if not entry.isdigit():
+                continue
+            try:
+                stat = (proc / entry / "stat").read_text()
+                # "pid (comm) state ppid pgrp …": comm can hold spaces and parentheses.
+                fields = stat[stat.rindex(")") + 2 :].split()
+                pages = int(fields[_STAT_RSS]) if len(fields) > _STAT_RSS else None
+                table.append(
+                    _ProcessRow(
+                        int(entry),
+                        int(fields[_STAT_PPID]),
+                        int(fields[_STAT_PGRP]),
+                        None if pages is None else pages * page_bytes,
+                    )
+                )
+            except (OSError, ValueError, IndexError):
+                continue  # it exited, is not ours to read, or its line does not parse
+        return table
+    listing = subprocess.run(
+        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "rss="],
+        capture_output=True,
+        text=True,
+        timeout=SIDECAR_TERM_GRACE_SECONDS,
+        check=True,
+    ).stdout
+    table = []
+    for line in listing.splitlines():
+        try:
+            pid, ppid, pgid, rss = (int(field) for field in line.split())
+        except ValueError:
+            continue  # not four numbers: not a process's line
+        table.append(_ProcessRow(pid, ppid, pgid, rss * _PS_RSS_UNIT_BYTES))
+    return table
+
+
+def _process_table(proc: Path = Path("/proc")) -> list[tuple[int, int, int]]:
+    """Every running process as ``(pid, ppid, pgid)`` (``_read_process_table``).
+
+    An unreadable table is empty, logged.
+    """
+    try:
+        rows = _read_process_table(proc)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("could not list processes to sweep a blocked sidecar's browsers: %s", error)
+        return []
+    return [(row.pid, row.ppid, row.pgid) for row in rows]
+
+
+def _kill_detached_children(process: subprocess.Popen) -> None:
+    """SIGKILL the group of each of the sidecar's children that leads a group of its own.
+
+    The browsers Playwright launches are such children (``detached``). Only
+    called while the sidecar still runs: a living node has not reaped its
+    children, so none of their ids can have been reused by another process.
+    """
+    for pid, ppid, pgid in _process_table():
+        if ppid == process.pid and pgid == pid and pid != process.pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # gone already, or a zombie its node has yet to reap
+
+
+def _end_process_group(process: subprocess.Popen) -> None:
+    """Stop the sidecar's process group, never waiting on it for long.
+
+    SIGTERM first: the sidecar's node scripts answer it with process.exit(143)
+    (emit_deck.mjs, probe_launch.mjs), and Playwright's exit handler then
+    SIGKILLs the group of every browser it launched. Playwright launches each
+    browser ``detached``, the leader of a group of its own, so no signal to the
+    sidecar's group reaches a browser: only node's exit path does. A node still
+    running after ``SIDECAR_TERM_GRACE_SECONDS`` could not take that path (its
+    event loop blocked, so no handler of its ran), so the groups of its detached
+    children, its browsers, are killed here. Then SIGKILL to whatever of the
+    sidecar's own group remains: node, or a child it started in that group.
+    """
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    if process.poll() is None:
+        _kill_detached_children(process)
+    _signal_process_group(process, signal.SIGKILL)
+    try:
+        process.wait(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning("sidecar pid %s did not exit after SIGKILL", process.pid)
+
+
+def run_sidecar_process(
+    command: list[str],
+    *,
+    input: bytes,
+    timeout: float,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a sidecar node script on ``input``, its output captured, bounded by ``timeout``.
+
+    ``env`` defaults to ``sidecar_subprocess_env()``, never the app's own
+    environment. The script starts a new session, so it leads a process group
+    of its own. ``on_spawn``, when given, is called with the process once it
+    has started, before it is given ``input`` (the export's memory sampler,
+    ``_TreeMemorySampler.watch``); what it raises ends the run as an interruption
+    does. A run past ``timeout``, or interrupted, is ended with
+    ``_end_process_group`` (SIGTERM, then SIGKILL after the grace period) and
+    ``subprocess.TimeoutExpired`` is raised with what it printed. After any
+    exit, a failing one included, the group is swept with SIGKILL, so no child
+    it started in its own group outlives it. No wait is unbounded: the run
+    returns within ``timeout`` plus four grace periods (the waits, and the
+    process listing a blocked sidecar's sweep reads).
+    """
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=sidecar_subprocess_env() if env is None else env,
+        start_new_session=True,
+    )
+    try:
+        try:
+            if on_spawn is not None:
+                on_spawn(process)
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired as timed_out:
+            _end_process_group(process)
+            stdout, stderr = _remaining_output(process)
+            raise subprocess.TimeoutExpired(
+                command, timeout, output=stdout, stderr=stderr
+            ) from timed_out
+        except BaseException:
+            _end_process_group(process)
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        try:
+            _signal_process_group(process, signal.SIGKILL)
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream:
+                    stream.close()
+
+
+def _remaining_output(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What an ended sidecar printed, read for at most ``SIDECAR_TERM_GRACE_SECONDS``.
+
+    A process outside its group (a detached browser) can still hold its
+    pipes open, so the read is bounded; past it, the output is given up.
+    """
+    try:
+        return process.communicate(timeout=SIDECAR_TERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        return b"", b""
+
+
+# The export summary's memory reading (_TreeMemorySampler): how often the
+# sidecar's process tree is read while it runs, and the unit of the reading (MiB).
+MEMORY_SAMPLE_SECONDS = 0.25
+BYTES_PER_MB = 1024 * 1024
+
+
+def _tree_resident_bytes(root: int, table: list[_ProcessRow]) -> int | None:
+    """The resident bytes of process ``root`` and of every descendant of it; None once it is gone.
+
+    Descendants by the PPID chain, whatever their group: Playwright launches
+    each browser ``detached``, the leader of a group of its own (found as
+    ``_kill_detached_children`` finds it), and a browser's own processes are
+    its children. A process of the tree whose resident size the table does not
+    give raises ``ValueError``: a sum without it would read low.
+    """
+    rows: dict[int, _ProcessRow] = {}
+    children: dict[int, list[_ProcessRow]] = {}
+    for row in table:
+        rows[row.pid] = row
+        children.setdefault(row.ppid, []).append(row)
+    if root not in rows:
+        return None
+    total = 0
+    counted: set[int] = set()
+    pending = [rows[root]]
+    while pending:
+        row = pending.pop()
+        if row.pid in counted:
+            continue  # each process once, whatever chain the table holds
+        counted.add(row.pid)
+        if row.rss_bytes is None:
+            raise ValueError(f"the process table gives no resident size for process {row.pid}")
+        total += row.rss_bytes
+        pending.extend(children.get(row.pid, ()))
+    return total
+
+
+# The container's own memory, as its cgroup charges it against its limit. The
+# cgroup is this process's own, named in /proc/self/cgroup: under cgroup v2 its
+# "0::<path>" line, under cgroup v1 its memory controller's line. That path is
+# looked for under the cgroup root (v2) or its memory/ hierarchy (v1), where a
+# host's whole tree is mounted; where it is not there, the container sees its
+# own cgroup as that root (a private cgroup namespace, or a bind-mounted view),
+# and the root is read. A host-wide view's root is the whole machine: under v1
+# it has the usage file, and would read the machine's usage. So the root is
+# read only where the process's own path is not in view, and there the root is
+# the container's own cgroup. A path that climbs ("..") out of the root in
+# view says that root is not the process's own cgroup: nothing is read for
+# that version. A machine with neither (macOS) has no reading. Tests point
+# both at fakes.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+# A cgroup v1 limit this large is none: v1 says "no limit" with the largest
+# page-aligned 63-bit number, v2 with "max".
+_CGROUP_UNLIMITED_BYTES = 1 << 62
+
+
+class _CgroupMemory(NamedTuple):
+    """Where a cgroup's memory files are, and their names in its cgroup version."""
+
+    # The cgroup's directory, and the top of its hierarchy as this process sees it.
+    directory: Path
+    top: Path
+    usage: str
+    limit: str
+    # The memory.stat line for the page cache nothing has used lately.
+    inactive_file: str
+
+
+# Per cgroup version: its line in /proc/self/cgroup (v2's hierarchy is "0" with no
+# controllers, v1's the one whose controllers include memory), where its hierarchy
+# is mounted under CGROUP_ROOT, and its memory files.
+_CGROUP_VERSIONS = (
+    ("v2", "", "memory.current", "memory.max", "inactive_file"),
+    ("v1", "memory", "memory.usage_in_bytes", "memory.limit_in_bytes", "total_inactive_file"),
+)
+
+
+def _own_cgroup_paths() -> dict[str, str]:
+    """This process's cgroup path per version, from ``PROC_SELF_CGROUP``; {} without the file."""
+    try:
+        lines = PROC_SELF_CGROUP.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    paths: dict[str, str] = {}
+    for line in lines:
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        hierarchy, controllers, path = fields
+        if hierarchy == "0" and not controllers:
+            paths.setdefault("v2", path)
+        elif "memory" in controllers.split(","):
+            paths.setdefault("v1", path)
+    return paths
+
+
+def _container_cgroup() -> _CgroupMemory | None:
+    """This process's own cgroup with memory files, v2 before v1; None for neither."""
+    own = _own_cgroup_paths()
+    for version, mount, usage, limit, inactive_file in _CGROUP_VERSIONS:
+        top = CGROUP_ROOT / mount if mount else CGROUP_ROOT
+        path = own.get(version)
+        if path is not None and ".." in PurePosixPath(path).parts:
+            # A path that climbs ("..") names a cgroup outside the root this process
+            # sees (its namespace's): that root is not its own cgroup but the
+            # namespace's, or the whole machine's, so this version has none to read.
+            continue
+        candidates = [] if path is None else [top / path.lstrip("/")]
+        candidates.append(top)
+        for directory in candidates:
+            if (directory / usage).is_file():
+                return _CgroupMemory(directory, top, usage, limit, inactive_file)
+    return None
+
+
+def _limit_bytes(text: str) -> int | None:
+    """A cgroup memory limit file's limit, or None for no limit."""
+    value = text.strip()
+    if value == "max":
+        return None
+    limit = int(value)
+    return None if limit >= _CGROUP_UNLIMITED_BYTES else limit
+
+
+def _container_memory_limit_bytes() -> int | None:
+    """The container's memory limit, or None: no limit, or no cgroup memory files.
+
+    The smallest limit set on its cgroup or on any cgroup above it that this
+    process sees, since each charges it (a pod's limit sits on the pod's
+    cgroup, its container's below it). A limit file that cannot be read, or
+    does not hold a number, raises ``OSError`` or ``ValueError``.
+    """
+    cgroup = _container_cgroup()
+    if cgroup is None:
+        return None
+    limits = []
+    directory = cgroup.directory
+    while True:
+        file = directory / cgroup.limit
+        if file.is_file():
+            limit = _limit_bytes(file.read_text(encoding="ascii"))
+            if limit is not None:
+                limits.append(limit)
+        if directory == cgroup.top or directory == directory.parent:
+            break
+        directory = directory.parent
+    return min(limits, default=None)
+
+
+def _container_memory(cgroup: _CgroupMemory) -> tuple[int, int | None]:
+    """The cgroup's usage and working set, in bytes; the working set None without memory.stat.
+
+    The working set as the kubelet and cAdvisor count it: usage less the page
+    cache nothing has used lately (memory.stat's inactive file pages), never
+    below 0. A file that cannot be read or parsed raises ``OSError`` or
+    ``ValueError``.
+    """
+    usage = int((cgroup.directory / cgroup.usage).read_text(encoding="ascii"))
+    try:
+        stat = (cgroup.directory / "memory.stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return usage, None
+    for line in stat.splitlines():
+        name, _, value = line.partition(" ")
+        if name == cgroup.inactive_file:
+            return usage, max(usage - int(value), 0)
+    return usage, None
+
+
+class _MemoryPeaks(NamedTuple):
+    """What a ``_TreeMemorySampler`` read, in MB (MiB): None for a reading it does not have."""
+
+    # The sidecar's process tree: node and every Chromium it launched, RSS summed.
+    tree_mb: float | None
+    # The whole container, as its cgroup counts it: its usage, and its working set.
+    container_mb: float | None
+    working_set_mb: float | None
+
+
+def _megabytes(held: int | None) -> float | None:
+    return None if held is None else round(held / BYTES_PER_MB, 1)
+
+
+class _TreeMemorySampler:
+    """The most memory a sidecar's process tree held, and the container with it.
+
+    ``watch`` (``run_sidecar_process``'s ``on_spawn``) starts a daemon thread
+    that reads, every ``MEMORY_SAMPLE_SECONDS`` and in one pass each, the
+    process table (``_read_process_table``) and, where there is one, the
+    container's cgroup (``_container_cgroup``, ``_container_memory``). It keeps
+    the largest resident size of the tree (``_tree_resident_bytes``), and the
+    largest usage and working set of the container. It stops once the sidecar
+    has ended, or at ``stop``.
+
+    It is telemetry. The two sources fail apart: one that fails before ``stop``
+    leaves its own readings None, not the part read before it, and the other is
+    still read. A thread that cannot start leaves none. Nothing here raises
+    into the export or waits on the thread, and a failure after ``stop``
+    changes nothing: the export has logged its readings.
+    """
+
+    def __init__(self) -> None:
+        # Guards what the thread records against ``stop`` reading it.
+        self._lock = threading.Lock()
+        self._stopped = threading.Event()
+        self._tree_peak: int | None = None
+        self._container_peak: int | None = None
+        self._working_set_peak: int | None = None
+        # A pass that read the container's usage but no working set.
+        self._working_set_unread = False
+        self._tree_failed = False
+        self._container_failed = False
+
+    def watch(self, process: subprocess.Popen) -> None:
+        """Start reading ``process``'s tree, in a thread of its own."""
+        try:
+            threading.Thread(
+                target=self._sample, args=(process,), name="huashu-memory", daemon=True
+            ).start()
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail_tree(error)
+            self._fail_container(error)
+
+    def _sample(self, process: subprocess.Popen) -> None:
+        try:
+            cgroup = _container_cgroup()
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail_container(error)
+            cgroup = None
+        reading_tree = True
+        try:
+            while not self._stopped.is_set() and process.returncode is None:
+                if reading_tree:
+                    try:
+                        held = _tree_resident_bytes(process.pid, _read_process_table())
+                    except Exception as error:  # noqa: BLE001
+                        self._fail_tree(error)
+                        reading_tree = False
+                    else:
+                        if held is None:
+                            return  # the sidecar has ended: no process has its id
+                        self._record_tree(held)
+                if cgroup is not None:
+                    try:
+                        usage, working_set = _container_memory(cgroup)
+                    except Exception as error:  # noqa: BLE001
+                        self._fail_container(error)
+                        cgroup = None
+                    else:
+                        self._record_container(usage, working_set)
+                if not reading_tree and cgroup is None:
+                    return  # nothing left to read
+                self._stopped.wait(MEMORY_SAMPLE_SECONDS)
+        except Exception as error:  # noqa: BLE001 (telemetry never fails an export)
+            self._fail_tree(error)
+            self._fail_container(error)
+
+    def _record_tree(self, held: int) -> None:
+        with self._lock:
+            if self._tree_peak is None or held > self._tree_peak:
+                self._tree_peak = held
+
+    def _record_container(self, usage: int, working_set: int | None) -> None:
+        with self._lock:
+            if self._container_peak is None or usage > self._container_peak:
+                self._container_peak = usage
+            if working_set is None:
+                self._working_set_unread = True
+            elif self._working_set_peak is None or working_set > self._working_set_peak:
+                self._working_set_peak = working_set
+
+    def _fail_tree(self, error: Exception) -> None:
+        with self._lock:
+            if self._stopped.is_set() or self._tree_failed:
+                return  # logged once; and after stop, the export has its readings
+            self._tree_failed = True
+        logger.warning(
+            "[huashu] export memory of the sidecar's processes not read, "
+            "its summary's peakRssMb is null: %s",
+            error,
+        )
+
+    def _fail_container(self, error: Exception) -> None:
+        with self._lock:
+            if self._stopped.is_set() or self._container_failed:
+                return  # logged once; and after stop, the export has its readings
+            self._container_failed = True
+        logger.warning(
+            "[huashu] export memory of the container not read, "
+            "its summary's containerPeakMb and containerWorkingSetMb are null: %s",
+            error,
+        )
+
+    def stop(self) -> _MemoryPeaks:
+        """Stop reading, without waiting: the most the tree and the container held, in MB.
+
+        Each is None when it was not read, or when its source failed.
+        """
+        with self._lock:
+            self._stopped.set()
+            container = not self._container_failed
+            return _MemoryPeaks(
+                tree_mb=None if self._tree_failed else _megabytes(self._tree_peak),
+                container_mb=_megabytes(self._container_peak) if container else None,
+                working_set_mb=(
+                    _megabytes(self._working_set_peak)
+                    if container and not self._working_set_unread
+                    else None
+                ),
+            )
+
+
+# The line each export logs once it ends (_ExportSummary), its prefix fixed: the
+# owner greps the app's logs for it.
+EXPORT_SUMMARY_PREFIX = "[huashu] export summary "
+
+
+class _StderrLineHandler(logging.StreamHandler):
+    """Each record as one line on ``sys.stderr``, the stream as it is when the record is logged.
+
+    Looked up per record, as logging's own last-resort handler does, so a
+    redirected stderr (a test's capture, the fidelity harness's tee) gets it.
+    """
+
+    def __init__(self) -> None:
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return sys.stderr
+
+
+# The telemetry's logger, for each export's summary line and the container's
+# memory limit at startup: INFO, each record one line on stderr, and not
+# passed on to the app's root handler, which in a worker wraps a long line
+# (module docstring, Telemetry).
+telemetry_logger = logging.getLogger(f"{__name__}.telemetry")
+telemetry_logger.setLevel(logging.INFO)
+telemetry_logger.propagate = False
+if not telemetry_logger.handlers:
+    _telemetry_handler = _StderrLineHandler()
+    _telemetry_handler.setFormatter(logging.Formatter("%(message)s"))
+    telemetry_logger.addHandler(_telemetry_handler)
+
+
+@dataclass
+class _ExportSummary:
+    """One export's summary line (``EXPORT_SUMMARY_PREFIX``): counts and timings only.
+
+    ``outcome`` is ``failed`` until the export says otherwise: ``ok`` or
+    ``partial`` for a deck written without or with failed slides
+    (``exported``), and ``timeout`` or ``busy`` where those are raised.
+    """
+
+    target: str
+    slides: int
+    outcome: str = "failed"
+    slides_exported: int = 0
+    failures: int = 0
+    # Waiting for a sidecar slot; no run until there is one.
+    wait_seconds: float = 0.0
+    run_seconds: float | None = None
+    # The sidecar's process tree, and the whole container (_TreeMemorySampler).
+    peak_rss_mb: float | None = None
+    container_peak_mb: float | None = None
+    container_working_set_mb: float | None = None
+    pptx_bytes: int = 0
+
+    def exported(self, pptx_bytes: bytes, failures: list[dict[str, Any]]) -> None:
+        """What the export returned: a deck of the slides that passed, or none at all."""
+        self.pptx_bytes = len(pptx_bytes)
+        self.failures = len(failures)
+        if pptx_bytes:
+            self.slides_exported = max(self.slides - self.failures, 0)
+            self.outcome = "partial" if failures else "ok"
+
+    def line(self) -> str:
+        """The line: its JSON's keys in a fixed order, read by the owner's tools."""
+        if self.run_seconds is None or not self.slides:
+            seconds_per_slide = None
+        else:
+            seconds_per_slide = round(self.run_seconds / self.slides, 3)
+        fields = {
+            "target": self.target,
+            "slides": self.slides,
+            "slidesExported": self.slides_exported,
+            "failures": self.failures,
+            "outcome": self.outcome,
+            "waitSeconds": round(self.wait_seconds, 3),
+            "runSeconds": None if self.run_seconds is None else round(self.run_seconds, 3),
+            "secondsPerSlide": seconds_per_slide,
+            "peakRssMb": self.peak_rss_mb,
+            "containerPeakMb": self.container_peak_mb,
+            "containerWorkingSetMb": self.container_working_set_mb,
+            "pptxBytes": self.pptx_bytes,
+            # The container's slots, and how many more exports a worker lets wait for one.
+            "sidecarConcurrency": _sidecar_slot_count,
+            "queueBound": _sidecar_queue,
+        }
+        return EXPORT_SUMMARY_PREFIX + json.dumps(fields, separators=(",", ":"))
+
+    def log(self) -> None:
+        """Log the line. A failure to is logged, and never raised into the export."""
+        try:
+            telemetry_logger.info("%s", self.line())
+        except Exception:  # noqa: BLE001 (telemetry never fails an export)
+            logger.exception("could not log the export summary")
 
 
 def _local_dev_gate() -> bool:
-    """True iff this process is running on a developer machine, not Apps.
+    """Whether this process is one the export may run in, before its prerequisites are checked.
 
-    Hard rules (in priority order):
-      - HUASHU_PIPELINE_ENABLED=1 explicit opt-in. This is what
-        app.yaml.darwish sets so the route works on Databricks Apps
-        (Chromium installed during boot via `npx playwright install
-        chromium`). Wins over the Apps-name check.
-      - DATABRICKS_APP_NAME being set without the opt-in means a
-        deployed Apps container that hasn't installed Chromium —
-        keep disabled to fail fast.
-      - Otherwise allow if ENVIRONMENT=development.
+    In priority order:
+      - ``HUASHU_PIPELINE_ENABLED=1``: yes. The app template sets it on
+        Databricks Apps, whose boot runs the sidecar's ``setup.sh`` to
+        extract its ``node_modules`` and install Chromium.
+      - ``DATABRICKS_APP_NAME`` set without it: no, a deployed app that has
+        not opted in, so it fails fast instead of launching a browser it
+        never installed.
+      - Otherwise yes exactly when ``ENVIRONMENT=development``.
     """
     if os.environ.get("HUASHU_PIPELINE_ENABLED") == "1":
         return True
@@ -136,10 +1274,12 @@ def _has_chromium() -> bool:
 
 
 def is_available() -> bool:
-    """Whether the huashu pipeline is ready to use.
+    """Whether the export can run here.
 
-    Returns False on Databricks Apps, when node isn't on PATH, when the
-    sidecar files aren't present, or when Chromium hasn't been installed.
+    It needs ``HUASHU_PIPELINE_ENABLED=1`` (a deployed app, its sidecar set up
+    by ``setup.sh``) or ``ENVIRONMENT=development`` (``_local_dev_gate``), and
+    then node on PATH, the sidecar's ``emit_deck.mjs``, its ``playwright`` and
+    ``pptxgenjs`` modules, and a Playwright Chromium. False until all are there.
     """
     if not _local_dev_gate():
         return False
@@ -156,65 +1296,82 @@ def is_available() -> bool:
     return True
 
 
-def build_pptx_huashu(
+RenderTarget = Literal["pptx", "gslides"]
+RENDER_TARGETS: tuple[RenderTarget, ...] = ("pptx", "gslides")
+
+
+def _run_measured(
+    cmd: list[str], payload_bytes: bytes, summary: _ExportSummary, env: dict[str, str]
+) -> subprocess.CompletedProcess:
+    """The sidecar's run in ``env``, its wall time and its memory peaks recorded on ``summary``."""
+    sampler = _TreeMemorySampler()
+    started = time.monotonic()
+    try:
+        return run_sidecar_process(
+            cmd,
+            input=payload_bytes,
+            timeout=SIDECAR_TIMEOUT_SECONDS,
+            env=env,
+            on_spawn=sampler.watch,
+        )
+    except subprocess.TimeoutExpired as e:
+        summary.outcome = "timeout"
+        raise HuashuTimeoutError(
+            f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
+        ) from e
+    finally:
+        summary.run_seconds = time.monotonic() - started
+        (
+            summary.peak_rss_mb,
+            summary.container_peak_mb,
+            summary.container_working_set_mb,
+        ) = sampler.stop()
+
+
+def _export_deck(
     title: str,
     slides_html: list[dict[str, Any]],
     *,
-    bypass_validation: bool = False,
+    bypass_validation: bool,
+    target: RenderTarget,
+    summary: _ExportSummary,
 ) -> tuple[bytes, list[dict[str, Any]]]:
-    """Run huashu's pipeline over each slide's HTML, return (pptx_bytes, failures).
-
-    ``slides_html`` is a list of ``{ "html": "<full doc string>", "notes": "..." }``.
-    The HTML string must be a complete standalone document with body sized
-    to 1280×720 px (= 13.333"×7.5"); the caller assembles this — see
-    ``src/api/routes/export.py::build_slide_html``.
-
-    ``bypass_validation``: when True, huashu's design-rule validation
-    (overflow > 100px, text-near-bottom-edge, layout dimension mismatch,
-    other authoring quality checks) becomes a per-slide console warning
-    instead of a throw. Slides that violate the rules still end up in the
-    output PPTX. Used by the Google Slides Drive route to guarantee every
-    slide ships, with the trade-off that some slides may render imperfectly.
-
-    Returns a 2-tuple:
-      * pptx_bytes — the .pptx as bytes, even if some slides failed
-        (empty if ALL slides failed; the caller should handle that).
-      * failures  — list of ``{ slide_index, error }`` with one entry per
-        slide huashu rejected. Empty list = clean run.
-    """
-    if not is_available():
-        raise HuashuExportError(
-            "huashu pipeline not available (local dev only; needs node, "
-            "playwright, sharp, and `npx playwright install chromium` to "
-            "have run in services/pptx-emit-huashu/)"
-        )
-
+    """``build_pptx_huashu``'s export, its wait for a slot and its run recorded on ``summary``."""
     payload_bytes = json.dumps({
         "title": title,
         "slides": slides_html,
         "bypassValidation": bypass_validation,
+        # The app the deck is written for (module docstring, Renderer target).
+        "target": target,
+        # What a slide's page may load (module docstring, Requests).
+        "allowedHosts": {kind: list(hosts) for kind, hosts in SIDECAR_REQUEST_HOSTS.items()},
     }).encode("utf-8")
 
-    with tempfile.TemporaryDirectory() as td:
+    # A place among this worker's exports for the whole export, refused at once
+    # when every one is taken, and one of the container's sidecar slots for the
+    # run, waited for before it so the wait does not count against its timeout
+    # (module docstring, Concurrency). Past either bound: HuashuBusyError. The sidecar runs with
+    # the deck's own temporary directory as its TMPDIR, made where the sidecar's
+    # TMPDIR would otherwise be, so all it leaves there goes with it (module
+    # docstring, Temporary files).
+    env = sidecar_subprocess_env()
+    with _export_place(), tempfile.TemporaryDirectory(prefix="huashu-", dir=env.get("TMPDIR")) as td:
+        env["TMPDIR"] = td
         out_path = Path(td) / "out.pptx"
         cmd = ["node", str(SIDECAR_SCRIPT), str(out_path)]
-        logger.info(
-            "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
-            " ".join(cmd), len(slides_html), len(payload_bytes),
-        )
+        asked_at = time.monotonic()
         try:
-            result = subprocess.run(
-                cmd,
-                input=payload_bytes,
-                capture_output=True,
-                timeout=SIDECAR_TIMEOUT_SECONDS,
-                check=False,
-                env=sidecar_subprocess_env(),
-            )
-        except subprocess.TimeoutExpired as e:
-            raise HuashuExportError(
-                f"huashu sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s"
-            ) from e
+            with _sidecar_slot(len(slides_html)):
+                summary.wait_seconds = time.monotonic() - asked_at
+                logger.info(
+                    "spawn huashu sidecar: %s (slides=%d, payload=%d bytes)",
+                    " ".join(cmd), len(slides_html), len(payload_bytes),
+                )
+                result = _run_measured(cmd, payload_bytes, summary, env)
+        except HuashuBusyError:
+            # Refused once its wait for a slot ran out: the wait was all of it.
+            summary.wait_seconds = time.monotonic() - asked_at
+            raise
 
         stderr = result.stderr.decode("utf-8", errors="replace")
         # Echo informational stderr lines into our log so the user sees
@@ -223,9 +1380,11 @@ def build_pptx_huashu(
             if line.strip() and not line.startswith("__HUASHU_RESULT__"):
                 print(f"[huashu-emit] {line}", file=sys.stderr, flush=True)
 
-        # Parse the sentinel line for structured failure data.
+        # Parse the sentinel line for structured failure data. emit_deck.mjs
+        # prints it last, once every slide is done, so the last one is its own:
+        # anything a slide's page made the sidecar print comes before it.
         failures: list[dict[str, Any]] = []
-        for line in stderr.splitlines():
+        for line in reversed(stderr.splitlines()):
             if line.startswith("__HUASHU_RESULT__"):
                 try:
                     parsed = json.loads(line.removeprefix("__HUASHU_RESULT__").strip())
@@ -244,3 +1403,71 @@ def build_pptx_huashu(
             )
 
         return out_path.read_bytes(), failures
+
+
+def build_pptx_huashu(
+    title: str,
+    slides_html: list[dict[str, Any]],
+    *,
+    bypass_validation: bool = False,
+    target: RenderTarget = "pptx",
+) -> tuple[bytes, list[dict[str, Any]]]:
+    """Run huashu's pipeline over each slide's HTML, return (pptx_bytes, failures).
+
+    ``slides_html`` is a list of ``{ "html": "<full doc string>", "notes": "..." }``.
+    The HTML string must be a complete standalone document with body sized
+    to 1280×720 px (= 13.333"×7.5"); the caller assembles this — see
+    ``src/api/routes/export.py::build_slide_html``.
+
+    ``bypass_validation``: when True, huashu's design-rule validation
+    (overflow > 100px, text-near-bottom-edge, layout dimension mismatch,
+    other authoring quality checks) becomes a per-slide console warning
+    instead of a throw. Slides that violate the rules still end up in the
+    output PPTX. Used by the Google Slides Drive route to guarantee every
+    slide ships, with the trade-off that some slides may render imperfectly.
+
+    ``target``: the app the deck is written for, ``"pptx"`` (PowerPoint, the
+    default) or ``"gslides"`` (the Google Slides conversion); see the module
+    docstring. Any other value raises ``ValueError``.
+
+    Each export logs one ``[huashu] export summary {json}`` line once it ends,
+    however it ends (module docstring, Telemetry). A call stopped before the
+    export starts, by an unknown ``target`` or with the pipeline unavailable
+    here (which the export routes answer 503), logs none.
+
+    Returns a 2-tuple:
+      * pptx_bytes — the .pptx as bytes, even if some slides failed
+        (empty if ALL slides failed; the caller should handle that).
+      * failures  — list of ``{ slide_index, error }`` with one entry per
+        slide huashu rejected. Empty list = clean run.
+    """
+    if target not in RENDER_TARGETS:
+        raise ValueError(f"unknown render target {target!r}: expected one of {RENDER_TARGETS}")
+    if not is_available():
+        raise HuashuUnavailableError(
+            "huashu pipeline not available: it needs HUASHU_PIPELINE_ENABLED=1 "
+            "(Databricks Apps, whose boot runs the sidecar's setup.sh) or "
+            "ENVIRONMENT=development, node on PATH, the sidecar's node_modules "
+            "(playwright, pptxgenjs) and a Playwright Chromium "
+            "(`npx playwright install chromium` in services/pptx-emit-huashu/)"
+        )
+
+    # The export's one summary line, logged once it ends, however it ends
+    # (module docstring, Telemetry).
+    summary = _ExportSummary(target=target, slides=len(slides_html))
+    try:
+        pptx_bytes, failures = _export_deck(
+            title,
+            slides_html,
+            bypass_validation=bypass_validation,
+            target=target,
+            summary=summary,
+        )
+    except HuashuBusyError:
+        summary.outcome = "busy"
+        raise
+    else:
+        summary.exported(pptx_bytes, failures)
+        return pptx_bytes, failures
+    finally:
+        summary.log()

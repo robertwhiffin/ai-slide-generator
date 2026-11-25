@@ -1,0 +1,48 @@
+<style>
+  /* Milestone and journey dots drawn with ::before and ::after, in the
+     design system's slide-journey and slide-milestones markup patterns (written
+     for the snapshot-engine pseudo-element tests, not copied from them). Read
+     with the export fidelity corpus deck (tests/fixtures/export_fidelity/deck.css),
+     whose variables and fonts it uses.
+
+     Horizontal milestones: the track is the row's ::before, a solid rule under
+     the dots, and the progress so far its ::after, a gradient over the track
+     (a capture target). Each milestone's dot is its ::before, coloured by its
+     position among the row's children, and raised over the track and the
+     progress with z-index. The current milestone's dot has no ring of its own
+     but a halo, a spread-only box-shadow. */
+  .pd-milestones { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 28px; }
+  .pd-milestones::before { content: ""; position: absolute; left: 0; right: 0; top: 12px; height: 4px; background: var(--rule); }
+  .pd-milestones::after { content: ""; position: absolute; left: 0; width: 58%; top: 12px; height: 4px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .pd-node { position: relative; padding: 44px 24px 0 0; }
+  .pd-node::before { content: ""; position: absolute; left: 0; top: 0; z-index: 1; box-sizing: border-box; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); border: 4px solid var(--paper); }
+  .pd-node:nth-child(2)::before { background: var(--accent-2); }
+  .pd-node:nth-child(3)::before { background: #1B5162; }
+  .pd-node:nth-child(4)::before { background: var(--good); }
+  .pd-node.pd-current::before { border: 0; box-shadow: 0 0 0 4px rgba(27, 81, 98, 0.2); }
+  .pd-date { font-family: var(--mono); font-size: 14px; color: var(--accent-2); }
+  .pd-head { font-size: 20px; font-weight: 700; margin-top: 6px; }
+
+  /* Vertical journey: the rule is the list's own left border, and each row's
+     dot is its ::before, centred on that border. */
+  .pd-journey { margin: 40px 0 0 6px; border-left: 2px solid var(--rule); display: flex; flex-direction: column; gap: 18px; }
+  .pd-row { position: relative; padding-left: 30px; }
+  .pd-row::before { content: ""; position: absolute; left: -7px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); }
+  .pd-when { font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+  .pd-what { font-size: 18px; font-weight: 700; }
+</style>
+<div class="slide">
+  <p class="dk-eyebrow">Customer journey</p>
+  <h2 class="dk-title">From pilot to platform in four milestones</h2>
+  <div class="pd-milestones">
+    <div class="pd-node"><div class="pd-date">Q1 2025</div><div class="pd-head">Foundation</div></div>
+    <div class="pd-node"><div class="pd-date">Q2 2025</div><div class="pd-head">Migration</div></div>
+    <div class="pd-node pd-current"><div class="pd-date">Q3 2025</div><div class="pd-head">Intelligence</div></div>
+    <div class="pd-node"><div class="pd-date">Q4 2025</div><div class="pd-head">Scale</div></div>
+  </div>
+  <div class="pd-journey">
+    <div class="pd-row"><div class="pd-when">2023 · Q3</div><div class="pd-what">First lakehouse pilot</div></div>
+    <div class="pd-row"><div class="pd-when">2024 · Q1</div><div class="pd-what">Unity Catalog rollout</div></div>
+    <div class="pd-row"><div class="pd-when">2024 · Q3</div><div class="pd-what">AI in production</div></div>
+  </div>
+</div>

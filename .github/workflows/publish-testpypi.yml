@@ -68,54 +68,25 @@ jobs:
       - name: Build databricks-tellr
         run: python -m build --sdist --wheel packages/databricks-tellr
 
+      - name: Build huashu bootstrap artifacts
+        # Produces services/pptx-emit-huashu/{node_modules,sys-libs-bullseye}.tar.gz
+        # which setup.py copies into the wheel's _assets/sidecars/pptx-emit-huashu/
+        # when TELLR_INCLUDE_HUASHU_SIDECAR=1. Mirrors publish.yml (prod).
+        run: bash services/pptx-emit-huashu/build-artifacts.sh
+
       - name: Build databricks-tellr-app
         run: |
           cp -r src packages/databricks-tellr-app/src
-          python -m build --sdist --wheel packages/databricks-tellr-app
+          TELLR_INCLUDE_HUASHU_SIDECAR=1 python -m build --sdist --wheel packages/databricks-tellr-app
           rm -rf packages/databricks-tellr-app/src
 
-      - name: Verify built artifacts (huashu tarballs present, wheel >= 25MB)
+      - name: Verify built artifacts (huashu tarballs and sidecar sources present, wheel >= 25MB)
         run: |
-          python - <<'PY'
-          import glob
-          import os
-          import sys
-          import zipfile
-
-          wheels = glob.glob("packages/databricks-tellr-app/dist/*.whl")
-          if len(wheels) != 1:
-              sys.exit(f"ERROR: expected exactly one wheel, found: {wheels}")
-          wheel = wheels[0]
-
-          size = os.path.getsize(wheel)
-          size_mb = size / (1024 * 1024)
-          print(f"Wheel: {wheel} ({size_mb:.1f} MB)")
-
-          base = "databricks_tellr_app/_assets/sidecars/pptx-emit-huashu"
-          required = [
-              f"{base}/node_modules.tar.gz",
-              f"{base}/sys-libs-bullseye.tar.gz",
-          ]
-
-          with zipfile.ZipFile(wheel) as zf:
-              names = set(zf.namelist())
-
-          missing = [name for name in required if name not in names]
-          if missing:
-              sys.exit(
-                  "ERROR: built wheel is missing required huashu sidecar tarball(s): "
-                  + ", ".join(missing)
-                  + " — this would ship a huashu-less wheel. Aborting."
-              )
-
-          if size < 25 * 1024 * 1024:
-              sys.exit(
-                  f"ERROR: built wheel is {size_mb:.1f} MB, under the 25MB floor — "
-                  "the huashu sidecar tarballs are likely missing. Aborting."
-              )
-
-          print("Verify gate passed: both huashu tarballs present and wheel >= 25MB.")
-          PY
+          # The tarballs, setup.sh and every sidecar source file the export
+          # loads (its require/import graph from emit_deck.mjs, read inside the
+          # wheel), and the 25MB floor. The export loads its sources only when it
+          # runs, so a missing one would pass the build and fail every export.
+          python scripts/verify_app_wheel.py packages/databricks-tellr-app/dist
 
       - name: Upload tellr dist
         uses: actions/upload-artifact@v4

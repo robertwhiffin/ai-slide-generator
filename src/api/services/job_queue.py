@@ -1,8 +1,9 @@
 """In-memory job queue for async chat processing.
 
 This module provides a background worker that processes chat requests
-asynchronously, enabling polling-based streaming to work around
-Databricks Apps' 60-second reverse proxy timeout.
+asynchronously, enabling polling-based streaming, so a long turn never has to
+fit in one request: Databricks Apps' reverse proxy ends a request after about
+300 seconds (measured on a plain request).
 """
 
 import asyncio
@@ -37,6 +38,12 @@ CRASH_RECOVERY_ERROR = "Request timed out (worker crash recovery)"
 # In-memory job tracking (request_id -> metadata)
 jobs: Dict[str, Dict[str, Any]] = {}
 job_queue: asyncio.Queue = asyncio.Queue()
+
+# How long (seconds) a job runner waits after an error outside any job before it
+# waits on the queue again.  An error that recurs at once (waiting on a queue
+# another event loop bound raises before it yields) would otherwise spin the
+# runner without ever yielding to its loop, logging without end.
+WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
 
 # Job runners per uvicorn process.  Each process (UVICORN_WORKERS, default 4) takes
 # the chat jobs POSTed to it.  A session's turns are still serialised by its
@@ -567,6 +574,7 @@ async def worker() -> None:
             break
         except Exception as e:
             logger.error(f"Worker loop error: {e}")
+            await asyncio.sleep(WORKER_LOOP_ERROR_BACKOFF_SECONDS)
 
 
 async def start_worker() -> asyncio.Task:

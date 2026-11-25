@@ -1,8 +1,9 @@
 """Database-backed job queue for async PPTX export processing.
 
 This module provides a background worker that processes PPTX export requests
-asynchronously, enabling polling-based export to work around
-Databricks Apps' 60-second reverse proxy timeout.
+asynchronously, enabling polling-based export, so a long export never has to
+fit in one request: Databricks Apps' reverse proxy ends a request after about
+300 seconds (measured on a plain request).
 
 Job state is stored in the database (ExportJob model) so that any worker
 process can read status/progress, fixing multi-worker 404 errors.
@@ -28,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Process-local queue for dispatching work to the background worker.
 # Only needs to work within a single process.
 export_queue: asyncio.Queue = asyncio.Queue()
+
+# How long (seconds) the export worker waits after an error outside any job
+# before it waits on the queue again, so an error that recurs at once cannot
+# spin it without yielding (job_queue.WORKER_LOOP_ERROR_BACKOFF_SECONDS).
+WORKER_LOOP_ERROR_BACKOFF_SECONDS = 1.0
 
 EXPORT_CLEANUP_INTERVAL_SECONDS = 300
 EXPORT_JOB_MAX_AGE_MINUTES = 30
@@ -389,6 +395,7 @@ async def export_worker() -> None:
             break
         except Exception as e:
             logger.error(f"Export worker loop error: {e}")
+            await asyncio.sleep(WORKER_LOOP_ERROR_BACKOFF_SECONDS)
 
 
 async def process_google_slides_job(job_id: str, payload: dict) -> None:

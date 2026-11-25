@@ -10,10 +10,11 @@ from setuptools.command.build_py import build_py
 
 
 # Files in services/pptx-emit-huashu/ NOT to ship in the wheel:
-#   - node_modules/ and sys-libs/ are bulky uncompressed trees; the wheel
-#     instead ships the gzipped tarballs (node_modules.tar.gz and
-#     sys-libs-bullseye.tar.gz) which setup.sh extracts at boot. The
-#     tarballs are produced by services/pptx-emit-huashu/build-artifacts.sh
+#   - node_modules/, sys-libs/ and fonts/ are bulky uncompressed trees; the
+#     wheel instead ships the gzipped tarballs (node_modules.tar.gz,
+#     sys-libs-bullseye.tar.gz and fonts-liberation.tar.gz) which setup.sh
+#     extracts at boot (fonts through a fonts-staging.* directory). The tarballs are
+#     committed (regenerated per services/pptx-emit-huashu/build-artifacts.sh)
 #     and are not in _SIDECAR_IGNORE so they DO ship.
 #   - package-lock.json is needed at build-artifacts.sh time but not at
 #     runtime (the lockfile is consumed when the tarball is built).
@@ -22,6 +23,9 @@ _SIDECAR_IGNORE = shutil.ignore_patterns(
     "node_modules",
     "sys-libs",
     "sys-libs-bullseye",
+    "fonts",
+    "fonts-staging",
+    "fonts-staging.*",
     ".databricks",
     "*.log",
     "package-lock.json",

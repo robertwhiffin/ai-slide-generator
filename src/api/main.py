@@ -95,6 +95,14 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
 
+    # The PPTX and Google Slides export's per-worker sidecar bounds. Loading the
+    # wrapper warns about any bound that defeats what it is for (a wait past the
+    # Apps proxy's limit, as many export places as the threadpool has threads),
+    # so a misconfiguration shows when a worker starts, not on its first export.
+    from src.services.pptx_from_html_huashu import log_sidecar_bounds
+
+    log_sidecar_bounds()
+
     # The FastMCP streamable-HTTP transport spawns per-session async tasks
     # inside a task group owned by its StreamableHTTPSessionManager. That
     # task group is initialised by ``session_manager.run()`` and is

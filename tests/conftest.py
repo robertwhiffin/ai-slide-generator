@@ -4,7 +4,9 @@ Pytest configuration and shared fixtures.
 This module provides fixtures that are available to all test modules.
 """
 
+import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Any, Generator
 from unittest.mock import MagicMock, Mock, patch
@@ -52,6 +54,13 @@ if (
     os.environ["TELLR_TESTS_DATABASE_URL_DEFAULTED"] = "1"
 
 from src.core.databricks_client import reset_client, reset_user_client
+from tests.fixtures import browser_leak_check
+
+# The session's child processes get a TMPDIR of its own, and no Playwright browser they start
+# outlives the session (tests/fixtures/browser_leak_check.py): a fixture bound here is on.
+no_playwright_browser_outlives_the_suite = (
+    browser_leak_check.no_playwright_browser_outlives_the_suite
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -117,6 +126,34 @@ def clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+#: The app's module-level asyncio queues, as (module, attribute).
+_APP_QUEUES = (
+    ("src.api.services.job_queue", "job_queue"),
+    ("src.api.services.export_job_queue", "export_queue"),
+    ("src.api.services.slide_style_preview_queue", "preview_queue"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_app_queues(monkeypatch):
+    """Each test waits on fresh app queues, never on one an earlier test's event loop bound.
+
+    The chat jobs', the exports' and the slide-style previews' queues are module-level
+    ``asyncio.Queue``s, each bound to the first event loop that waits on it.  A test that
+    drives a worker under its own ``asyncio.run`` leaves its queue bound to that loop once
+    the loop ends, and waiting on it in any later test's loop raises at once: the
+    sweeper's worker test then spun, logging, until the serial suite's one process held
+    18 GB (``tests/unit/test_queue_worker_loop_errors.py``).  Only a queue module already
+    imported gets a fresh queue: importing one here would load the app into every test,
+    and a module a test imports itself starts with a queue no loop has bound.
+    """
+    for module_name, attribute in _APP_QUEUES:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            monkeypatch.setattr(module, attribute, asyncio.Queue())
+    yield
 
 
 @pytest.fixture(autouse=True)

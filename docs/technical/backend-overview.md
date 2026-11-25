@@ -31,7 +31,7 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
                           └──────────────────────────────────────────────┘
 ```
 
-- **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. All endpoints use `asyncio.to_thread()` for blocking operations.
+- **Routers** (`src/api/routes/*.py`) validate HTTP payloads and map 1:1 to frontend calls. Blocking work stays off the event loop: an `async def` endpoint wraps it in `asyncio.to_thread()`, and a plain `def` endpoint runs whole in FastAPI's threadpool, as the PowerPoint and Google Slides export routes do (their sidecar run and Drive upload block for seconds).
 - **`ChatService`** (`src/api/services/chat_service.py`) is a process-wide singleton that manages a session-scoped deck cache (thread-safe via `_cache_lock`). It no longer holds a persistent agent instance; instead it calls `build_agent_for_request()` from `src/services/agent_factory.py` to construct a fresh agent for each request using the session's `agent_config`.
 - **`SessionManager`** (`src/api/services/session_manager.py`) handles database-backed sessions with locking for concurrent request handling. Stores slide deck in `deck_json`, verification results separately in `verification_map` (keyed by content hash), and the session's `agent_config` JSON column.
 - **`SlideGeneratorAgent`** (`src/services/agent.py`) wraps LangChain's tool-calling agent. Built per-request by `agent_factory.py` with tools derived from the session's `agent_config`.
@@ -222,9 +222,9 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint | `routes/export.export_pptx_huashu_from_html` |
+| `POST` | `/api/export/pptx/editable/huashu/from-html` | **Primary.** Render the deck HTML to PowerPoint (the snapshot engine; 429 when the worker's exports are busy) | `routes/export.export_pptx_huashu_from_html` |
 | `POST` | `/api/export/pptx/editable/from-records` | **Fallback** — fires on 503 or an unavailable/installing pipeline message | `routes/export.export_pptx_editable_from_records` |
-| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Synchronous Google Slides export via Drive conversion | `routes/google_slides` |
+| `POST` | `/api/export/google-slides/from-huashu` | **Primary.** Synchronous Google Slides export via Drive conversion (429 when busy, 502 when Drive fails) | `routes/google_slides` |
 | `POST` | `/api/export/google-slides/from-records` | **Fallback** for the Google path | `routes/google_slides` |
 | `POST` | `/api/export/pptx` | **Legacy** — LLM code-generation path; no caller exists in this repository's frontend, and the UI uses the huashu route above | `routes/export.export_to_pptx` |
 | `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above; no caller in this repository's frontend | `routes/export.start_pptx_export_async` |
@@ -234,10 +234,10 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 | `GET` | `/api/export/google-slides/auth/url` | Get Google OAuth consent URL | `routes/google_slides.auth_url` |
 | `GET` | `/api/export/google-slides/auth/callback` | OAuth callback (exchanges code for token) | `routes/google_slides.auth_callback` |
 | `DELETE` | `/api/export/google-slides/auth` | Revoke the current user's stored Google token | `routes/google_slides.revoke_auth` |
-| `POST` | `/api/export/google-slides` | Start async Google Slides export | `routes/google_slides.start_google_slides_export` |
-| `GET` | `/api/export/google-slides/poll/{job_id}` | Poll Google Slides export status | `routes/google_slides.poll_google_slides_export` |
+| `POST` | `/api/export/google-slides` | **Legacy** — async LLM code-generation export; no caller in this repository's frontend, which uses `/from-huashu` above | `routes/google_slides.start_google_slides_export` |
+| `GET` | `/api/export/google-slides/poll/{job_id}` | **Legacy** — polls the route above | `routes/google_slides.poll_google_slides_export` |
 
-See [Google Slides Integration](google-slides-integration.md) for full details on the OAuth2 flow, encryption, and converter.
+See [Google Slides Integration](google-slides-integration.md) for full details on the OAuth2 flow, encryption, and the Drive conversion.
 
 ### Feedback Endpoints
 
@@ -384,9 +384,12 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/utils/logging_config.py` | Structured logging | JSON/text formatters, RotatingFileHandler. |
 | `src/core/encryption.py` | Fernet encryption | Encrypt/decrypt Google OAuth credentials and tokens at rest. |
 | `src/services/google_slides_auth.py` | Google OAuth2 | DB-backed or file-backed credential/token management. |
-| `src/services/html_to_google_slides.py` | Google Slides converter | LLM code-gen HTML to Slides API, same pattern as PPTX converter. |
-| `src/services/html_to_pptx.py` | PPTX converter | LLM code-gen HTML to PowerPoint. |
-| `src/api/routes/google_slides.py` | Google Slides endpoints | OAuth flow + async export to Google Slides. |
+| `src/services/pptx_from_html_huashu.py` | PPTX and Google Slides export | Runs the snapshot engine (the Node sidecar in `services/pptx-emit-huashu/`) over the deck's slide documents, `target` `pptx` or `gslides`; bounds its sidecars per worker (429 when busy). |
+| `src/services/drive_uploader.py` | Drive upload | Uploads the PPTX to Drive as a Google Slides presentation (Drive converts it), or replaces the session's earlier one; each request bounded by `DRIVE_HTTP_TIMEOUT_SECONDS`. |
+| `src/services/pptx_from_records.py` | Records fallback | DOM-walker records to PowerPoint with pptxgenjs, where the sidecar is not available. |
+| `src/services/html_to_google_slides.py` | Legacy Google Slides converter | LLM code-gen HTML to Slides API; no UI caller. |
+| `src/services/html_to_pptx.py` | Legacy PPTX converter | LLM code-gen HTML to PowerPoint; no UI caller. |
+| `src/api/routes/google_slides.py` | Google Slides endpoints | OAuth flow, the synchronous export through Drive conversion (`/from-huashu`, `/from-records`), and the legacy async LLM export. |
 | `src/api/routes/settings/contributors.py` | Profile contributor management | CRUD for profile-level contributors. |
 | `src/api/routes/settings/identities.py` | Identity search | Search Databricks users/groups via SCIM or local table. |
 
@@ -873,7 +876,7 @@ The graph's architect can author a **deck style** that gives the deck a look of 
 
 ## Extending the Backend
 
-1. **New endpoints:** Add a router under `src/api/routes`, register it in `src/api/main.py`, define Pydantic request/response models in `src/api/schemas/`, wrap blocking calls in `asyncio.to_thread()`, and add session locking for mutations.
+1. **New endpoints:** Add a router under `src/api/routes`, register it in `src/api/main.py`, define Pydantic request/response models in `src/api/schemas/`, keep blocking calls off the event loop (`asyncio.to_thread()` in an `async def` handler, or a plain `def` handler), and add session locking for mutations.
 2. **Additional tools:** Add a new module under `src/services/tools/`, implement a `build_*_tool()` function that returns a LangChain `StructuredTool`, re-export it from `src/services/tools/__init__.py`, and wire it into `agent_factory.py`. Remember to add a corresponding discovery endpoint in `routes/tools.py` and update prompts so the LLM knows when to invoke the tool.
 3. **Observability hooks:** Reuse `mlflow.start_span` or extend `logging_config` if you introduce new long-running operations (e.g., batch generation).
 4. **Integration with the frontend:** Any change that affects `ChatResponse` or slide deck structure must be reflected in `frontend/src/types` and `docs/technical/frontend-overview.md`.
@@ -892,4 +895,4 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 - [Slide Parser & Script Management](slide-parser-and-script-management.md) -- HTML parsing flow
 - [Slide Editing Robustness](slide-editing-robustness-fixes.md) -- Deck preservation, LLM validation, canvas deduplication, JS validation
 - [Save Points / Versioning](save-points-versioning.md) -- Complete deck state snapshots with preview and restore
-- [Google Slides Integration](google-slides-integration.md) -- OAuth2 flow, encrypted credential storage, LLM converter
+- [Google Slides Integration](google-slides-integration.md) -- OAuth2 flow, encrypted credential storage, Drive conversion of the exported deck

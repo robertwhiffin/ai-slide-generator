@@ -23,7 +23,7 @@ from src.api.routes._authz import (
     _check_deck_permission_for_session,
     _require_export_job_access,
 )
-from src.api.routes.export import ExportJobResponse
+from src.api.routes.export import ExportJobResponse, exports_busy
 from src.api.services.chat_service import get_chat_service
 from src.core.database import get_db
 from src.core.encryption import decrypt_data
@@ -509,8 +509,43 @@ class GoogleSlidesExportResponse(BaseModel):
     failures: list[dict] = []
 
 
+def _upload_session_deck(
+    auth: GoogleSlidesAuth, session_id: str, pptx_bytes: bytes, title: str, *, route: str
+) -> tuple[str, str, bool]:
+    """Upload ``pptx_bytes`` to Drive as the session's Google Slides deck, and record it.
+
+    A re-export replaces the presentation the session already has. Returns
+    ``(presentation_id, url, replaced)``; a Drive failure is a 502 "Drive
+    upload failed", logged with ``route``. Blocking (Drive's HTTP calls), so it
+    runs in the threadpool with the plain ``def`` routes that call it.
+    """
+    from src.api.services.session_manager import get_session_manager
+
+    session_manager = get_session_manager()
+    existing_info = session_manager.get_google_slides_info(session_id)
+    existing_id = existing_info["presentation_id"] if existing_info else None
+
+    try:
+        if existing_id:
+            presentation_id, url = replace_presentation(auth, existing_id, pptx_bytes, title)
+        else:
+            presentation_id, url = upload_pptx_as_slides(auth, pptx_bytes, title)
+    except Exception as exc:
+        logger.error("Drive upload failed (%s)", route, exc_info=True)
+        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
+
+    session_manager.set_google_slides_info(
+        session_id=session_id,
+        presentation_id=presentation_id,
+        presentation_url=url,
+    )
+    return presentation_id, url, bool(existing_id)
+
+
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the
+# PPTX build, the Drive upload) holds no event loop.
 @router.post("/from-records", response_model=GoogleSlidesExportResponse)
-async def export_google_slides_from_records(
+def export_google_slides_from_records(
     request: GoogleSlidesFromRecordsRequest,
     db: Session = Depends(get_db),
 ):
@@ -546,28 +581,8 @@ async def export_google_slides_from_records(
         logger.error("PPTX build failed for Google Slides export", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PPTX build failed: {exc}") from exc
 
-    from src.api.services.session_manager import get_session_manager
-    session_manager = get_session_manager()
-    existing_info = session_manager.get_google_slides_info(request.session_id)
-    existing_id = existing_info["presentation_id"] if existing_info else None
-
-    try:
-        if existing_id:
-            presentation_id, url = replace_presentation(
-                auth, existing_id, pptx_bytes, request.title,
-            )
-        else:
-            presentation_id, url = upload_pptx_as_slides(
-                auth, pptx_bytes, request.title,
-            )
-    except Exception as exc:
-        logger.error("Drive upload failed", exc_info=True)
-        raise HTTPException(status_code=502, detail="Drive upload failed") from exc
-
-    session_manager.set_google_slides_info(
-        session_id=request.session_id,
-        presentation_id=presentation_id,
-        presentation_url=url,
+    presentation_id, url, replaced = _upload_session_deck(
+        auth, request.session_id, pptx_bytes, request.title, route="records path"
     )
 
     logger.info(
@@ -575,7 +590,7 @@ async def export_google_slides_from_records(
         extra={
             "session_id": request.session_id,
             "presentation_id": presentation_id,
-            "replaced": bool(existing_id),
+            "replaced": replaced,
         },
     )
 
@@ -599,8 +614,10 @@ class GoogleSlidesFromHuashuRequest(BaseModel):
     session_id: str
 
 
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the
+# database and token reads, the sidecar, the Drive upload) holds no event loop.
 @router.post("/from-huashu", response_model=GoogleSlidesExportResponse)
-async def export_google_slides_from_huashu(
+def export_google_slides_from_huashu(
     request: GoogleSlidesFromHuashuRequest,
     db: Session = Depends(get_db),
 ):
@@ -625,7 +642,10 @@ async def export_google_slides_from_huashu(
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
 
     from src.services.pptx_from_html_huashu import (
+        HuashuBusyError,
         HuashuExportError,
+        HuashuTimeoutError,
+        HuashuUnavailableError,
         build_pptx_huashu,
     )
 
@@ -674,51 +694,49 @@ async def export_google_slides_from_huashu(
             title=title,
             slides_html=slides_html,
             bypass_validation=True,
+            # Written for Google Slides' own placement of script runs.
+            target="gslides",
         )
-    except HuashuExportError as exc:
-        logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
+    except HuashuBusyError as exc:
+        # Not a 503: the frontend answers that by falling back to the records pipeline.
+        raise exports_busy(exc, route="Google Slides") from exc
+    except HuashuUnavailableError as exc:
+        # The one failure the frontend falls back to the records pipeline on.
+        logger.error("Huashu pipeline unavailable for Google Slides export: %s", exc)
         raise HTTPException(
             status_code=503,
             detail=f"Huashu pipeline unavailable: {exc}",
+        ) from exc
+    except HuashuTimeoutError as exc:
+        # Shown, not fallen back on: the pipeline is installed and ran.
+        logger.error("Huashu pipeline timed out for Google Slides export: %s", exc)
+        raise HTTPException(
+            status_code=504,
+            detail=f"The Google Slides export took too long and was stopped: {exc}",
+        ) from exc
+    except HuashuExportError as exc:
+        logger.error("Huashu pipeline error for Google Slides export", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"The Google Slides export failed: {exc}",
         ) from exc
 
     if not pptx_bytes:
         # With bypass_validation=True the only way this happens is if every
         # slide hit a non-validation error (e.g. chromium failed to launch
-        # for all of them). Surface the failures so the user can debug.
+        # for all of them). Surface the failures so the user can debug. The log
+        # gets their count alone: a failure's message can quote the deck, and
+        # the app's log is read outside its permissions.
         logger.error(
-            "Huashu produced no output even with bypass; failures=%s", failures
+            "Huashu produced no output even with bypass: %d slide failure(s)", len(failures)
         )
         raise HTTPException(
             status_code=500,
             detail=f"Huashu produced no output. failures={failures}",
         )
 
-    from src.api.services.session_manager import get_session_manager
-    session_manager = get_session_manager()
-    existing_info = session_manager.get_google_slides_info(request.session_id)
-    existing_id = existing_info["presentation_id"] if existing_info else None
-
-    try:
-        if existing_id:
-            presentation_id, url = replace_presentation(
-                auth, existing_id, pptx_bytes, title,
-            )
-        else:
-            presentation_id, url = upload_pptx_as_slides(
-                auth, pptx_bytes, title,
-            )
-    except Exception as exc:
-        logger.error("Drive upload failed (huashu path)", exc_info=True)
-        raise HTTPException(
-            status_code=502,
-            detail="Drive upload failed",
-        ) from exc
-
-    session_manager.set_google_slides_info(
-        session_id=request.session_id,
-        presentation_id=presentation_id,
-        presentation_url=url,
+    presentation_id, url, replaced = _upload_session_deck(
+        auth, request.session_id, pptx_bytes, title, route="huashu path"
     )
 
     logger.info(
@@ -726,7 +744,7 @@ async def export_google_slides_from_huashu(
         extra={
             "session_id": request.session_id,
             "presentation_id": presentation_id,
-            "replaced": bool(existing_id),
+            "replaced": replaced,
             "huashu_failures": len(failures),
         },
     )

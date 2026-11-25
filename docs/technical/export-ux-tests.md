@@ -1,6 +1,6 @@
 # Export UX Test Cases
 
-**Scope:** Manual test cases for changes introduced in the parallel export + prompt improvement work.
+**Scope:** Manual test cases for changes introduced in the parallel export + prompt improvement work. They cover the **legacy** LLM code-generation export routes, which no UI surface calls: the Export buttons use the snapshot engine (see [Export Features](export-features.md)), whose own "429" is the busy answer of a worker whose exports are full, not an LLM rate limit.
 
 Covers: PPTX parallelization, Google Slides prompt enrichment, code sanitization, and 429 retry logic.
 

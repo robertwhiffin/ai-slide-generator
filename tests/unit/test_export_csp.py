@@ -116,17 +116,37 @@ def _frontend_host_frame(host_selector: str) -> str:
     )
 
 
+def _frontend_preview_reset() -> str:
+    """The TS `SLIDE_PREVIEW_RESET_STYLE` as it renders: its literal, with its two
+    interpolations (the root reset and the frame contract for `body`) filled in from
+    the same source, never from a Python copy."""
+    src = _FRONTEND_SLIDE_DOC.read_text()
+    anchor = "export const SLIDE_PREVIEW_RESET_STYLE = `"
+    start = src.index(anchor) + len(anchor)
+    literal = src[start : src.index("`;", start)]
+    assert "${SLIDE_ROOT_RESET_STYLE}" in literal and "${slideHostFrameStyle('body')}" in literal, (
+        "SLIDE_PREVIEW_RESET_STYLE no longer interpolates what this extractor fills in"
+    )
+    return literal.replace("${SLIDE_ROOT_RESET_STYLE}", _frontend_slide_root_reset()).replace(
+        "${slideHostFrameStyle('body')}", _frontend_host_frame("body")
+    )
+
+
 #: The four EXPORT builders. None of them may inject a slide-host frame contract.
 #:
 #: A contract framing `body` (or `section.slide-container`) and stretching its
 #: CHILD to `position: absolute !important; inset: 0 !important; width/height: 100%
 #: !important` was injected into all four at 0.4.2.dev17 and reverted. On the
-#: huashu -> PPTX -> Google Slides path it DESTROYS TABLES:
-#: preprocess.mjs::flattenTables() re-emits every <td>/<th> as an absolutely
-#: positioned <div> whose left/top/width/height are NON-important INLINE styles and
-#: appends it to `body`, so a stylesheet !important rule on `body > *` outranks each
-#: cell's own position and collapses all of them onto one rect. Measured on a real
-#: 21-cell deck: distinct cell rects in ppt/slides/slide1.xml 42 -> 11.
+#: huashu -> PPTX -> Google Slides path it DESTROYED TABLES: the converter that
+#: path ran then re-emitted every <td>/<th> as an absolutely positioned <div>
+#: whose left/top/width/height were NON-important INLINE styles and appended it
+#: to `body`, so a stylesheet !important rule on `body > *` outranked each cell's
+#: own position and collapsed all of them onto one rect. Measured on a real
+#: 21-cell deck: distinct cell rects in ppt/slides/slide1.xml 42 -> 11. The
+#: snapshot engine that replaced it appends nothing to `body`, but it reads the
+#: page as laid out, so whatever the contract changes in that layout reaches the
+#: deck: none of these builders needs it, and reintroducing it is a change to the
+#: export's layout, to be made on its own evidence, not by accident.
 #:
 #: There is deliberately NO Python mirror of the rule any more — it existed only to
 #: serve build_slide_html. The frontend `slideHostFrameStyle` REMAINS, because the
@@ -156,17 +176,17 @@ def test_no_export_builder_injects_the_frame_contract(rel_path):
     """THE REGRESSION GUARD. Reintroducing the contract into a builder fails here.
 
     Deliberately a source scan and not a document assertion: three of the four
-    builders are TypeScript, and the huashu damage is EMIT-TIME (the built document
-    is unchanged, so a document-level probe reads 0.00 px and is blind to it).
-    Scanning the source is what actually catches the reintroduction.
+    builders are TypeScript, and the measured huashu damage was EMIT-TIME (the
+    built document was unchanged, so a document-level probe read 0.00 px and was
+    blind to it). Scanning the source is what actually catches the reintroduction.
     """
     repo_root = Path(__file__).resolve().parents[2]
     src = (repo_root / rel_path).read_text(encoding="utf-8")
     for call in _CONTRACT_CALLS:
         assert call not in src, (
-            f"{rel_path} injects the slide-host frame contract again. On the huashu "
-            "path this collapses every flattened table cell onto one rect "
-            "(42 -> 11 distinct rects measured). If a DS-pinned deck's ground needs "
+            f"{rel_path} injects the slide-host frame contract again. It was reverted "
+            "after collapsing every flattened table cell of a huashu export onto one "
+            "rect (42 -> 11 distinct rects measured). If a DS-pinned deck's ground needs "
             "fixing on a capture surface, re-aim the capture with findSlideRoot "
             "instead — it injects no CSS."
         )
@@ -271,11 +291,11 @@ def test_build_slide_html_does_not_inject_the_frame_contract():
     html = build_slide_html(_WRAPPED_SLIDE, _deck_with_css(_WRAPPED_DECK_CSS))
 
     assert _CONTRACT_MARKER not in html, (
-        "the frame contract is back in the server slide document; on the huashu "
-        "path this collapses every flattened table cell onto one rect"
+        "the frame contract is back in the server slide document, which the huashu "
+        "sidecar reads as laid out"
     )
     # The declarations that did the damage, checked individually: a reintroduction
-    # under a different selector would still collapse the cells.
+    # under a different selector would still be the contract.
     assert "inset: 0 !important" not in html
     assert "height: 100% !important" not in html
 

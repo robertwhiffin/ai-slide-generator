@@ -457,7 +457,7 @@ class TestExportEndpoint:
 
     @pytest.fixture(autouse=True)
     def _bypass_deck_gate(self, monkeypatch):
-        # SDR-4437 PR-2 (Task 13): these legacy tests post an unfixtured
+        # SDR-4437 PR-2: these legacy tests post an unfixtured
         # session_id to assert the 400/401 credential paths. The new CAN_VIEW
         # deck gate would 404 first ("Session not found"), so no-op it here —
         # never weaken the gate itself; its enforcement is covered by
@@ -484,3 +484,109 @@ class TestExportEndpoint:
         )
         assert resp.status_code == 401
         assert "OAuth" in resp.json()["detail"]
+
+
+def _stub_huashu_route(monkeypatch, fake_build) -> None:
+    """``/from-huashu`` with every collaborator stubbed, its pipeline ``fake_build``."""
+    fake_auth = MagicMock()
+    fake_auth.is_authorized.return_value = True
+    fake_chat = MagicMock()
+    fake_chat.get_slides.return_value = {"title": "Deck", "slides": [{"html": "<p>x</p>"}]}
+    monkeypatch.setattr(
+        "src.api.routes.google_slides._check_deck_permission_for_session",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr("src.api.routes.google_slides._get_auth", lambda db: fake_auth)
+    monkeypatch.setattr("src.api.routes.google_slides.get_chat_service", lambda: fake_chat)
+    monkeypatch.setattr(
+        "src.api.routes.google_slides._build_slide_html", lambda slide, deck: "<html></html>"
+    )
+    monkeypatch.setattr(
+        "src.api.services.chat_service.resolve_active_design_system_id", lambda session_id: None
+    )
+    monkeypatch.setattr(
+        "src.utils.image_utils.substitute_deck_dict_images", lambda deck, db: None
+    )
+    monkeypatch.setattr(
+        "src.utils.ds_asset_utils.substitute_deck_dict_ds_assets",
+        lambda deck, db, design_system_id=None: None,
+    )
+    monkeypatch.setattr("src.services.pptx_from_html_huashu.build_pptx_huashu", fake_build)
+
+
+class TestFromHuashuEndpoint:
+    """The Google Slides route writes its deck for Google Slides (target ``gslides``)."""
+
+    def test_the_deck_is_written_for_google_slides(self, test_client, monkeypatch):
+        """``/from-huashu`` calls ``build_pptx_huashu(..., target="gslides")``.
+
+        Google Slides sizes a line holding a superscript or subscript by the
+        run's written size, so the huashu deck it converts is written for it;
+        every other collaborator of the route is stubbed, and the stubbed
+        pipeline returns no deck, so the route stops there.
+        """
+        calls = []
+
+        def fake_build(**kwargs):
+            calls.append(kwargs)
+            return b"", [{"slide_index": 0, "error": "stubbed pipeline"}]
+
+        _stub_huashu_route(monkeypatch, fake_build)
+
+        resp = test_client.post(
+            "/api/export/google-slides/from-huashu", json={"session_id": "s-gslides"}
+        )
+
+        assert resp.status_code == 500, resp.text
+        assert len(calls) == 1, f"build_pptx_huashu was called {len(calls)} times"
+        assert calls[0]["target"] == "gslides" and calls[0]["bypass_validation"] is True, calls[0]
+
+    @pytest.mark.parametrize(
+        ("error", "status"),
+        [
+            ("HuashuUnavailableError", 503),
+            ("HuashuTimeoutError", 504),
+            ("HuashuExportError", 500),
+        ],
+    )
+    def test_each_failure_of_the_pipeline_is_answered_its_status(
+        self, test_client, monkeypatch, error, status
+    ):
+        """503 only where the pipeline cannot run, which the frontend falls back on; a timed-out
+        export 504 and any other failure 500, which it shows (M1)."""
+        from src.services import pptx_from_html_huashu
+
+        def fake_build(**_):
+            raise getattr(pptx_from_html_huashu, error)("the pipeline's own message")
+
+        _stub_huashu_route(monkeypatch, fake_build)
+
+        resp = test_client.post(
+            "/api/export/google-slides/from-huashu", json={"session_id": "s-gslides"}
+        )
+
+        assert resp.status_code == status, resp.text
+        assert "the pipeline's own message" in resp.json()["detail"], resp.text
+
+    def test_a_deck_of_failed_slides_is_logged_by_its_count(
+        self, test_client, monkeypatch, caplog
+    ):
+        """The app's log is read outside the deck's permissions: no failure's message, which
+        can quote the deck, reaches it. The user who exported the deck still gets them."""
+        quoted = "Zyqquotedword"
+
+        def fake_build(**_):
+            return b"", [{"slide_index": 0, "error": f'Text box "{quoted}" ends too close'}]
+
+        _stub_huashu_route(monkeypatch, fake_build)
+        caplog.set_level("DEBUG")
+
+        resp = test_client.post(
+            "/api/export/google-slides/from-huashu", json={"session_id": "s-gslides"}
+        )
+
+        assert resp.status_code == 500 and quoted in resp.text, resp.text
+        assert any("1 slide failure" in record.getMessage() for record in caplog.records), [
+            record.getMessage() for record in caplog.records
+        ]
+        assert quoted not in caplog.text, caplog.text

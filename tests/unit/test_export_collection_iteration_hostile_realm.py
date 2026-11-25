@@ -5,26 +5,17 @@ element's children, and said in as many words what it was leaving behind:
 ``Array.from(NodeList)`` consumes ``NodeList.prototype[Symbol.iterator]``, which
 a hostile realm can make endless. This is that residual.
 
-The defect is one layer up from the descent and in six more places than the
-disclosure named. ``Array.from()`` — like spread, and like ``for...of`` — reads
-the collection's ``[Symbol.iterator]``, and that property is CONFIGURABLE on both
+``Array.from()`` — like spread, and like ``for...of`` — reads the collection's
+``[Symbol.iterator]``, and that property is CONFIGURABLE on both
 ``NodeList.prototype`` and ``HTMLCollection.prototype``. An iterator that never
-reports ``done`` therefore stops the pass at whichever of these it reaches first:
-
-    preprocess.mjs  45   Array.from(panel.children)          HTMLCollection
-                    53   Array.from(panel.childNodes)        NodeList
-                    59   Array.from(child.childNodes)        NodeList
-                    140  Array.from(parent.childNodes)       NodeList
-                    381  for (const wrapper of wrappers)     NodeList
-                    864  Array.from(querySelectorAll('img')) NodeList
-                    921  Array.from(querySelectorAll('svg')) NodeList
+reports ``done`` stops whichever read reaches it first: the slide-root locator's
+loop over its wrapper candidates, and every collection the snapshot reads after
+it. So every page-side read goes through ``dom_access.mjs``, which walks the
+sibling chain or indexes under a bound and never iterates a live collection.
 
 REACHABILITY is the same as the sibling suite's and no weaker: ``SLIDE_CSP``
 (``src/utils/html_safety.py``) carries ``script-src 'unsafe-inline'``, so inline
-script in an uploaded template runs in the export page at load, before this pass.
-Line 140 is reached for every ``<div>``, ``<pre>`` and ``<code>`` in the document,
-so unlike the locator's own read this one is on the path of EVERY deck — the
-residual is more reachable than the layer already fixed.
+script in an uploaded template runs in the export page at load, before any pass.
 
 It has TWO measured failure modes, which is why the expectations below are
 "returned", not merely "did not hang":
@@ -39,53 +30,20 @@ Both are a denial of service in the sidecar, which has no execution budget of it
 own. Neither is distinguishable, from outside, from a deck that simply cannot be
 exported.
 
-The two fixtures split the file's collection reads by LAYER:
+The two fixtures split the reads by LAYER:
 
   hostile_wrapper_iterator      the wrapper shape, so the locator's own
-                                collection read is what the pass reaches (381).
+                                collection read is what the pass reaches.
   hostile_collection_passes     a shape the locator resolves on its first lookup,
-                                so the pass runs on into the reads a hardened
-                                locator cannot help (45, 53, 59, 140, 864, 921).
+                                so the export runs on into the snapshot's reads of
+                                a monospace panel, a prose div, an ``<svg>`` and an
+                                ``<img>``, which a hardened locator cannot help.
 
 Each is a byte-identical copy of a BENIGN twin plus its ``<script>``, so any
-difference in the artifact is attributable to the hostile script alone. That is
-also what makes the second fixture pin every site at once rather than only the
-first: its twin's export depends on all four of its collection reads — the
-monospace panel, the prose div, the ``<svg>`` and the ``<img>`` — so the artifact
-matches only when every one of them yields the same elements in the same order.
-
-THE VENDORED WALKER IS NOW HARDENED TOO, which is why the artifact claims below
-are ordinary expectations. Hardening ``preprocess.mjs`` alone made the PASS
-return but not the EXPORT complete, because the vendored huashu walker had the
-same defect one file over — and line 652 runs for every element the text walker
-visits, so both fixtures hung there regardless of the preprocess fix:
-
-    html2pptx.js  447  element.childNodes.forEach(...)        NodeList
-                  576  document.querySelectorAll('*').forEach HTMLCollection
-                  652  for (const node of el.childNodes)      NodeList
-                  791  Array.from(el.querySelectorAll('li'))  NodeList
-                  896  el.querySelector('b, i, u, ...')       Element lookup
-
-All five now read through the same mechanism ``preprocess.mjs`` uses: accessors
-captured from a src-less iframe's pristine realm, consumed by walking the sibling
-chain or indexing under a bound. The measured effect on this module is four
-sidecar timeouts becoming four passes, and the suite going from 109s to under
-20s. These two claims carried ``xfail(strict=True)`` while the walker was open;
-the strictness is what turned the fix into a failing test and made the markers'
-removal owed rather than optional.
-
-WHAT IS STILL NOT REACHED, measured rather than assumed. One raw site remains in
-``preprocess.mjs``, inside ``emitInlineBackgrounds``:
-
-    preprocess.mjs 866  document.querySelectorAll(SELECTOR).forEach(...)
-
-That function is fenced off from this change by explicit instruction, so the site
-is disclosed rather than closed. It is not a partial residual: a poisoned
-``forEach`` ignores its receiver, so that line spins on ANY document — an empty
-``span, mark, kbd`` NodeList still calls it — which leaves the hang and the raise
-open for every deck, not only for decks carrying an inline background. The
-sibling module ``test_export_accessor_hostile_realm.py`` states that residual as
-its own strict expectations, so it fails the moment the fence is lifted.
+difference in the artifact is attributable to the hostile script alone. Each pair
+is compared three ways: the background transfer's result (``{bgTransferred}``),
+the snapshot's slide summary (every count it reports, without the clock reading
+``captureMs``), and the whole exported deck.
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
@@ -98,7 +56,13 @@ import json
 import pytest
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import (
+    export_logged,
+    slide_summaries,
+    summary_without_clock,
+)
 from tests.unit.test_export_slide_root_background import (
+    FIXTURE_DIR,
     GROUND,
     GROUND_RGB,
     _build,
@@ -112,7 +76,7 @@ from tests.unit.test_export_slide_root_hostile_realm import (
 from tests.unit.test_export_svg_raster import structural_manifest
 
 # Long enough to be a real export of a two-element slide (the hostile twins finish
-# in a couple of seconds now that the walker terminates), short enough that a
+# in a couple of seconds now that every read terminates), short enough that a
 # regression costs the suite seconds instead of the 180s-per-case the production
 # timeout would.
 HOSTILE_EXPORT_TIMEOUT_SECONDS = 25
@@ -126,7 +90,7 @@ TWINS = {
 HOSTILE_FIXTURES = tuple(TWINS)
 
 # The two interfaces whose [Symbol.iterator] the fixtures replace. Both, because
-# the pass consumes both: childNodes and querySelectorAll() are NodeLists,
+# the export reads both: childNodes and querySelectorAll() are NodeLists,
 # element.children is an HTMLCollection.
 POISONED_INTERFACES = ("NodeList", "HTMLCollection")
 
@@ -209,19 +173,41 @@ class TestTheHostileScriptCostsTheDeckNothing:
         assert result["bodyBackgroundColor"] == GROUND_RGB
 
     @pytest.mark.parametrize("fixture", HOSTILE_FIXTURES)
-    def test_every_pass_reports_the_same_counts_as_the_benign_twin(
-        self, fixture: str
+    def test_every_read_reports_the_same_counts_as_the_benign_twin(
+        self, monkeypatch: pytest.MonkeyPatch, fixture: str
     ) -> None:
-        """Same elements, per pass, measured as the counts the pass returns.
+        """Same elements, measured as the counts the background transfer and the snapshot report.
 
-        Probed in ONE run so the two documents share a browser, and compared as a
-        whole object so a collection read that silently returned fewer elements
-        shows up as a smaller count rather than having to be predicted here.
+        The transfer's result is probed in ONE run so the two documents share a
+        browser. The snapshot's slide summary counts the elements it walked and
+        the items, pictures and captures it made of them, so a collection read
+        that silently returned fewer elements shows up as a smaller count rather
+        than having to be predicted here; it is compared whole but for its clock
+        reading, ``captureMs``.
         """
         twin = TWINS[fixture]
         probed = _probe_bounded(fixture, twin)
 
         assert probed[fixture]["counts"] == probed[twin]["counts"]
+        assert set(probed[twin]["counts"]) == {"bgTransferred"}, probed[twin]["counts"]
+
+        monkeypatch.setattr(
+            pptx_from_html_huashu,
+            "SIDECAR_TIMEOUT_SECONDS",
+            HOSTILE_EXPORT_TIMEOUT_SECONDS,
+        )
+        summaries = {}
+        for name in (fixture, twin):
+            logged = export_logged(
+                [(FIXTURE_DIR / f"{name}.html").read_text(encoding="utf-8")],
+                monkeypatch=monkeypatch,
+            )
+            assert logged.failures == [], f"{name}: {logged.failures}"
+            (summary,) = slide_summaries(logged.stderr)
+            summaries[name] = summary_without_clock(summary)
+
+        assert summaries[twin]["elements"] > 0, summaries[twin]
+        assert summaries[fixture] == summaries[twin]
 
     @pytest.mark.parametrize("fixture", HOSTILE_FIXTURES)
     def test_the_ground_reaches_the_artifact(

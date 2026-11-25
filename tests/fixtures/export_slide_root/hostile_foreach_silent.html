@@ -8,22 +8,22 @@
       /* The BENIGN twin of the hostile_foreach_* and hostile_selector_decoy
          fixtures: identical but for each of those fixtures' added <script>.
 
-         collection_passes.html drives FOUR of the preprocess pass's collection
-         reads. This one drives EVERY one of them, because the raw-accessor
-         defect is spread across ten sub-passes and a fixture that leaves any of
-         them at zero cannot attribute a regression to the site that caused it.
-         Each element below is the sole reason one count is non-zero:
+         collection_passes.html drives FOUR of the export's collection reads.
+         This one drives a read of every kind of item the export writes, so the
+         twin's slide summary holds elements, text, shapes, a table, pictures
+         and captures, and a hostile copy that loses any of them shows in its
+         counts and its deck. What each element below is in the export:
 
            .slide            the slide-root ground        -> bgTransferred
-           .code             monospace panel, 2 child divs -> codeBlocks
-           .prose            bare inline text in a <div>   -> wrapped
-           .tile             div with a background-image    -> replacedImgs
-           <img> data: svg   svg data-URI image             -> svgImgsRasterized
-           <svg>             inline svg                     -> inlineSvgsRasterized
-           p.badge           <p> carrying a background      -> peeledTextTags
-           <table>           one th + one td                -> tableCells
-           <canvas>          drawn in the shared script     -> canvasImgs
-           span.pill         inline element with background  -> inlineBgs
+           .code             monospace panel, 2 child divs -> a text item per line
+           .prose            bare inline text in a <div>   -> a text item
+           .tile             div with a background-image    -> a box capture
+           <img> data: svg   svg data-URI image             -> a capture
+           <svg>             inline svg                     -> a capture
+           p.badge           <p> carrying a background      -> a shape under its text
+           <table>           one th + one td                -> a native table
+           <canvas>          drawn in the shared script     -> a capture
+           span.pill         inline element with background  -> a shape under its text
 
          Every colour is synthetic (#123456 ground, #abcdef accent) and the only
          name is Acme, so nothing here is anyone's brand. */
@@ -33,11 +33,8 @@
       p { font-size: 24px; }
       .prose { font-size: 24px; }
       .code { font-family: monospace; font-size: 20px; }
-      /* A non-gradient url() background: the one shape replaceBackgroundImageWithImg
-         acts on. Kept a data: URI so the fixture never touches the network, and
-         base64 PNG rather than inline SVG because that pass matches the url with
-         [^"')]+ — the quotes an svg+xml payload carries would end the match early
-         and leave this count at zero. */
+      /* A url() background, which no shape can paint, so the export captures
+         the box. Kept a data: URI so the fixture never touches the network. */
       .tile { width: 60px; height: 60px;
               background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGNYffY9VsQwtCQAAkyZwR/tUEcAAAAASUVORK5CYII="); }
       .badge { background: #abcdef; color: #123456; padding: 4px; }
@@ -48,11 +45,11 @@
     <script>
       // No-op NodeList.prototype.forEach — the QUIET half of the same defect.
       //
-      // Where the endless twin denies service, this one lets the pass return
-      // promptly and reports success while every forEach-driven sub-pass has
-      // silently done nothing. That is the failure mode no timeout can catch and
-      // no artifact explains, so it is asserted on the pass's own per-sub-pass
-      // COUNTS rather than on whether it terminated.
+      // Where the endless twin denies service, this one lets a pass return
+      // promptly and report success while every forEach-driven read has
+      // silently done nothing. That is the failure mode no timeout can catch,
+      // so it is asserted on the export's own COUNTS (its slide summary) and on
+      // its whole deck rather than on whether it terminated.
       // Reported on document.title so the suite can prove the poisoning TOOK
       // before asserting anything else — a poisoning the browser refused would
       // make every expectation vacuous.
@@ -93,9 +90,9 @@
       <p>Acme prose with a <span class="pill">pill</span> inside.</p>
     </div>
     <script>
-      // Shared by every twin: rasterizeCanvases() skips a canvas whose
-      // toDataURL() is under 200 chars, which a never-drawn canvas always is.
-      // Drawing two synthetic rects is the least that makes the pass reach it.
+      // Shared by every twin: a drawn canvas, so the export's canvas wait
+      // (render_slide.cjs waitForCanvases) has a canvas to settle, and its
+      // capture holds both colours drawn here.
       (function () {
         var canvas = document.getElementById('acme-canvas');
         var ctx = canvas && canvas.getContext && canvas.getContext('2d');

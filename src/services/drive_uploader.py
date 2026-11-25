@@ -21,6 +21,12 @@ def _debug(msg: str) -> None:
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 GSLIDES_MIME = "application/vnd.google-apps.presentation"
 
+# Each Drive request fails once its socket has waited this long for a read or a
+# write, so a Drive that stops answering cannot hold the export's thread: the
+# export routes answer the error 502 "Drive upload failed". A replace makes two
+# requests (the delete, then the upload), so it is bounded by twice this.
+DRIVE_HTTP_TIMEOUT_SECONDS = 60
+
 
 def upload_pptx_as_slides(
     auth: GoogleSlidesAuth,
@@ -37,7 +43,7 @@ def upload_pptx_as_slides(
     Returns:
         Tuple of (presentation_id, web_view_url).
     """
-    drive_service = auth.build_drive_service()
+    drive_service = auth.build_drive_service(timeout=DRIVE_HTTP_TIMEOUT_SECONDS)
 
     file_metadata = {
         "name": title,
@@ -91,7 +97,7 @@ def replace_presentation(
     Returns:
         Tuple of (new_presentation_id, new_web_view_url).
     """
-    drive_service = auth.build_drive_service()
+    drive_service = auth.build_drive_service(timeout=DRIVE_HTTP_TIMEOUT_SECONDS)
 
     # Delete old presentation (best-effort)
     try:

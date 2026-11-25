@@ -1,7 +1,8 @@
 // Slide-root background-transfer probe.
 //
-// Runs the REAL PREPROCESS_SOURCE against a slide HTML in a real chromium
-// page and reports what transferSlideRootBackground() actually returned,
+// Runs the REAL PREPROCESS_SOURCE, the export's background transfer, against a
+// slide HTML in a real chromium page and reports what
+// transferSlideRootBackground() actually returned,
 // plus the body background it actually left behind. The emitted .pptx is the
 // proof that the export is correct; this probe is how we assert the *branch*
 // taken — in particular that the 'no-root' sentinel is still reachable for
@@ -49,19 +50,21 @@ const TIMED_OUT = Symbol('timed-out');
 // Hanging is not the only way a hostile realm stops the pass. An endless
 // [Symbol.iterator] makes `Array.from()` grow a result array until it exceeds
 // the maximum array length and RAISES — measured: `RangeError: Invalid array
-// length` out of flattenMonospaceCodeBlocks. That kills the export just as
-// dead, and letting it take the probe process down with it would report the
-// whole run as infrastructure failure rather than as the fixture's outcome. So a
-// throwing pass is DATA too, for the same reason non-termination is.
+// length` out of a pass that consumed a DOM collection that way. That kills the
+// export just as dead, and letting it take the probe process down with it would
+// report the whole run as infrastructure failure rather than as the fixture's
+// outcome. So a throwing pass is DATA too, for the same reason non-termination is.
 class PassFailed {
   constructor(message) {
     this.message = message;
   }
 }
 
+// The pass's value, { bgTransferred } (its diagnostics, which the export logs,
+// are not this probe's).
 async function evaluatePreprocess(page) {
   try {
-    return await page.evaluate(PREPROCESS_SOURCE);
+    return (await page.evaluate(PREPROCESS_SOURCE)).value;
   } catch (error) {
     // First line only: the stack names this file's own frames, which would make
     // the reported message move whenever the sidecar is edited.
@@ -118,9 +121,8 @@ async function main() {
         // null when the pass returned. Non-null names the other failure mode, so
         // "did not hang" and "did not raise" are separable expectations.
         error: failed ? result.message : null,
-        // The pass's whole return value: every count it reports, which is how the
-        // per-pass ELEMENT COUNTS are compared between a benign document and its
-        // hostile twin (same elements, or the counts differ).
+        // The pass's whole return value, { bgTransferred }, compared between a
+        // benign document and its hostile twin.
         counts: returned ? result : null,
         ms,
       }));

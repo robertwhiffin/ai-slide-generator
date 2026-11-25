@@ -303,7 +303,6 @@ Each named template contributes layout HTML and may reference an optional thumbn
 | `/admin` helper text overstates precedence | The panel states a personal default in *either* library takes precedence over the org default. That is reliable for a personal **design system**; for a personal **slide style** it depends on the resolution path — see §4. The copy asserts a uniform rule the code does not have. |
 | Personal defaults do not reach MCP | They live in `localStorage`, which the server cannot read. MCP resolves from the org default down. A profile is the cross-browser alternative. |
 | No in-app bundle authoring | `POST ""` creates a **token-only** system; assets, fonts and templates require an imported bundle. |
-| Agenda-badge placement in PPTX | Inline background pills are centred against their resolved ancestor, so badges on a wide list can land away from their item. Affects export only. |
 | Unpinned template adherence | Bounded by the catalog mechanism, not by wording. See §9. |
 
 ---

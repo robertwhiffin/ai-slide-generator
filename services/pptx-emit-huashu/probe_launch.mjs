@@ -4,6 +4,11 @@
 // rely on chromium working.
 import { chromium } from 'playwright';
 
+// A SIGTERM (the probe-launch route's timeout) ends node through its exit path,
+// where Playwright's exit handler kills the detached browser it launched
+// (emit_deck.mjs says why).
+process.on('SIGTERM', () => process.exit(143));
+
 const launchOptions = {
   headless: true,
   channel: 'chromium',

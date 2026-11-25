@@ -5,14 +5,13 @@ pristine-realm accessors. This module is the site that survived both, and the
 reason it survived is worth stating plainly, because it is a fact about the TESTS
 and not only about the code.
 
-``html2pptx()`` settles ``<canvas>`` slides before it does anything else: it reads
-the canvas count, and then waits for every canvas to report a drawing buffer.
-Both of those are ``page.evaluate``/``page.waitForFunction`` callbacks of their
-own, and they run BEFORE ``preprocess.mjs`` is evaluated into the page. A
-``page.evaluate`` callback is serialised and cannot close over anything on the
-Node side, so the pristine accessors the later passes share are provably out of
-scope there — the same constraint html2pptx.js already documents for why those
-helpers are repeated rather than imported.
+The export settles ``<canvas>`` slides before it does anything else
+(``render_slide.cjs`` settle): it reads the canvas count, and then waits for
+every canvas to report a drawing buffer. Both of those are
+``page.evaluate``/``page.waitForFunction`` sources of their own, and they run
+BEFORE ``preprocess.mjs`` is evaluated into the page. A ``page.evaluate``
+callback is serialised and cannot close over anything on the Node side, so each
+of those reads composes ``DOM_ACCESS_SOURCE`` into its own source.
 
 WHY THE SUITE WAS BLIND TO IT: every existing hostile-realm module asserts through
 ``probe_bg_transfer.mjs``, which evaluates the preprocess source against a fixture
@@ -21,23 +20,24 @@ here — it never runs the preflight at all, so a green suite proved nothing abo
 this path. Everything below therefore drives the REAL sidecar end to end, through
 ``_build``, and measures the .pptx.
 
-THREE measured failure modes, one per read and per poisoning shape:
+THREE failure modes a raw read would have, one per read and per poisoning shape:
 
   * a REJECTED SLIDE — the count read carries no ``.catch()`` and
-    ``page.evaluate`` has no timeout of its own, so a throwing lookup takes the
-    whole export down and the slide never ships.
+    ``page.evaluate`` has no timeout of its own, so a throwing lookup would take
+    the whole export down and the slide would never ship.
   * a STALLED WORKER — a lookup that does not return occupies the renderer's main
-    thread. Nothing in the sidecar bounds it, so the export holds a browser and a
-    worker slot until the Python wrapper's own subprocess timeout kills it.
-  * a STALLED WORKER REACHED BY THE OTHER PROPERTY — the readiness check builds an
-    array with ``Array.from``, which reads ``[Symbol.iterator]`` off the
-    collection. A document that leaves ``querySelectorAll`` alone still gets in
-    this way, which is why closing one read does not close the other.
+    thread. Nothing in the sidecar would bound it, so the export would hold a
+    browser and a sidecar slot until the Python wrapper's own timeout ended it.
+  * a STALLED WORKER REACHED BY THE OTHER PROPERTY — a readiness check that built
+    an array with ``Array.from`` would read ``[Symbol.iterator]`` off the
+    collection. A document that leaves ``querySelectorAll`` alone would still get
+    in this way, which is why closing one read does not close the other.
 
 Each fixture is a PURE ADDITION to ``every_collection_pass`` — one ``<script>`` in
 the head, nothing else touched — so the deck they should export is a deck this
 repo already exports, and parity against that twin is what shows the hardening
-costs the slide no content.
+costs the slide no content. Its canvas is drawn by the shared script: two
+synthetic rects, ABCDEF with a 123456 one inside.
 
 Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 ``node_modules`` (run ``setup.sh``) and a local Chrome/Chromium.
@@ -46,10 +46,13 @@ Gating matches the sibling export suites: needs ``node``, the extracted sidecar
 from __future__ import annotations
 
 import json
+from io import BytesIO
 
 import pytest
+from PIL import Image
 
 from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import slide_shapes
 from tests.unit.test_export_slide_root_background import (
     _build,
     requires_huashu_sidecar,
@@ -62,9 +65,12 @@ from tests.unit.test_export_svg_raster import structural_manifest
 # a canvas-free document skips the readiness wait entirely.
 BENIGN = "every_collection_pass"
 
-# The sub-pass whose non-zero count proves the twin's canvas is real and drawn.
-# Without it the readiness read is never reached and every claim below is vacuous.
-CANVAS_SUB_PASS = "canvasImgs"
+# The twin's 80x40 canvas, as the export captures it (twice its box), and the two
+# colours its script draws on it. A picture of that size holding both proves the
+# canvas is real and drawn; without one the readiness read is never reached and
+# every claim below is vacuous.
+CANVAS_PICTURE_SIZE = (160, 80)
+CANVAS_COLOURS = ((0xAB, 0xCD, 0xEF), (0x12, 0x34, 0x56))
 
 # Cut down from the wrapper's own 180s. A healthy export of this deck measures
 # ~3.5s, and the stalling fixtures hold the renderer far longer than this, so the
@@ -130,21 +136,30 @@ class TestThePoisoningIsActuallyHostile:
 class TestTheBenignTwinReachesThePreflight:
     """The instrument itself, asserted rather than assumed."""
 
-    def test_the_twin_carries_a_canvas_the_preflight_has_to_settle(self) -> None:
+    def test_the_twin_carries_a_canvas_the_preflight_has_to_settle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A canvas-free twin would skip the readiness read entirely.
 
-        ``canvasImgs`` is non-zero only when the pass found a canvas whose
-        ``toDataURL()`` is long enough to have been drawn on, so this is the
-        available proof that the preflight's count is greater than zero and its
-        readiness branch is entered.
+        The exported deck holds the canvas's picture, with what its script drew,
+        so the preflight's count is greater than zero and its readiness branch is
+        entered.
         """
-        counts = _probe_bounded(BENIGN)[BENIGN]["counts"]
-
-        assert counts[CANVAS_SUB_PASS], (
-            f"{BENIGN} reports {CANVAS_SUB_PASS}=0, so it has no drawn canvas and "
-            "the preflight's readiness read is never reached — every stall claim "
-            "in this module would be vacuous"
+        pictures = [
+            Image.open(BytesIO(shape.image)).convert("RGB")
+            for shape in slide_shapes(_build_bounded(monkeypatch, BENIGN))
+            if shape.kind == "picture" and shape.image
+        ]
+        canvases = [picture for picture in pictures if picture.size == CANVAS_PICTURE_SIZE]
+        assert canvases, (
+            f"{BENIGN} exports no {CANVAS_PICTURE_SIZE} canvas picture (pictures: "
+            f"{[picture.size for picture in pictures]}), so it has no drawn canvas and "
+            "the preflight's readiness read is never reached — every stall claim in "
+            "this module would be vacuous"
         )
+        drawn = {colour for _, colour in canvases[0].getcolors(maxcolors=1 << 16) or []}
+        missing = [colour for colour in CANVAS_COLOURS if colour not in drawn]
+        assert missing == [], f"the canvas picture lacks the colours its script drew: {missing}"
 
     def test_the_twin_exports_well_inside_the_bounded_budget(
         self, monkeypatch: pytest.MonkeyPatch

@@ -40,8 +40,8 @@
  * from recovered clipping.
  *
  * That is a force-size, NOT the frame contract, and the distinction is the whole
- * point — it injects no CSS, so it cannot outrank the inline coordinates
- * preprocess.mjs::flattenTables() gives each flattened table cell. Pinned by
+ * point — it injects no CSS, so it cannot outrank inline coordinates, such as
+ * those the huashu converter once gave each flattened table cell. Pinned by
  * 'captureDeckAsPngDataUrls paints the ground AND the ink on a wrapped deck' in
  * frontend/tests/e2e/slide-surface-fidelity.spec.ts, which asserts the ground and
  * the ink SEPARATELY so neither half can regress alone.

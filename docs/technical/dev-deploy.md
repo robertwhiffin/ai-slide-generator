@@ -4,9 +4,9 @@
 
 `deploy_local` originally uploaded the locally-built wheel into the app's
 `source_code_path`. Databricks Apps cap that source bundle at ~10MB, and the
-`databricks-tellr-app` wheel is ~31MB (it bundles the huashu PPTX sidecar:
-`node_modules.tar.gz` ~12MB + `sys-libs-bullseye.tar.gz` ~19MB). So local-wheel
-dev deploys fail the cap.
+`databricks-tellr-app` wheel is ~34MB (it bundles the huashu PPTX sidecar:
+`node_modules.tar.gz` ~12MB + `sys-libs-bullseye.tar.gz` ~19MB + the font bundle
+`fonts-liberation.tar.gz` ~2.4MB). So local-wheel dev deploys fail the cap.
 
 Prod avoids this: its `requirements.txt` is the bare `databricks-tellr-app`, and
 the wheel is pulled from a package index at install time — nothing large enters

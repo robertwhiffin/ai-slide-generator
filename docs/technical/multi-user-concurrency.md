@@ -8,7 +8,7 @@ How the backend handles concurrent requests from multiple users without blocking
 
 The AI Slide Generator supports multiple simultaneous users through:
 - **Session-scoped state** – each user operates on their own session with isolated slide decks
-- **Async endpoint handlers** – FastAPI endpoints use `asyncio.to_thread()` for blocking LLM calls
+- **Non-blocking endpoint handlers** – `async def` endpoints wrap blocking calls in `asyncio.to_thread()`; plain `def` endpoints (the PowerPoint and Google Slides exports among them) run in FastAPI's threadpool
 - **Database-based locking** – prevents concurrent mutations to the same session
 - **Per-request tool binding** – eliminates shared mutable state in the LangChain agent
 - **Per-user session isolation** – sessions are scoped to the authenticated user via the `created_by` column
@@ -51,7 +51,7 @@ Sessions are isolated per user using the `created_by` column. Authentication mid
 
 ### 1. Async Request Handling
 
-All FastAPI endpoints are `async def`. Blocking operations (LLM calls, database queries) are wrapped with `asyncio.to_thread()` so the event loop remains responsive:
+Blocking operations (LLM calls, database queries) never run on the event loop, so it remains responsive. An `async def` endpoint wraps them with `asyncio.to_thread()`; a plain `def` endpoint runs whole in FastAPI's threadpool (40 threads per worker), as the PowerPoint and Google Slides export routes do, whose waiting for a sidecar is bounded so exports never hold all of them (`TELLR_SIDECAR_QUEUE`, `TELLR_SIDECAR_WAIT_SECONDS`; see [Export Features](export-features.md)):
 
 ```python
 # src/api/routes/chat.py — excerpt from submit_chat_async
@@ -236,6 +236,8 @@ uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
 
 Set the `UVICORN_WORKERS` environment variable to override the default. Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
 
+`run.py` also sets `UVICORN_WORKERS` in the environment its workers inherit, with one slot directory (`TELLR_SIDECAR_SLOTS_DIR`), which it removes after them. The export sidecars' slots are the container's, `UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY`, files of that directory held with `fcntl.flock`, so any worker runs an export in any free slot however requests land (`src/services/sidecar_slots.py`; see [Export Features](export-features.md), *Time and limits*).
+
 ### Chat Job Runners
 
 A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 8, at most 16, and an unusable value falls back to 8. With the default 4 workers, the app runs up to 32 turns at once. A turn waits only when all runners on its worker are busy (a turn queues only if 9 land on one worker).
@@ -257,7 +259,7 @@ Runners only decide which turns start. Model load is capped separately, per proc
 The history behind the cap and the retries: on 2026-10-31 a devloop load test of 8 decks of 8 slides, with 4 runners per worker, started 7 of the 8 turns within 2 s, but the AI Gateway returned 118 `429 Too Many Requests` and 6 of the 8 turns failed.
 
 - **Sessions stay serial.** The database session lock still allows one turn per session, so runners only overlap different sessions.
-- **Own thread pool.** Chat jobs run on a dedicated `chat-job` thread pool sized to the runners, not on the loop's default executor. Request handlers (the chat poll among them) `asyncio.to_thread` onto the default executor, and jobs that hold a thread for minutes would starve them.
+- **Own thread pool.** Chat jobs run on a dedicated `chat-job` thread pool sized to the runners, not on the loop's default executor. Request handlers (the chat poll among them) `asyncio.to_thread` onto the default executor, and jobs that hold a thread for minutes would starve them. Nor do they run in FastAPI's threadpool, where the PowerPoint and Google Slides exports wait for their sidecar slots, so neither waits for the other's threads: every runner starts a turn while exports hold that whole threadpool, and exports are built while every runner is busy (`TestChatTurnsBesideExports` in `tests/unit/test_export_routes_off_event_loop.py`).
 - **Waiting is visible.** While a turn waits for a runner, its request is `pending` with no `turn_progress`. The poll loop forwards a `queued` event, and the chat shows "Waiting for another request to finish…" until the turn starts.
 - **Restarts.** The queue is in memory, so a turn still waiting when its worker restarts is lost and stays `pending`.
 - **Process-global MLflow state.** Several users' turns can share a process (and a verification can overlap a turn even with one runner), so anything that relies on MLflow's process-global state must hold `mlflow_experiment_lock()` (`src/core/mlflow_tracing.py`). That state is the active experiment that `mlflow.set_experiment` sets and that traces and `mlflow.genai.evaluate` read.

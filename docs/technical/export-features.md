@@ -4,8 +4,8 @@
 
 The AI Slide Generator supports exporting slide decks in three formats, plus the deck spec as Markdown:
 - **PDF**: Client-side generation using browser APIs
-- **PPTX**: Server-side render of the deck HTML via the huashu pipeline — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
-- **Google Slides**: Synchronous server-side export — the rendered PPTX is uploaded to Drive, which converts it to native editable Slides
+- **PPTX**: Server-side render of the deck HTML by the snapshot engine (the `services/pptx-emit-huashu/` sidecar) — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
+- **Google Slides**: Synchronous server-side export — the same engine writes a deck for Google Slides, which is uploaded to Drive, which converts it to native editable Slides
 - **Deck spec (Markdown)**: client-side, from the Spec view — see *Deck spec as Markdown*.
 
 All export options are accessible through a unified dropdown menu in the slide panel (PDF, PPTX, Google Slides); the deck spec exports via a separate button in the Spec view header.
@@ -14,9 +14,9 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 | Route | Status | Notes |
 |---|---|---|
-| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML |
+| `POST /api/export/pptx/editable/huashu/from-html` | **Live — primary** | What the Export → PowerPoint button calls. Deterministic render of the deck HTML by the snapshot engine (below) |
 | `POST /api/export/pptx/editable/from-records` | **Live — fallback** | DOM-walker records → pptxgenjs. Fires on a `503` **or** when the error text indicates the pipeline is unavailable or installing — not status-code-only |
-| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; uploads the rendered PPTX to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
+| `POST /api/export/google-slides/from-huashu` | **Live — primary** | Synchronous; renders the deck for Google Slides (`target="gslides"`) and uploads it to Drive for conversion. Returns `presentation_id`, `presentation_url`, `total_slides`, `succeeded`, `failures` |
 | `POST /api/export/google-slides/from-records` | **Live — fallback** | The Google equivalent of the records fallback |
 | `POST /api/export/pptx/editable/from-images` | Live, unreachable | Rasterised path, reached only when `fontMode === 'screenshot'`, which no UI surface passes |
 | `POST /api/export/pptx` · `/pptx/async` | **Legacy** | LLM code-generation; superseded, and **no caller exists in this repository's frontend** |
@@ -24,13 +24,155 @@ All export options are accessible through a unified dropdown menu in the slide p
 
 PDF export is client-side and is not a route.
 
-**Table fidelity differs by route.** The huashu path emits **positioned text boxes and no `<a:tbl>`** — its DOM walker produces no records for `<td>`/`<th>`, so cells are flattened into absolutely-positioned elements. The result is positionally faithful but not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx`, and its prompt uses `add_table`, so it *can* produce a native `<a:tbl>` — though being model-generated, that is not guaranteed per run. Treat the huashu flattening as current behaviour and a known limitation; nothing in the code establishes noneditable tables as a permanent product contract.
+**Table fidelity differs by route.** The snapshot engine writes a `<table>` the browser laid out as a plain grid as **one native, editable table** (`<a:tbl>`): the browser's own column widths and row heights, spans, fills, collapsed borders (resolved as CSS collapses them and written on both cells of each edge, which Drive keeps; a dotted one dotted) and cell margins. In the deck for PowerPoint the grid lies where Chrome paints it, on whole pixels, so filled cells meet with no seam. A table inside a rounded `overflow: hidden` wrapper has its corner cells unfilled and their fills drawn as shapes cut to the wrapper's arcs, under the table; in the deck for Google Slides, which draws a native cell on whole pixels and a shape anti-aliased, each of those shapes runs 1 px under the opaque cells beside it, so no light seam shows where they meet. A collapsed cell rounded by its own `border-radius` (Chrome rounds its background, not its borders) is drawn the same way, and in the deck for Google Slides such a shape also runs under an opaque one drawn after it, so two rounded cells side by side (a two-column table's header) meet with no seam either. A cell's inset box-shadow keeps its table native: its bands are drawn over the table, inside the cell's padding box. A table no `<a:tbl>` can draw becomes editable positioned items instead (see *What the export trades away* below). The records fallback's DOM walker produces no records for `<td>`/`<th>`, so on that path cells are flattened into absolutely-positioned elements: faithful in position, not editable *as a table*. The legacy code-generation path prompts an LLM to write `python-pptx` with `add_table`, so it *can* produce a native table, though not reliably per run.
 
 **A deck's leading webfont `@import` must stay first in its stylesheet.** `@import` is only valid at the top of a stylesheet, so anything prepended to the deck's CSS discards it and the export silently falls back to a system font. The Python `build_slide_html` builder achieves this by emitting the deck's CSS in its **own** `<style>` element. `buildStandaloneDeckDocument` instead concatenates deck and wrapper CSS into a single `<style>`, and remains correct only because the deck's CSS is placed first within it.
 
 **No universal `* { box-sizing }` rule is applied** by either export builder, so slide content keeps the browser default. The resets that do exist are narrower than "scoped to `html, body`" — the Python builder's shell reset omits `box-sizing` entirely, and the preview host applies `box-sizing: border-box` to the host's direct child rather than to the document shell. See [Slide Host Frame Contract](slide-host-frame-contract.md).
 
-**Known export limitations.** Inline background pills (used for agenda badges) are centred against their resolved ancestor, so badges on a wide list can land away from their item. `<code>` chips do not receive their pill background. The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
+**The export document gives inherited text what the UI's document gives it.** Neither shell sets a font, or any other inherited property, so a slide's text that takes its font from `<body>` is drawn in the browser's default face in both (Times on the Mac) and breaks its lines in the same places. The Python builder's shell used to set `font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif`, so such text was drawn in SF or the container's fallback in the export and broke differently: a real deck's "So what" paragraph was 4 lines in the UI and 5 in the export (Task 15, N2). `tests/unit/test_export_document_ui_parity.py` reads both shells and fails when either declares an inherited property the other does not. The deck names such text Times New Roman, the face metric-compatible with the one the browser draws it in (Times on the Mac, Liberation Serif on Databricks Apps): *Fonts and the face written*, below.
+
+**Known export limitations.** The PowerPoint and Google Slides exports trade a few things away on purpose (*What the export trades away*, below). The PDF and screenshot paths do not carry the deck's webfont, so they render in a fallback face.
+
+## The snapshot engine (PowerPoint and Google Slides)
+
+Both live server-side routes run `build_pptx_huashu` (`src/services/pptx_from_html_huashu.py`), which runs the Node sidecar `services/pptx-emit-huashu/emit_deck.mjs` over the deck's slide documents (`build_slide_html`). For each slide, `render_slide.cjs` loads the complete document in headless Chromium (Playwright, 1280×720, device scale 2) and takes it through five stages:
+
+1. **Load and settle.** Network idle; every font face the text asks for loaded (`pageFontsSettled`); every `<canvas>` given a drawing buffer (`waitForCanvases`, for Chart.js: polled from Node for 5 s, then 2 s for the chart's animation; a canvas still without one is said on an `[html2pptx] canvases:` line, and the slide read as it is); then every CSS animation and transition finished, so a deck that fades content in exports its settled, opaque state; then the fonts again, for text an animation's end state set.
+2. **The slide root's ground.** `preprocess.mjs` moves the slide root's background onto `<body>`, which becomes the slide background. A ground holding a `data:` image (a photo or pattern, under a scrim gradient or not) stays on the root instead, and is captured whole, as the browser fits it, as the slide's background picture. Nothing that moves layout runs: the page is read as the browser laid it out.
+3. **Snapshot.** Each `::before`, `::after` and list `::marker` is read through the Chrome DevTools Protocol (`pseudo.mjs`): Chrome's own text, box and counters, read-only, with nothing inserted into the page. Then one read-only `page.evaluate` (`snapshot.mjs`, with `snapshot_borders.mjs`, `snapshot_text*.mjs` and `snapshot_table.mjs`) turns the page into a slide model: shapes, lines, text blocks with the browser's line breaks and runs, native tables, and picture targets, in CSS paint order. The slide's own script built the realm the model was made in, so Node validates the model before any use (`model_check.cjs`): an item it could not have written (a forged capture id, non-finite geometry, an unknown kind, an empty table grid) is dropped and counted (`modelDrops` in the slide summary), and the rest exports. Its text is measured with offscreen probes on the document element, in the page's own fonts: every declaration of a probe's style is `!important`, so no deck rule (an `html > div { display: none !important }` among them) hides, restyles, contains or scales one, and a probe of text that measures no width counts as unmeasured, said on an `[html2pptx] text metric probes:` line. Text under `text-transform: capitalize` is cased at the browser's word boundaries, as measured in Chrome: a connector punctuation (`total_revenue_q3`) and an apostrophe or middle dot between two letters continue a word, a soft hyphen, a word joiner and a combining mark are looked past, and a word starts after a superscript digit or Han, kana or Hangul text.
+4. **Capture.** What PowerPoint and Slides cannot draw natively (gradients, background images, filters, inline SVG, canvas, images that are not raster `data:`) is an element-isolated 2× screenshot of the original page (`capture.cjs`); the element's text, children and pseudo-elements stay native.
+5. **Emit.** `emit_model.cjs` writes the model to a pptxgenjs slide (`emit_text.cjs`, `emit_table.cjs`, `emit_typography.cjs`, `units.cjs`): typefaces named by weight (and, for PowerPoint, an italic by its italic static) for the webfonts the page loaded, any other text named by the face the browser drew it in, by a name every app draws with that face's metrics (*Fonts and the face written*, below), each character the written face lacks in the apps a run of its own in a face every app has (Arial, Times New Roman or Courier New, by the run's generic family; for a symbol outside WGL4, the face its target's app draws it in nearest the UI's size: Segoe UI Symbol for PowerPoint, JetBrains Mono or Noto Sans JP for Google Slides, MS PGothic where nothing measures nearer, and MS Gothic in a monospace run), line spacing written against the renderers' single spacing of 1.2 × the font size (a percentage up to it, space before each line above it), colours pre-blended against their backdrop, pictures from `data:` only (SDR-4437), and each box with its own corners: one circle on all four is a rounded rectangle; a top pair and a bottom pair of circles the preset `round2SameRect`, two diagonal pairs `round2DiagRect`, a top-right corner alone `round1Rect` (each corner at most half the short side); and any other mix (a left-only, an elliptical or an all-different corner) a custom path of one quarter arc per rounded corner. A border the same on all four sides is the box's outline. One that differs between sides is a line along each painted side, except on a box whose corners round: there each solid side is the region CSS paints for it, a filled custom shape between the rounded border box and the rounded padding box, which follows the corners and tapers to nothing where a neighbouring side has no width, divided from a differently painted neighbour by the line from the border box's corner through the padding box's, as Chrome divides it; neighbouring sides painted alike are one shape (a dashed or dotted side stays a line). A `double` border of 3 px or more, which Chrome paints as two lines and a gap, is a double compound line (`cmpd="dbl"`, written once the deck is written, `emit_rewrite.cjs`). A box's inset box-shadow paints inside its padding box, over its fill: a layer with no blur as the band it paints (a strip, a ring), shapes of its colour; a blurred one, in the deck for PowerPoint, as an inner shadow on a shape in the box's opaque fill. A native table's cell paragraph set tighter than the apps' single spacing carries its spacing even alone in its cell, so the apps keep the browser's row height.
+
+Then each slide's checks print, on stderr, a `[html2pptx] text missing:` line when a word of the page's rendered text is in no exported item (a word is found in one item's text, inside one of its words or as two or more of them whole, one after the other, a line's end ending a word; or across a chain of neighbouring text items, unturned one-line items side by side on one line whose texts meet within an atomic inline's edge, holding the tail's last word and the head's first whole at each join: a word the page runs across an atomic inline's edge, such as an inline-block numeral and the word after it, is written so in two items, while a lost chip's letters at the ends of the items either side of where it was are no whole words of theirs, and it is reported lost; the chains are of the first 1,024 boxes the rule can read: unturned one-line text boxes), and always one `[html2pptx] slide summary {json}` line (item counts, captures, `hiddenWords`, `target`, `modelDrops`, `blockedRequests`, `closedPopups`). The text-missing line is `{"slideIndex", "words"}`: the slide, and how many of its words are missing; the words themselves are logged only with the debug text on (*What reaches the app's log*, below). The wrapper echoes them into the app log, and the export-fidelity harness reads them ([Export Fidelity Harness](export-fidelity-harness.md)).
+
+**What a slide's page may load** (`request_guard.cjs`). The export loads each slide from a `file:` URL, and nothing in a page stops its script navigating it elsewhere: one line of slide script used to export `file:///etc/hosts`, or a directory's listing, and on Databricks Apps any user who can edit a slide could have read the container's files into a deck. So each slide runs in a browser context of its own whose every request Node decides, through Playwright's routing, whatever the document says:
+- allowed: the slide's own file URL, exactly; `data:` and `blob:`; and an https request, on https's own port and without credentials, to a host the slide CSP allows for its kind of request: a script `script-src`'s (`cdn.jsdelivr.net`, `cdn.tailwindcss.com`), a stylesheet `style-src`'s (`fonts.googleapis.com`), a font `font-src`'s (`cdn.jsdelivr.net`, `fonts.gstatic.com`). The hosts are `SLIDE_CSP`'s own: `src/utils/html_safety.py` derives them (`slide_csp_request_hosts`) and the wrapper passes them in the stdin payload as `allowedHosts`; a payload without them loads no https host. A CSP source the guard cannot mirror (an https source with a path, a port or a wildcard, `https:` alone, or one in a directive other than those three) never stops the app starting: the derivation leaves it out, so the guard aborts its requests (it fails closed for that source alone, and every other host is kept), and loading `html_safety` logs one warning naming it, once in each worker;
+- aborted, with `ERR_ABORTED` (a frame commits no error page): any other `file:`, `http:`, a loopback or link-local address, any other host, a frame's navigation anywhere but the slide; WebSockets are closed before they connect, and popups (`window.open`) are closed. The slide summary counts both (`blockedRequests`, `closedPopups`);
+- failed: a main-frame navigation away from the slide, by a request (`location`, a meta refresh) or not (a `blob:` URL): the slide is stopped at once, its browser closed, and it fails with "the slide's page navigated away from the slide", the failure the routes report (`X-Huashu-Failures`); the rest of the deck exports.
+
+WebRTC is no request the routing sees: a peer connection's ICE gathering sends STUN over UDP and opens TURN over TCP to whatever servers it names, a loopback or internal address included, which both measured to reach local listeners. So an init script takes `RTCPeerConnection` and `webkitRTCPeerConnection` away in every realm of the slide's context before any of its own script runs (the page's, each frame's, each popup's), and the browser is launched with the IP-handling policy `disable_non_proxied_udp`, which Chrome reads from `--webrtc-ip-handling-policy` and Playwright's Chromium from `--force-webrtc-ip-handling-policy` (both are passed), so it sends no UDP but through a proxy, which it has none of. A slide that opens peer connections to a local STUN and TURN listener reaches neither.
+
+Playwright's routing sees a redirect chain's first request alone, so a redirect from a CSP host is followed unchecked; what a slide loads from those hosts is a script, a stylesheet or a font, whose bytes the page cannot read, and a document, which would show what it reached, is never allowed to them.
+
+**A slide's deadline.** Each slide has `SLIDE_DEADLINE_MS`, 30 s, from its browser's launch to its last read (`render_slide.cjs`), and it bounds every step of the slide: the launch, the browser context, the request guard's routing of it, the page and each read. A slide whose script blocks its page (a busy loop), or whose browser stops answering (seen of Chrome under the test suites' parallel load), used to hang the deck until the 180 s sidecar timeout, losing every slide; now it is stopped at its deadline, its browser closed, and it fails alone with "the slide did not finish within 30 s" ("its page may be blocked by its own script", or "its browser stopped answering" when it never opened the page); the deck goes on. Its browser then has `BROWSER_CLOSE_TIMEOUT_MS`, 5 s, to close, as has every slide's once it is read, past which its process is killed (`[html2pptx] the slide's browser did not close within 5 s: its process was killed`), the process found at the launch, so one that outlives its browser's disconnection is killed too (a close that ended the browser without answering ends the line `its process had already exited`): no slide's browser outlives it, and a slide read whole is kept though its browser would not close. Measured: the slowest slide of both corpora and three matrix decks takes 3.2 s on a dev Mac (a Chart.js slide), the median 1.0 s, and Apps renders a slide in about a Mac's time; the engine's own bounded waits add up to 26 s, so the deadline fails no slide those waits let through, and a deck with one blocked slide keeps 140 s for the rest.
+
+**A browser that crashes before its page loads.** Measured on Apps under four exports at once, one Chromium of 420 died of SIGSEGV at its launch, and its slide was lost. Nothing of the slide's own made it fail, so a slide whose browser exits (a signal or an exit code) before the slide's page is opened, at its launch, its context, the request guard's routing or its page, is launched once more, inside the same deadline (`render_slide.cjs` readSlide). The exited browser is closed and its process waited for first, and each launch is given what is left of the deadline as Playwright's own timeout. One line says how it exited, with nothing of the slide's in it: `[html2pptx] the slide's browser exited before its page loaded (at its launch, on signal SIGSEGV): relaunching it once`. A second exit fails the slide with its own failure, as before, its line ending `it exited again once relaunched, so the slide fails`. How it exited is read from Playwright's launch log (`<process did exit: exitCode=…, signal=…>`), or for a later step from the browser's disconnection and its process. A dying browser's pipe closes as it dies, so the step can fail before node is told of its exit (measured on a loaded CI runner, a browser killed as its context opened was logged with `its exit status unread`): a disconnected browser's exit is waited for first, up to `EXIT_STATUS_WAIT_MS`, 1 s, inside the deadline, and only an exit not told by then is said `its exit status unread`. A browser that never started (its executable missing) did not exit and is not relaunched; nor is a slide once its page is navigated: a navigation away, a read its page broke and the deadline are the slide's own.
+
+**What reaches the app's log.** Every line the sidecar prints on stderr is echoed into the app's log (`[huashu-emit] …`), which every manager of the app reads, outside Tellr's per-deck permissions. So no line holds a slide's own text: the summary counts its hidden words (`hiddenWords`), the text-loss line counts its lost words, a validation message names the text box it quotes by its length, and a message a slide's page made (a read that failed, a slide's failure) is said by its length; a failure that holds no page text (a browser that cannot launch, a slide past its deadline or one that left itself) is logged whole. **The engine's own diagnostics** (`[preprocess] no slide root: …`, `[preprocess] collection …` and `[html2pptx] collection …` when a bound is met, `[html2pptx] native table: …`, the text metric probes', the list markers', a background gradient that could not be read, the box-shadow fit budget) are logged whole: each page-side pass collects what it says in its own closure, from nothing the page's realm can replace, and returns it with its result, which Node reads through the DevTools protocol rather than Playwright's page-side serializer (`dom_access.mjs` diagnose, `render_slide.cjs` evaluatePass). Node takes nothing from it but the engine's own wordings (`model_check.cjs` checkDiagnostics), so a slide can neither silence a diagnostic (by replacing `console.warn`, or owning `Array.prototype.push`) nor forge one with its own words. The exception is a slide that replaces `window.eval`, which Playwright's utility script calls with every pass's source: it then decides what each pass returns, the model as well as the diagnostics, so it can drop the engine's diagnostics or add entries made of the engine's own wordings, though never its own text, which it can put only in an entry's page slots. The page's text a diagnostic holds (an error's message, a tag name) is logged by its length alone (`body children [<5 characters>]`), the line then saying page text was left out. A pass keeps 100 diagnostics and a slide logs 100 lines of them, the rest counted on one `[html2pptx] diagnostics:` line; an entry that is no wording of the engine's is dropped, on an `[html2pptx] model:` line, and counted in the summary's `modelDrops`, as are the background transfer's and the animations' results when they are not as the engine writes them. What a page logs itself is its own text, whatever its prefix: a slide's script can log its words with the engine's `[preprocess]` and `[html2pptx]` prefixes. So none of it is logged: one `[html2pptx] page console:` line a slide, read or failed, counts its messages by level and says how many carry the engine's prefixes (`3 message(s) (1 error, 1 log, 1 warning), 2 with the engine's prefix, not logged`), which only a page imitating the engine writes; the deck's own chart script logs one message on every slide. `TELLR_EXPORT_DEBUG_TEXT=1` adds the words: the summary's `hiddenText`, a second text-loss line naming them, the quotes and the messages, the page text in the engine's diagnostics, and what a page logs, each message behind `Browser console:`, with the engine's prefixes on stderr and anything else on stdout (which the wrapper never echoes), cut at 1,000 characters, at most 100 messages a slide per stream, and the rest counted; once a slide is stopped, its page's messages are dropped. No app passes it: it is not in the sidecar's env allowlist. The export-fidelity harness adds it for its own runs (`sidecar_debug_text`), since it reads each slide's hidden text. A failure's whole message stays in the failure list, which goes to the user who exported the deck: whole in a body (the 422 of a deck whose every slide failed, the Google Slides route's answer), and bounded in the PPTX route's `X-Huashu-Failures` header, since proxies refuse a response whose headers are too large (measured: a launch crash's failure was 14,424 characters of Chromium's launch log). There each text is cut at 300 characters, "…" added, and the whole is at most 4 KB of ASCII JSON: when it is not, every text is cut at the longest length that fits, and past that the first entries that fit are kept (`export.py` huashu_failures_header). Each entry keeps its `slide_index`, and `X-Huashu-Succeeded` still counts every failure.
+
+**Temporary files.** The sidecar writes each slide's HTML to a file for its browser to load, in a `huashu-deck-*` directory it removes however the deck ends; and it runs with a `TMPDIR` of its own, the export's `TemporaryDirectory` (which holds the written deck), made where its `TMPDIR` would otherwise be. So what a sidecar ended at its timeout leaves, its slides and its browsers' profiles, is removed with that directory.
+
+**Renderer target.** `build_pptx_huashu(..., target=...)` names the app the deck is written for: `"pptx"` (PowerPoint, the download) or `"gslides"` (the Google Slides route). The two draw a few constructs apart, so only those are written differently: lines that hold a superscript or subscript run (A4, A5); each run's tracking, which for PowerPoint folds in the run's kerning, since PowerPoint for Mac kerns no DM Sans (X1); an italic run of a webfont, which for PowerPoint is its italic static's own name, since PowerPoint draws the family plus italic as Bold Italic (D1); a bold run only a lighter loaded face meets (the browser's synthetic bold), which for Google Slides is that face alone, since Drive makes any bold flag weight 700 and Google lays such a bold out wider than it draws it, so right-aligned figures ended short (D12); a hyphen the face lacks (D8); a native table's grid, which for PowerPoint lies on whole pixels (D7), and its rounded corner fills, which for Google Slides run 1 px under their opaque neighbour cells (D13); a dotted border, which for Google Slides is one custom shape drawing the border's centre line twice, two widths apart, since every dot dash Drive has draws one width on and three off (D6); a script run's raise, which for PowerPoint is the browser's own, written as its baseline offset, while Drive keeps only Google's one superscript and subscript (T5); a blurred inset box-shadow, which only PowerPoint draws, as an inner shadow (T3); a box-drawing character's face, chosen per app by its advance (T6); and a double table border, which PowerPoint draws as a double compound line and Drive as one solid line, so for Google Slides the edge is drawn over the table as its two lines (T7). The measurements are in `scripts/export_fidelity/CALIBRATION.md`.
+
+**Fonts and the face written.** Text whose stack has no webfont the page loaded is laid out in the machine's own faces, so the export's container ships faces a desktop has, and the deck names the face the browser drew (Task 15 B8, N3 and N4):
+- **The container's faces.** The sidecar's font bundle, `services/pptx-emit-huashu/fonts-liberation.tar.gz` (2.4 MB: Liberation Sans, Serif and Mono 2.1.5, regular, bold, italic and bold italic, their OFL licence, and `fonts.conf.in`), is extracted by `setup.sh` at boot into `fonts/`, whole or not at all: into a staging directory made fresh for the boot first (`mktemp -d`, `fonts-staging.XXXXXX`, beside `fonts/`), moved into place once `tar` has succeeded and stamped, so an extraction cut off part way is done again on the next boot, one that fails leaves the bundle in place as it was, and a staging directory an earlier boot could not remove blocks no later one. For a whole bundle alone `setup.sh` writes `fonts/fonts.conf`, with that directory's absolute path, and the wrapper sets `FONTCONFIG_FILE` to it (`sidecar_subprocess_env`). Nothing in the font step stops the boot: Chromium is still installed. **The upgrade-boot window:** `setup.sh` runs in the background while the app starts (the app template's boot command), and on a boot whose bundle is newer than the one in place it moves the old `fonts/` aside, moves the new one in and only then writes its `fonts/fonts.conf`. For that moment, two renames and the config's writing, no config is in place, so an export that starts then gets no `FONTCONFIG_FILE`, and its text with no loaded webfont is laid out in the base image's DejaVu. A boot whose bundle is unchanged has no such window, and nor has a first boot, whose exports wait for Chromium, which `setup.sh` installs after the font step (until then the export is unavailable, 503). `setup.sh` logs to `$HUASHU_SETUP_LOG`, `/tmp/huashu-setup.log` when it is not set, and the diagnostics below read the same. Operators can see the bundle: `GET /api/export/pptx/editable/huashu/available` (admins) answers `checks.font_bundle`, whether `fonts/fonts.conf` is in place, and logs server-side the config's path, how many Liberation faces are beside it and setup's `[setup] … fonts` lines; the export's availability does not depend on it. Arial and Helvetica, Times New Roman and Times, Courier New and Courier, and `sans-serif`, `system-ui`, `serif` and `monospace` are their metric-compatible Liberation faces; a name the container has no face for (Inter, Segoe UI, Roboto) draws nothing, so the stack goes on to its next family, as on a desktop that lacks it, and a stack with none left is set in the standard face, Liberation Serif, as a Mac sets it in Times. The base image's DejaVu stays for the characters Liberation lacks (check marks, stars), but no stack can name it. On Linux Chromium also lays glyphs out unhinted (`--font-render-hinting=none`), so a webfont's advances are not rounded. Measured on Apps' Chromium against the Mac's: every such stack lays out at 1.0000 of the Mac's widths (12 sizes, 3 weights, italics), webfont lines within 0.0004 (they were 0.95 to 1.08), and on the 19 real decks of the Task 15 matrix the Apps export and the laptop's export of the same HTML have a median single-line width ratio of 1.000, with 2 of 1,539 text boxes breaking differently (133 of 1,527 before), both on a deck that names DM Sans without loading it, which the owner's Mac has installed. The bundle is built reproducibly from a pinned release by `scripts/sidecar_fonts/build_fonts_tarball.py`; it adds 2.4 MB to the wheel (34.2 MB, from 32.0 MB).
+- **The face written** (`snapshot_text_metrics.mjs` resolveWrittenFaces). Each family of the run's stack is probed alone on the run's own characters, with a font after it whose every glyph is 4 em wide (`coverage_font.mjs`): the first that draws any of them is the one the browser's font matching took, which agreed with the DevTools protocol (`CSS.getPlatformFontsForNode`) on the runs of the matrix decks and both corpora that could be compared: on Apps on all 3,147, none against; on a Mac on 3,135, and 13 differ in name only (a deck names DM Sans without loading it and the Mac has its statics installed: the protocol names the 500 static "DM Sans Medium", and the run is written "DM Sans", by the rule for a family the page did not load; `scripts/export_fidelity/CALIBRATION.md` N4). It is written:
+  - Arial for Arial, Helvetica, Liberation Sans and Arimo; Times New Roman for Times New Roman, Times, Liberation Serif and Tinos; Courier New for Courier New, Courier, Liberation Mono and Cousine;
+  - a generic or system face as the face the container draws for it: `sans-serif` and `system-ui` (SF on a Mac) Arial, `serif` Times New Roman, `monospace` Courier New; `cursive`, `fantasy`, `emoji` and `math` draw nothing in the container, so Times New Roman;
+  - Times New Roman where nothing in the stack draws, which is text with no font of its own;
+  - a webfont the page loaded later in the stack by its own name (and weight); any other face installed on the machine as itself (a laptop's own fonts); never the container's own DejaVu, a face the page did not load. A webfont the page loaded is the page's own bytes, so it is written by its own name whatever that is, DejaVu included.
+  
+  `font-family: system-ui, Arial` at 600 is Arial plus bold. A table cell's own face is resolved the same way.
+- **Symbols.** 982 characters outside WGL4 (superscript digits, currency, arrows, mathematical operators, enclosed numbers, box drawing, the Harvey quarters ◔◑◕, ✓, ★ and other dingbats) are drawn alike, glyph for glyph, by MS PGothic and MS Gothic in PowerPoint and Google Slides. Written in Arial or Times New Roman, PowerPoint for Mac draws them from Segoe UI Symbol, Cambria Math or Apple Color Emoji at 0.72 to 1.12 em, and Google from MS PGothic. So such a character is a run of its own wherever the written face lacks it: always for Arial, Times New Roman and Courier New, bar the 19 each draws itself, and where the coverage probe says a webfont lacks it (`SYMBOL_COVERAGE`). Its face is per target, measured against the UI (Chrome on a Mac draws these from Menlo; `scripts/export_fidelity/CALIBRATION.md` D8, per target): MS PGothic drew the Harvey quarters at about half the UI's size in both apps, so the deck for PowerPoint writes 381 of them (the quarters among them) in Segoe UI Symbol, which comes with Windows and Office for Mac, and the deck for Google Slides 47 in JetBrains Mono (◔◕) and 142 in Noto Sans JP (◐◑, ★☆), faces Google hosts, as none draws all four; the rest stay MS PGothic, and a monospace run's MS Gothic, which keeps its cells even. A face is written only for the symbols its app was measured drawing in it itself (`TARGET_SYMBOL_FACES`), so none falls back or draws as a box. Box drawing (U+2500 to U+257F) fills a cell of its face's width, which differs between faces, so such a character is written in the face whose advance is nearest the one the browser laid it out at (`TARGET_BOX_DRAWING_FACES`, CALIBRATION.md T6): Segoe UI Symbol (0.5 em) or MS PGothic (1 em for JIS X 0208's 32, 0.667 for the rest) for PowerPoint, JetBrains Mono (0.6 em) or Noto Sans JP (1 em) for Google Slides. Written at 1 em where Chrome laid a heavy rule out at 0.6 or 0.7, it ran past its box and Google, which wraps every box, broke it. **Known limit (measured on Apps):** the container's only face for box drawing is DejaVu, at about 0.7 em, while the UI's platforms draw it at about 1 em. So a heavy rule (`━━━━━`) is laid out narrower than the UI shows it. On a five-glyph rule the deck for PowerPoint draws 42 px where the UI shows 77, and Google Slides draws 49 px, on one line. Laying box drawing out in the container at the UI's advance, with a face that covers it ranked before DejaVu, is the follow-up.
+- **Time.** On Apps the 28-slide real decks take 0.8 to 1.5 % longer than before (7 to 13 ms a slide).
+
+**Determinism.** Identical rendered pages give byte-identical `.pptx` files, apart from the timestamps in `docProps/core.xml`: item and capture ids are sequence numbers in document order. Two exports of the same deck can still differ slightly when the page itself differs: **live Google Fonts responses vary**. Google now and then serves a different DM Sans binary for the same `@import` (measured: 4 of 40 fresh loads), whose glyph widths differ by a fraction of a px, so text widths in the export move with it. The variance is external to the engine. The unit tests load nothing from the network: every export a test runs gives the sidecar no host, so its request guard aborts any live fetch and the test fails naming it (`tests/unit/conftest.py`), and the test documents embed the corpus's webfonts (`DECK_CSS`, `pinned_font_css`) and write a vendored Chart.js inline (`tests/fixtures/export_snapshot_support.py`), so exports compare byte for byte.
+
+**Time and limits.**
+- A slide takes about 1.5 s on a dev Mac (measured 2026-11-20: 1 slide 1.5 s, 5 slides 6.4 s, 17 slides 25.0 s; one browser per slide). That is about 8% slower than the converter it replaced (1.47 against 1.36 s per slide, same corpus, Chrome channel and Playwright).
+- One sidecar run is bounded by `SIDECAR_TIMEOUT_SECONDS`, 180 s, as before: decks of more than about 120 slides time out. A timed-out sidecar is ended with every Chromium it launched (`run_sidecar_process`), and the route answers 504. Each slide is bounded by `SLIDE_DEADLINE_MS`, 30 s, past which it fails alone (*A slide's deadline*, above).
+- The container runs at most `UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY` sidecars at once: its slots, default 4 × 1 on Databricks Apps, where a node and Chromium tree takes about 790 MB (measured, four 28-slide exports at once on a Medium app: container peak 6,423 MB, working set 4,267 MB, of an 8,192 MB limit).
+  - **The slots are the container's, not each worker's.** The kernel does not balance requests across uvicorn workers: measured with a slot per worker, three of four simultaneous exports landed on one worker while the others idled, queued there, and one was refused at its 60 s wait. So any worker runs an export in any free slot. The slots are files of one directory, each held with a non-blocking `fcntl.flock`, which the kernel drops for a worker that dies (`src/services/sidecar_slots.py`). `run.py` makes the directory for the workers it starts, names it in their environment (`TELLR_SIDECAR_SLOTS_DIR`) with their count (`UVICORN_WORKERS`), and removes it after them. A process `run.py` did not start (local development's single `uvicorn`) runs alone: one worker's slots, kept in memory.
+  - A worker lets in one export for each slot, all of which it may run, and at most `TELLR_SIDECAR_QUEUE` more (default 15), each waiting up to `TELLR_SIDECAR_WAIT_SECONDS` (default 60 s) for a slot to come free, whichever worker frees it. An export past either bound is answered **429**, `Retry-After: 60`, "Exports are busy right now. Please try again in a minute.", which the UI shows as it is (no fallback). Waiting exports hold threads of the worker's threadpool (40), so the queue keeps the rest free for every other request.
+  - Measured locally, four workers started through `run.py` and five simultaneous exports of a 5-slide deck through the PPTX route: four sidecars ran at once, two of them in one worker, and the fifth waited 8.5 to 9.2 s, its own worker idle, then ran.
+  - Each worker logs the bounds once, when it starts: `[huashu] export sidecars: 4 slot(s) in the container (4 worker(s) x TELLR_SIDECAR_CONCURRENCY=1); a worker lets in one export per slot and 15 more to wait for one, each up to 60s`.
+- The Databricks Apps proxy ends a request after about **300 s** (measured on 2026-11-20: requests of 30 to 185 s returned 200, one of 310 s got 502 at 300.4 s). With the defaults, the slowest route, Google Slides, answers within it: 60 s of waiting, the 180 s run, and the Drive upload, whose every request fails after 60 s without an answer (`DRIVE_HTTP_TIMEOUT_SECONDS`), a 502 "Drive upload failed". Bounds set past these limits are warned about in the log when the app starts.
+
+### The export summary line
+
+Every export logs one line once it ends, however it ends, so export times and memory can be read from a deployed app's logs. Each build is measured the same way, from this same line. The test corpus, measured on a dev Mac when it had 17 slides (2026-11-21; no cgroup there, so both container keys are `null`):
+
+```text
+[huashu] export summary {"target":"pptx","slides":17,"slidesExported":17,"failures":0,"outcome":"ok","waitSeconds":0.0,"runSeconds":22.834,"secondsPerSlide":1.343,"peakRssMb":837.6,"containerPeakMb":null,"containerWorkingSetMb":null,"pptxBytes":1560992,"sidecarConcurrency":1,"queueBound":15}
+```
+
+| Key | What it holds |
+|---|---|
+| `target` | `pptx` (the PowerPoint download) or `gslides` (the Google Slides route) |
+| `slides` | The slides the export was asked for |
+| `slidesExported` | The slides in the deck it wrote; 0 when it wrote none |
+| `failures` | The slide failures it returned: one per slide that failed, or one for a sidecar that failed before any slide |
+| `outcome` | `ok`: a deck, no slide failed. `partial`: a deck, some slides failed. `failed`: no deck, because every slide failed or the sidecar did. `timeout`: the run passed `SIDECAR_TIMEOUT_SECONDS`. `busy`: refused, HTTP 429 |
+| `waitSeconds` | The time spent waiting for one of the container's sidecar slots; 0 for an export refused at once |
+| `runSeconds` | The sidecar's wall time; `null` when no sidecar ran (`busy`) |
+| `secondsPerSlide` | `runSeconds / slides`; `null` with it |
+| `peakRssMb` | The most resident memory (RSS, in MiB) the sidecar's process tree held at once: node and every Chromium it launched. Playwright starts each browser in a process group of its own, so the tree is found through the parent chain, not the group. It is read every 0.25 s while the sidecar runs, in one pass of `/proc` (Linux) or `ps` (macOS), and the largest reading is kept. `null` when no sidecar ran or a reading failed |
+| `containerPeakMb` | The most memory the whole container's cgroup held during the export, in MiB: its `memory.current` (cgroup v2), else its `memory.usage_in_bytes` (v1), page cache included. It is read in the same passes as `peakRssMb`, and the largest reading during the export is kept, not the cgroup's lifetime `memory.peak`. `null` where there is no cgroup (macOS), when no sidecar ran, or when the cgroup could not be read |
+| `containerWorkingSetMb` | The most the container's working set reached during the export, in MiB: its usage less the page cache nothing has used lately (`memory.stat`'s `inactive_file`, v1's `total_inactive_file`), never below 0, as the kubelet and cAdvisor count it. Each reading is taken whole in one pass, so its peak need not fall where the usage peaked. `null` as for `containerPeakMb`, and where `memory.stat` gives no inactive file figure |
+| `pptxBytes` | The size of the deck; 0 when it wrote none |
+| `sidecarConcurrency` | The container's sidecar slots, how many run at once in the whole container: `UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY` (4 on a Medium app; `TELLR_SIDECAR_CONCURRENCY` alone in a process `run.py` did not start) |
+| `queueBound` | `TELLR_SIDECAR_QUEUE`: how many exports past the container's slots the worker lets wait for one |
+
+The line carries counts and timings only: no slide content, title, notes, user or file path. A call stopped before any export starts logs none: an unknown target, or the pipeline unavailable on this deployment (503). A memory reading that fails never fails or slows the export. The process tree and the cgroup are read apart, and fail apart. A process table that cannot be read nulls `peakRssMb` only, and a cgroup that cannot be read or parsed nulls the two container keys only. A `[huashu] export memory of … not read` warning says which and why, unless the export had logged its line already.
+
+**The three memory figures.** Each answers its own question:
+- **`peakRssMb` compares builds.** It is this export's own processes only, summed per process. Memory the processes share (Chromium's shared libraries and its shared memory between its processes) is counted in each, so it is an upper bound for the export, measured the same way on every build.
+- **`containerPeakMb` is the container's whole usage.** It covers every worker of the app and every export running then, with shared pages counted once. It also holds the page cache, file data the kernel keeps in memory and gives back under pressure. So it can read higher than `peakRssMb`, with the app, the other exports and the cache in it. It can also read lower, because `peakRssMb` counts each shared page once per process. It always bounds the working set from above.
+- **`containerWorkingSetMb` judges headroom.** It is that usage less the inactive page cache: the memory the container cannot give back quickly. This is the figure the kubelet and cAdvisor watch against the limit.
+
+To judge whether memory is comfortable, read `containerWorkingSetMb` against the container's limit. Each worker logs the limit once, when it starts:
+
+```text
+[huashu] container memory limit 4096.0 MB
+```
+
+**Which cgroup is read.** The container's own cgroup, as `/proc/self/cgroup` names it: the `0::<path>` line under cgroup v2, the memory controller's line under v1. The path is looked for under `/sys/fs/cgroup` (v2) or `/sys/fs/cgroup/memory` (v1), where a host's whole tree is mounted. Where it is not there, the container sees its own cgroup as that root, through a private cgroup namespace or a bind-mounted view, and the root is read. A path that climbs out (`..`) means the process sits outside the cgroup root it sees, so that root is not its own cgroup. Nothing is read for that cgroup version: the container keys are `null`, and the limit line says `none`. The limit is the smallest set on that cgroup or on any cgroup above it in view, since each of them charges it: a pod's limit sits on the pod's cgroup, above its container's. It is read from `memory.max` (`max` means none), else `memory.limit_in_bytes` (v1's largest value means none). The line says `none` when no limit is set, or when there is no cgroup (macOS).
+
+**Reading the lines on Apps.** These were measured on 2026-11-21 with the Databricks CLI v1.20.0, read-only, against a deployed app. `databricks apps logs` needs an OAuth (U2M) profile. It refuses a PAT profile with "OAuth Token not supported for current auth type pat". Sign in with `databricks auth login --host <workspace-host> -p <oauth-profile>`, as for reading deploy logs (`.claude/skills/deploy-tellr-dev`).
+- **To collect every summary the log service holds,** about 5 days back, run:
+
+  ```bash
+  databricks apps logs <app> --profile <oauth-profile> --search "huashu] export summary" --tail-lines 100000 \
+    | grep "huashu] export summary"
+  ```
+
+  `--search` sends the term to the log service, which answers in about 3 s. One measured run reached back about 5 days, 11,088 entries. Its match is loose (it returns other lines too), so the `grep` keeps only the summaries. The same with `--search "container memory limit"` finds the startup limit lines.
+- **Without `--search`, only the latest window comes back.** Even `--tail-lines 100000` reached only about 728 lines, about 5.6 hours of this app's log, and the default is 200 lines.
+- **`--tail-lines 0` does not return.** It streams live lines until it is interrupted.
+- **To watch exports as they run,** run:
+
+  ```bash
+  databricks apps logs <app> --profile <oauth-profile> --follow | grep --line-buffered "huashu] export summary"
+  ```
+
+- **To keep what a command shows in a file as well,** add `--output-file <path>`.
+- **To leave each line's JSON,** add one of the following. Every Apps log line starts with its time and `[APP]`:
+
+  ```bash
+  … | sed -n 's/.*huashu] export summary //p' | jq -c .
+  … | sed -n 's/.*huashu] export summary //p' \
+      | jq -r '[.target, .outcome, .slides, .runSeconds, .peakRssMb, .containerWorkingSetMb] | @tsv'
+  ```
+
+The summary and the limit lines have their own logger, `src.services.pptx_from_html_huashu.telemetry` at INFO, which writes each record to stderr as one line. It does not go through the app's root handler. In a worker, that handler is FastMCP's `RichHandler`, which wraps a long message into narrow pieces where stderr is not a terminal, as on Apps. Through it, even the line's prefix would be split.
+
+### What the export trades away
+
+These are deliberate, each the closest a slide can come in an editable file:
+- **Line breaks are the UI's.** Each line is the browser's line: a block of one line is written `wrap="none"`, and every box carries a little width slack, so a slightly wider font in PowerPoint or Slides never re-wraps a line. Editing a line does not re-flow the lines after it, as it would in a text box typed from scratch.
+- **Tables are native, with exceptions.** A table becomes editable positioned items (cell boxes as shapes, cell text as text boxes) when no `<a:tbl>` can draw it: card tables (`border-collapse: separate` with visible spacing and painted cells), a table a clip cuts part of, the outer table of a nested pair, and overlapping row and column spans.
+- **A sentence with chips is several boxes.** An inline element with padding, a border or a margin (a chip, a `<kbd>`) cuts its line, so each piece is a text box of its own at the browser's exact position.
+- **Some mixed corners are freeforms.** A box whose corners round by different radii stays a preset when one draws it exactly (`16px 16px 0 0`, the rounded-top rectangle; `16px 0`, the diagonal one; `0 16px 0 0`, the one-corner one), whose handles still work; any other mix is a custom shape, which moves and recolours whole but scales its corners with it when resized.
+- **Charts are pictures.** A chart's SVG or canvas is a high-resolution picture; titles, legends and labels written in HTML stay editable text.
+- **Google Slides superscripts are a little small.** In the deck written for Google Slides, a superscript or subscript on a line the browser did not grow is drawn at 0.8 of its browser size, so the line itself sits where the browser has it.
+- **Google Slides sets a superscript at its own height.** Drive keeps only Google's one superscript and subscript, raised by a share of the run's written size, the size it also draws the glyph at. The browser raises a superscript by a third of its LINE's size, so a small one on a large line (an 11 px footnote mark on a 32 px figure) sits about 5 px low in Google, where placing it would draw it at 1.8 times its size. PowerPoint sets it where the browser does.
+- **Blurred inset shadows are PowerPoint's alone.** A box's blurred `inset` box-shadow is an inner shadow in the PowerPoint deck; Drive drops inner shadows, so the Google deck draws none, and a table cell, which carries no shape of its own, draws none in either. An inset layer with no blur (a column highlight's rules, a ring) is drawn in both. On a rounded box its band follows the outer corners; the band's inner edge stays straight.
+- **Generated text a clip cuts is drawn by the character.** A text box cannot clip its glyphs, so of `::before` and `::after` text an `overflow` clip cuts, each character is drawn whole where the clip shows at least half of it and is left out where it shows less (a column arrow cut to a 4 px tip is left out). The page's own words are always drawn whole.
+- **A Mac's system face is written as the container's.** Text the Mac draws in SF (`system-ui`, `-apple-system`) or another face no app has (Apple Chancery for `cursive`) is written as the face the export's container draws for it (Arial, Times New Roman), whose widths the deck on Apps is laid out at. The laptop's own export of such text keeps the Mac's layout, up to 9 % off the written face's widths at the extremes of SF's optical sizes.
+- **Symbols take each app's nearest face.** A symbol outside WGL4 is written in the face its target's app draws nearest the UI's size, at that face's advance: Segoe UI Symbol's Harvey quarters advance 0.861 em where the browser lays out 0.6, so a line of them runs a little longer in PowerPoint (slide 18's legend, about 10 px, inside its box's slack). Chrome picks a symbol's fallback by its context, so a ◑ inside a line of text is smaller in the UI than the same ◑ alone in a table cell, whose size the faces follow. MS PGothic and MS Gothic come with the Japanese fonts on Windows: where a machine lacks them, PowerPoint falls back per glyph, as it does for these characters in any other face; Windows PowerPoint was not probed.
+- **CJK and emoji have no face in the export's container.** The container ships no CJK or emoji fonts (Noto Sans CJK alone is 95 MB zipped, almost three times the whole wheel), so such text is laid out at the replacement glyph's width (0.74 to 0.88 of a Mac's) and shows empty boxes in a captured picture; the deck keeps every character, and each app draws it in its own fallback face.
+- **The Google export is its own variant.** The Google Slides route writes a deck for Google Slides (`target="gslides"`), not the PowerPoint download, so the two files can differ on lines with script runs.
 
 ## User Guide
 
@@ -50,8 +192,9 @@ PDF export is client-side and is not a route.
 
 3. **Export as PowerPoint**
    - Click "Export as PowerPoint"
-   - The primary path sends only `session_id` to the **synchronous** huashu route and downloads the returned PPTX blob — there is no job/poll cycle
+   - The primary path sends only `session_id` to the **synchronous** snapshot-engine route and downloads the returned PPTX blob — there is no job/poll cycle
    - If that pipeline is unavailable on the deployment (HTTP 503, or an error naming the pipeline as unavailable or still installing), the UI extracts DOM records client-side and retries through the records fallback
+   - If exports are busy (HTTP 429, see *Time and limits*), the UI shows "Exports are busy right now. Please try again in a minute." and does not fall back
    - A PPTX file will be downloaded automatically when complete
    - Filename format: `{slide_deck_title}_{timestamp}.pptx`
 
@@ -224,36 +367,32 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 ### Google Slides Export (Server-Side)
 
 **Location:**
-- `src/api/routes/google_slides.py` — API endpoints (auth + export)
+- `src/api/routes/google_slides.py` — API endpoints (auth + export); `_upload_session_deck` is the one Drive upload both export routes share
 - `src/api/routes/admin.py` — Google credential management endpoints (upload, status, delete)
 - `src/services/google_slides_auth.py` — OAuth2 flow and token management
-- `src/services/html_to_google_slides.py` — LLM-powered converter
+- `src/services/pptx_from_html_huashu.py` — the snapshot engine's wrapper (`target="gslides"`)
+- `src/services/drive_uploader.py` — the Drive upload, which converts the PPTX to Slides
+- `src/services/html_to_google_slides.py` — the legacy LLM converter (no UI caller)
 
 **Technology Stack:**
-- Google Slides API + Google Drive API: Creates and populates presentations
+- Google Drive API: uploads the PPTX with `mimeType=application/vnd.google-apps.presentation`, which converts it to a native Slides presentation
 - `google-auth-oauthlib`: OAuth2 authorization flow
 - Fernet encryption (`cryptography`): Encrypts credentials and tokens at rest
-- LLM (Databricks Claude Sonnet 4.5): Generates Python code that calls the Slides API
 
 **Process:**
 1. Admin uploads `credentials.json` globally (one-time setup)
 2. User authorizes via Google OAuth popup (one-time per user)
 3. User clicks "Export to Google Slides"
-4. Frontend calls `POST /api/export/google-slides` to initiate export
-5. Backend validates auth, fetches slides, builds HTML, and enqueues a background job; returns `job_id` immediately
-6. Background worker builds authenticated API clients from encrypted DB records
-7. Creates a blank presentation via Slides API
-8. For each slide, LLM generates Python code to populate the slide via `batchUpdate`; progress is updated after each slide
-9. Code is sanitized and executed server-side
-10. Frontend polls `GET /api/export/google-slides/poll/{job_id}` for status and progress
-11. When `status` is `completed`, the response includes `presentation_id` and `presentation_url`
+4. Frontend calls `POST /api/export/google-slides/from-huashu` with the `session_id`
+5. Backend checks the user may view the deck and is authorized, builds each slide's HTML, and runs the snapshot engine for Google Slides (`build_pptx_huashu(..., bypass_validation=True, target="gslides")`)
+6. The PPTX is uploaded to Drive (a re-export replaces the session's earlier presentation), which converts it; every Drive request is bounded by `DRIVE_HTTP_TIMEOUT_SECONDS`
+7. The response carries `presentation_id`, `presentation_url`, `total_slides`, `succeeded` and `failures`, in one synchronous round-trip
+8. On a 503, which the route answers only where the sidecar cannot run (not installed or not enabled on the deployment, `HuashuUnavailableError`), the frontend falls back to `/from-records`. Every other failure it shows as the route words it, falling back on none: a 429 (the worker's exports are busy), a 504 (the sidecar ran past its timeout, `HuashuTimeoutError`) or a 500 (it failed otherwise). The PPTX route answers the same statuses
 
 **Features:**
-- Produces editable Google Slides (not static images)
+- Produces editable Google Slides (not static images), from the same snapshot of the page as the PowerPoint export
 - Global credential storage (encrypted)
 - Per-user OAuth tokens (multi-user safe)
-- LLM-powered layout with retry and fallback
-- Chart images uploaded to Google Drive and embedded
 - Stale token/credential auto-cleanup
 
 **Configuration:**
@@ -264,14 +403,14 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 **Limitations:**
 - Requires Google Cloud project setup
 - Requires user interaction for initial OAuth consent
-- Processing time: 5–15 seconds per slide (similar to PPTX)
-- Requires LLM API access (Databricks endpoint)
+- Processing time: about 1.5 s per slide for the render, plus the Drive upload (4–20 s measured)
 
 For full technical details, see [Google Slides Integration](./google-slides-integration.md).
 
-## Positioning Constraints
+## Positioning Constraints (legacy LLM path)
 
-The PPTX converter uses strict positioning constraints to prevent overlapping elements:
+The legacy LLM converter (`html_to_pptx.py`) prompts with strict positioning constraints to prevent overlapping elements. The snapshot engine needs none: it writes every item where the browser drew it.
+
 
 - **Slide dimensions**: 10" wide × 7.5" tall
 - **Safe bounds**: left ≥ 0.5", top ≥ 0.5", left + width ≤ 9.5", top + height ≤ 7.0"
@@ -288,7 +427,11 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 - Chart.js visualizations are captured via canvas
 - Charts appear exactly as they do in the browser
 
-### PPTX Export
+### PPTX and Google Slides Export (snapshot engine)
+
+A chart's `<svg>` or `<canvas>` is captured server-side from the rendered page, after the export has waited for every canvas to be drawn and every animation to finish: a 2× picture at the chart's place. Its HTML title, legend and labels stay editable text. Nothing is captured in the browser tab, which may be closed or hidden while the export runs.
+
+### PPTX Export (legacy LLM path)
 
 **Chart Images (client-side capture)**:
 - Charts are captured as base64 PNG images in the browser before export
@@ -381,7 +524,27 @@ The field `template_section_index` is omitted: it is a 0-based machine index int
 **Problem**: First slide content trimmed
 - **Solution**: The implementation includes special handling for the first slide with additional wait time and canvas cropping logic.
 
-### PPTX Export Issues
+### PPTX and Google Slides Export Issues (snapshot engine)
+
+**Problem**: "Exports are busy right now. Please try again in a minute." (HTTP 429)
+- **Solution**: Every one of the container's sidecar slots ran for the whole `TELLR_SIDECAR_WAIT_SECONDS` (60 s) the export waited, or its worker already held an export for each slot and its full queue (`TELLR_SIDECAR_QUEUE`). The slots are the container's (`UVICORN_WORKERS` × `TELLR_SIDECAR_CONCURRENCY`, 4 on a Medium app), so which worker took the request does not matter. The startup line `[huashu] export sidecars: …` gives the bounds the app runs with, and the export's summary line its wait (`waitSeconds`, `outcome` `busy`). Retry after a minute. For sustained load, raise `TELLR_SIDECAR_CONCURRENCY` within the memory the container has: each slot is about 790 MB, so read `containerWorkingSetMb` against the container's limit (*The export summary line*). Do not raise the wait instead: 60 s of waiting, the 180 s run and Drive's 60 s request timeout fit the 300 s the Apps proxy allows a request.
+
+**Problem**: The export falls back to the records pipeline ("Falling back to records pipeline (slower)…")
+- **Solution**: The sidecar is not available on this deployment (HTTP 503): it needs `HUASHU_PIPELINE_ENABLED=1`, node, the sidecar's `node_modules` and a Playwright Chromium, which the app's boot installs with `setup.sh`. Until that finishes, the fallback is expected.
+
+**Problem**: "Drive upload failed" (HTTP 502)
+- **Solution**: Drive refused the upload or did not answer within `DRIVE_HTTP_TIMEOUT_SECONDS`. The deck was rendered; the app log names the Drive error.
+
+**Problem**: A slide is missing text, or `MODEL DROPS` appears in the harness
+- **Solution**: Read the slide's `[html2pptx] text missing:` and `slide summary` lines in the app log: the first says how many words the slide lost, and `modelDrops` counts model items (and the engine's diagnostics and pass results) that failed validation and were left out. The engine's diagnostics before them say why content left the deck (`[preprocess] no slide root:`, a `collection` bound met, `native table:`). To see the words, and the page text those diagnostics name by its length, export the deck locally with `TELLR_EXPORT_DEBUG_TEXT=1` through the export-fidelity harness, which passes it to its sidecar; no deployed app logs them.
+
+**Problem**: A slide fails with "the slide's page navigated away from the slide"
+- **Solution**: Its script set `location`, ran a meta refresh, or opened a `blob:` page in the main frame. An export reads nothing but its own slide, so the slide is stopped; remove the navigation from the slide.
+
+**Problem**: A slide fails with "the slide did not finish within 30 s"
+- **Solution**: "its page may be blocked by its own script": its script kept the page busy (a loop that never yields, or an endless re-render); fix the slide's script. "its browser stopped answering": the slide's Chromium never opened its page (a machine under heavy load); export again. Either way the rest of the deck exported.
+
+### PPTX Export Issues (legacy LLM path)
 
 **Problem**: Export fails with "No slide deck available"
 - **Solution**: Ensure you have generated slides before attempting export. The export requires an active slide deck.
@@ -423,8 +586,7 @@ The field `template_section_index` is omitted: it is a 0-based machine index int
 2. **For PPTX Export**:
    - Use when you need editable PowerPoint files
    - Best for presentations that need further editing
-   - Ensure charts are fully rendered before exporting (wait for animations to complete)
-   - Keep the browser tab active during export for reliable chart capture
+   - The export renders the deck server-side and waits for charts and animations itself; the browser tab can be left
 
 3. **Chart Considerations**:
    - PDF: Charts are images (not editable)
@@ -442,13 +604,13 @@ Potential improvements for export features:
 - [ ] Compression options for PDF
 - [ ] Export quality presets (high/medium/low)
 - [x] Persistent job storage (survive server restarts) - **Implemented** (DB-backed ExportJob model)
-- [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, LLM code-gen)
-- [x] Google Slides async export with progress polling - **Implemented** (`POST` returns job_id, `GET .../poll/{job_id}` for status)
+- [x] Google Slides export - **Implemented** (OAuth2, encrypted credential storage, the snapshot engine's deck converted by Drive)
 
 ## Related Documentation
 
 - [Backend Overview](../technical/backend-overview.md) - Backend architecture
 - [Frontend Overview](../technical/frontend-overview.md) - Frontend architecture
 - [Slide Parser & Script Management](../technical/slide-parser-and-script-management.md) - How slides are structured
-- [Google Slides Integration](../technical/google-slides-integration.md) - OAuth2 flow, encryption, LLM converter
+- [Google Slides Integration](../technical/google-slides-integration.md) - OAuth2 flow, encryption, the Drive conversion
+- [Export Fidelity Harness](../technical/export-fidelity-harness.md) - Measuring the exports against the UI in PowerPoint and Google Slides
 

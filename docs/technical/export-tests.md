@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-The export test suite validates the `/api/export` endpoints for converting slide decks to downloadable formats. The primary focus is PPTX (PowerPoint) export, with support for async export jobs and chart image injection.
+The export test suite validates the `/api/export` endpoints for converting slide decks to downloadable formats. This document covers the **legacy** LLM code-generation routes (`/api/export/pptx`, `/pptx/async`), which no UI surface calls. The live PowerPoint and Google Slides export, the snapshot engine, is tested by the unit suites `tests/unit/test_export_snapshot_*.py` (one per part of the engine), the hostile-realm suites `tests/unit/test_export_*hostile_realm.py`, `tests/unit/test_pptx_from_html_huashu_*.py` (the wrapper: timeout, concurrency, image sources) and `tests/unit/test_export_routes_off_event_loop.py` (the routes), and measured against PowerPoint and Google Slides with the [Export Fidelity Harness](export-fidelity-harness.md).
 
 ### Test File
 

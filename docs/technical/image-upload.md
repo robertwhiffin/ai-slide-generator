@@ -239,8 +239,9 @@ The frontend asks `GET /api/images/generate/available` through one cached probe
 ### Image Library: Generate and Edit with prompt
 
 `POST /api/images/generate` and `POST /api/images/{token}/edit` start an owner-scoped job and
-return 202; the browser polls `GET /api/images/generate/jobs/{job_id}`, because the Apps proxy cuts
-requests at 60 s. Jobs reuse `export_jobs` with `session_id = image-generation:<owner>`.
+return 202; the browser polls `GET /api/images/generate/jobs/{job_id}`, so the request returns at once
+however long the model takes (the Apps proxy ends a request after about 300 s, measured on a plain
+request). Jobs reuse `export_jobs` with `session_id = image-generation:<owner>`.
 
 ### Chat: the architect's `generate_image` tool
 

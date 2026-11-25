@@ -1,5 +1,7 @@
 """Export endpoints for PDF and PPTX generation."""
 
+import asyncio
+import json
 import logging
 import re
 import tempfile
@@ -186,30 +188,42 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
     # NO SLIDE-HOST FRAME CONTRACT HERE, DELIBERATELY. A contract framing `body`
     # and stretching its CHILD to `position: absolute !important; inset: 0
     # !important; width/height: 100% !important` was injected into this sheet at
-    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroys tables.
+    # 0.4.2.dev17 and is REVERTED, because on the huashu path it destroyed tables.
     #
-    # `services/pptx-emit-huashu/preprocess.mjs::flattenTables()` reads every
-    # `<td>/<th>`'s bounding rect and re-emits each cell as an absolutely
-    # positioned <div> carrying its own `left/top/width/height` as NON-important
-    # INLINE styles, then calls `document.body.appendChild(div)`. Every cell is
-    # therefore a DIRECT CHILD of `body` by the time the walker runs, so a
-    # stylesheet `!important` rule on `body > *` outranks each cell's inline
-    # position and collapses all of them onto one rect. Measured on a real
+    # The converter that path ran then read every `<td>/<th>`'s bounding rect and
+    # re-emitted each cell as an absolutely positioned <div> carrying its own
+    # `left/top/width/height` as NON-important INLINE styles, appended to `body`.
+    # Every cell was therefore a DIRECT CHILD of `body` by the time it walked the
+    # page, so a stylesheet `!important` rule on `body > *` outranked each cell's
+    # inline position and collapsed all of them onto one rect. Measured on a real
     # 21-cell deck: distinct cell rects in ppt/slides/slide1.xml went 42 -> 11,
     # with 12 shapes stacked at (12.0, 349.8) and 12 more at (0.0, 719.5).
     #
-    # The document itself is unchanged by this — `body` has exactly one rendered
-    # child before scripts run — so a document-level geometry probe reads 0.00 px
-    # and is structurally blind to the defect. It is an EMIT-TIME regression; only
-    # diffing the emitted slide XML can see it.
+    # The document itself was unchanged by this — `body` has exactly one rendered
+    # child before scripts run — so a document-level geometry probe read 0.00 px
+    # and was structurally blind to the defect: an EMIT-TIME regression, which only
+    # diffing the emitted slide XML could see. The snapshot engine that replaced
+    # that converter appends nothing to `body`, but it reads the page as laid out,
+    # so whatever a contract changes in that layout reaches the deck.
     #
     # What the contract was for (a section-wrapped design-system deck whose ground
     # never paints) is handled on the capture surfaces by aiming at the slide ROOT
     # instead — see `findSlideRoot` in frontend/src/services/slideDocument.ts. That
-    # locator injects no CSS, so it cannot perturb huashu geometry. This path never
-    # needed the contract regardless: the sidecar reads
+    # locator injects no CSS, so it cannot perturb the export's geometry. This path
+    # never needed the contract regardless: the sidecar reads
     # `getComputedStyle(root).backgroundColor`, and a 1280x0 element still computes
     # the right colour, so the .pptx was immune here BY CONSTRUCTION.
+    #
+    # NO FONT ON THE SHELL, DELIBERATELY: inherited text gets exactly what the
+    # UI's document gives it. This sheet used to set `html, body {
+    # font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif }`,
+    # which buildSlideDocument (frontend/src/services/slideDocument.ts) never
+    # set. Text that takes its font from `body` was then drawn in the browser's
+    # default face on screen (Times on the Mac) and in SF, or the container's
+    # fallback, in the export, and broke its lines elsewhere: a real deck's "So
+    # what" paragraph was 4 lines in the UI and 5 in the export. The shell
+    # declares no inherited property the UI's shell does not, which
+    # tests/unit/test_export_document_ui_parity.py pins against the TS source.
     complete_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -227,7 +241,6 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
       padding: 0;
       overflow: hidden;
       background: #ffffff;
-      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     }}
   </style>
   <style>{deck_css}</style>
@@ -336,6 +349,16 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
             // Step 3: Set canvas dimensions BEFORE Chart.js initialization
             // This is critical - Chart.js needs non-zero dimensions
             canvases.forEach((canvas, idx) => {{
+              // A canvas with a width or height attribute (from its markup, or
+              // set by the slide's own script, as one drawing at 2x for a sharp
+              // display does) already has the size its author gave it. Leave it
+              // alone: resizing a canvas clears what is drawn on it.
+              if (canvas.hasAttribute('width') || canvas.hasAttribute('height')) {{
+                console.log('[CHART_INIT] Canvas ' + idx + ' (' + (canvas.id || 'unnamed') +
+                            ') keeps its own size: ' + canvas.width + 'x' + canvas.height);
+                return;
+              }}
+
               const rect = canvas.getBoundingClientRect();
               const container = canvas.closest('.chart-container') || canvas.parentElement;
 
@@ -361,9 +384,11 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                 console.log('[CHART_INIT] Using default dimensions for canvas ' + idx);
               }}
 
-              // Set dimensions explicitly (Chart.js will respect these)
-              canvas.width = targetWidth;
-              canvas.height = targetHeight;
+              // Set dimensions explicitly (Chart.js will respect these).
+              // Only when they differ: assigning a canvas dimension clears its
+              // bitmap, even to the same value.
+              if (canvas.width !== targetWidth) canvas.width = targetWidth;
+              if (canvas.height !== targetHeight) canvas.height = targetHeight;
 
               // Also set CSS dimensions to match (for responsive behavior)
               canvas.style.width = targetWidth + 'px';
@@ -697,7 +722,6 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
     """
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
-    import asyncio
     from src.api.services.export_job_queue import (
         enqueue_export_job,
         generate_job_id,
@@ -1036,27 +1060,123 @@ async def export_pptx_editable(request: ExportPPTXEditableRequest):
 
 
 # ---------------------------------------------------------------------------
-# Huashu pipeline (alchaincyf/huashu-design) — LOCAL-ONLY test export
+# Huashu pipeline — the snapshot engine's editable PPTX export
 # ---------------------------------------------------------------------------
-# Uses Playwright + their html2pptx.js server-side. Not deployed to Apps:
-# the gate in pptx_from_html_huashu.is_available() blocks anything but
-# local dev. Surface as an additive 5th export mode in the frontend modal.
+# Server-side Playwright + Chromium reads each slide as the browser laid it out
+# and pptxgenjs writes it (services/pptx-emit-huashu, render_slide.cjs). The
+# gate in pptx_from_html_huashu.is_available() serves it only where the sidecar
+# is installed: HUASHU_PIPELINE_ENABLED=1 on Databricks Apps (setup.sh at boot)
+# or local dev. Surfaced as an export mode in the frontend modal.
+
+
+# How long the admin diagnostics below may run their node scripts. Each runs
+# through run_sidecar_process, so a run past it is ended with every process it
+# started, the browser or installer children included.
+HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS = 300
+HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS = 60
+
+# What a Chrome export answers when its worker has no room for it just now
+# (HuashuBusyError): a 429 whose detail the frontend shows as it is. It must not
+# read as "unavailable" (a 503, or "huashu pipeline not available"), which the
+# frontend answers by falling back to the records pipeline without a word.
+EXPORTS_BUSY_DETAIL = "Exports are busy right now. Please try again in a minute."
+EXPORTS_BUSY_RETRY_AFTER_SECONDS = 60
+
+
+# The PPTX route's X-Huashu-Failures header, which names a partly exported deck's
+# failed slides for the frontend's toast. Proxies refuse a response whose headers
+# are too large, and a failure's text can be long (measured: a browser that
+# crashed at its launch failed its slide with 14,424 characters of Chromium's
+# launch log). So each text is cut at HUASHU_FAILURE_TEXT_LIMIT characters, the
+# cut marked with HUASHU_FAILURE_TEXT_ELISION, and the whole header is at most
+# HUASHU_FAILURES_HEADER_LIMIT bytes of ASCII JSON (huashu_failures_header). A
+# failure list in a body, the 422's or the Google Slides route's, keeps each
+# message whole.
+HUASHU_FAILURE_TEXT_LIMIT = 300
+HUASHU_FAILURES_HEADER_LIMIT = 4096
+HUASHU_FAILURE_TEXT_ELISION = "…"
+
+
+def _failures_json(failures: list[dict], limit: int) -> str:
+    """``failures`` as compact ASCII JSON, each ``error`` cut at ``limit`` characters."""
+    cut = []
+    for failure in failures:
+        entry = dict(failure)
+        if "error" in entry:
+            text = str(entry["error"])
+            if len(text) > limit:
+                text = text[:limit] + HUASHU_FAILURE_TEXT_ELISION
+            entry["error"] = text
+        cut.append(entry)
+    return json.dumps(cut, ensure_ascii=True, separators=(",", ":"))
+
+
+def huashu_failures_header(failures: list[dict]) -> str:
+    """The ``X-Huashu-Failures`` value: ``failures`` as JSON, at most the header's bound in bytes.
+
+    Each entry keeps its keys, its ``error`` cut at ``HUASHU_FAILURE_TEXT_LIMIT``
+    characters. When the whole is still too long, every error is cut at the
+    longest length at which it fits (the length only grows with the cut, so it
+    is searched by halves); and when even errors of the elision alone do not
+    fit, the first entries that fit are kept. ASCII, so its length is its bytes.
+    """
+    header = _failures_json(failures, HUASHU_FAILURE_TEXT_LIMIT)
+    if len(header) <= HUASHU_FAILURES_HEADER_LIMIT:
+        return header
+    fitting = None
+    shortest, longest = 0, HUASHU_FAILURE_TEXT_LIMIT - 1
+    while shortest <= longest:
+        limit = (shortest + longest) // 2
+        candidate = _failures_json(failures, limit)
+        if len(candidate) <= HUASHU_FAILURES_HEADER_LIMIT:
+            fitting, shortest = candidate, limit + 1
+        else:
+            longest = limit - 1
+    if fitting is not None:
+        return fitting
+    kept: list[dict] = []
+    for failure in failures:
+        if len(_failures_json([*kept, failure], 0)) > HUASHU_FAILURES_HEADER_LIMIT:
+            break
+        kept.append(failure)
+    return _failures_json(kept, 0)
+
+
+def exports_busy(error: Exception, *, route: str) -> HTTPException:
+    """The 429 a Chrome export route answers ``HuashuBusyError`` with; the reason is logged."""
+    logger.warning("%s export refused, its worker busy: %s", route, error)
+    return HTTPException(
+        status_code=429,
+        detail=EXPORTS_BUSY_DETAIL,
+        headers={"Retry-After": str(EXPORTS_BUSY_RETRY_AFTER_SECONDS)},
+    )
+
+
+# Where the sidecar's setup.sh logs its bootstrap (services/pptx-emit-huashu/setup.sh):
+# HUASHU_SETUP_LOG when the app's environment sets it, as setup.sh reads it, else this.
+HUASHU_SETUP_LOG_ENV = "HUASHU_SETUP_LOG"
+HUASHU_SETUP_LOG = Path("/tmp/huashu-setup.log")
+# How many of the setup log's last lines the diagnostics carry.
+HUASHU_SETUP_LOG_TAIL_LINES = 40
 
 
 @router.get("/pptx/editable/huashu/available", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_available() -> dict:
     """Tell the frontend whether the huashu pipeline is available.
 
-    Returns the boolean plus a slim set of per-check booleans. Full
-    diagnostics (paths, env, log tails, directory listings) are logged
-    server-side only (SDR-4437 MEDIUM-1).
+    Returns the boolean plus a slim set of per-check booleans, among them
+    ``font_bundle``: whether the sidecar's fontconfig (the font bundle,
+    ``fonts/fonts.conf``) is in place. Full diagnostics (paths, env, log tails,
+    directory listings, the font bundle's config path, its Liberation face count
+    and setup's font lines) are logged server-side only (SDR-4437 MEDIUM-1). The
+    bundle does not decide availability: without it the export lays text out in
+    the base image's faces.
     """
     import os
     import shutil
-    from pathlib import Path
 
     from src.services.pptx_from_html_huashu import (
-        SIDECAR_DIR, SIDECAR_SCRIPT, _has_chromium, is_available,
+        SIDECAR_DIR, SIDECAR_FONTCONFIG_FILE, SIDECAR_SCRIPT, _has_chromium, is_available,
     )
 
     home = Path.home()
@@ -1067,17 +1187,28 @@ async def export_pptx_huashu_available() -> dict:
         )
         if p.exists()
     ]
-    setup_log_path = Path("/tmp/huashu-setup.log")
+    setup_log_path = Path(os.environ.get(HUASHU_SETUP_LOG_ENV) or HUASHU_SETUP_LOG)
     setup_log_tail = None
     setup_log_size = None
+    setup_log_font_lines: list[str] = []
     if setup_log_path.exists():
         try:
             setup_log_size = setup_log_path.stat().st_size
             with open(setup_log_path) as f:
                 lines = f.readlines()
-            setup_log_tail = "".join(lines[-40:])
+            setup_log_tail = "".join(lines[-HUASHU_SETUP_LOG_TAIL_LINES:])
+            # The font step's own lines: Chromium's download output fills the tail.
+            setup_log_font_lines = [
+                line.rstrip("\n")
+                for line in lines
+                if line.startswith("[setup]") and "fonts" in line
+            ]
         except Exception as e:  # noqa: BLE001
             setup_log_tail = f"(error reading log: {e})"
+    font_bundle = SIDECAR_FONTCONFIG_FILE.is_file()
+    liberation_faces = len(
+        list((SIDECAR_FONTCONFIG_FILE.parent / "liberation").glob("Liberation*.ttf"))
+    )
     checks_full = {
         "huashu_pipeline_enabled": os.environ.get("HUASHU_PIPELINE_ENABLED") == "1",
         "databricks_app_name": os.environ.get("DATABRICKS_APP_NAME") or None,
@@ -1091,8 +1222,12 @@ async def export_pptx_huashu_available() -> dict:
         "chromium_cache_paths": chromium_paths,
         "home": str(home),
         "playwright_browsers_path_env": os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
+        "font_bundle": font_bundle,
+        "fontconfig_file": str(SIDECAR_FONTCONFIG_FILE),
+        "liberation_faces": liberation_faces,
         "setup_log_path_exists": setup_log_path.exists(),
         "setup_log_size": setup_log_size,
+        "setup_log_font_lines": setup_log_font_lines,
         "setup_log_tail": setup_log_tail,
     }
     logger.info("huashu availability diagnostics: %s", checks_full)
@@ -1105,6 +1240,7 @@ async def export_pptx_huashu_available() -> dict:
             "playwright_node_modules": (SIDECAR_DIR / "node_modules" / "playwright").exists(),
             "pptxgenjs_node_modules": (SIDECAR_DIR / "node_modules" / "pptxgenjs").exists(),
             "chromium_cache": _has_chromium(),
+            "font_bundle": font_bundle,
         },
     }
 
@@ -1120,7 +1256,11 @@ async def export_pptx_huashu_install_chromium() -> dict:
     import subprocess
     from pathlib import Path
 
-    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+    from src.services.pptx_from_html_huashu import (
+        SIDECAR_DIR,
+        run_sidecar_process,
+        sidecar_subprocess_env,
+    )
 
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
@@ -1129,12 +1269,13 @@ async def export_pptx_huashu_install_chromium() -> dict:
         logger.warning("huashu install-chromium: playwright cli not found at %s", cli)
         return {"ok": False, "error": "playwright cli not found"}
     try:
-        result = subprocess.run(
+        # In a worker thread, as the exports run theirs: the event loop stays free.
+        result = await asyncio.to_thread(
+            run_sidecar_process,
             ["node", str(cli), "install", "chromium"],
+            input=b"",
+            timeout=HUASHU_INSTALL_CHROMIUM_TIMEOUT_SECONDS,
             cwd=str(SIDECAR_DIR),
-            capture_output=True,
-            timeout=300,
-            check=False,
             env=env,
         )
         logger.info(
@@ -1158,7 +1299,7 @@ async def export_pptx_huashu_install_chromium() -> dict:
 
 @router.post("/pptx/editable/huashu/probe-launch", dependencies=[Depends(require_admin)])
 async def export_pptx_huashu_probe_launch() -> dict:
-    """Spawn chromium with our standard launch options. No html2pptx, no pptxgenjs.
+    """Spawn chromium with our standard launch options. No slide, no pptxgenjs.
 
     De-risks the rest of the sidecar: if this exits 0 with PROBE_OK on the
     deployed app, chromium-on-Apps is solid and the full export will work.
@@ -1167,7 +1308,11 @@ async def export_pptx_huashu_probe_launch() -> dict:
     import subprocess
     from pathlib import Path
 
-    from src.services.pptx_from_html_huashu import SIDECAR_DIR, sidecar_subprocess_env
+    from src.services.pptx_from_html_huashu import (
+        SIDECAR_DIR,
+        run_sidecar_process,
+        sidecar_subprocess_env,
+    )
 
     probe_js = SIDECAR_DIR / "probe_launch.mjs"
     if not probe_js.exists():
@@ -1177,12 +1322,13 @@ async def export_pptx_huashu_probe_launch() -> dict:
     env = sidecar_subprocess_env()
     env.setdefault("HOME", str(Path.home()))
     try:
-        result = subprocess.run(
+        # In a worker thread, as the exports run theirs: the event loop stays free.
+        result = await asyncio.to_thread(
+            run_sidecar_process,
             ["node", str(probe_js)],
+            input=b"",
+            timeout=HUASHU_PROBE_LAUNCH_TIMEOUT_SECONDS,
             cwd=str(SIDECAR_DIR),
-            capture_output=True,
-            timeout=60,
-            check=False,
             env=env,
         )
         logger.info(
@@ -1204,11 +1350,16 @@ async def export_pptx_huashu_probe_launch() -> dict:
         return {"ok": False, "error": "probe failed"}
 
 
+# A plain def: FastAPI runs it in its threadpool, so its blocking work (the deck
+# read, the sidecar) holds no event loop.
 @router.post("/pptx/editable/huashu/from-html")
-async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
-    """Run the LLM-generated deck HTML through huashu's html2pptx pipeline.
+def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
+    """Export the deck's slides to an editable .pptx through the snapshot engine.
 
-    Local-only. Returns 503 if the gate doesn't pass. On a partial
+    Returns 503 if the gate (``pptx_from_html_huashu.is_available``) doesn't
+    pass, 504 if the sidecar ran past its timeout, 500 if it failed otherwise,
+    and 429 with ``Retry-After`` when the worker has no room for another
+    export just now (``HuashuBusyError``, ``exports_busy``). On a partial
     success (some slides reject, others pass), still returns the .pptx
     with an ``X-Huashu-Failures`` header carrying the per-slide error
     JSON so the frontend can surface what huashu objected to.
@@ -1216,7 +1367,10 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
     # SDR-4437 HIGH-1: caller must hold CAN_VIEW on the deck being exported.
     _check_deck_permission_for_session(request.session_id, PermissionLevel.CAN_VIEW)
     from src.services.pptx_from_html_huashu import (
+        HuashuBusyError,
         HuashuExportError,
+        HuashuTimeoutError,
+        HuashuUnavailableError,
         build_pptx_huashu,
         is_available,
     )
@@ -1225,10 +1379,11 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         raise HTTPException(
             status_code=503,
             detail=(
-                "huashu pipeline not available — local dev only. Ensure "
-                "ENVIRONMENT=development is set, services/pptx-emit-huashu/ "
-                "has node_modules installed, and `npx playwright install "
-                "chromium` has been run."
+                "huashu pipeline not available. It runs on Databricks Apps "
+                "with HUASHU_PIPELINE_ENABLED=1 once the boot's setup.sh has "
+                "installed the sidecar, or locally with ENVIRONMENT=development, "
+                "services/pptx-emit-huashu/ node_modules installed and "
+                "`npx playwright install chromium` run."
             ),
         )
 
@@ -1259,9 +1414,18 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         pptx_bytes, failures = build_pptx_huashu(
             title, slides_with_html, bypass_validation=True
         )
+    except HuashuBusyError as e:
+        raise exports_busy(e, route="PPTX") from e
+    except HuashuUnavailableError as e:
+        # The gate passed above and failed here: the frontend falls back on it.
+        logger.error("Huashu pipeline unavailable: %s", e)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except HuashuTimeoutError as e:
+        logger.error("Huashu sidecar timed out: %s", e)
+        raise HTTPException(status_code=504, detail=str(e)) from e
     except HuashuExportError as e:
         logger.exception("Huashu sidecar hard-failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     if not pptx_bytes:
         # All slides rejected by huashu validation — return a structured
@@ -1283,10 +1447,9 @@ async def export_pptx_huashu_from_html(request: ExportPPTXEditableRequest):
         "X-Huashu-Succeeded": str(len(slides_with_html) - len(failures)),
     }
     if failures:
-        # Compact JSON so it fits comfortably in a header. Frontend parses
-        # it for the "N slides failed" toast.
-        import json as _json
-        headers["X-Huashu-Failures"] = _json.dumps(failures, ensure_ascii=True)
+        # Bounded JSON, each failure's text cut (huashu_failures_header): the
+        # frontend parses it for the "N slides failed" toast.
+        headers["X-Huashu-Failures"] = huashu_failures_header(failures)
 
     from fastapi.responses import Response
     return Response(

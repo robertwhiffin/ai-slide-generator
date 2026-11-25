@@ -4,7 +4,7 @@ This guide covers how to set up Google Slides integration and export your AI-gen
 
 ## Overview
 
-The Google Slides export creates an editable Google Slides presentation from your generated deck. It uses an LLM to convert each slide's HTML into Google Slides API calls, producing a cloud-native presentation you can share and edit in Google Workspace.
+The Google Slides export creates an editable Google Slides presentation from your generated deck. Tellr renders each slide as you see it, writes the deck as a PowerPoint file made for Google Slides, and uploads it to your Google Drive, which converts it to a native presentation you can share and edit in Google Workspace.
 
 ## Prerequisites
 
@@ -87,25 +87,27 @@ Click **Export to Google Slides** to start the export.
 
 ![Google Slides option](images/07-exporting-to-google-slides/08-google-slides-option.png)
 
-The backend creates a blank Google Slides presentation, then converts each slide using the LLM. When complete, a link to the new presentation appears. Click it to open and edit in Google Slides.
+Tellr renders the deck and uploads it to Drive in one step. When complete, a link to the new presentation appears. Click it to open and edit in Google Slides.
 
 ---
 
 ## How the Export Works
 
-1. The frontend sends the session ID and any chart images to the export endpoint
-2. The backend builds an authenticated Google API client using the admin credentials and your user token
-3. A blank presentation is created via the Google Slides API
-4. Each slide's HTML is sent to the LLM, which generates Python code calling the Google Slides `batchUpdate` API
-5. The generated code is executed server-side for each slide
-6. If a slide fails to convert, the system retries once with error context, then falls back to a placeholder text box
+1. The frontend sends the session ID to the export endpoint
+2. The backend renders each slide in a server-side browser and reads it as it is laid out: text, shapes and tables become editable items where the browser drew them, and charts and graphics become pictures
+3. It writes those slides as a PowerPoint file made for Google Slides
+4. It uploads the file to your Drive with your Google authorization, and Drive converts it to a Google Slides presentation
+5. If a slide cannot be rendered, the export still completes, and the message names the slides that are missing
+6. If the server's exports are all busy, you see "Exports are busy right now. Please try again in a minute."
 
 ## Troubleshooting
 
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | "Not authorized" after previously working | Token expired or encryption key changed | Open **Settings** and click **Authorize with Google** again |
-| Export fails for a single slide | LLM-generated code error | The slide gets a placeholder; other slides are unaffected |
+| Export reports missing slides | A slide could not be rendered | The other slides are in the presentation; check the slide's content and export again |
+| "Exports are busy right now. Please try again in a minute." | The server is already running its exports | Wait a minute and export again |
+| "Drive upload failed" | Google Drive refused or did not answer the upload | Export again; if it persists, check your Google authorization in **Settings** |
 | "Credentials not configured" | Admin hasn't uploaded `credentials.json` | Ask an admin to upload credentials on the `/admin` page |
 | App won't start in production | Encryption key missing or mis-configured | Verify the deployment used `tellr.update` / `deploy_local` (not the Databricks Apps UI button); check app logs for a key-resolution error |
 
@@ -120,10 +122,10 @@ In local development, a key is auto-generated and persisted to `.encryption_key`
 
 ## Tips
 
-- **Export after finalising** — Export once you're satisfied with the slides, since each export creates a new presentation
-- **Chart images are included** — Any charts rendered on the slides are captured and embedded in the Google Slides export
-- **Slides are 16:9** — The exported presentation uses widescreen dimensions (10" x 5.625")
-- **Edit freely in Google** — The export produces native Google Slides elements, not images, so text and shapes are fully editable
+- **Export after finalising** — Export once you're satisfied with the slides: exporting the same session again replaces its earlier presentation in your Drive
+- **Charts are pictures** — Charts are captured as high-resolution pictures; their HTML titles, legends and labels stay editable text
+- **Slides are 16:9** — The exported presentation uses widescreen dimensions (13.333" x 7.5")
+- **Edit freely in Google** — Text, shapes and tables are native Google Slides elements, so they are fully editable; a line of text keeps the line breaks you saw in Tellr
 
 ## Related Guides
 

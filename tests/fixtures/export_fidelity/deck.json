@@ -1,0 +1,5 @@
+{
+  "title": "Export fidelity corpus",
+  "external_scripts": ["https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"],
+  "scripts": "(function() { var el = document.getElementById('segChart'); if (!el) return; new Chart(el, { type: 'doughnut', data: { labels: ['Industrial', 'Automotive', 'Aerospace', 'Other'], datasets: [{ data: [51, 29, 12, 8], backgroundColor: ['#FF5F46', '#1B3139', '#5A6F77', '#DCE0E2'], borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { position: 'right', labels: { font: { family: 'DM Sans', size: 15 } } } } } }); })();"
+}

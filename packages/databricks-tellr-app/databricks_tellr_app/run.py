@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
 import traceback
 
 import uvicorn
 
 logger = logging.getLogger(__name__)
+
+# The variable that names the export sidecars' slot directory for the workers
+# (src/services/sidecar_slots.py SLOTS_DIR_ENV), and the prefix of the one
+# main() makes. Written here, not imported: importing src.services loads the
+# agent's libraries, which this process, that only supervises the workers,
+# would then hold for the app's lifetime.
+SIDECAR_SLOTS_DIR_ENV = "TELLR_SIDECAR_SLOTS_DIR"
+SIDECAR_SLOTS_DIR_PREFIX = "tellr-sidecar-slots-"
 
 
 def init_database(seed_databricks_defaults: bool = False) -> None:
@@ -193,7 +203,22 @@ def main() -> None:
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     workers = int(os.getenv("UVICORN_WORKERS", "4"))
-    uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
+    # The export sidecars' slots are the container's, shared by every worker
+    # (src/services/sidecar_slots.py): each worker counts them from how many
+    # workers there are, and takes them in one directory, made here unless the
+    # environment names one, and removed with the workers. uvicorn starts each
+    # worker as a fresh interpreter, which inherits this environment.
+    os.environ["UVICORN_WORKERS"] = str(workers)
+    made = None
+    if not os.environ.get(SIDECAR_SLOTS_DIR_ENV):
+        made = tempfile.mkdtemp(prefix=SIDECAR_SLOTS_DIR_PREFIX)
+        os.environ[SIDECAR_SLOTS_DIR_ENV] = made
+    try:
+        uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
+    finally:
+        if made is not None:
+            os.environ.pop(SIDECAR_SLOTS_DIR_ENV, None)
+            shutil.rmtree(made, ignore_errors=True)
 
 
 if __name__ == "__main__":

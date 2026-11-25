@@ -6,8 +6,11 @@ Legitimate slides never use these constructs (chart data is inlined, images are
 data: URIs), so any hit is off-path.
 """
 
+import logging
 import re
-from typing import List
+from typing import List, NamedTuple
+
+logger = logging.getLogger(__name__)
 
 # Content-Security-Policy for rendered slide documents. MUST stay in sync with
 # the frontend builder's SLIDE_CSP (frontend/src/services/slideDocument.ts):
@@ -33,6 +36,89 @@ SLIDE_CSP = (
 SLIDE_CSP_META = (
     f'<meta http-equiv="Content-Security-Policy" content="{SLIDE_CSP}">'
 )
+
+# The export's request guard (services/pptx-emit-huashu/request_guard.cjs) aborts
+# every request a slide's page makes in the sidecar's Chromium but the slide's
+# own file, data:, blob:, and the https hosts SLIDE_CSP allows for that kind of
+# request; it also stops navigations, which the CSP cannot. These are the fetch
+# directives that name https hosts, each with the request type it governs, as
+# Playwright's resourceType() names it. Every other directive allows no https
+# host (default-src 'none'), and the guard allows none for its requests either.
+_CSP_DIRECTIVE_REQUEST_TYPES = {
+    "script-src": "script",
+    "style-src": "stylesheet",
+    "font-src": "font",
+}
+_CSP_HTTPS_HOST = re.compile(r"https://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)")
+
+
+class CspRequestHosts(NamedTuple):
+    """A CSP read for the export's request guard (``slide_csp_request_hosts``).
+
+    ``hosts`` maps each request type to the https hosts a slide's page may load for it;
+    ``unmirrored`` names each https source the guard could not mirror, as
+    ``"<directive> <source>"``, which no entry of ``hosts`` stands for.
+    """
+
+    hosts: dict[str, tuple[str, ...]]
+    unmirrored: tuple[str, ...]
+
+
+def slide_csp_request_hosts(csp: str = SLIDE_CSP) -> CspRequestHosts:
+    """The https hosts a slide's page may load, by request type, as ``csp`` allows them.
+
+    Read from each fetch directive's ``https://host`` sources, in order. The
+    guard matches a host exactly, on https's own port, so it cannot mirror an
+    https source with a path, a port or a wildcard, ``https:`` alone, or one in a
+    directive outside ``_CSP_DIRECTIVE_REQUEST_TYPES``. Such a source is left out
+    of ``hosts`` and named in ``unmirrored``: the guard then aborts the requests
+    the CSP allows it, so an export fails closed for that source alone, and every
+    other host is kept. Nothing here raises, so no CSP can stop the app, which
+    imports this module, from starting.
+    """
+    hosts: dict[str, tuple[str, ...]] = {}
+    unmirrored: list[str] = []
+    for directive in csp.split(";"):
+        name, *sources = directive.split() or [""]
+        request_type = _CSP_DIRECTIVE_REQUEST_TYPES.get(name)
+        names = []
+        for source in sources:
+            if not source.lower().startswith("https:"):
+                continue
+            matched = _CSP_HTTPS_HOST.fullmatch(source)
+            if request_type is None or matched is None:
+                unmirrored.append(f"{name} {source}")
+            else:
+                names.append(matched.group(1))
+        if request_type is not None and names:
+            hosts[request_type] = tuple(names)
+    return CspRequestHosts(hosts, tuple(unmirrored))
+
+
+# What the export's sidecar is given as its request guard's hosts (``allowedHosts``):
+# SLIDE_CSP's own, its one source. And the sources of SLIDE_CSP the guard could not
+# mirror, whose requests an export aborts (none, as SLIDE_CSP is written).
+SLIDE_CSP_REQUEST_HOSTS, SLIDE_CSP_UNMIRRORED_SOURCES = slide_csp_request_hosts()
+
+
+def _warn_about_unmirrored_sources() -> None:
+    """Log one warning naming every source of SLIDE_CSP the request guard could not mirror.
+
+    Run at import, so the app's startup, which imports this module (the
+    security-headers middleware, the agent, the streaming callback), says it once
+    in each worker: a CSP edit such as ``img-src https:`` costs an export those
+    requests, and never costs the app its start.
+    """
+    if SLIDE_CSP_UNMIRRORED_SOURCES:
+        logger.warning(
+            "the slide CSP allows %s, which the export's request guard cannot mirror: it "
+            "allows only an exact https host, for a script, stylesheet or font, so an export "
+            "aborts every request the CSP allows there, while the app's own slides still load them",
+            ", ".join(SLIDE_CSP_UNMIRRORED_SOURCES),
+        )
+
+
+_warn_about_unmirrored_sources()
 
 # Uniform root-slide reset for server-built slide documents. MUST stay in sync
 # with the frontend builder's SLIDE_ROOT_RESET_STYLE

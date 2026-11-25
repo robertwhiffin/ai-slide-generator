@@ -64,17 +64,29 @@ instances sharing one store, mutate via A, assert B's view matches the store.
 
 ## 2. The huashu PPTX-export bundling chain must not be silently broken
 
-**Why this exists.** The HTML→PPTX export ("huashu", from
-`alchaincyf/huashu-design`'s `html2pptx.js`) lives in
-`services/pptx-emit-huashu/` and runs Playwright/Chromium. That can't be built
-in CI (npm's "Exit handler never called!" bug) or shipped uncompressed (size
-limits), so the pipeline depends on a fragile, easy-to-break bundling chain:
+**Why this exists.** The PowerPoint and Google Slides export, the snapshot
+engine, is a Node sidecar in `services/pptx-emit-huashu/` (the directory keeps
+the "huashu" name of the converter it replaced) and runs Playwright/Chromium.
+`emit_deck.mjs` loads `render_slide.cjs`, which composes its page sources
+(`preprocess.mjs`, `dom_access.mjs`, `gradient.mjs`, `snapshot.mjs`,
+`snapshot_borders.mjs`, `snapshot_text.mjs`, `snapshot_text_ellipsis.mjs`,
+`snapshot_text_markers.mjs`, `snapshot_text_metrics.mjs`,
+`snapshot_text_turned.mjs`, `snapshot_table.mjs`) and requires its Node side
+(`pseudo.mjs`, `capture.cjs`, `model_check.cjs`, `text_check.cjs`,
+`log_line.cjs`, `emit_model.cjs`, `emit_text.cjs`, `emit_table.cjs`,
+`emit_typography.cjs`, `units.cjs`). Every one is loaded only when an export
+runs. The `node_modules` can't be built in CI (npm's "Exit handler never
+called!" bug) or shipped uncompressed (size limits), so the pipeline depends on
+a fragile, easy-to-break bundling chain:
 
 1. **Pre-built tarballs committed to git**:
-   `services/pptx-emit-huashu/node_modules.tar.gz` (~12 MB) and
-   `sys-libs-bullseye.tar.gz` (~18 MB). These are committed on purpose, *not*
-   built in CI. Regen instructions live in the header comment of
-   `services/pptx-emit-huashu/build-artifacts.sh`.
+   `services/pptx-emit-huashu/node_modules.tar.gz` (~12 MB),
+   `sys-libs-bullseye.tar.gz` (~18 MB) and `fonts-liberation.tar.gz` (~2.4 MB,
+   the Liberation faces and the fontconfig the sidecar's Chromium lays text out
+   in). These are committed on purpose, *not* built in CI. Regen instructions
+   live in the header comment of `services/pptx-emit-huashu/build-artifacts.sh`;
+   the font bundle is rebuilt byte-identically from a pinned release by
+   `scripts/sidecar_fonts/build_fonts_tarball.py`.
 2. **Verify step** (`build-artifacts.sh`) runs in `publish.yml` /
    `publish-dev.yml` before `python -m build`: checks the tarballs exist, are
    >1 MB (not truncated/dir-only), and contain `playwright*/cli.js`.
@@ -83,11 +95,18 @@ limits), so the pipeline depends on a fragile, easy-to-break bundling chain:
    `TELLR_INCLUDE_HUASHU_SIDECAR=1`** (the deployed-app path via CI; local
    `deploy_local` deliberately omits it because the tarballs exceed Apps
    workspace file limits).
-4. **CI post-build verify**: the publish workflows assert the built wheel is
-   ≥25 MB and contains the huashu tarballs, failing the release otherwise.
+4. **CI post-build verify**: the publish workflows run
+   `scripts/verify_app_wheel.py` on the built wheel, which fails the release
+   unless the wheel is ≥25 MB, holds the tarballs and `setup.sh`, and holds
+   every sidecar source the export loads: it walks the `require`/`import`
+   graph from `emit_deck.mjs` through the wheel's own copies, and checks
+   `SIDECAR_SOURCES`, the known list, as a floor.
+   `tests/unit/test_verify_app_wheel_huashu.py` keeps that list equal to the
+   graph of the source tree.
 5. **`.databricksignore`** excludes the bulky uncompressed
-   `services/pptx-emit-huashu/node_modules/` and `playwright-browsers/` from
-   `deploy_local` uploads.
+   `services/pptx-emit-huashu/node_modules/`, `fonts/`, `fonts-staging/` (the
+   staging directory `setup.sh` extracts the font bundle into) and
+   `playwright-browsers/` from `deploy_local` uploads.
 
 **What to flag in review.** Raise a concern when a diff touches any link in
 this chain in a way that could break it silently:
@@ -97,13 +116,21 @@ this chain in a way that could break it silently:
   stale tarballs ships a mismatched pipeline.
 - weakens or removes the `build-artifacts.sh` verification, the
   `TELLR_INCLUDE_HUASHU_SIDECAR` gate, the setup.py copy step, or the CI
-  wheel-size / tarball-presence assertion (the ≥25 MB check exists to catch a
-  wheel built without the sidecar).
+  wheel check (`verify_app_wheel.py`: the ≥25 MB floor exists to catch a wheel
+  built without the sidecar, the source graph to catch a wheel missing one
+  module of it).
+- adds a sidecar module that the export loads some other way than a literal
+  relative `require('./…')`, `import('./…')` or `import … from './…'` (the
+  wheel check reads only those), or without adding it to `SIDECAR_SOURCES`. A page source
+  composed by string must still be imported by the module that composes it.
+- edits `package.json` beyond its description: a dependency change needs
+  fresh tarballs (above).
 - changes `.databricksignore` or setup.py `_SIDECAR_IGNORE` such that the
   uncompressed trees start getting uploaded (blows Apps file limits) or the
   tarballs stop being included (breaks deployed export).
 - moves/renames `services/pptx-emit-huashu/` files without updating the
-  references in `setup.py`, the publish workflows, and `.databricksignore`.
+  references in `setup.py`, the publish workflows, `.databricksignore`, and
+  `SIDECAR_SOURCES` in `scripts/verify_app_wheel.py`.
 
 **Rule of thumb.** If a change touches `services/pptx-emit-huashu/` or the
 packaging around it, confirm the whole chain still holds: committed tarballs

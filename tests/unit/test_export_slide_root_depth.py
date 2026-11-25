@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -50,6 +49,11 @@ from src.api.routes.export import build_slide_html
 from src.domain.slide_deck import SlideDeck
 from src.services import pptx_from_html_huashu
 from src.utils.html_utils import find_slide_roots
+from tests.fixtures.export_snapshot_support import (
+    build_pptx_guarded,
+    hermetic_document,
+    run_node,
+)
 from tests.unit.test_export_slide_root_background import (
     FIXTURE_DIR,
     GROUND,
@@ -145,11 +149,9 @@ def _chain_document(depth: int, *, inner_sibling: str = "", extra_css: str = "")
 
 
 def _build_html(monkeypatch: pytest.MonkeyPatch, html: str) -> bytes:
-    """Export one in-memory slide document through the real huashu pipeline."""
+    """Export one in-memory slide document through the real huashu pipeline, its model whole."""
     monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-    pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
-        "slide root depth", [{"html": html}]
-    )
+    pptx, failures = build_pptx_guarded("slide root depth", [{"html": html}])
     assert failures == [], f"huashu rejected the deck: {failures}"
     assert pptx, "huashu produced no pptx bytes"
     return pptx
@@ -173,12 +175,8 @@ def _probe(tmp_path: Path, documents: dict[str, str]) -> dict[str, dict]:
         path = tmp_path / f"{name}.html"
         path.write_text(html, encoding="utf-8")
         paths.append(path)
-    proc = subprocess.run(
-        ["node", str(PROBE_SCRIPT), *[str(path) for path in paths]],
-        cwd=pptx_from_html_huashu.SIDECAR_DIR,
-        env=pptx_from_html_huashu.sidecar_subprocess_env(),
-        capture_output=True,
-        text=True,
+    proc = run_node(
+        [str(PROBE_SCRIPT), *[str(path) for path in paths]],
         timeout=pptx_from_html_huashu.SIDECAR_TIMEOUT_SECONDS,
     )
     assert proc.returncode == 0, f"probe failed: {proc.stderr}"
@@ -260,7 +258,8 @@ class TestBackendSidecarDepthParity:
         """
         deck = SlideDeck.from_html_string(_chain_document(depth)).to_dict()
         assert len(deck["slides"]) == 1, f"depth={depth}: expected one slide"
-        slide_html = build_slide_html(deck["slides"][0], deck)
+        # The deck's Chart.js, which a parsed deck is given, from the vendored copy.
+        slide_html = hermetic_document(build_slide_html(deck["slides"][0], deck))
         pptx = _build_html(monkeypatch, slide_html)
         assert _slide_background(pptx) == GROUND, (
             f"depth={depth}: production path lost the slide-root ground"
@@ -427,9 +426,8 @@ class TestChromiumParserNestingLimit:
         is emitted by the preprocess pass, which runs first either way.
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
-        pptx_from_html_huashu.build_pptx_huashu(
-            "slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}]
-        )
+        # The diagnostic is the preprocess pass's own, logged without the debug text.
+        build_pptx_guarded("slide root depth", [{"html": _chain_document(REPARSED_DEPTH)}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr, (
@@ -450,7 +448,7 @@ class TestChromiumParserNestingLimit:
         """
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
         html = (FIXTURE_DIR / "rootless.html").read_text(encoding="utf-8")
-        pptx_from_html_huashu.build_pptx_huashu("slide root depth", [{"html": html}])
+        build_pptx_guarded("slide root depth", [{"html": html}])
         stderr = capfd.readouterr().err
 
         assert "[preprocess] no slide root:" in stderr

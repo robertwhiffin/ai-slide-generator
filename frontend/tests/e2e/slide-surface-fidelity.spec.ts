@@ -399,13 +399,14 @@ async function boxProbe(page: Page, doc: string, selector: string) {
 //   REVERTED — the slide-host frame contract in the four export builders. It
 //   framed `body` and stretched its CHILD with `position: absolute !important;
 //   inset: 0 !important; width/height: 100% !important`. On the huashu path that
-//   DESTROYS TABLES: preprocess.mjs::flattenTables() appends every <td>/<th> to
-//   `body` as an absolutely positioned <div> whose left/top/width/height are
-//   NON-important INLINE styles, so the stylesheet !important rule outranks each
+//   DESTROYED TABLES: the converter that path ran then appended every <td>/<th>
+//   to `body` as an absolutely positioned <div> whose left/top/width/height were
+//   NON-important INLINE styles, so the stylesheet !important rule outranked each
 //   cell's own position. Measured on a real 21-cell deck: distinct cell rects in
 //   ppt/slides/slide1.xml 42 -> 11, with 12 shapes stacked at (12.0, 349.8).
-//   The built DOCUMENT is unchanged by it, so a document probe reads 0.00 px and
-//   is blind — the damage is EMIT-TIME.
+//   The built DOCUMENT was unchanged by it, so a document probe read 0.00 px and
+//   was blind — the damage was EMIT-TIME. The snapshot engine that replaced that
+//   converter reads the page as laid out, so a contract would reach the deck.
 //
 //   KEPT — the slide-root LOCATOR (findSlideRoot). It aims the capture at the
 //   element that carries the ground instead of at `.slide`. Locator-only measures
@@ -501,10 +502,10 @@ const dsUnwrappedDeck = () =>
  * Assert a built EXPORT document carries no slide-host frame contract.
  *
  * The contract was injected into all four export builders at 0.4.2.dev17 and is
- * reverted: on the huashu path it collapses every flattened table cell onto one
- * rect (preprocess.mjs::flattenTables appends each cell to `body` with its
+ * reverted: on the huashu path it collapsed every flattened table cell onto one
+ * rect (the converter that path ran then appended each cell to `body` with its
  * position as NON-important inline styles, so a `body > *` !important rule
- * outranks them — 42 -> 11 distinct cell rects measured on a real 21-cell deck).
+ * outranked them — 42 -> 11 distinct cell rects measured on a real 21-cell deck).
  *
  * Checked two ways so a reintroduction under a different host selector is still
  * caught: the exact rendered rule for this host, and the `#tellr-host-frame-boost`
