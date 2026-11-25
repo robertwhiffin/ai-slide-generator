@@ -14,7 +14,7 @@ Each case drives the app through ``httpx.ASGITransport``, so the export and
 everything else share one event loop. While the export runs, a ticker on that
 loop records the longest gap between its ticks (the longest the loop was held),
 and ``/api/health`` is asked for again and again: the loop is never held for
-``ANSWER_WITHIN_SECONDS``, and every health check answers within it. The step
+``LOOP_HOLD_BOUND_SECONDS``, and every health check answers within it. The step
 under test blocks for ``STUB_SECONDS``: a stub node script in the sidecar's
 place, so the real ``build_pptx_huashu`` and ``run_sidecar_process`` run and
 block as they do in production, or a Drive upload or a deck read made slow.
@@ -65,9 +65,13 @@ from tests.fixtures.export_snapshot_support import requires_node
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# How long the step under test blocks, and the longest the loop may be held.
+# How long the step under test blocks, and how quickly a request that should not wait answers.
 STUB_SECONDS = 3
 ANSWER_WITHIN_SECONDS = 1
+# The longest the loop may be held while an export runs, and the slowest health check then.
+# A step run on the loop holds it for all of STUB_SECONDS, so anything under that still
+# catches it; a loaded CI runner was measured holding the loop 1.06 s with the step off it.
+LOOP_HOLD_BOUND_SECONDS = 2
 # How often the ticker ticks and the health check is asked for.
 TICK_SECONDS = 0.05
 HEALTH_EVERY_SECONDS = 0.2
@@ -152,13 +156,13 @@ def _assert_answered_meanwhile(measured: dict, what: str) -> None:
         f"fixture drift: the {what} took {measured['export_seconds']:.1f}s, under its "
         f"{STUB_SECONDS}s step"
     )
-    assert measured["longest_hold"] < ANSWER_WITHIN_SECONDS, (
+    assert measured["longest_hold"] < LOOP_HOLD_BOUND_SECONDS, (
         f"the {what} held the event loop for {measured['longest_hold']:.1f}s"
     )
     health = measured["health"]
     assert len(health) >= 2 and all(status == 200 for _, status in health), health
     slowest = max(seconds for seconds, _ in health)
-    assert slowest < ANSWER_WITHIN_SECONDS, (
+    assert slowest < LOOP_HOLD_BOUND_SECONDS, (
         f"/api/health took {slowest:.1f}s to answer while the {what} ran"
     )
 
