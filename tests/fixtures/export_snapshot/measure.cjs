@@ -126,6 +126,37 @@ function launchOptions() {
   return options;
 }
 
+// A browser that exits at its launch is launched once more, as the export's own is
+// (render_slide.cjs readSlide): on a CI runner (run 45515985534) Chromium's headless shell
+// died of SIGSEGV as it started, and failed the test that had asked for one point. Only a
+// browser that ran and exited is: Playwright's failed launch carries its log of the exit
+// (playwright-core 1.59.1, server/utils/processLauncher.js), and one that never started (its
+// executable missing) has none, so it fails as before. A second exit fails the measurement
+// with its launch's own failure. One line says how each exited. Written out here rather than
+// imported from the engine, so the measurement stays an independent oracle.
+const LAUNCH_ATTEMPTS = 2;
+const PROCESS_EXIT_LOG = /<process did exit: exitCode=(-?\d+|null), signal=([A-Z][A-Z0-9]*|null)>/;
+
+async function launchBrowser() {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await chromium.launch(launchOptions());
+    } catch (error) {
+      const exit = String((error && error.message) || '').match(PROCESS_EXIT_LOG);
+      if (!exit) throw error;
+      let how = 'its exit status unread';
+      if (exit[2] !== 'null') how = `on signal ${exit[2]}`;
+      else if (exit[1] !== 'null') how = `with exit code ${exit[1]}`;
+      const again = attempt >= LAUNCH_ATTEMPTS;
+      console.error(
+        `measure.cjs: its browser exited at its launch (${how}): ` +
+        (again ? 'it exited again once relaunched, so the measurement fails' : 'relaunching it once'),
+      );
+      if (again) throw error;
+    }
+  }
+}
+
 // The same settle as render_slide.cjs, step for step and with the same bounds,
 // so a test measures the state the engine exports. Written out here rather than
 // imported from the engine, so the measurement stays an independent oracle.
@@ -1388,7 +1419,7 @@ async function main() {
     console.error(`index must be a non-negative integer, got ${indexArgument}`);
     process.exit(1);
   }
-  const browser = await chromium.launch(launchOptions());
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2 });
     // Hermetic, as the export the tests run is (tests/unit/conftest.py): the page

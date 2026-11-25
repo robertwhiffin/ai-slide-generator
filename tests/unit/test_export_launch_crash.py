@@ -8,6 +8,8 @@ how the browser exited (its signal or its exit code), which holds no text of the
 second exit fails the slide as before. A slide that failed for its own content (it navigated
 away, it ran past its deadline, its page broke a read) is never relaunched, nor is a browser
 that never started (its executable missing): only one that exited before the page loaded.
+``measure.cjs``, the tests' own browser oracle, relaunches a browser that exited at its launch
+once too, which a CI runner's did, failing the test that asked it for one point.
 
 The seam is the deadline tests' (``test_export_slide_deadline.py``): a preload, loaded into the
 real sidecar through ``NODE_OPTIONS``, wraps Playwright's ``chromium.launch``. On the launches a
@@ -31,9 +33,13 @@ import pytest
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
+    MEASURE_SCRIPT,
+    MEASURE_TIMEOUT_SECONDS,
+    browser_rect,
     export_logged,
     node_json,
     requires_huashu_sidecar,
+    run_node,
     slide_document,
     slide_xml,
 )
@@ -68,6 +74,12 @@ EXIT_STATUS_UNREAD = "its exit status unread"
 # The whole line of a browser that exited as its context opened and is relaunched, how it
 # exited in the place of %s: its fixed wording, which holds nothing of the slide's.
 CONTEXT_EXIT_LINE = EXIT_LINE + " (at its context, %s): " + RELAUNCHED
+# The line measure.cjs, the tests' own browser oracle, logs of a browser that exited at its
+# launch, and how it ends when it is relaunched or when it exited again.
+MEASURE_EXIT_LINE = "measure.cjs: its browser exited at its launch"
+MEASURE_FAILED_AGAIN = "it exited again once relaunched, so the measurement fails"
+# The element measure.cjs measures in these cases.
+PROBE_SELECTOR = "#probe"
 # How much less than what is left of its slide's deadline a launch may be given: the time the
 # engine takes from reading its clock to calling the launch.
 LAUNCH_TIMEOUT_SLACK_MS = 500
@@ -171,8 +183,8 @@ class _CrashedExport:
     failures: list[dict]
     stderr: str
     elapsed: float  # seconds
-    # Each launch, with the timeout it was given, and node's exit, each with the earlier
-    # browsers' process groups still running then.
+    # Each launch, with the timeout it was given, each failed context of a "context" crash,
+    # and node's exit, each with the earlier browsers' process groups still running then.
     record: list[dict]
 
     def exit_lines(self) -> list[str]:
@@ -182,20 +194,18 @@ class _CrashedExport:
         return ["".join(slide_xml(self.pptx, index).itertext()) for index in range(count)]
 
 
-def _export(
-    documents: list[str],
+def _crashing_launch_preload(
     crashes: dict[int, str],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     *,
     delay: float = 0,
     exit_delays: dict[int, float] | None = None,
-) -> _CrashedExport:
-    """``documents`` exported, launch ``n`` crashing as ``crashes[n]`` says.
+) -> tuple[Path, Path]:
+    """``CRASHING_LAUNCH_PRELOAD`` written under ``tmp_path``, and the record it writes.
 
-    A crash is a ``DYING_BROWSERS`` name, ``"context"``, or a path, used as the executable.
-    ``exit_delays[n]``, for a ``"context"`` launch, is how many ms after its browser's exit
-    node is told of it.
+    Launch ``n`` crashes as ``crashes[n]`` says: a ``DYING_BROWSERS`` name, ``"context"``, or
+    a path, used as the executable. ``exit_delays[n]``, for a ``"context"`` launch, is how many
+    ms after its context has failed node is told of its browser's exit.
     """
     executables = {}
     for name, script in DYING_BROWSERS.items():
@@ -219,6 +229,27 @@ def _export(
         },
         encoding="utf-8",
     )
+    return preload, record
+
+
+def _read_record(record: Path) -> list[dict]:
+    return [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+
+
+def _export(
+    documents: list[str],
+    crashes: dict[int, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    delay: float = 0,
+    exit_delays: dict[int, float] | None = None,
+) -> _CrashedExport:
+    """``documents`` exported, launch ``n`` crashing as ``crashes[n]`` says
+    (``_crashing_launch_preload``)."""
+    preload, record = _crashing_launch_preload(
+        crashes, tmp_path, delay=delay, exit_delays=exit_delays
+    )
     sidecar_env = pptx_from_html_huashu.sidecar_subprocess_env
     monkeypatch.setattr(
         pptx_from_html_huashu,
@@ -233,12 +264,53 @@ def _export(
         failures=logged.failures,
         stderr=logged.stderr,
         elapsed=time.monotonic() - started,
-        record=[json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()],
+        record=_read_record(record),
     )
 
 
-def _launches(export: _CrashedExport) -> int:
-    return sum(1 for entry in export.record if entry["at"].startswith("launch "))
+@dataclass(frozen=True)
+class _CrashedMeasure:
+    """measure.cjs run with some of its launches crashing."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    record: list[dict]  # as _CrashedExport's
+
+    def exit_lines(self) -> list[str]:
+        return [line for line in self.stderr.splitlines() if MEASURE_EXIT_LINE in line]
+
+
+def _measure(document: str, crashes: dict[int, str], tmp_path: Path) -> _CrashedMeasure:
+    """measure.cjs's rect of ``document``'s ``PROBE_SELECTOR``, launch ``n`` crashing as
+    ``crashes[n]`` says (``_crashing_launch_preload``), run as the suite's helpers run it
+    (``run_node``, the selector on stdin)."""
+    preload, record = _crashing_launch_preload(crashes, tmp_path)
+    document_path = tmp_path / "document.html"
+    document_path.write_text(document, encoding="utf-8")
+    process = run_node(
+        [str(MEASURE_SCRIPT), str(document_path), "-"],
+        input=PROBE_SELECTOR.encode("utf-8"),
+        timeout=MEASURE_TIMEOUT_SECONDS,
+        env={
+            **pptx_from_html_huashu.sidecar_subprocess_env(),
+            "NODE_OPTIONS": f"--import={preload.as_uri()}",
+        },
+    )
+    return _CrashedMeasure(
+        returncode=process.returncode,
+        stdout=process.stdout,
+        stderr=process.stderr,
+        record=_read_record(record),
+    )
+
+
+def _probe_document() -> str:
+    return slide_document(f'<div class="slide"><p id="probe">{PLANTED_WORD} grew 12%.</p></div>')
+
+
+def _launches(crashed: _CrashedExport | _CrashedMeasure) -> int:
+    return sum(1 for entry in crashed.record if entry["at"].startswith("launch "))
 
 
 def _render_slide_constant(name: str) -> object:
@@ -447,3 +519,48 @@ class TestNothingElseIsRelaunched:
         assert _launches(export) == 4, export.record
         assert export.exit_lines() == [], export.exit_lines()
         _assert_no_browser_outlives_its_slide(export)
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestTheTestOraclesBrowserThatCrashesAtLaunchIsRelaunched:
+    """measure.cjs, the tests' own browser (``browser_rect`` and its kin), relaunches a
+    browser that exited at its launch once, as the engine does: on a CI runner one died of
+    SIGSEGV as it started, and failed the test that had asked it for one point."""
+
+    @pytest.mark.parametrize("how", ["signal", "exit"])
+    def test_a_crash_at_its_launch_is_relaunched_once_and_measures(
+        self, how: str, tmp_path: Path
+    ) -> None:
+        """Its first launch dies; its second measures what a run with no crash measures, and
+        one line says how the first exited."""
+        document = _probe_document()
+
+        measured = _measure(document, {1: how}, tmp_path)
+
+        assert measured.returncode == 0, measured.stderr
+        rect = json.loads(measured.stdout)
+        assert {key: float(rect[key]) for key in ("x", "y", "w", "h")} == browser_rect(
+            document, PROBE_SELECTOR
+        )
+        assert _launches(measured) == 2, measured.record
+        (line,) = measured.exit_lines()
+        assert EXIT_WORDS[how] in line and RELAUNCHED in line, line
+        assert [entry for entry in measured.record if entry["running"]] == [], measured.record
+
+    def test_a_second_crash_fails_it_with_the_launchs_failure(self, tmp_path: Path) -> None:
+        measured = _measure(_probe_document(), {1: "signal", 2: "signal"}, tmp_path)
+
+        assert measured.returncode == 1, measured.stdout
+        assert LAUNCH_CLOSED in measured.stderr, measured.stderr
+        assert _launches(measured) == 2, measured.record
+        first, second = measured.exit_lines()
+        assert RELAUNCHED in first and MEASURE_FAILED_AGAIN in second, (first, second)
+
+    def test_a_browser_that_never_started_is_not_relaunched(self, tmp_path: Path) -> None:
+        """Its executable missing: no browser ran, so none exited; it fails as before."""
+        measured = _measure(_probe_document(), {1: str(tmp_path / "no-such-browser")}, tmp_path)
+
+        assert measured.returncode == 1, measured.stdout
+        assert _launches(measured) == 1, measured.record
+        assert measured.exit_lines() == [], measured.exit_lines()
