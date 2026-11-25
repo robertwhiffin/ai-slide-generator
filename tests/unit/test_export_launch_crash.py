@@ -13,8 +13,10 @@ The seam is the deadline tests' (``test_export_slide_deadline.py``): a preload, 
 real sidecar through ``NODE_OPTIONS``, wraps Playwright's ``chromium.launch``. On the launches a
 case names it gives Playwright an executable that dies as asked, a signal or an exit code, so
 Playwright fails the launch as it failed the measured one ("Target page, context or browser has
-been closed", its log naming the exit); or it kills the real browser while its context opens.
-It records each launch and, at each launch and at node's exit, which earlier browsers still run.
+been closed", its log naming the exit); or it kills the real browser while its context opens,
+and can tell node of that browser's exit only once its context has failed, as a loaded CI runner
+did, so the line must wait for the exit to name it. It records each launch and, at each launch
+and at node's exit, which earlier browsers still run.
 """
 
 from __future__ import annotations
@@ -61,16 +63,25 @@ DYING_BROWSERS = {
 }
 # What the exit line says of each.
 EXIT_WORDS = {"signal": "on signal SIGSEGV", "exit": "with exit code 3"}
+# What it says of an exit node has not been told of.
+EXIT_STATUS_UNREAD = "its exit status unread"
+# The whole line of a browser that exited as its context opened and is relaunched, how it
+# exited in the place of %s: its fixed wording, which holds nothing of the slide's.
+CONTEXT_EXIT_LINE = EXIT_LINE + " (at its context, %s): " + RELAUNCHED
 # How much less than what is left of its slide's deadline a launch may be given: the time the
 # engine takes from reading its clock to calling the launch.
 LAUNCH_TIMEOUT_SLACK_MS = 500
 
 # Loaded into the real sidecar (NODE_OPTIONS --import). CRASHES maps a launch's number, from
 # 1 across the deck, to the executable it is launched with instead of the browser, or to
-# "context": the real browser, killed with SIGSEGV as its context opens. Each launch is
-# recorded, with the process groups of the earlier browsers still running then; so is
-# node's exit. The exit handler is registered before Playwright's, which kills the browsers
-# it launched, so a browser the engine left running is still seen there.
+# "context": the real browser, killed with SIGSEGV as its context opens. EXIT_DELAYS maps a
+# "context" launch's number to how many ms after its context has failed node is told of its
+# browser's exit (its exit code or signal set, its 'exit' emitted), as a loaded runner was
+# told only after the browser's pipe had closed. Each launch is recorded, with the process
+# groups of the earlier browsers still running then; so is each "context" launch's failed
+# context, with whether node had its browser's exit then, and node's exit. The exit handler
+# is registered before Playwright's, which kills the browsers it launched, so a browser the
+# engine left running is still seen there.
 CRASHING_LAUNCH_PRELOAD = """
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -78,6 +89,7 @@ const require = createRequire(%(sidecar)s);
 const { chromium } = require('playwright-core');
 const RECORD = %(record)s;
 const CRASHES = %(crashes)s;
+const EXIT_DELAYS = %(exit_delays)s;
 const launched = [];
 let launches = 0;
 function running(pid) {
@@ -88,25 +100,43 @@ function running(pid) {
     return error.code === 'EPERM';
   }
 }
-function record(at, timeout) {
-  const entry = { at, now: Date.now(), timeout, running: launched.filter(running) };
+function record(at, fields = {}) {
+  const entry = { at, now: Date.now(), running: launched.filter(running), ...fields };
   fs.appendFileSync(RECORD, JSON.stringify(entry) + '\\n');
 }
 process.on('exit', () => record('exit'));
 const launch = chromium.launch.bind(chromium);
 chromium.launch = async (options) => {
   launches += 1;
-  record('launch ' + launches, options.timeout);
-  const crash = CRASHES[String(launches)];
+  const number = launches;
+  record('launch ' + number, { timeout: options.timeout });
+  const crash = CRASHES[String(number)];
   if (crash && crash !== 'context') return launch({ ...options, executablePath: crash });
+  const earlier = launched.slice();
   const browser = await launch(options);
   const browserProcess = browser._connection.toImpl(browser).options.browserProcess.process;
   launched.push(browserProcess.pid);
   if (crash === 'context') {
+    const exitDelay = EXIT_DELAYS[String(number)];
+    let contextFailed;
+    const failedContext = new Promise((resolve) => { contextFailed = resolve; });
+    if (exitDelay !== undefined) {
+      const handle = browserProcess._handle;
+      const onexit = handle.onexit;
+      handle.onexit = (...exitArguments) => failedContext.then(() =>
+        setTimeout(() => onexit.apply(handle, exitArguments), exitDelay));
+    }
     const newContext = browser.newContext.bind(browser);
     browser.newContext = (...contextArguments) => {
       const opening = newContext(...contextArguments);
       process.kill(browserProcess.pid, 'SIGSEGV');
+      opening.catch(() => {
+        record('context failed ' + number, {
+          running: earlier.filter(running),
+          exitReached: browserProcess.exitCode !== null || browserProcess.signalCode !== null,
+        });
+        contextFailed();
+      });
       return opening;
     };
   }
@@ -159,10 +189,13 @@ def _export(
     monkeypatch: pytest.MonkeyPatch,
     *,
     delay: float = 0,
+    exit_delays: dict[int, float] | None = None,
 ) -> _CrashedExport:
     """``documents`` exported, launch ``n`` crashing as ``crashes[n]`` says.
 
     A crash is a ``DYING_BROWSERS`` name, ``"context"``, or a path, used as the executable.
+    ``exit_delays[n]``, for a ``"context"`` launch, is how many ms after its browser's exit
+    node is told of it.
     """
     executables = {}
     for name, script in DYING_BROWSERS.items():
@@ -179,6 +212,9 @@ def _export(
             "record": json.dumps(str(record)),
             "crashes": json.dumps(
                 {str(launch): executables.get(how, how) for launch, how in crashes.items()}
+            ),
+            "exit_delays": json.dumps(
+                {str(launch): delay_ms for launch, delay_ms in (exit_delays or {}).items()}
             ),
         },
         encoding="utf-8",
@@ -203,6 +239,17 @@ def _export(
 
 def _launches(export: _CrashedExport) -> int:
     return sum(1 for entry in export.record if entry["at"].startswith("launch "))
+
+
+def _render_slide_constant(name: str) -> object:
+    """What ``render_slide.cjs`` exports as ``name``."""
+    return node_json(f"console.log(require({json.dumps(str(RENDER_SLIDE))}).{name})")
+
+
+def _failed_context(export: _CrashedExport, launch: int) -> dict:
+    """The record of launch ``launch``'s failed context, which a "context" crash makes."""
+    (failed,) = [entry for entry in export.record if entry["at"] == f"context failed {launch}"]
+    return failed
 
 
 def _assert_no_browser_outlives_its_slide(export: _CrashedExport) -> None:
@@ -266,6 +313,51 @@ class TestABrowserThatCrashesBeforeItsPageIsRelaunched:
         assert _launches(export) == 4, export.record
         (line,) = export.exit_lines()
         assert "at its context" in line and EXIT_WORDS["signal"] in line, line
+        _assert_no_browser_outlives_its_slide(export)
+
+    def test_an_exit_node_is_told_of_after_its_context_failed_is_named(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Node is told of the browser's exit only after its context has failed, as a loaded
+        CI runner was, whose line said its exit status unread. The engine waits for it, up to
+        EXIT_STATUS_WAIT_MS: the line names the signal, in its fixed wording."""
+        wait_ms = _render_slide_constant("EXIT_STATUS_WAIT_MS")
+
+        export = _export(
+            _three_slides(), {2: "context"}, tmp_path, monkeypatch, exit_delays={2: wait_ms / 5}
+        )
+
+        assert _failed_context(export, 2)["exitReached"] is False, (
+            "fixture drift: node had the browser's exit when its context failed"
+        )
+        assert export.failures == [], export.failures
+        assert _launches(export) == 4, export.record
+        (line,) = export.exit_lines()
+        assert line.endswith(CONTEXT_EXIT_LINE % EXIT_WORDS["signal"]), line
+        _assert_holds_no_slide_text([line])
+        _assert_no_browser_outlives_its_slide(export)
+
+    def test_an_exit_node_is_not_told_of_within_the_wait_is_said_unread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Node is told of the browser's exit only well past the engine's wait for it: the
+        line says its exit status unread rather than hold the slide for it, and the slide is
+        relaunched and kept."""
+        wait_ms = _render_slide_constant("EXIT_STATUS_WAIT_MS")
+
+        export = _export(
+            _three_slides(), {2: "context"}, tmp_path, monkeypatch, exit_delays={2: wait_ms * 3}
+        )
+
+        assert _failed_context(export, 2)["exitReached"] is False, (
+            "fixture drift: node had the browser's exit when its context failed"
+        )
+        assert export.failures == [], export.failures
+        assert "Slide 2" in export.texts(3)[1], export.texts(3)
+        assert _launches(export) == 4, export.record
+        (line,) = export.exit_lines()
+        assert line.endswith(CONTEXT_EXIT_LINE % EXIT_STATUS_UNREAD), line
+        _assert_holds_no_slide_text([line])
         _assert_no_browser_outlives_its_slide(export)
 
     def test_the_relaunch_is_within_the_same_deadline(

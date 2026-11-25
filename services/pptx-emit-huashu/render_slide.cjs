@@ -915,21 +915,53 @@ function hasExited(browserProcess) {
 // deadline's.
 const LAUNCH_ATTEMPTS = 2;
 
+// How long a slide whose browser is found disconnected before its page loaded
+// waits for its process's exit to reach node, so its line can say how it
+// exited. The browser's pipe closes as it dies, so the step under way can fail
+// before node is told of its exit: on a loaded CI runner, a browser killed as
+// its context opened was logged with its exit status unread. The wait is inside
+// the slide's deadline (readSlide); an exit not told by then is said unread.
+const EXIT_STATUS_WAIT_MS = 1000;
+
 // Playwright's log line for a browser's exit (playwright-core 1.59.1,
 // server/utils/processLauncher.js), which a failed launch's message carries in
 // its browser logs; a browser that never started (its executable missing) has none.
 const PROCESS_EXIT_LOG = /<process did exit: exitCode=(-?\d+|null), signal=([A-Z][A-Z0-9]*|null)>/g;
 
+// Whether the browser's process has exited once node has been told of its
+// exit, or `milliseconds` have passed: node sets the exit code or signal as it
+// emits the process's 'exit'.
+async function exitedWithin(browserProcess, milliseconds) {
+  const launched = browserProcess.process;
+  if (!launched || hasExited(browserProcess)) return hasExited(browserProcess);
+  let onExit;
+  const exiting = new Promise((resolve) => {
+    onExit = resolve;
+    launched.once('exit', onExit);
+  });
+  try {
+    await settlesWithin(exiting, milliseconds);
+  } finally {
+    launched.removeListener('exit', onExit);
+  }
+  return hasExited(browserProcess);
+}
+
 // How the slide's browser ended before its page was opened, {exitCode, signal}
 // (each null when not known), or null when it did not: its launch failed, its
 // log naming the exit; or a later step failed with the browser disconnected or
-// its process exited. Only for a slide not stopped: a launch's own timeout is
-// what is left of the slide's deadline, whose stop comes first (readSlide).
-function exitBeforeItsPage(error, launched) {
+// its process exited. A disconnected browser's exit is waited for, up to
+// EXIT_STATUS_WAIT_MS, when node has not yet been told of it. Only for a slide
+// not stopped: a launch's own timeout is what is left of the slide's deadline,
+// whose stop comes first (readSlide).
+async function exitBeforeItsPage(error, launched) {
   if (launched) {
     const { browser, browserProcess } = launched;
-    const exited = browserProcess !== null && hasExited(browserProcess);
+    let exited = browserProcess !== null && hasExited(browserProcess);
     if (!exited && browser.isConnected()) return null;
+    if (!exited && browserProcess !== null) {
+      exited = await exitedWithin(browserProcess, EXIT_STATUS_WAIT_MS);
+    }
     const ended = exited ? browserProcess.process : {};
     return {
       exitCode: typeof ended.exitCode === 'number' ? ended.exitCode : null,
@@ -1051,7 +1083,7 @@ async function readSlide(slideUrl, sources, { tmpDir, target, requestHosts }) {
         page = await step(context.newPage());
         break;
       } catch (error) {
-        const exit = isStopped ? null : exitBeforeItsPage(error, launched);
+        const exit = isStopped ? null : await step(exitBeforeItsPage(error, launched));
         if (exit === null) throw error;
         const again = attempt >= LAUNCH_ATTEMPTS;
         log.error(exitLine(exit, opening, again));
@@ -1124,6 +1156,7 @@ module.exports = {
   SLIDE_DEADLINE_MS,
   BROWSER_CLOSE_TIMEOUT_MS,
   BROWSER_KILL_TIMEOUT_MS,
+  EXIT_STATUS_WAIT_MS,
   DIAGNOSTIC_LINES_PER_SLIDE,
   NETWORK_IDLE_TIMEOUT_MS,
   FONTS_READY_TIMEOUT_MS,
